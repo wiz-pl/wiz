@@ -1176,7 +1176,10 @@ setup action keeps the elan cache for those
   `web/playground-loom-test.sh` (the output pane and editor components) run beside it.
   `CI result` requires the job when `changes` selects it. The Chromium half
   (`web/chrome_test.mjs` and `web/doc_chrome_test.mjs`: a served page over the DevTools
-  protocol) needs a browser and stays local.
+  protocol) needs a browser and stays local. The source reader's smoke
+  (`web/source_chrome_test.mjs`) is local too: it needs a packaged bundle
+  (`web/source-bundle.sh`) and, for its live half, a built `wiz`; the recipe and the
+  design of the `?lsp=` interaction are in `wiz-notes/scry-web-ux.md`.
 * **Source tarball and supply chain** (the `source-tarball` job):
   `scripts/test-source-tarball.sh` builds the release source tarball twice in
   different directories and environments, compares the archives, manifests and

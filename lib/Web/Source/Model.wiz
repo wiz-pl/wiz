@@ -91,6 +91,10 @@ structure Source.Answer where
   lines : List Hover.Line
   rows : List Source.FactRow
   findings : List Source.Finding
+  /-- A live `textDocument/hover` result, verbatim (the live transport fills it; a
+  static export leaves it empty). The view renders it with `Web.Hover.card`, the same
+  Markdown reader the playground's card uses, so a live answer needs no lines here. -/
+  raw : String
 
 /-- The answer has content to show. -/
 def Source.Answer.shown (a : Source.Answer) : Bool :=
@@ -102,7 +106,9 @@ structure Source.Request where
   payload : String
 
 /-- The reader's state. `bundleLoaded` becomes true after the host's `"bundle"` effect;
-before that the page says so rather than drawing an empty reader. -/
+before that the page says so rather than drawing an empty reader. `focus` is a range
+the reader is pointing at that is not a finding (an LSP definition target): the source
+pane outlines it, and it is empty when there is none. -/
 structure Source.Page where
   mode : String
   tool : String
@@ -117,11 +123,12 @@ structure Source.Page where
   note : String
   request : Option Source.Request
   bundleLoaded : Bool
+  focus : Option Source.Span
 
 /-- The first paint: nothing loaded yet, the findings panel. -/
 def Source.Page.initial : Source.Page :=
   Source.Page.mk "static" "" [] [] [] .none .none .none .none "findings"
-    "loading the bundle…" .none .false
+    "loading the bundle…" .none .false .none
 
 /-- The first file (in the bundle's order) that a finding names. -/
 partial def Source.firstFileWithFinding (findings : List Source.Finding) :
@@ -176,13 +183,15 @@ def Source.Page.selection (s : Source.Page) : Option Source.Finding :=
 -- ## Messages and routes
 
 /-- The page's messages: open a file, select a finding, ask the host for the hover card
-or the info view at a span, dismiss a panel, or switch the side panel. `hoverSpan` and
-`infoSpan` carry `FILEID@START-STOP` (the same text a route uses). -/
+or the info view at a span, focus a definition range, dismiss a panel, or switch the
+side panel. `hoverSpan` and `infoSpan` carry `FILEID@START-STOP` (the same text a route
+uses); `focusSpan` carries the target of a definition row. -/
 inductive Source.Msg where
   | openFile (id : String)
   | select (id : String)
   | hoverSpan (span : String)
   | infoSpan (span : String)
+  | focusSpan (span : String)
   | clearHover
   | closeInfo
   | panel (name : String)
@@ -191,6 +200,13 @@ inductive Source.Msg where
 def Source.spanPayload (fileId : String) (span : Source.Span) : String :=
   String.append fileId (String.append "@"
     (String.append (Nat.repr span.start) (String.append "-" (Nat.repr span.stop))))
+
+/-- A one-unit span at a UTF-16 offset, as a request payload (the live host's pointer
+position). `none` when the offset is not a number. -/
+def Source.spanAtPayload (fileId offset : String) : Option String :=
+  match String.parseNat offset with
+  | .some n => .some (Source.spanPayload fileId (Source.Span.make n (n + 1)))
+  | .none => .none
 
 /-- A request payload back into a file id and a span. -/
 def Source.parsePayload (payload : String) : Option (String × Source.Span) :=
@@ -202,17 +218,17 @@ def Source.parsePayload (payload : String) : Option (String × Source.Span) :=
     | _ => .none
   | _ => .none
 
-/-- Open a file (clearing the panels). -/
+/-- Open a file (clearing the panels and any live focus). -/
 def Source.Page.openFileIn (s : Source.Page) (id : String) : Source.Page :=
   { s with openFile := .some id, selected := .none, hover := .none, info := .none,
-    note := "" }
+    focus := .none, note := "" }
 
 /-- Select a finding: open its file at its span and make it the selection. -/
 def Source.Page.selectFinding (s : Source.Page) (id : String) : Source.Page :=
   match Source.Page.finding s id with
   | .none => { s with note := String.append "no finding " id }
   | .some f => { s with openFile := .some f.fileId, selected := .some f.id,
-      hover := .none, info := .none, note := "" }
+      hover := .none, info := .none, focus := .none, note := "" }
 
 /-- A hover request for a span payload. -/
 def Source.Page.askHover (s : Source.Page) (payload : String) : Source.Page :=
@@ -228,6 +244,41 @@ def Source.Page.askInfo (s : Source.Page) (payload : String) : Source.Page :=
   | .some p => { s with openFile := .some p.1, info := .none, panel := "info",
       request := .some (Source.Request.mk "info" payload), note := "" }
 
+/-- A definition request for a span payload: the live host answers with
+`scry.source.answer/1` (`request = "definition"`), whose located rows are targets. -/
+def Source.Page.askDefinition (s : Source.Page) (payload : String) : Source.Page :=
+  match Source.parsePayload payload with
+  | .none => { s with note := "bad definition payload" }
+  | .some p => { s with openFile := .some p.1, hover := .none, info := .none,
+      panel := "info", focus := .none,
+      request := .some (Source.Request.mk "definition" payload), note := "" }
+
+/-- A live `textDocument/hover` result (`raw`) for the span in `payload`. The card is
+`Web.Hover`'s, the same component the playground uses; a `null` result is the "no
+answer" state, not an error. -/
+def Source.Page.lspHover (s : Source.Page) (payload raw : String) : Source.Page :=
+  match Source.parsePayload payload with
+  | .none => { s with note := "bad hover payload" }
+  | .some p =>
+    let spanText := match Source.Page.file s p.1 with
+      | .some f => Source.Span.show (EditorModel.index f.text) p.2
+      | .none => "";
+    let status := match String.trim raw with
+      | "null" => "none"
+      | "" => "none"
+      | _ => "ok";
+    { s with hover := .some (Source.Answer.mk "hover" status p.1 (.some p.2) spanText
+        "LSP hover" "" "" "" [] [] [] raw), request := .none, note := "" }
+
+/-- The first located target of a definition answer: a row that names a file the
+reader has and a non-empty span. -/
+partial def Source.firstLocatedRow : List Source.FactRow → Option (String × Source.Span)
+  | .nil => .none
+  | .cons r rest =>
+    match Bool.and (Bool.not (String.isEmpty r.fileId)) (Bool.not (Source.Span.isEmpty r.span)) with
+    | .true => .some (r.fileId, r.span)
+    | .false => Source.firstLocatedRow rest
+
 /-- The page's update: a message from the view. -/
 def Source.Page.step (s : Source.Page) (m : Source.Msg) : Source.Page :=
   match m with
@@ -235,6 +286,10 @@ def Source.Page.step (s : Source.Page) (m : Source.Msg) : Source.Page :=
   | .select id => Source.Page.selectFinding s id
   | .hoverSpan payload => Source.Page.askHover s payload
   | .infoSpan payload => Source.Page.askInfo s payload
+  | .focusSpan payload => match Source.parsePayload payload with
+    | .some p => { s with openFile := .some p.1, selected := .none, hover := .none,
+        info := .none, focus := .some p.2, note := "" }
+    | .none => { s with note := "bad definition span" }
   | .clearHover => { s with hover := .none }
   | .closeInfo => { s with info := .none, panel := "findings" }
   | .panel name => { s with panel := name }
@@ -255,11 +310,23 @@ def Source.Page.ack (s : Source.Page) (kind : String) : Source.Page :=
     | .false => s
   | .none => s
 
-/-- Store a decoded answer in the panel its `request` names. -/
+/-- Store a decoded answer in the panel its `request` names. A definition answer also
+focuses its first located target and opens that file (a "jump to source"): the info
+panel keeps every target, so a target outside the bundle is still named. -/
 def Source.Page.answer (s : Source.Page) (a : Source.Answer) : Source.Page :=
   match String.eq a.request "info" with
   | .true => { s with info := .some a, panel := "info", request := .none }
-  | .false => { s with hover := .some a, request := .none }
+  | .false => match String.eq a.request "definition" with
+    | .true =>
+      let focus := Source.firstLocatedRow a.rows;
+      { s with info := .some a, panel := "info", hover := .none, request := .none,
+        openFile := match focus with
+          | .some p => .some p.1
+          | .none => s.openFile,
+        focus := match focus with
+          | .some p => .some p.2
+          | .none => .none }
+    | .false => { s with hover := .some a, request := .none }
 
 /-- The route for a file and span: `#/src/<fileId>@L:C-L:C` (1-based, from the span). -/
 def Source.Page.spanRoute (s : Source.Page) (file : Source.File) (span : Source.Span) : String :=
@@ -268,9 +335,10 @@ def Source.Page.spanRoute (s : Source.Page) (file : Source.File) (span : Source.
     (String.append "@" (Source.Span.show i span)))
 
 /-- Handle a hash route. `#/f/<id>` selects a finding; `#/src/<fileId>@L:C[-L:C]` opens
-the file and asks for the hover card there; `#/file/<fileId>` opens the file. Anything
-else is a one-line note, never a blank page. The page returns itself and the request it
-wants the host to service (if any). -/
+the file and asks for the hover card there; `#/def/<fileId>@L:C[-L:C]` opens the file and
+focuses the range (a definition target, no request); `#/file/<fileId>` opens the file.
+Anything else is a one-line note, never a blank page. The page returns itself and the
+request it wants the host to service (if any). -/
 def Source.Page.route (s : Source.Page) (hash : String) : Source.Page :=
   let body := match String.stripPrefix hash "#" with
     | .some rest => rest
@@ -278,6 +346,16 @@ def Source.Page.route (s : Source.Page) (hash : String) : Source.Page :=
   match String.splitOn body "/" with
   | .cons "" (.cons "f" (.cons id _)) => Source.Page.selectFinding s id
   | .cons "" (.cons "file" (.cons id _)) => Source.Page.openFileIn s id
+  | .cons "" (.cons "def" (.cons rest _)) =>
+    match String.splitOn rest "@" with
+    | .cons fileId (.cons frag _) => match Source.Page.file s fileId with
+      | .none => { s with note := String.append "no file " fileId }
+      | .some f => match Source.Span.parse (EditorModel.index f.text) frag with
+        | .none => { s with openFile := .some f.id,
+            note := String.append "bad span " frag }
+        | .some span => { s with openFile := .some f.id, selected := .none,
+            hover := .none, info := .none, focus := .some span, note := "" }
+    | _ => s
   | .cons "" (.cons "src" (.cons rest _)) =>
     match String.splitOn rest "@" with
     | .cons fileId (.cons frag _) => match Source.Page.file s fileId with
