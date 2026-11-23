@@ -30,6 +30,7 @@ checked against a line table without a fourth copy of the offset arithmetic.
 -/
 
 link_c "js.c"
+link_c "step.c"   -- the browser ABI's i32 word entry (`wiz_step`, web/step.c)
 extern "js_patch" Js.patch : String → IO Unit
 
 /-- Patch the page from `s` to `s'` and give `s'` back. -/

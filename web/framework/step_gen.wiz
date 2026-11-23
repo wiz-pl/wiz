@@ -1,0 +1,37 @@
+/-!
+# The i32 word entry's fixture (`web/step.c`, `wiz-web/1`)
+
+Every browser page runtime exports its i64 step (`export "wiz_loom_step" loomStep`,
+`web/playground-ui.wiz` and friends) and links `web/step.c`, which adds the three-word
+`wiz_step` the host calls: `(state : i32, payload_ptr : i32, payload_len : i32) -> i32`.
+
+This module is the smallest app of that shape, with `main` so `wiz run` compiles and
+links it in one go. `web/framework/step_test.c` is its C half: it calls `wiz_step` with
+32-bit words exactly as `web/framework/driver.js` does, calls the i64 entry as the older
+hosts do, and prints the comparison. `web/framework/test.sh` runs it.
+
+The state is a `Nat` here, not the pages' record, for one reason: in the C ABI a `Nat`
+is kind `n` (a plain 64-bit number), so the test can read the state back and compare
+numbers, while the pages' record state is kind `w` (the Wiz value word itself). The shim
+does not care which: it moves one 32-bit word from `wiz_step` into `wiz_loom_step` and
+back, and the test's plain numbers exercise that word exactly as a page's heap handle
+would (in a wasm64 module every handle is below 4 GiB by construction; on a 64-bit host
+the heap is not, so the *payload* is placed at a 32-bit address instead — `step_test.c`).
+-/
+import IO
+import Text
+
+link_c "../step.c"
+link_c "step_test.c"
+
+/-- The C half (`step_test.c`): it drives `wiz_step`; `main` only prints its report. -/
+extern "step_probe" Step.probe : String
+
+/-- The step under test: the state and the event string the host assembled
+(`event "\n" index "\n" payload`). -/
+def loomStep (s : Nat) (ev : String) : Nat := Nat.add s (String.length ev)
+
+/-- The app's i64 entry — the one the page runtimes export and `wiz_step` wraps. -/
+export "wiz_loom_step" loomStep
+
+def main : IO Unit := IO.println Step.probe

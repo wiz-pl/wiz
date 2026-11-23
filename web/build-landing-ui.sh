@@ -47,7 +47,7 @@ fi
   --gmp "$OUT/gmp/mini-gmp.c" \
   --ldflags "-sMEMORY64=1 -sSTACK_SIZE=33554432 --no-entry \
 -sALLOW_MEMORY_GROWTH -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=web,node \
--sEXPORTED_FUNCTIONS=_wiz_loom_init,_wiz_loom_html,_wiz_loom_ssr_hash,_wiz_loom_step,_wiz_retain,_wiz_release,_free \
+-sEXPORTED_FUNCTIONS=_wiz_loom_init,_wiz_loom_html,_wiz_loom_ssr_hash,_wiz_loom_step,_wiz_step,_wiz_retain,_wiz_release,_free \
 -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString \
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build web/landing_ui.wiz -o "$OUT/wiz-landing-ui.mjs" --no-main)

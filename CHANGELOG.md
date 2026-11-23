@@ -16,6 +16,21 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 
 ## [Unreleased]
 
+* web: the browser host ABI's step entry is **three 32-bit words**. A page runtime (a
+  `Web.Loom` app built through the C backend and Emscripten) now also exports
+  `wiz_step : (state : i32, payload_ptr : i32, payload_len : i32) -> i32` from
+  `web/step.c`, linked beside the app's own `i64` `wiz_loom_step`, and
+  `web/framework/driver.js`/`mount.js` call it: the JavaScript API has no `Number` path
+  for an `i64` parameter or result, so the word form is what keeps an opaque handle from
+  costing a `BigInt` allocation per DOM event in and another out (`sota-web-wasm-gpu`
+  R1). The `i64` entry stays: `driver.start` reports
+  `abi: "i32" | "i64"`, falls back to `wiz_loom_step` when the module has no `wiz_step`,
+  and normalises the state for the `i64` calls that remain (`wiz_loom_html`,
+  `wiz_loom_consume`, a page's `call`). `web/framework/step_gen.wiz` and its C half
+  (`step_test.c`) check the words and the payload's length rule on a real build, and the
+  page tests' stubs still drive the `i64` entry. The word entry is the ABI's shape, not a
+  measured speedup.
+
 * ci: `bootstrap-chain.yml` publishes only what passed. The `release` job now runs only
   for a CI run that concluded `success` (the `workflow_run` gate excluded `cancelled`
   and `skipped` only, so a failed run released and pushed its paths); its Cachix push

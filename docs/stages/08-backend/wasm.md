@@ -79,10 +79,29 @@ generated adapter must match this table.
 * **Exports.** `memory`, `wiz_main` (the IR entry, `() -> ()`), the three decoders
   `wiz_value_tag : i64 -> i32`, `wiz_value_field` and `wiz_big_digits : i64 -> i64`, and
   the `i32` global `wiz_caf_builds`
-  (`Wiz/Compiler/Wasm.lean:1565-1567`). The stepping shape for an interactive host,
-  `wiz_step : (state : i32, payload_ptr : i32, payload_len : i32) -> i32`, is the
-  intended 1.x entry for a UI loop, with the `i64` entry kept for tests; it is **not
-  emitted yet**, and the module still runs one `main` to completion.
+  (`Wiz/Compiler/Wasm.lean:1565-1567`). This module runs one `main` to completion; it
+  emits no step entry (see the next bullet).
+* **The step entry, in the page runtimes.** A browser page's runtime is not that module:
+  it is a `Web.Loom` app built through the **C backend and Emscripten**
+  (`web/build*-ui.sh`), which has the FFI the app needs (`js_patch`), and it exports
+  `wiz_loom_init`, `wiz_loom_html`, `wiz_loom_effect`, … and **two** step entries:
+
+  * `wiz_step : (state : i32, payload_ptr : i32, payload_len : i32) -> i32`, the one
+    `web/framework/driver.js` calls. `state` is the low 32 bits of the same handle the
+    `i64` entry takes and gives back; the payload is UTF-8 at `payload_ptr` and `len`
+    bytes long (`payload_ptr[len]` must be readable: a NUL there means the runtime's own
+    NUL-terminated conversion is used, otherwise the shim copies exactly `len` bytes). It
+    is `web/step.c`, linked by every page runtime (`link_c "step.c"`); the state and the
+    payload therefore cross as three words and the JavaScript side never builds a
+    `BigInt` for a DOM event.
+  * `wiz_loom_step : (state, payload) -> state`, the app's own `i64` export — kept for
+    the Node tests (`web/framework/driver_test.mjs`, `mount_test.mjs` stub it) and for a
+    host or a module built before the word entry. `driver.js` falls back to it when
+    `wiz_step` is absent, and the other calls (`wiz_loom_html`, `wiz_loom_consume`, …)
+    are still `i64`, so the host normalises the state at each of those.
+
+  The word entry is the ABI's shape, not a measured speedup: the per-event saving is one
+  BigInt allocation in and one out (order-of-magnitude figures only, see "Unverified").
 * **Memory.** One memory, `i32`-addressed, never shrunk (`memory.grow` is one-way). The
   host reads a result by offset and length. `memory64` is neither required nor used.
 * **Failure.** A trap is a trap: no exception crosses the boundary, there is no FFI and

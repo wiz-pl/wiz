@@ -10,6 +10,7 @@ import Web.Search
 `Web.Search`'s; the page keeps the input, Enter/Escape and the `location`.
 -/
 link_c "js.c"
+link_c "step.c"   -- the browser ABI's i32 word entry (`wiz_step`, web/step.c)
 extern "js_patch" Js.patch : String → IO Unit
 
 inductive DocsMsg where
