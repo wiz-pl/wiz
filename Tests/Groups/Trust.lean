@@ -8,12 +8,27 @@ set_option compiler.extract_closed false
 
 namespace Tests.Elab
 
+/-- A message list as the diagnostic lines the trust cases check (`error: …`). -/
+def formatMessages (s : CommandState ZeroOneMany) : List String :=
+  s.messages.toList.map fun m => (match m.severity with
+    | .error => "error: " | .warning => "warning: " | .info => "") ++ m.text
+
+/-- Messages of `input`, with every module of `lib/` (and of the Scry and Hdl packages)
+importable **from disk**.
+
+`preludeLoader` only carries Prelude/Word/Functor/Logic/Text/IO/Std/Sys, so a case that
+imports `Region`, `Vec`, `WordArray`, `Intern`, `WordMap`, `Data.PMap` or `Web.EditorModel`
+saw `unknown module` (and passed or failed for the wrong reason). Resolving the closure
+means the case exercises the module it names. -/
+def diskLoader (input : String) : IO (Name → Option String) := do
+  let ms ← Wiz.Module.loadClosure ["lib"] input
+  pure fun n => (ms[n]?).map (·.2)
+
 /-- Messages of `input` (with `lib/` importable), without positions, errors marked. -/
 def messagesLib (input : String) : IO (List String) := do
-  let loader ← preludeLoader
-  let s := runFrontend (R := ZeroOneMany) input { loader, trustedModule := Tests.libModule }
-  pure (s.messages.toList.map fun m => (match m.severity with
-    | .error => "error: " | .warning => "warning: " | .info => "") ++ m.text)
+  let s := runFrontend (R := ZeroOneMany) input
+    { loader := ← diskLoader input, trustedModule := Tests.libModule }
+  pure (formatMessages s)
 
 /-- Some error mentions `fragment` (others may follow from it). -/
 def failsWith (input : String) (fragment : String) : IO Unit := do
@@ -503,7 +518,12 @@ def trustGroup : Group where
         expectMsg ms "Outlives.refl : (0 ρ : Region) → Outlives ρ ρ"
         expectMsg ms "Outlives.static : (0 ρ : Region) → Outlives Region.static ρ"
         expectMsg ms "Outlives.trans : (0 ρ₁ : Region) → (0 ρ₂ : Region) → (0 ρ₃ : Region) → Outlives ρ₁ ρ₂ → Outlives ρ₂ ρ₃ → Outlives ρ₁ ρ₃"
-        let known := ["Outlives", "Outlives.refl", "Outlives.static", "Outlives.trans"]
+        -- The six ledger rows are `Region`, `Region.static` and the four `Outlives` ones, and
+        -- `#print axioms` reports the axioms in a derivation's *type* as well as its value, so
+        -- `r1 : (0 ρ : Region) → Outlives ρ ρ` depends on `Region` too. The assertion below is
+        -- "no axiom outside the six", not "no type axiom": that is what the case pins.
+        let known := ["Region", "Region.static", "Outlives", "Outlives.refl",
+          "Outlives.static", "Outlives.trans"]
         for (nm, needs) in [("r1", "Outlives.refl"), ("r2", "Outlives.static"),
             ("r3", "Outlives.trans"), ("r4", "Outlives.trans")] do
           let ax := printAxiomsOf ms nm
@@ -511,8 +531,10 @@ def trustGroup : Group where
           for a in ax do
             check (known.contains a) s!"{nm} depends on a new Region axiom '{a}': {ax}"
         -- the declarations: exactly the six rows, each an axiom (not a `def`)
+        -- `libLoader`, not `preludeLoader`: the latter does not carry `Region` (and the
+        -- module doc above says so); with it the import failed and the check saw 0 names.
         let s := runFrontend (R := ZeroOneMany) "import Region\n"
-          { loader := ← preludeLoader, trustedModule := Tests.libModule }
+          { loader := ← diskLoader "import Region\n", trustedModule := Tests.libModule }
         let names := s.globals.order.filter (fun n => n == "Outlives" || n.startsWith "Outlives.")
         checkEq 4 names.size
         for n in (["Outlives", "Outlives.refl", "Outlives.static", "Outlives.trans"] : List Name) do
@@ -524,9 +546,9 @@ def trustGroup : Group where
           check (d.value.isNone && d.witness.isNone) s!"{n} is not an axiom"
         -- non-derivable: a fresh region does not outlive `'static`, and transitivity
         -- needs both premises
-        failsWithLib "import Region\ndef bad (0 ρ σ : Region) : Outlives ρ σ := Outlives.refl ρ\n" "type mismatch"
-        failsWithLib "import Region\ndef bad (0 ρ : Region) : Outlives ρ Region.static := Outlives.static ρ\n" "type mismatch"
-        failsWithLib "import Region\ndef bad (0 ρ σ : Region) : Outlives ρ σ := Outlives.trans\n" "type mismatch" },
+        failsLibs "import Region\ndef bad (0 ρ σ : Region) : Outlives ρ σ := Outlives.refl ρ\n" "type mismatch"
+        failsLibs "import Region\ndef bad (0 ρ : Region) : Outlives ρ Region.static := Outlives.static ρ\n" "type mismatch"
+        failsLibs "import Region\ndef bad (0 ρ σ : Region) : Outlives ρ σ := Outlives.trans\n" "type mismatch" },
     { name := "Std.Str.empty / Str.push: copying a shared text, in C and LLVM (ledger rows 334-335, 342-343)", run := fun _ => do
         -- The reason for `Str.push` says it grows in place when the text is unique and
         -- copies when shared. A wrong uniqueness check mutates a shared literal, which
@@ -634,8 +656,8 @@ def trustGroup : Group where
           "      (.cons (U32.ofNat 70000) .nil))))\n" ++
           "      (List.map UIntN.toNat (U64Array.toList (U64Array.ofList\n" ++
           "        (.cons (U64.ofNat 18446744073709551615) .nil)))))"
-        cRun src expected
-        cRun src expected (llvm := true) },
+        cRunOnDisk src expected
+        cRunOnDisk src expected (llvm := true) },
     { name := "EditorModel partials: the compiled editor path runs them (C and LLVM)", run := fun _ => do
         -- The five `partial` rows (firstLineAfter, lineTableGo, lspLookupGo,
         -- splitGoalsGo, tokenEndGo) are compiled-only general recursion; call each
@@ -651,14 +673,24 @@ def trustGroup : Group where
           "  (.cons (match EditorModel.lspLookup (.cons e1 .nil) 1 \"term\" with\n" ++
           "    | .some e => e.stop\n    | .none => 0)\n" ++
           "  .nil)))))\n"
-        cRun src expected
-        cRun src expected (llvm := true) },
+        cRunOnDisk src expected
+        cRunOnDisk src expected (llvm := true) },
+    { name := "Web.Hover.percentGo: the URI decoder in compiled code (C and LLVM)", run := fun _ => do
+        -- Hover.percentGo is a `partial` list walk on the hover path with no other test.
+        let src := "import Web.Hover\ndef b2n : Bool → Nat\n  | .true => 1\n  | .false => 0\n" ++
+          "def main : List Nat :=\n" ++
+          "  (.cons (b2n (String.eq (Hover.percentDecode \"a%20b\") \"a b\"))\n" ++
+          "  (.cons (b2n (String.eq (Hover.percentDecode \"%2F%zz\") \"/%zz\"))\n" ++
+          "  (.cons (b2n (String.eq (Hover.percentDecode \"p+q\") \"p+q\"))\n" ++
+          "  .nil)))\n"
+        cRunOnDisk src ".cons 1 (.cons 1 (.cons 1 .nil))"
+        cRunOnDisk src ".cons 1 (.cons 1 (.cons 1 .nil))" (llvm := true) },
     { name := "the Scry review record: the moved rows still name its partial definitions", run := fun _ => do
         -- Scry moved to scry/src/Scry, outside the lib/ walk; its eight reviewed rows
         -- live in scry/trust-baseline.tsv. Check the record is not stale: every row is
         -- still a `partial def` in the package source.
         let text ← IO.FS.readFile "scry/trust-baseline.tsv"
-        let rows := text.splitOn "\n" |>.filterMap fun l =>
+        let rows := (text.splitOn "\n").filterMap fun l =>
           if l.isEmpty || l.startsWith "#" then none
           else match l.splitOn "\t" with
             | [m, n, item, _, _, _] => some (m, n, item)

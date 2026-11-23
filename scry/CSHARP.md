@@ -176,15 +176,45 @@ keeps an unknown result (`?`) and its `unmodelled-external` warning names it.
 ### Nullability (CWE-476 → `NullReferenceException`)
 
 * Facts: a `?`-annotated reference type (`string? s`) is *maybe-null*; under `#nullable
-  enable` an unannotated one is *non-null by contract*; `null` literals, `as`, `?.`,
-  `FirstOrDefault()`-style models produce maybe-null; `!` (null-forgiving) is an
-  assertion the analysis records but trusts.
+  enable` an unannotated one is *non-null by contract* (outside it, *oblivious*: the
+  checker treats it as maybe-null, since a caller may pass null); `null` literals, `as`,
+  `?.`, and `FirstOrDefault()`-style models produce maybe-null; `!` (null-forgiving) is
+  an assertion the analysis records but trusts.
 * The check: a dereference (member access, call with receiver, element access, unboxing)
-  of a value the nullness domain (`Scry.AiDomain`, already planned in §4.6) says may be
-  null is a finding `scry/cs/null-dereference`. Guards `x != null`, `x is not null`,
-  `x is T y` refine through `Wil.assume` on the branch, as for C.
-* Annotations become facts in the EDB (`nullable(var)`), so a Datalog rule can also
-  report "annotated non-null but assigned maybe-null" (CS8600-like) without the AI.
+  of a value the nullness domain (`Scry.AiDomain`) says may be null is a finding
+  `scry/memory/null-dereference` (see "As implemented" below for why the id is not
+  `scry/cs/…`). Guards `x != null`, `x is not null`, `x is T y`, `??`, and `?.` refine
+  through `Wil.assume`/the branch condition on the edge, as for C.
+* Annotations become facts in the EDB (`nullable(var)`, plus `nonnull(var)` for the
+  contract side), so a Datalog rule can also report "annotated non-null but assigned
+  maybe-null" (CS8600-like) without the AI. The implemented check for that shape is the
+  separate `scry/cs/nullable-assignment` alarm.
+
+#### As implemented (2026-11-22)
+
+The fact layer is `Scry.CsNull` (`scry/src/Scry/CsNull.wiz`) over two tables the
+lowering publishes on `Scry.Cs.Lowered`:
+
+| table | content | source |
+|---|---|---|
+| `nulls` | `nullable(func, var)` / `nonnull(func, var)`: the declared annotation of every parameter, local and field-read register | `Scry.Cs.annAt`, `Scry.Cs.exprAnn` |
+| `nullPoints` | `deref(func, node, var)`, `mayNull(func, node, var)`, `assert(func, node, var)`, keyed by the CST node on the `Wil.Span` | `Scry.Cs.derefAt`/`mayNullAt`/`recordPoint` |
+
+`Scry.Nullness` gained a table (`Scry.NullTables`) and two abstract statements:
+`AStmt.check` (a receiver dereference) and `AStmt.checkAssign` (a non-null-annotated
+variable assigned a maybe-null value). The C frontend passes `NullTables.empty`, so its
+analysis and goldens are unchanged. `scry taint FILE.cs --null-deref` runs the pass
+(`Scry.analyzeCsFile`); `scry cs` does not yet expose a flag for it.
+
+**Diagnostic id.** The design named `scry/cs/null-dereference`; the implementation keeps
+`scry/memory/null-dereference`. The memory-diagnostic carrier is shared by C and C# (one
+`Scry.MemWarnKind`, one `--null-deref` switch), `TaintCmd.memoryFindings` and
+`ProjectTaint` classify the `scry/memory/` family as memory, and the `=scry-cs` C/C#
+parity case pins that both frontends report the same id for the same shape. Renaming
+only the C# side would split one alarm class by language and break that parity. The
+annotation check is C#-only and does use the design's family:
+`Scry.MemWarnKind.ruleId` maps it to `scry/cs/nullable-assignment`.
+
 
 ### Bounds (CWE-125/787 → `IndexOutOfRangeException`, `ArgumentOutOfRangeException`)
 
@@ -223,6 +253,15 @@ can use `*` (`sink *.ExecuteReader arg 0`) when resolution is weak.
 * `scry/corpus/csharp/taint/*.cs`: paired unsafe/safe fixtures per CWE (78 first, then
   89, 22), named like the C corpus (`cwe78-process-unsafe.cs`,
   `cwe78-process-safe.cs`), with a `manifest.json` row each once `scry bench` reads C#.
+* `scry/corpus/csharp/null/cwe476-*.cs`: the nullability fixtures (2026-11-22): an
+  unguarded `T?` dereference (`cwe476-deref-unsafe`), its guards `x != null` /
+  `x is not null` / `x is T y` (`cwe476-deref-safe`), `?.`/`??`
+  (`cwe476-coalesce-safe`), a non-null-annotated local assigned `null`
+  (`cwe476-annotated-unsafe`: `scry/cs/nullable-assignment` plus the dereference), the
+  `!` assertion (`cwe476-forgiving-safe`), a `T?` field read
+  (`cwe476-field-unsafe`), and the `as` / `FirstOrDefault` models
+  (`cwe476-models-unsafe`: each is maybe-null, so a non-null-annotated local is
+  `scry/cs/nullable-assignment` plus a dereference).
 * Later, without downloading big corpora: a few hand-reduced cases modelled on the
   Juliet C# suite's CWE-78/89/476 shapes and on OWASP Benchmark-style servlets;
   real-world differential runs only with the user's OK.
@@ -268,7 +307,7 @@ when a spill's root does not span its `.cs` text. Goldens are regenerated with
 `SCRY_CS_WRITE=1 tests =scry-csharp`, which writes the files **and fails**, so a new
 golden is always reviewed in the diff.
 
-The spills are tool output, but they stay checked in as small goldens (15 files, 164 KB):
+The spills are tool output, but they stay checked in as small goldens (42 files, 336 KB):
 the test groups run Wiz in the Lean interpreter, which can't call the native shim, and
 neither the `.#tests` closure nor CI builds `scry-cst` (it needs the out-link, a C
 compile of the grammar and a `wiz build` of `CstMain`). This is the same arrangement as

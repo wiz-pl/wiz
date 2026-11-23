@@ -2,10 +2,19 @@
 #
 # Runs on `master` (the integration branch, with the solutions in it) and on pull
 # requests into it: the full suite, split into shards (.github/test-shards.json). The
-# toolchain is built once, with Nix (`nix build .#wiz .#tests`), and a push to master
-# publishes it to the trusted Cachix cache (a pull request publishes only to its own
-# untrusted PR cache); the test shards substitute those store paths instead of rebuilding
-# (no Lake build and no `.lake` Actions cache on the critical path). The exercise tree
+# toolchain is built once, with Nix, and a push to master publishes it to the trusted
+# Cachix cache (a pull request publishes only to its own untrusted PR cache); the test
+# shards substitute those store paths instead of rebuilding (no Lake build and no
+# `.lake` Actions cache on the critical path).
+#
+# Lake seeds have a direction: a push to master's `lake_seed` job builds
+# `withLakeCache empty-lake` — a cold compile *inside* the derivation, whose `.lake`
+# output is the seed — and saves that seed to the trusted and untrusted Actions keys; a
+# pull request restores the untrusted key first and the trusted one second and builds
+# `withLakeCache <seed>` (flake.nix), recompiling only the modules the branch changed.
+# Nothing a pull request writes is read by a trusted job: the producer only ever passes
+# `empty-lake` (it has no restore step) and a pull request writes no seed. Pushes, the
+# merge queue and the release path keep the pure `nix build`. The exercise tree
 # (scripts/mkexercises.py) is checked only when a release is tagged: release.yml's
 # `exercise tree` job, which must pass before anything is published (it still builds
 # with Lake, as does the weekly fixpoint).
@@ -120,17 +129,34 @@ jobs:
   # (scripts/check-complexity --diff HEAD^1), so a new append-in-loop or eraseDups fails
   # a PR before the build starts. A bounded site is excused inline, on the line or the
   # line above it (`-- complexity: ok (why it is bounded)`); there is no allowlist file.
+  # Early in the job, scripts/check-companion-lists.py checks the lists a commit must
+  # move with its source (libdiff corpus, legacy names + digest, collision baseline),
+  # and scripts/check-release-consistency.py checks the release packet and that the
+  # docs still name the versions, channels, commands and artifacts the tree produces.
   # Runs on every pull request too, including docs-only ones, which build and test skip.
   docs_style:
     name: docs style
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    # 5 min: four Python checks and the libdiff corpus check on the checkout; no build
+    # `check-release-consistency` resolves the release packet's candidate and its PR
+    # counts through `gh`; without a token it cannot, and an *unverifiable* count is a
+    # failure (exit 2), not a pass. Read-only on both.
+    permissions:
+      contents: read
+      pull-requests: read
+    # 5 min: six Python checks and the libdiff corpus check on the checkout; no build
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          fetch-depth: 2 # the diff base for scripts/check-complexity
+          # 0: check-release-consistency resolves the packet's candidate (an older
+          # commit) and its counts; check-complexity uses HEAD^1.
+          fetch-depth: 0
+      - name: Check the generated companion lists
+        shell: bash
+        run: |
+          python3 scripts/check-companion-lists.py --self-test
+          python3 scripts/check-companion-lists.py
       - name: Check the docs, and the checker's fixtures
         shell: bash
         run: |
@@ -144,7 +170,17 @@ jobs:
           python3 scripts/check-name-collisions.py --quiet
           python3 scripts/check-names.py --self-test
           python3 scripts/check-names.py --quiet
+          python3 scripts/check-boundaries.py --self-test && python3 scripts/check-boundaries.py --quiet
           scripts/check-libdiff-corpus.sh --self-test && scripts/check-libdiff-corpus.sh --quiet
+      - name: Check the release packet and the machinery it describes
+        shell: bash
+        env:
+          # `gh pr view`/`gh api` for the packet's candidate counts. Unset, the check is
+          # UNVERIFIABLE and exits 2.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/check-release-consistency.py --self-test
+          python3 scripts/check-release-consistency.py --quiet
 
   # (seconds, no build) The self-hosted frontend's prelude (`preludeText`,
   # selfhost/Frontend.wiz) is a hand-written subset of lib/Prelude.wiz. The playground
@@ -271,7 +307,9 @@ jobs:
     needs: changes
     if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    # one cold Nix build (unwrapped + prewarm), then the Cachix push of ~1.8 GB
+    # one cold Nix build (unwrapped + prewarm), then the Cachix push of ~1.8 GB. A pull
+    # request's seeded build is the incremental one only after its first run (a miss is
+    # the same cold build); the timeout covers the cold case.
     timeout-minutes: 90
     outputs:
       tree: solution # only the summary's title reads it (there is one tree now)
@@ -299,6 +337,38 @@ jobs:
         run: |
           # what identifies the compiler and test driver (and the C toolchain they use)
           echo "compiler=${{ hashFiles('flake.lock', 'flake.nix', 'lean-toolchain', 'lake-manifest.json', 'lakefile.lean', '**/*.lean', 'runtime/**', 'c/**') }}" >> "$GITHUB_OUTPUT"
+      - name: Lake cache key (a pull request)
+        # The seed (a cold build's compiled modules) is only safe for the toolchain and
+        # sources that produced it: the key names flake.lock and the lean-toolchain
+        # stamp, the architecture and the `lean`/`runtime` subset hashes, and the prefix
+        # names the toolchain alone, so restore-keys falls back to a previous seed from
+        # the same toolchain and never to one from another. See scripts/lake-cache.sh.
+        id: lake-key
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          scripts/lake-cache.sh key >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+      - name: Restore the untrusted Lake seed (a pull request)
+        # First choice: this pull request's own previous save, or the producer's copy
+        # published under the untrusted key. Nothing here is trusted by a later job.
+        id: lake-pr
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lake-seed-pr
+          key: ${{ steps.lake-key.outputs.pr-key }}
+          restore-keys: ${{ steps.lake-key.outputs.pr-prefix }}
+      - name: Restore the trusted Lake seed (a pull request)
+        # Second choice: the cold seed a push to master saved. That job is the only
+        # writer of this namespace (scripts/lake-cache.sh's header).
+        id: lake-trusted
+        if: github.event_name == 'pull_request' && steps.lake-pr.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lake-seed-trusted
+          key: ${{ steps.lake-key.outputs.trusted-key }}
+          restore-keys: ${{ steps.lake-key.outputs.trusted-prefix }}
       - name: nix build (wiz, grail and the test driver)
         id: nix
         run: |
@@ -306,11 +376,27 @@ jobs:
           # from the trusted cache; a pull request's from its PR cache when published).
           # `packages.wiz` is the default package; `packages.tests` is the test driver,
           # from the same build.
-          nix build .#wiz .#tests --no-link -L
           # No .#reference here: only the docs job reads it (and only on a push), and no
           # shard waits on it. That job builds it from this cached wiz, off this path.
-          wiz=$(nix path-info .#wiz)
-          tests=$(nix path-info .#tests)
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            # The PR-only fast path: the same packages from a seeded `.lake`
+            # (flake.nix's withLakeCache, a different derivation), so Lake recompiles
+            # only the modules the branch changed. The seed is the untrusted one if the
+            # restore found it, else the trusted cold seed, else `empty-lake` (the cold
+            # build — a miss is never a failure). A pull request saves no seed: its
+            # `.lake` output is an unreferenced store path, not a cache entry.
+            seed=$(scripts/lake-cache.sh choose .lake-seed-pr .lake-seed-trusted)
+            echo "seed: $seed"
+            scripts/lake-cache.sh build "$seed" wiz tests | tee lake-paths
+            wiz=$(sed -n 's/^wiz=//p' lake-paths)
+            tests=$(sed -n 's/^tests=//p' lake-paths)
+          else
+            # Not a pull request (a push, the merge queue, a manual run): the pure
+            # build, which is what the trusted cache and the release path use.
+            nix build .#wiz .#tests --no-link -L
+            wiz=$(nix path-info .#wiz)
+            tests=$(nix path-info .#tests)
+          fi
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
           echo "wiz: $wiz"; echo "tests: $tests"
@@ -340,7 +426,7 @@ jobs:
           fi
           # .#reference is built by the docs job, not here (#460), so it is not pushed.
           nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_AUTH_TOKEN" cachix push "$CACHIX_NAME" \
-            $(nix path-info .#wiz .#tests)
+            ${{ steps.nix.outputs.wiz }} ${{ steps.nix.outputs.tests }}
       - name: Publish the store paths to the PR cache
         # A pull request writes only its own untrusted cache, with its own token. If the
         # repository variable or secret is absent (or this is a fork), nothing is
@@ -355,7 +441,7 @@ jobs:
             exit 0
           fi
           nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_PR_AUTH_TOKEN" cachix push "$CACHIX_PR_NAME" \
-            $(nix path-info .#wiz .#tests)
+            ${{ steps.nix.outputs.wiz }} ${{ steps.nix.outputs.tests }}
       - name: Every test case is in exactly one shard
         run: |
           python3 scripts/ci.py check-shards --self-test
@@ -382,15 +468,20 @@ jobs:
         run: scripts/grail-index-check.sh examples/fate-index
       - name: The package checks, builds and runs a program outside the checkout
         # what the old `package` job tested, after the one build: a program is checked and
-        # built from a directory with no checkout, and grail starts
+        # built from a directory with no checkout, and grail starts. The store paths from
+        # the build step (not `nix run …#wiz`, which would evaluate, and on a pull request
+        # rebuild, the pure packages).
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}
+          GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
         run: |
           dir=$(mktemp -d)
           cp examples/io.wiz "$dir/"
           cd "$dir"
-          nix run "$GITHUB_WORKSPACE#wiz" -- check io.wiz
-          nix run "$GITHUB_WORKSPACE#wiz" -- build io.wiz -o io
+          "$WIZ/bin/wiz" check io.wiz
+          "$WIZ/bin/wiz" build io.wiz -o io
           ./io | head -3
-          nix run "$GITHUB_WORKSPACE#grail" -- 2>&1 | head -2
+          "$GRAIL" 2>&1 | head -2
       - name: Reproducibility (two absolute paths)
         # generated C, binaries, .split/, -g debug info, LLVM output and the .grail tree
         # must be byte-identical under different PWD/HOME/TMPDIR/umask/locale/epoch/-j.
@@ -434,6 +525,74 @@ jobs:
           path: .lake/docs-examples
           key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
 
+  # The trusted Lake seed (a push to master). The trust direction is in
+  # scripts/lake-cache.sh's header and in docs/building.md; it is structural here:
+  #
+  #   * the producer is `withLakeCache empty-lake`: the same function a pull request
+  #     calls, applied to an empty seed, so the **sandbox** is the cold boundary —
+  #     no cache is restored, no dev shell, no impure path. Its `bin` is byte-identical
+  #     to the pure build's (the same compile), which is what makes it a trustworthy
+  #     substitute for the compile;
+  #   * its `unwrapped.lake` output (`.lake/build/lib`, `.lake/build/ir`, `.lake/config`
+  #     and the toolchain stamp; no `build/bin`, no `.lake/cache`) is the seed, saved
+  #     under both keys. This job is the only writer of either for this key; a pull
+  #     request reads them and writes no seed;
+  #   * it publishes no store path and nothing waits on it (it runs beside `build`,
+  #     off the shards' critical path). It needs no elan (`lean: false`): nixpkgs' Lean
+  #     compiles it, exactly as the pure build does.
+  lake_seed:
+    name: lake seed
+    needs: changes
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    # the cold compile (no prewarm: this job builds only `unwrapped`), with slack
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          # substitution only (cachix-action is set up with skipPush); this job
+          # publishes no store path
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # nixpkgs' Lean, as the pure build uses: no elan and no dev-shell `lake build`
+          lean: false
+      - name: Key
+        id: key
+        shell: bash
+        run: |
+          scripts/lake-cache.sh key >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+      - name: Build the cold seed (withLakeCache from empty-lake)
+        # There is no restore step anywhere in this job: the seed it saves comes from
+        # this derivation, so a pull request's `.lake` can never become the trusted one.
+        id: seed
+        shell: bash
+        run: |
+          empty=$(scripts/lake-cache.sh empty)
+          echo "empty seed: $empty"
+          scripts/lake-cache.sh build "$empty" unwrapped.lake | tee seed-paths
+          echo "lake=$(sed -n 's/^unwrapped\.lake=//p' seed-paths)" >> "$GITHUB_OUTPUT"
+      - name: The seed (the `.lake` output, without the linked binaries)
+        shell: bash
+        run: scripts/lake-cache.sh save "${{ steps.seed.outputs.lake }}" .lake-seed
+      # The same cold seed under both keys: a pull request restores the untrusted key
+      # first (its own previous run) and the trusted key second. A master commit whose
+      # key an earlier commit already saved is not a failure (`continue-on-error`):
+      # that entry is the same toolchain and sources, so it is the same seed.
+      - name: Save the trusted seed
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lake-seed
+          key: ${{ steps.key.outputs.trusted-key }}
+      - name: Publish the same seed to the untrusted key (for a pull request's first restore)
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lake-seed
+          key: ${{ steps.key.outputs.pr-key }}
+
   # The trust ledger (scripts/trust-ledger.sh, .github/trust-baseline.tsv): every
   # declaration of `lib/` (and the axiom-free example) goes through `#print axioms`, and a
   # source of trust the reviewed baseline does not list fails the run, as does an expired
@@ -468,7 +627,12 @@ jobs:
       - name: nix build (the test driver, from Cachix), and point .lake at it
         id: nix
         run: |
-          tests=$(nix build .#tests --no-link --print-out-paths)
+          # The build job's driver (a PR's from the seeded build); a store path
+          # substitutes directly, and a missing one falls back to the derivation.
+          tests='${{ needs.build.outputs.tests }}'
+          if [ -z "$tests" ] || ! nix build --no-link "$tests"; then
+            tests=$(nix build .#tests --no-link --print-out-paths)
+          fi
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
           du -sh "$tests"
           # the ledger driver and the fixture scripts name `.lake/build/bin/tests`
@@ -579,11 +743,27 @@ jobs:
       - name: nix build (the store paths, from Cachix)
         id: nix
         run: |
-          nix build .#wiz .#tests --no-link -L
-          wiz=$(nix path-info .#wiz)
-          tests=$(nix path-info .#tests)
+          # The store paths the build job published (master's pure ones; a pull
+          # request's from its seeded `.lake` build). Asking for a store path
+          # substitutes it from the caches directly — the derivation hash of a PR's
+          # cached build cannot be recomputed here — and a fork (no PR cache) or a
+          # missing path falls back to the derivation, as before.
+          wiz='${{ needs.build.outputs.wiz }}'
+          tests='${{ needs.build.outputs.tests }}'
+          if [ -z "$wiz" ] || [ -z "$tests" ] || ! nix build --no-link "$wiz" "$tests"; then
+            nix build .#wiz .#tests --no-link -L
+            wiz=$(nix path-info .#wiz)
+            tests=$(nix path-info .#tests)
+          fi
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          # `=scry-project` (and the other scry groups in the library shard) link against
+          # the C# grammar: `scry/src/Scry/NativeLink.wiz` has `link_c ../../native/
+          # tree-sitter-c-sharp/src/parser.c`. That out-link is gitignored, so a fresh
+          # checkout has no grammar and the case fails on a missing file instead of
+          # testing anything. Create it here, exactly as the scry workflow does; it is
+          # substituted from Cachix, so this is a link, not a build.
+          nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp
           # the suite and its helpers name the checkout's binaries (`.lake/build/bin/wiz`,
           # `.lake/build/bin/grail`, `scripts/trust-ledger.sh`); point them at the store.
           # No Lake build and no .lake cache: this is a directory of symlinks.
@@ -621,20 +801,34 @@ jobs:
         env:
           SELECT: ${{ matrix.shard.select }}
           JOBS: ${{ matrix.shard.jobs }}
+          ALLOW_MISSING_DEPS: "${{ matrix.shard['allow-missing-deps'] }}"
         run: |
           mapfile -t sel <<< "$SELECT"
           mkdir -p logs ~/.cache/wiz
           du -sh ~/.cache/wiz .grail /tmp/wiz-selfhost-* 2>/dev/null || true
+          # A missing dependency is a failure (Tests.skipMissing) unless the shard is one
+          # whose environment deliberately lacks an optional tool: only `library` sets
+          # "allow-missing-deps" in .github/test-shards.json, for iverilog (the one Icarus
+          # case) and the tower "from source" case's Lake toolchain. The flag is the
+          # driver's `--allow-missing-deps` by another name; every skip it allows still
+          # needs an .github/skip-allowlist.json entry (`scripts/ci.py check-skips`), so it
+          # cannot hide an unexpected missing cc, node, yosys, ...
+          allow=()
+          if [ "$ALLOW_MISSING_DEPS" = "true" ]; then
+            export WIZ_ALLOW_MISSING_DEPS=1
+            allow=(--allow-missing-deps)
+          fi
+          echo "allow-missing-deps: ${ALLOW_MISSING_DEPS:-false}"
           # A shard without "jobs" gets no `--jobs`: the driver already runs one case at
           # a time, and a case with an auto mode (`=selfhost-libdiff`) tells "not given"
           # from "--jobs 1" (`Tests.caseJobsGiven`).
           jobs=()
           if [ -n "$JOBS" ]; then jobs=(--jobs "$JOBS"); fi
           jobs_s="${jobs[*]-}"
-          echo "tests -- --cache ~/.cache/wiz ${jobs_s:+$jobs_s }${sel[*]}"
+          echo "tests -- --cache ~/.cache/wiz ${jobs_s:+$jobs_s }${allow[*]-}${allow:+ }${sel[*]}"
           # the Nix-built driver, exactly as `lake test -- …` would run it; every case's
           # time as JSON lines (scripts/ci.py summary and baseline read them)
-          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${jobs[@]}" \
+          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${allow[@]}" "${jobs[@]}" \
             --timings "logs/${{ matrix.shard.name }}.jsonl" \
             --shard "${{ matrix.shard.name }}" "${sel[@]}" 2>&1 | tee "logs/${{ matrix.shard.name }}.log"
       - name: Save the Wiz build caches
@@ -662,11 +856,13 @@ jobs:
           retention-days: 3
 
   # (11s) The Wiz→wasm page modules as Nix derivations (`packages.wiz-web`,
-  # `packages.wiz-playground` and `packages.wiz-playground-ui`; flake.nix), built once
-  # here and published to Cachix. They used to be built inside `web`'s test step (95 % of
+  # `packages.wiz-playground`, `packages.wiz-playground-ui` and `packages.wiz-source-ui`;
+  # flake.nix), built once here and published to Cachix. They used to be built inside
+  # `web`'s test step (95 % of
   # its 608 s, with `wasm-opt -O2`'s 8–10 GiB peak as the tail that once reached 55 min)
   # and again in every `docs` job on a push; both jobs now substitute these paths
-  # (`web/modules-from-store.sh`).
+  # (`web/modules-from-store.sh`). The reader's module is also what `scry web --ui` puts
+  # in the published `/source/` bundle.
   #
   # It is not in `build`: a 10-minute wasm build there would sit on the shards' critical
   # path. Here it runs beside the shards. It waits for `build` when that runs, so its
@@ -684,6 +880,14 @@ jobs:
     # Cachix miss (the nix build of both derivations), and GitHub reports a timed-out
     # job as "The operation was canceled." — the annotation is the timeout.
     timeout-minutes: 75
+    # The paths it built (and pushed). A pull request's are *seeded* derivations:
+    # their store paths differ from `.#wiz-web` and friends, so `web`/`docs` must
+    # take these, not recompute the pure attrs (which can never match).
+    outputs:
+      web: ${{ steps.nix.outputs.web }}
+      playground: ${{ steps.nix.outputs.playground }}
+      ui: ${{ steps.nix.outputs.ui }}
+      source_ui: ${{ steps.nix.outputs.source_ui }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
@@ -697,22 +901,67 @@ jobs:
           cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
           cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
-      - name: nix build (wiz-web, wiz-playground, wiz-playground-ui)
+      - name: Lake cache key (a pull request)
+        id: lake-key
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          scripts/lake-cache.sh key >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+      - name: Restore the untrusted Lake seed (a pull request)
+        # The untrusted key first (a pull request's own previous save, or the trusted
+        # producer's copy), the trusted key next. Nothing this job reads is ever read
+        # by a trusted job: the producer has no restore (ci.yml, `lake_seed`).
+        id: lake-pr
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lake-seed-pr
+          key: ${{ steps.lake-key.outputs.pr-key }}
+          restore-keys: ${{ steps.lake-key.outputs.pr-prefix }}
+      - name: Restore the trusted Lake seed (a pull request)
+        id: lake-trusted
+        if: github.event_name == 'pull_request' && steps.lake-pr.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lake-seed-trusted
+          key: ${{ steps.lake-key.outputs.trusted-key }}
+          restore-keys: ${{ steps.lake-key.outputs.trusted-prefix }}
+      - name: nix build (wiz-web, wiz-playground, wiz-playground-ui, wiz-source-ui)
         id: nix
         run: |
           # They share `wiz`, the emscripten closure and mini-gmp; the playground engine is
           # the expensive one (`--opt 1` in flake.nix, because `wasm-opt`'s -O2 peak does
           # not fit a 16 GB runner). `--max-jobs 1`: one at a time, for the same reason.
           # `wiz` and emscripten are substitutes.
-          nix build .#wiz-web .#wiz-playground .#wiz-playground-ui --no-link -L --max-jobs 1
-          web=$(nix path-info .#wiz-web)
-          playground=$(nix path-info .#wiz-playground)
-          ui=$(nix path-info .#wiz-playground-ui)
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            # a pull request: build from the seed (untrusted first, trusted second,
+            # else empty) so `wiz` is this branch's seeded build, not a cold rebuild.
+            # `wiz-source-ui` is built the same way, so it uses the seeded compiler too
+            # (a pure `.#wiz-source-ui` would drag in a cold pure `.#wiz`).
+            seed=$(scripts/lake-cache.sh choose .lake-seed-pr .lake-seed-trusted)
+            echo "seed: $seed"
+            LAKE_CACHE_NIX_ARGS='--max-jobs 1' \
+              scripts/lake-cache.sh build "$seed" wiz-web wiz-playground wiz-playground-ui wiz-source-ui \
+              | tee web-paths
+            web=$(sed -n 's/^wiz-web=//p' web-paths)
+            playground=$(sed -n 's/^wiz-playground=//p' web-paths)
+            ui=$(sed -n 's/^wiz-playground-ui=//p' web-paths)
+            source_ui=$(sed -n 's/^wiz-source-ui=//p' web-paths)
+          else
+            nix build .#wiz-web .#wiz-playground .#wiz-playground-ui .#wiz-source-ui --no-link -L --max-jobs 1
+            web=$(nix path-info .#wiz-web)
+            playground=$(nix path-info .#wiz-playground)
+            ui=$(nix path-info .#wiz-playground-ui)
+            source_ui=$(nix path-info .#wiz-source-ui)
+          fi
           echo "web=$web" >> "$GITHUB_OUTPUT"
           echo "playground=$playground" >> "$GITHUB_OUTPUT"
           echo "ui=$ui" >> "$GITHUB_OUTPUT"
+          echo "source_ui=$source_ui" >> "$GITHUB_OUTPUT"
           echo "wiz-web: $web"; echo "wiz-playground: $playground"; echo "wiz-playground-ui: $ui"
-          du -sh "$web" "$playground" "$ui"
+          echo "wiz-source-ui: $source_ui"
+          du -sh "$web" "$playground" "$ui" "$source_ui"
       - name: Publish the store paths to Cachix
         # `web` and `docs` substitute these; the same token rule as the compiler's push.
         # A fork pull request has no secret: its jobs build the modules themselves.
@@ -729,7 +978,7 @@ jobs:
             exit 1
           fi
           nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
-            $(nix path-info .#wiz-web .#wiz-playground .#wiz-playground-ui)
+            ${{ steps.nix.outputs.web }} ${{ steps.nix.outputs.playground }} ${{ steps.nix.outputs.ui }} ${{ steps.nix.outputs.source_ui }}
 
   # (11s, ci-01) The playground and the site's JavaScript, on every pull request that
   # touches `web/**` (and on a push, where `changes --all` sets web=true). `web/test.sh`
@@ -771,7 +1020,12 @@ jobs:
         id: nix
 
         run: |
-          wiz=$(nix build .#wiz --no-link --print-out-paths)
+          # the build job's wiz: a pull request's from its seeded `.lake` build (a
+          # store path substitutes directly); a miss falls back to the derivation
+          wiz='${{ needs.build.outputs.wiz }}'
+          if [ -z "$wiz" ] || ! nix build --no-link "$wiz"; then
+            wiz=$(nix build .#wiz --no-link --print-out-paths)
+          fi
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           du -sh "$wiz"
       - name: The Wasm modules (from Cachix; web_modules built them)
@@ -779,6 +1033,10 @@ jobs:
         env:
           # only the fork-pull-request fallback in the script reads it
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # the producer's seeded paths (a pull request's differ from the pure attrs)
+          WIZ_MODULES_WEB: ${{ needs.web_modules.outputs.web }}
+          WIZ_MODULES_PLAYGROUND: ${{ needs.web_modules.outputs.playground }}
+          WIZ_MODULES_UI: ${{ needs.web_modules.outputs.ui }}
         run: sh web/modules-from-store.sh
       - name: The browser-free half of web/test.sh
         env:
@@ -812,11 +1070,11 @@ jobs:
     needs: [build, web_modules]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    # 45 min: `wiz doc --lib` and the site, with wiz and both Wasm modules substituted
-    # (`web_modules`). Without an elaboration cache for this binary `wiz doc --lib` is
-    # the bulk of the job (10-19 min in recent runs); the restored cache below replays it
-    # in ~2-4 min.
-    timeout-minutes: 45
+    # 60 min: `wiz doc --lib` (10-19 min cold, ~2-4 min with the restored cache), the
+    # source reader's `grail build scry` (~12 min measured in scry.yml) and the site,
+    # with wiz and the Wasm modules substituted (`web_modules`). The reader build is why
+    # this is 60 and not 45: a timeout is a cancelled job, not a verdict on the commit.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
@@ -866,6 +1124,10 @@ jobs:
         env:
           # only the fork-pull-request fallback in the script reads it (this job is a push)
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # the producer's paths: on a pull request they are seeded derivations
+          WIZ_MODULES_WEB: ${{ needs.web_modules.outputs.web }}
+          WIZ_MODULES_PLAYGROUND: ${{ needs.web_modules.outputs.playground }}
+          WIZ_MODULES_UI: ${{ needs.web_modules.outputs.ui }}
         run: sh web/modules-from-store.sh
       - name: The Wasm modules in web/out (web/build.sh, web/build-playground.sh)
         env:
@@ -922,10 +1184,52 @@ jobs:
         run: |
           ref=$(nix build .#reference --no-link --print-out-paths)
           cp "$ref/index.md" doc-site/docs/reference.md
+      - name: The source reader (grail build scry + scry web)
+        # `/source/` is one static bundle: scry's report of the public C fixtures, the
+        # host files, and the reader's Loom runtime. `scry` is not a Nix package, so this
+        # is the job that has a scry binary: the same `grail build scry` path scry.yml
+        # uses (the tree-sitter shim and the dev shell's grail.local.wiz). The compiler
+        # is the build job's seeded `wiz` (not a cold `.#wiz`), and the runtime is the
+        # seeded `wiz-source-ui` path `web_modules` published; `web/source-bundle.sh`
+        # adds the .wasm beside it, because `--ui` alone copies only the .mjs.
+        id: source
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+          SOURCE_UI: ${{ needs.web_modules.outputs.source_ui }}
+        run: |
+          [ -n "$SOURCE_UI" ] || {
+            echo "docs: web_modules produced no source_ui (the wasm modules job must build .#wiz-source-ui)" >&2
+            exit 1
+          }
+          nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp
+          mkdir -p .lake/build/bin
+          ln -sf "$WIZ" .lake/build/bin/wiz
+          ln -sf "$(dirname "$WIZ")/grail" .lake/build/bin/grail
+          ( cd scry && cp ../grail.local.wiz . && ../.lake/build/bin/grail build scry )
+          bundle=$(mktemp -d)
+          sh web/source-bundle.sh ./scry/.grail/bin/scry "$bundle/b" \
+            --ui "$SOURCE_UI" --target scry/tests/fixtures/report
+          echo "SOURCE_BUNDLE=$bundle/b" >> "$GITHUB_ENV"
+          echo "ui=$SOURCE_UI" >> "$GITHUB_OUTPUT"
       - name: The landing page and the playground (web/build-site.sh)
+        env:
+          # The reader is part of the published product, so a site without it is red.
+          SITE_REQUIRE_SOURCE: "1"
         run: sh web/build-site.sh doc-site web/out
-      - name: The site has its three entry points and the landing's links resolve
+      - name: The site has its entry points, /source/, and the landing's links resolve
+        env:
+          SITE_REQUIRE_SOURCE: "1"
         run: sh web/check-site.sh doc-site
+      - name: The published source reader in headless Chromium
+        # The bundle is the tree under doc-site/source, not a second export: this checks
+        # the artifact deploy-docs will publish. The test serves it and loads it twice
+        # (JavaScript off: the SSR; on: mount, hover, #/f/<id>).
+        run: |
+          chrome=$(command -v chromium || command -v chromium-browser || command -v google-chrome || true)
+          if [ -z "$chrome" ]; then
+            chrome=$(nix shell --inputs-from . nixpkgs#chromium -c sh -c 'command -v chromium')
+          fi
+          node web/source_chrome_test.mjs "$chrome" doc-site/source
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wiz-docs
@@ -989,13 +1293,14 @@ jobs:
     # `docs` is wanted on a push only (it is push-only): making it a need here is what
     # makes a broken site red on master (review ci-02). It is skipped on a pull request
     # and on a merge-queue entry, where `check` below accepts `skipped`.
-    needs: [changes, docs_style, name_collisions_reachable, prelude_drift, docs_examples, source-tarball, attest, build, trust_ledger, stc, test, web_modules, web, docs]
+    needs: [changes, docs_style, name_collisions_reachable, prelude_drift, docs_examples, source-tarball, attest, build, lake_seed, trust_ledger, stc, test, web_modules, web, docs]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # 10 min: download the logs, the summary, the skip lint and the balance check
     timeout-minutes: 10
     permissions:
       contents: read
+      actions: read # this run's job walls, for the shard-balance gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -1021,8 +1326,10 @@ jobs:
       # A green run must have tested something. Fails when a group skipped wholesale
       # (unless .github/skip-allowlist.json allows it, with a reason and an owner), when
       # a skip names a tool the dev shell must provide (cc, GMP, GC, yosys, node, nix,
-      # …), or when a group's unexplained skipped ratio (over its cases in every shard) is over 25%. The self-test runs
-      # first, so the rule itself is checked on synthetic logs without the suite.
+      # …), when a `--allow-missing-deps` shard recorded a missing dependency that the
+      # allow-list does not name, or when a group's unexplained skipped ratio (over its
+      # cases in every shard) is over 25%. The self-test runs first, so the rule itself
+      # is checked on synthetic logs without the suite.
       - name: Skips are explained
         if: needs.test.result != 'skipped'
         shell: bash
@@ -1043,27 +1350,47 @@ jobs:
           if-no-files-found: ignore
           # master's feed `scripts/ci.py baseline` (docs/building.md); others are short-lived
           retention-days: ${{ github.event_name == 'push' && 7 || 2 }}
-      # The shards stay balanced (docs/building.md, "Shard balance"): warn, never fail, when
-      # the longest shard is over 1.5x the median, a split shard's cases are missing from
-      # the baseline, or two parts build the same program. On master, a run whose tests all
-      # passed and that drifted uploads the regenerated baseline (`test-timings-baseline`).
+      # The shards stay balanced (docs/building.md, "Shard balance"): the longest shard's
+      # job wall must be within 1.5x the median wall, every split shard's cases must be in
+      # the baseline, and two parts must not build the same program. Wall, not summed case
+      # seconds: a shard that runs cases in parallel ("jobs": N) has a wall well below its
+      # case sum, so the case-sum ratio alone would call a short job the tail. It is a
+      # warning everywhere but a push to master, where `--strict` makes drift a failure:
+      # as a warning it stayed stale for three current runs (wiz-notes/ci-profile.md). A
+      # run whose tests all passed still uploads the regenerated baseline
+      # (`test-timings-baseline`), including when it is the strict step that failed.
       - name: Shard balance
         id: balance
         if: needs.test.result != 'skipped' # no shard ran: nothing to sum up
-        continue-on-error: true
+        continue-on-error: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/master') }}
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           shopt -s nullglob
           rm -f test-timings.json
-          python3 scripts/ci.py balance --factor 1.5 --baseline-out test-timings.json logs/*.jsonl >> "$GITHUB_STEP_SUMMARY"
+          # This run's job list, for the `tests --` step's wall. Without it (the API call
+          # failed) balance falls back to summed case seconds and says so.
+          jobs=()
+          if gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?filter=latest&per_page=100" > jobs.json.tmp 2>/dev/null && mv jobs.json.tmp jobs.json; then
+            jobs=(--jobs-json jobs.json)
+          else
+            rm -f jobs.json.tmp jobs.json
+            echo "::warning title=Shard balance::no job list from the API; the gate falls back to summed case seconds"
+          fi
+          set +e
+          python3 scripts/ci.py balance --factor 1.5 --strict --baseline-out test-timings.json "${jobs[@]}" logs/*.jsonl >> "$GITHUB_STEP_SUMMARY"
+          rc=$?
+          set -e
           if [ -f test-timings.json ] && [ "${{ github.event_name }}" = push ] && [ "${{ needs.test.result }}" = success ]; then
             echo "refresh=true" >> "$GITHUB_OUTPUT"
             cmd="gh run download ${{ github.run_id }} -R ${{ github.repository }} -n test-timings-baseline -D .github"
             echo "::warning title=Shard balance::the test-timings baseline drifted; to apply this run's: $cmd"
             { echo; echo "To apply it (then commit .github/test-timings.json in a PR):"; echo; echo '```'; echo "$cmd"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
+          exit $rc
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: steps.balance.outputs.refresh == 'true'
+        if: always() && steps.balance.outputs.refresh == 'true'
         with:
           name: test-timings-baseline
           path: test-timings.json
@@ -1077,7 +1404,7 @@ jobs:
           echo "docs examples: ${{ needs.docs_examples.result }}"
           echo "source tarball: ${{ needs['source-tarball'].result }}"
           echo "attestation: ${{ needs.attest.result }}"
-          echo "build: ${{ needs.build.result }}, trust ledger: ${{ needs.trust_ledger.result }}, stc: ${{ needs.stc.result }}, test: ${{ needs.test.result }}, wasm modules: ${{ needs.web_modules.result }}, web: ${{ needs.web.result }}, docs: ${{ needs.docs.result }}"
+          echo "build: ${{ needs.build.result }}, lake seed: ${{ needs.lake_seed.result }}, trust ledger: ${{ needs.trust_ledger.result }}, stc: ${{ needs.stc.result }}, test: ${{ needs.test.result }}, wasm modules: ${{ needs.web_modules.result }}, web: ${{ needs.web.result }}, docs: ${{ needs.docs.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
           [ "${{ needs.changes.result }}" = success ] || exit 1
@@ -1108,6 +1435,9 @@ jobs:
           check "source tarball" "${{ needs['source-tarball'].result }}" "$code"
           check "attestation" "${{ needs.attest.result }}" true
           check build "${{ needs.build.result }}" "$code"
+          # the cold trusted seed only runs on a push to master; a PR's seeded build
+          # falls back to the cold build when it is missing, so it is not required there
+          check "lake seed" "${{ needs.lake_seed.result }}" "$want_site"
           check "trust ledger" "${{ needs.trust_ledger.result }}" "$code"
           check "STC metatheory" "${{ needs.stc.result }}" "$want_stc"
           check test "${{ needs.test.result }}" "$want_tests"

@@ -65,16 +65,17 @@ def build (dir : System.FilePath) (tc : Toolchain) (cache : System.FilePath)
 
 /-- Build for a case that only cares that the build succeeded. `false` is a *documented*
 missing toolchain (`Build.missingToolchain`: `gmp.h`, or a `cc`/`llc` that could not be
-started) and skips; every other non-zero exit throws, so a broken `--attest` path is a
-red case instead of a skip. A skipped case is not a pass (AGENTS.md; `ci.py check-skips`
-would report it as a skip, not a failure). -/
+started): `Tests.skipMissing` fails by default and is a reported skip under
+`--allow-missing-deps`. Every other non-zero exit throws, so a broken `--attest` path is
+a red case instead of a skip. A skipped case is not a pass (AGENTS.md; `ci.py
+check-skips` reports a skip, not a failure). -/
 def buildOrSkip (dir : System.FilePath) (tc : Toolchain) (cache : System.FilePath)
     (attest : String := "prog.attest.json") (extraCflags : String := "") : IO Bool := do
   let (_, err, code) ← build dir tc cache attest extraCflags
   if code == 0 then
     pure true
   else if Build.missingToolchain tc err then
-    skip "no toolchain"
+    skipMissing "no toolchain"
     pure false
   else
     throw (IO.userError s!"build failed ({code}): {err}")
@@ -123,7 +124,7 @@ def group : Group where
         let (_, err, code) ← build dir tc cache
         if code != 0 then
           if Build.missingToolchain tc err then
-            skip "no toolchain"
+            skipMissing "no toolchain"
             return
           throw (IO.userError s!"build failed ({code}): {err}")
         check ((err.splitOn "attestation written").length > 1) s!"no note: {err}"
@@ -214,7 +215,7 @@ def group : Group where
     -- while a build that ran and failed (including the old catch-all word "failed") is
     -- not. Without this case the classifier could be widened back to "any non-zero
     -- exit" without a test noticing.
-    { name := "only a missing cc/llc or gmp.h is a 'no toolchain' skip", run := fun _ => do
+    { name := "only a missing cc/llc or gmp.h is classified as a missing toolchain", run := fun _ => do
         let tc : Toolchain := {}
         check (Build.missingToolchain tc "cc failed:\nfatal error: gmp.h: No such file or directory") "gmp.h"
         check (Build.missingToolchain tc "cc failed:\ncould not execute external process 'cc'") "a missing cc"

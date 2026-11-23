@@ -8,7 +8,10 @@ tree that had already moved, and advertise a `*-src.tar.gz` that no script in
 the tree can build.  This check makes those claims executable.  It is cheap: no
 build, no dependency beyond Python 3, git and (for the PR counts) `gh`.
 
-Checked files: `docs/release/*.md` and `docs/release/release-manifest.json`.
+Checked files: `docs/release/*.md` and `docs/release/release-manifest.json`;
+for the machinery check also `docs/release.md`, `docs/building.md`,
+`README.md`, `CHANGELOG.md`, and the machinery they name (`flake.nix`,
+`lakefile.lean`, `Wiz/Version.lean`, `tower/Tower/*.wiz`, the workflows).
 
 Checks
   candidate   Every candidate mention in the release docs and the manifest
@@ -41,6 +44,15 @@ Checks
               a missing file: ticking is the claim that it exists.  Reviewed
               exceptions go in ALLOW with a reason, and an exception that no
               longer matches (because the file landed) is itself a failure.
+  machinery   The documents still describe the machinery.  A version named by
+              the release docs, `docs/building.md`, `README.md` or
+              `CHANGELOG.md` must be one that `flake.nix`, `lakefile.lean`,
+              `Wiz/Version.lean`, the tower CLI or the manifest produces (a
+              `-dev` suffix is the same version); a tower spec or `--channel`
+              must be a channel a workflow or tower still produces; a
+              `scripts/...` command must exist; and an artifact or signature
+              the release docs promise must be in the manifest.  A failure
+              names the file, the line and the claim.
 
 What this cannot check
   * Network and `gh`: pull-request counts cannot be verified offline.  Without
@@ -1143,6 +1155,377 @@ def check_checklist(root: Path, report: Report) -> None:
     )
 
 
+# --- release machinery ------------------------------------------------------------
+#
+# The packet check above is about the named candidate.  This second half is about
+# the *machinery*: a version or channel the documents advertise must still be one
+# that `flake.nix`, the tower resolver or a workflow produces, a command they show
+# must still exist, and an artifact they promise must be in the manifest.  It is
+# the cheap half to drift: a packet stays internally consistent while the release
+# it describes has moved on.
+
+SCOPE_FILES = ("docs/release.md", "docs/building.md", "README.md", "CHANGELOG.md")
+
+# Placeholders in user-facing prose, not claims about this tree.
+PLACEHOLDER_CHANNELS = {
+    "SPEC",
+    "SPEC…",
+    "SPEC...",
+    "X.Y.Z",
+    "vX.Y.Z",
+    "<version>",
+    "<sha>",
+}
+PLACEHOLDER_CHANNEL_RE = re.compile(r"^(?:SPEC|X|Y|Z|[<>…]|\.\.\.)+$")
+
+VERSION_IN_RELEASE_RE = re.compile(r"\bv(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\b")
+BUILDING_VERSION_RE = re.compile(
+    r"`Wiz/Version\.lean`'s version \(`(?P<version>[^`]+)`"
+)
+BUILDING_DEV_RE = re.compile(r"\b(?P<version>\d+\.\d+\.\d+-dev)\b")
+CHANGELOG_HEADER_RE = re.compile(r"^## \[(?P<version>[^\]]+)\]")
+CHANGELOG_PIN_RE = re.compile(r"`wiz-toolchain`: `v(?P<version>\d+\.\d+\.\d+)`")
+README_PIN_RE = re.compile(r"tower default (?:v)?(?P<version>\d+\.\d+\.\d+)")
+
+TOWER_SPEC_RE = re.compile(
+    r"\btower\s+(?:default|install|toolchain\s+install|update)\s+"
+    r"([A-Za-z0-9_.@/<>…-]+)"
+)
+CHANNEL_FLAG_RE = re.compile(r"--channel\s+([A-Za-z0-9_.-]+)")
+SCRIPT_REF_RE = re.compile(r"((?:scry/)?scripts/[A-Za-z0-9_./+*<>-]+)")
+ARTIFACT_RE = re.compile(
+    r"[A-Za-z0-9_.<>-]+\.(?:tar\.gz(?:\.(?:sha256|manifest\.json|cdx\.json))?"
+    r"|cdx\.json|intoto\.json(?:\.dsse|\.sig)?|sha256|dsse|sig)"
+)
+# A signature named without the provenance file it signs (".dsse", ".sig").
+BARE_SIGNATURE_RE = re.compile(r"(?<![\w.-])(?P<suffix>\.(?:dsse|sig))\b")
+
+# Fields that look like artifacts but are manifest members, not release assets.
+NOT_ARTIFACTS = {"release-manifest.json", "lake-manifest.json",
+                 "tree.sha256", "tarball.sha256"}
+
+
+def normalize_version(raw: str) -> str:
+    """`v0.1.0`, `0.1.0-dev`, `0.1.0 - unreleased (draft)` -> `0.1.0`."""
+    value = raw.strip().split()[0] if raw.strip() else raw
+    value = re.sub(r"^v", "", value)
+    value = re.sub(r"-(?:dev|draft|unreleased).*$", "", value)
+    return value
+
+
+def machinery_versions(root: Path, manifest: dict) -> dict[str, list[tuple[str, str]]]:
+    """{normalized version: [(source, the text as written), ...]} the tree produces."""
+    produced: dict[str, list[tuple[str, str]]] = {}
+
+    def add(source: str, raw: object) -> None:
+        if not isinstance(raw, str):
+            return
+        value = normalize_version(raw)
+        if re.fullmatch(r"\d+\.\d+\.\d+", value):
+            produced.setdefault(value, []).append((source, raw.strip()))
+
+    add(MANIFEST_REL.as_posix(), manifest.get("version"))
+    sources = {
+        "flake.nix": (
+            r'pname\s*=\s*"wiz-unwrapped";\s*version\s*=\s*"([^"]+)"',
+            read_text(root, root / "flake.nix"),
+        ),
+        "lakefile.lean": (
+            r'version\s*:=\s*v!"([^"]+)"',
+            read_text(root, root / "lakefile.lean"),
+        ),
+        "Wiz/Version.lean": (
+            r'def\s+version\s*:\s*String\s*:=\s*"([^"]+)"',
+            read_text(root, root / "Wiz" / "Version.lean"),
+        ),
+        "tower/Tower/Cli.wiz": (
+            r'Tower\.say\s+"tower\s+([^"]+)"',
+            read_text(root, root / "tower" / "Tower" / "Cli.wiz"),
+        ),
+    }
+    for source, (pattern, text) in sources.items():
+        if text is None:
+            continue
+        match = re.search(pattern, text, re.DOTALL)
+        if match is not None:
+            add(source, match.group(1))
+    return produced
+
+
+def machinery_channels(root: Path) -> dict[str, str]:
+    """{channel: the file that still produces it}."""
+    produced: dict[str, str] = {}
+    install = read_text(root, root / "tower" / "Tower" / "Install.wiz") or ""
+    if 'String.eq spec "stable"' in install:
+        produced["stable"] = "tower/Tower/Install.wiz"
+    nightly = read_text(root, root / ".github" / "workflows" / "nightly.yml") or ""
+    if "nightly" in nightly:
+        produced["nightly"] = ".github/workflows/nightly.yml"
+    release = read_text(root, root / ".github" / "workflows" / "release.yml") or ""
+    if "snapshot" in release:
+        produced["snapshot"] = ".github/workflows/release.yml"
+    if re.search(r'tags:\s*\[\s*"v\*"', release):
+        produced["release tag"] = ".github/workflows/release.yml"
+    return produced
+
+
+def machinery_artifacts(manifest: dict) -> set[str]:
+    """Every name the manifest says the release carries."""
+    names: set[str] = set()
+    for entry in manifest.get("artifacts", []) or []:
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+            names.add(entry["name"])
+    source = manifest.get("source")
+    if isinstance(source, dict):
+        tarball = source.get("tarball")
+        if isinstance(tarball, dict):
+            if isinstance(tarball.get("name"), str):
+                names.add(tarball["name"])
+            sbom = tarball.get("sbom")
+            if isinstance(sbom, dict) and isinstance(sbom.get("name"), str):
+                names.add(sbom["name"])
+    return names
+
+
+def scoped_docs(root: Path) -> list[Path]:
+    files = [root / name for name in SCOPE_FILES] + release_docs(root)
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for path in files:
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
+
+
+def line_at(text: str, index: int) -> int:
+    return text.count("\n", 0, index) + 1
+
+
+def documented_versions(root: Path) -> list[tuple[str, int, str]]:
+    """(path, line, raw) version claims the scoped documents make."""
+    claims: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int, str]] = set()
+
+    def add(path: str, text: str, index: int, raw: str) -> None:
+        key = (path, line_at(text, index), raw)
+        if key not in seen:
+            seen.add(key)
+            claims.append(key)
+
+    for path in release_docs(root):
+        text = read_text(root, path)
+        if text is None:
+            continue
+        for match in VERSION_IN_RELEASE_RE.finditer(text):
+            add(rel(root, path), text, match.start(), match.group(0))
+
+    building_path = root / "docs" / "building.md"
+    building = read_text(root, building_path)
+    if building is not None:
+        for pattern in (BUILDING_VERSION_RE, BUILDING_DEV_RE):
+            for match in pattern.finditer(building):
+                add("docs/building.md", building, match.start(), match.group("version"))
+
+    changelog_path = root / "CHANGELOG.md"
+    changelog = read_text(root, changelog_path)
+    if changelog is not None:
+        for match in CHANGELOG_HEADER_RE.finditer(changelog):
+            raw = match.group("version").strip()
+            if raw.lower() == "unreleased":
+                continue
+            add("CHANGELOG.md", changelog, match.start(), raw)
+        for match in CHANGELOG_PIN_RE.finditer(changelog):
+            add("CHANGELOG.md", changelog, match.start(), match.group("version"))
+
+    readme_path = root / "README.md"
+    readme = read_text(root, readme_path)
+    if readme is not None:
+        for match in README_PIN_RE.finditer(readme):
+            add("README.md", readme, match.start(), match.group("version"))
+    return claims
+
+
+def documented_channels(root: Path) -> list[tuple[str, int, str]]:
+    """(path, line, raw) tower specs and `--channel` values the docs name."""
+    claims: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for path in scoped_docs(root):
+        text = read_text(root, path)
+        if text is None:
+            continue
+        for pattern in (TOWER_SPEC_RE, CHANNEL_FLAG_RE):
+            for match in pattern.finditer(text):
+                raw = match.group(1).rstrip(".,;:")
+                if not raw or raw in PLACEHOLDER_CHANNELS or PLACEHOLDER_CHANNEL_RE.match(raw):
+                    continue
+                key = (rel(root, path), line_at(text, match.start()), raw)
+                if key not in seen:
+                    seen.add(key)
+                    claims.append(key)
+    return claims
+
+
+def channel_is_produced(
+    raw: str,
+    produced: dict[str, str],
+    versions: dict[str, list[tuple[str, str]]],
+) -> bool:
+    if raw in ("stable", "nightly") and raw in produced:
+        return True
+    if raw == "snapshot" and "snapshot" in produced:
+        return True
+    if raw.startswith("snapshot-") and "snapshot" in produced:
+        return True
+    if "@" in raw or "/" in raw:
+        return True  # a branch or commit pin; the workflow does not enumerate those
+    if raw in ("master", "main"):
+        return True
+    if normalize_version(raw) in versions and "release tag" in produced:
+        return True
+    return False
+
+
+def documented_scripts(root: Path) -> list[tuple[str, int, str]]:
+    """(path, line, token) script paths the scoped documents name."""
+    claims: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for path in scoped_docs(root):
+        text = read_text(root, path)
+        if text is None:
+            continue
+        for match in SCRIPT_REF_RE.finditer(text):
+            token = match.group(1).rstrip(".,;:")
+            if token.rstrip("/") in ("scripts", "scry/scripts"):
+                continue  # a directory or a `scripts/...` placeholder, not a command
+            if any(char in token for char in "*<>") or "..." in token or "…" in token:
+                continue
+            start = text.rfind("\n", 0, match.start()) + 1
+            end = text.find("\n", match.end())
+            line = text[start:end if end >= 0 else len(text)]
+            if re.search(r"\b(?:is|are|was|were)\s+(?:gone|removed|deleted)\b"
+                         r"|\bno longer\b", line, re.IGNORECASE):
+                continue  # a note that the command was removed, not a command
+            key = (rel(root, path), line_at(text, match.start()), token)
+            if key not in seen:
+                seen.add(key)
+                claims.append(key)
+    return claims
+
+
+def documented_artifacts(root: Path, version: str) -> list[tuple[str, int, str]]:
+    """(path, line, name) release files the release docs promise."""
+    claims: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for path in release_docs(root):
+        text = read_text(root, path)
+        if text is None:
+            continue
+        for match in ARTIFACT_RE.finditer(text):
+            name = match.group(0).replace("<version>", version)
+            if name in NOT_ARTIFACTS:
+                continue
+            if not (name.startswith("wiz-") or name.startswith("provenance.intoto.json")):
+                continue
+            key = (rel(root, path), line_at(text, match.start()), name)
+            if key not in seen:
+                seen.add(key)
+                claims.append(key)
+    return claims
+
+
+def documented_signatures(root: Path) -> list[tuple[str, int, str]]:
+    """(path, line, `*.dsse`/`*.sig`) signatures the release docs promise."""
+    claims: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for path in release_docs(root):
+        text = read_text(root, path)
+        if text is None:
+            continue
+        for match in BARE_SIGNATURE_RE.finditer(text):
+            key = (rel(root, path), line_at(text, match.start()),
+                   "*" + match.group("suffix"))
+            if key not in seen:
+                seen.add(key)
+                claims.append(key)
+    return claims
+
+
+def check_machinery(root: Path, manifest: dict, report: Report) -> None:
+    """The documents must still describe what the release machinery produces."""
+    versions = machinery_versions(root, manifest)
+    channels = machinery_channels(root)
+    artifacts = machinery_artifacts(manifest)
+    if not versions:
+        report.cannot(
+            "no version could be read from flake.nix, lakefile.lean, "
+            "Wiz/Version.lean, tower/Tower/Cli.wiz or the manifest"
+        )
+        return
+    if len(versions) > 1:
+        detail = "; ".join(
+            f"{version} ({', '.join(sorted({s for s, _ in sources}))})"
+            for version, sources in sorted(versions.items())
+        )
+        report.warn(
+            f"the release machinery names different versions: {detail}; keep "
+            "flake.nix, lakefile.lean, Wiz/Version.lean, the tower CLI and the "
+            "manifest in step (a -dev suffix is ignored here)"
+        )
+
+    for path, line, raw in documented_versions(root):
+        value = normalize_version(raw)
+        if value not in versions:
+            sources = ", ".join(
+                f"{source} {text!r}" for source, text in sorted(
+                    (s, t) for values in versions.values() for s, t in values)
+            )
+            report.wrong(
+                f"{path}:{line}: version {raw!r} is not produced by the release "
+                f"machinery ({sources}); update the document or the version"
+            )
+        report.checks += 1
+    report.note(
+        f"release versions: {', '.join(sorted(versions))} "
+        f"({', '.join(sorted({s for v in versions.values() for s, _ in v}))})"
+    )
+
+    for path, line, raw in documented_channels(root):
+        report.checks += 1
+        if not channel_is_produced(raw, channels, versions):
+            report.wrong(
+                f"{path}:{line}: channel {raw!r} is not produced by a workflow or "
+                f"by tower (known: {', '.join(sorted(channels)) or 'none'})"
+            )
+    report.note(f"release channels: {', '.join(sorted(channels)) or 'none'}")
+
+    for path, line, token in documented_scripts(root):
+        report.checks += 1
+        if not (root / token).is_file():
+            report.wrong(
+                f"{path}:{line}: documented command `{token}` does not exist in "
+                "this checkout"
+            )
+
+    for path, line, name in documented_artifacts(root, normalize_version(manifest.get("version", ""))):
+        report.checks += 1
+        if name not in artifacts:
+            report.wrong(
+                f"{path}:{line}: release promises {name!r}, which "
+                f"{MANIFEST_REL} does not list"
+            )
+
+    for path, line, name in documented_signatures(root):
+        report.checks += 1
+        suffix = name[1:]
+        if not any(artifact.endswith(suffix) for artifact in artifacts):
+            report.wrong(
+                f"{path}:{line}: release promises a {suffix} signature, which "
+                f"{MANIFEST_REL} does not list"
+            )
+
+
 def check(root: Path, for_tag: bool, offline: bool, report: Report,
           repo: str | None) -> None:
     if not is_git_checkout(root):
@@ -1165,6 +1548,7 @@ def check(root: Path, for_tag: bool, offline: bool, report: Report,
     if candidate is not None:
         check_counts(root, report, candidate, offline, repo)
     check_artifacts(root, manifest, report)
+    check_machinery(root, manifest, report)
 
     tag = manifest.get("tag")
     if isinstance(tag, str) and tag:
@@ -1331,11 +1715,78 @@ def self_test() -> int:
         check_equal("subject", commit_field(root, candidate_sha, "%s"),
                     "Merge pull request #471 from x")
 
+    # Release machinery: a document naming a version, channel, command or
+    # artifact the tree no longer produces fails, and the message names the file
+    # and the claim.  A consistent packet passes.
+    with tempfile.TemporaryDirectory(prefix="wiz-release-machinery-") as tmp:
+        root = Path(tmp)
+        for directory in ("docs/release", ".github/workflows", "Wiz",
+                          "tower/Tower", "scripts"):
+            (root / directory).mkdir(parents=True, exist_ok=True)
+        (root / "flake.nix").write_text(
+            'pkgs.stdenv.mkDerivation {\n  pname = "wiz-unwrapped";\n'
+            '  version = "0.1.0";\n}\n', encoding="utf-8")
+        (root / "lakefile.lean").write_text(
+            'package wiz where\n  version := v!"0.1.0"\n', encoding="utf-8")
+        (root / "Wiz" / "Version.lean").write_text(
+            'def version : String := "0.1.0-dev"\n', encoding="utf-8")
+        (root / "tower" / "Tower" / "Cli.wiz").write_text(
+            'Tower.say "tower 0.1.0-dev";\n', encoding="utf-8")
+        (root / "tower" / "Tower" / "Install.wiz").write_text(
+            'match String.eq spec "stable" with\n', encoding="utf-8")
+        (root / ".github" / "workflows" / "nightly.yml").write_text(
+            "name: nightly\n", encoding="utf-8")
+        (root / ".github" / "workflows" / "release.yml").write_text(
+            'on:\n  push:\n    tags: ["v*"]\n# snapshot-<sha>\n', encoding="utf-8")
+        (root / "scripts" / "ok.py").write_text("#!/usr/bin/env python3\n",
+                                                encoding="utf-8")
+        (root / "docs" / "building.md").write_text(
+            "`Wiz/Version.lean`'s version (`0.1.0-dev` today).\n", encoding="utf-8")
+        (root / "README.md").write_text("tower default nightly\n", encoding="utf-8")
+        (root / "CHANGELOG.md").write_text(
+            "## [Unreleased]\n\n## [0.1.0] - unreleased (draft)\n", encoding="utf-8")
+        manifest = {
+            "version": "0.1.0",
+            "artifacts": [
+                {"name": "wiz-x86_64-linux.tar.gz"},
+                {"name": "provenance.intoto.json"},
+                {"name": "provenance.intoto.json.dsse"},
+                {"name": "provenance.intoto.json.sig"},
+            ],
+        }
+        (root / "docs" / "release" / "note.md").write_text(
+            "# Wiz v0.1.0\n\n"
+            "`python3 scripts/ok.py`, `tower default stable`, "
+            "`--channel snapshot`, `wiz-x86_64-linux.tar.gz` and "
+            "`provenance.intoto.json` (plus `.dsse`/`.sig`).\n",
+            encoding="utf-8")
+        report = Report()
+        check_machinery(root, manifest, report)
+        check_equal("machinery clean", report.problems, [])
+
+        (root / "docs" / "release" / "note.md").write_text(
+            "# Wiz v9.9.9\n\n"
+            "`python3 scripts/gone.py`, `tower default beta`, "
+            "`wiz-arm64-linux.tar.gz`; the `.sig` signs the provenance.\n",
+            encoding="utf-8")
+        stale = dict(manifest)
+        stale["artifacts"] = manifest["artifacts"][:-1]
+        report = Report()
+        check_machinery(root, stale, report)
+        for needle in ("v9.9.9", "beta", "scripts/gone.py",
+                       "wiz-arm64-linux.tar.gz", ".sig"):
+            check_equal(
+                f"machinery stale {needle}",
+                any(needle in problem and "docs/release/note.md" in problem
+                    for problem in report.problems),
+                True,
+            )
+
     if failures:
         for failure in failures:
             print(f"self-test FAIL: {failure}", file=sys.stderr)
         return 1
-    print("check-release-consistency self-test: ok (4 fixtures, git fixtures)")
+    print("check-release-consistency self-test: ok (5 fixtures, git fixtures)")
     return 0
 
 

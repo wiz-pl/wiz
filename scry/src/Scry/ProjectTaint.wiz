@@ -384,7 +384,7 @@ def Scry.Project.boundaryResultJsonAt (p : Scry.Project) (b : Scry.BoundaryFindi
   let loc := match b.origin with
     | .some o => Scry.Project.physicalJson p o
     | .none => Scry.logicalLocationJson b.func b.point;
-  let kind := match String.startsWith b.rule "scry/memory/" with
+  let kind := match Scry.memoryRuleId b.rule with
     | .true => "memory"
     | .false => "boundary";
   Json.mkObj

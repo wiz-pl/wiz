@@ -1,7 +1,7 @@
 [
   {
     "name": "selfhost",
-    "split": 3,
+    "split": 6,
     "heavy": true,
     "inputs": [
       "selfhost/*",
@@ -13,7 +13,12 @@
       "lib/Deriving.wiz",
       "Wiz/Parser/*",
       "scripts/GenSelfhostTables.lean",
+      "scripts/check-wizc-release.sh",
+      "scripts/fixtures/wizc-release/*",
+      "scripts/diff-fuzz.py",
+      "Tests/data/selfhost-trust-cross.tsv",
       "Tests/Groups/SelfHost.lean",
+      "Tests/Groups/SelfhostTrust.lean",
       "Tests/Elab.lean"
     ],
     "select": [
@@ -25,16 +30,20 @@
       "=selfhost-macro",
       "=selfhost-cli",
       "=selfhost-cli-diff",
+      "=selfhost-trust",
       "=selfhost-lsp"
     ],
     "split-cases": true
   },
   {
     "name": "hdl",
+    "split": 1,
+    "split-cases": true,
     "heavy": true,
     "select": [
       "=hdl-verified",
       "=hdl-uart-temporal",
+      "=hdl-examples",
       "=selfhost-parse-diff"
     ]
   },
@@ -48,6 +57,7 @@
       "scry/*",
       "selfhost/*",
       "Tests/Groups/SelfhostLibDiff.lean",
+      "Tests/libdiff-baseline.tsv",
       "Tests/Main.lean",
       "Tests/Harness.lean"
     ],
@@ -57,8 +67,9 @@
   },
   {
     "name": "library",
-    "split": 10,
+    "split": 8,
     "jobs": 4,
+    "allow-missing-deps": true,
     "select": [
       "=bus-crc",
       "=bus-law",
@@ -91,6 +102,7 @@
       "modules", "=namespace",
       "=native",
       "=natives",
+      "=numerics",
       "=nvim",
       "=loom",
       "=wire",
@@ -141,6 +153,7 @@
       "=task",
       "effects",
       "ffi",
+      "=js",
       "llvm",
       "reuse",
       "serial",
@@ -154,6 +167,7 @@
       "data",
       "desceq",
       "elab",
+      "elab-ext",
       "eval",
       "format",
       "=fmt",
@@ -189,7 +203,8 @@
       "=scaling",
       "=prop",
       "=audit",
-      "=desc-sweep"
+      "=desc-sweep",
+      "=perf-core"
     ]
   },
   {

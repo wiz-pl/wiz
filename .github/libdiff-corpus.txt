@@ -1,3 +1,28 @@
+# The files one whole =selfhost-libdiff run compares: every *.wiz under lib/ and scry/,
+# sorted the way Tests/Groups/SelfhostLibDiff.lean's libDiffFiles sorts them.
+# `scripts/check-libdiff-corpus.sh` checks that this list is exactly that walk: every
+# entry is a file, every file is an entry, there are no duplicates, and the order is
+# `LC_ALL=C`. Add or remove a line here in the same change that adds or removes the
+# file under lib/ or scry/. Regenerate with:
+#
+#   find lib scry -name '*.wiz' | LC_ALL=C sort
+#
+# There are no exclusions among lib/ and scry/. The sweep compares acceptance, the first
+# error's code, span and message, and the declaration count; a file the self-hosted
+# frontend cannot parse is a divergence to report, not a reason to drop it from the
+# corpus. A module that genuinely cannot be compared needs its reason here, next to its
+# absence, not silence.
+#
+# NOT swept yet: hdl/src/ (32 modules, hdl/src/Hdl/*.wiz). The harness already takes the
+# root (libDiffRoots has `hdl/src`, libDiffModule knows `Hdl.Core`, and the cover case
+# asserts the root exists and is not walked); adding it to libDiffFiles and the lines
+# below is the whole change. It stays out because all 32 modules diverge today, through
+# the self-hosted frontend's Hdl.Core cluster (`Hdl.indexed`, Core:113) and the bundle
+# deriver; a corpus that is 32/32 diverging measures nothing (see
+# scripts/libdiff-causes.tsv: hdl-core 18, deriver-bundle 5, numeral-term 2, and one
+# each of logic-true, word-equations, hdl-optic, coinductive, exists, hdl-xilinx7;
+# Formal.wiz fails through Hdl.Core). The Hdl gate meanwhile is `=hdl-examples`.
+
 lib/Args.wiz
 lib/BitBlast.wiz
 lib/BitVec.wiz
@@ -41,9 +66,11 @@ lib/IntOrder.wiz
 lib/IntRing.wiz
 lib/Intern.wiz
 lib/Json.wiz
+lib/Lint.wiz
 lib/Logic.wiz
 lib/MVar.wiz
 lib/Nat.wiz
+lib/Omega.wiz
 lib/Optic.wiz
 lib/OpticDerive.wiz
 lib/Plot.wiz
@@ -86,6 +113,8 @@ lib/Web/Examples.wiz
 lib/Web/Goals.wiz
 lib/Web/Highlight.wiz
 lib/Web/Hover.wiz
+lib/Web/InfoPanel.wiz
+lib/Web/InfoTree.wiz
 lib/Web/InfoviewPage.wiz
 lib/Web/Loom.wiz
 lib/Web/Playground.wiz
@@ -126,6 +155,7 @@ scry/src/Scry/ConcurrencyExamples.wiz
 scry/src/Scry/CsCmd.wiz
 scry/src/Scry/CsCst.wiz
 scry/src/Scry/CsLower.wiz
+scry/src/Scry/CsNull.wiz
 scry/src/Scry/CstOptics.wiz
 scry/src/Scry/CstStore.wiz
 scry/src/Scry/Datalog.wiz
@@ -155,6 +185,7 @@ scry/src/Scry/NullExamples.wiz
 scry/src/Scry/Nullness.wiz
 scry/src/Scry/Optics.wiz
 scry/src/Scry/OpticsExamples.wiz
+scry/src/Scry/Output.wiz
 scry/src/Scry/Parse.wiz
 scry/src/Scry/PointsTo.wiz
 scry/src/Scry/Preproc.wiz
@@ -201,10 +232,12 @@ scry/tests/e2e-egraph.wiz
 scry/tests/e2e-prover.wiz
 scry/tests/egraph-rewrite.wiz
 scry/tests/egraph.wiz
+scry/tests/emit.wiz
 scry/tests/fuzz.wiz
 scry/tests/native.wiz
 scry/tests/oob.wiz
 scry/tests/optics.wiz
+scry/tests/output.wiz
 scry/tests/parse-stats.wiz
 scry/tests/preproc.wiz
 scry/tests/project.wiz
@@ -214,6 +247,7 @@ scry/tests/repl-prelude.wiz
 scry/tests/repl.wiz
 scry/tests/report-pure.wiz
 scry/tests/report.wiz
+scry/tests/sarif-contract.wiz
 scry/tests/sarif-id.wiz
 scry/tests/scale.wiz
 scry/tests/schema-index.wiz
@@ -221,7 +255,9 @@ scry/tests/schema.wiz
 scry/tests/taint.wiz
 scry/tests/uaf.wiz
 scry/tests/workflow-e2e.wiz
+scry/tests/workflow-records.wiz
 scry/tests/workflow.wiz
+scry/tools/ArtifactsMain.wiz
 scry/tools/CsCover.wiz
 scry/tools/CsExternalsMain.wiz
 scry/tools/CsTraceMain.wiz

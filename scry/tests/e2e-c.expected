@@ -13,6 +13,10 @@ taint: two findings: ok
 taint: both checked: ok
 taint: five lowering-boundary warnings: ok
 taint: one memory warning: ok
+taint: the boundary count is the sum of the files' entries: ok
+taint: the memory count is the sum of the files' entries: ok
+taint: every boundary entry is a located scry/lowering/boundary warning: ok
+taint: every memory entry names a scry/memory rule and a message: ok
 taint: no duplicate symbols: ok
 taint: the unresolved callee is recorded: ok
 taint: both findings are command-injection: ok

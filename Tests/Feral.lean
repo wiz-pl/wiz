@@ -187,8 +187,8 @@ def group : Group where
         checkEq "[]" (toString (errorsOf t z))
         checkEq "[.ok 15]" (toString (infosOf t))
         let lz ← frontend (z.replace "\nferal\n" "\n#lower feral\n")
-        check ((infosOf lz).any (has · "@Uniq.zoomIn")) s!"{infosOf lz}"
-        check ((infosOf lz).any (has · "@Uniq.zoom ")) s!"{infosOf lz}"
+        check ((infosOf lz).any (has · "Uniq.zoomIn (S := ")) s!"{infosOf lz}"
+        check ((infosOf lz).any (has · "Uniq.zoom (S := ")) s!"{infosOf lz}"
         -- two fields of one struct in one call: not yet (the `let` form, L11, does it)
         let e ← firstError (z.replace "bump2 (&mut p.a) q" "bump2 (&mut p.a) (&mut p.b)")
         check (has e "not supported yet: two fields of `p`") e },
@@ -220,7 +220,7 @@ def group : Group where
         checkEq "[]" (toString (errorsOf t b))
         checkEq "[.ok (2, 1)]" (toString (infosOf t))
         let l ← frontend (b.replace "\nferal\n" "\n#lower feral\n")
-        check ((infosOf l).any (has · "@Uniq.shareIn")) s!"{infosOf l}" },
+        check ((infosOf l).any (has · "Uniq.shareIn (S := ")) s!"{infosOf l}" },
     { name := "examples/resources.wiz: Feral's swap on heap cells, verified with the x-tactics through lib/HeapBorrow.wiz", run := fun _ => do
         let src ← IO.FS.readFile "examples/resources.wiz"
         let s ← frontend src
@@ -452,7 +452,19 @@ def group : Group where
         let s ← frontend src
         checkEq "[]" (toString (errorsOf s src))
         checkEq "[(\"x\", \"f.g\"), (\"\", \"\"), (\"\", \"f\"), [\"x\", \"y\", \"a\", \"b\", \"c\"], 20000, \"tail\", 3, 20002]"
-          (toString (infosOf s)) }
+          (toString (infosOf s)) },
+    { name := "hand-written Wiz against lib/Region.wiz: a duplicated handle and a packed region are rejected", run := fun _ => do
+        for n in ["dup_handle", "region_pack_shr", "region_pack_scope"] do
+          let src ← IO.FS.readFile s!"drafts/feral/rejected/{n}.wiz"
+          let errs := errorsOf (← frontend src) src
+          check (!errs.isEmpty) s!"{n} is accepted"
+        -- the packed-region programs fail on the scope's `RegionFree` side condition;
+        -- the duplicated handle fails on quantity 1 (the two are different obligations)
+        for n in ["region_pack_shr", "region_pack_scope"] do
+          let src ← IO.FS.readFile s!"drafts/feral/rejected/{n}.wiz"
+          check ((errorsOf (← frontend src) src).any (has · "RegionFree")) s!"{n} is not a RegionFree rejection"
+        let d ← IO.FS.readFile "drafts/feral/rejected/dup_handle.wiz"
+        check ((errorsOf (← frontend d) d).any (has · "quantity")) "dup_handle is not a quantity rejection" }
   ]
 
 def groups : List Group :=

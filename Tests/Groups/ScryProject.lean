@@ -35,7 +35,7 @@ def scryProjectSource (cc : String) : String :=
   "    | .false => IO.bind (IO.println (label ++ \": FAILED\"))\n" ++
   "        (fun _ => Process.exit 1))\n\n" ++
   "def run : EIO Unit := do\n" ++
-  s!"  let cc := \"{cc}\"\n" ++
+  s!"  let cc := \"{cc}\";\n" ++
   "  tmp ← FS.createTempDir;\n" ++
   "  built ← Scry.ProjectIO.buildProject \"scry/corpus/project/taint\" .none cc .true .false .false .nil Scry.CacheOpts.none;\n" ++
   "  pack ← Scry.loadTaintPack .none;\n" ++

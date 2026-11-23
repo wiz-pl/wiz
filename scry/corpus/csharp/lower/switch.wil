@@ -86,46 +86,55 @@ func Demo.Router.EnumLabel(%0)
 func Demo.Router.Typed(%0)
   b0:
     %2 = havoc u1
-    %3 = 0
-    br ne %2, %3 ? b4 : b3
+    %3 = null
+    %4 = ne %0, %3
+    %5 = and %2, %4
+    %6 = 0
+    br ne %5, %6 ? b4 : b3
   b1:
     ret
   b2:
-    %4 = call System.String.get_Length(%1)
-    ret %4
+    %7 = call System.String.get_Length(%1)
+    ret %7
   b3:
-    %5 = 0
-    ret %5
+    %8 = 0
+    ret %8
   b4:
     %1 = %0
     goto b2
 func Demo.Router.Guarded(%0)
   b0:
     %2 = havoc u1
-    %3 = 0
-    br ne %2, %3 ? b6 : b5
+    %3 = null
+    %4 = ne %0, %3
+    %5 = and %2, %4
+    %6 = 0
+    br ne %5, %6 ? b6 : b5
   b1:
     ret
   b2:
-    %9 = global $str:"long"
-    ret %9
+    %15 = global $str:"long"
+    ret %15
   b3:
-    %10 = global $str:"short"
-    ret %10
+    %16 = global $str:"short"
+    ret %16
   b4:
-    %11 = global $str:"other"
-    ret %11
+    %17 = global $str:"other"
+    ret %17
   b5:
-    %7 = havoc u1
-    %8 = 0
-    br ne %7, %8 ? b7 : b4
+    %10 = havoc u1
+    %11 = null
+    %12 = ne %0, %11
+    %13 = and %10, %12
+    %14 = 0
+    br ne %13, %14 ? b7 : b4
   b6:
     %1 = %0
-    %4 = call System.String.get_Length(%1)
-    %5 = 3
-    br gt %4, %5 ? b2 : b5
+    %7 = call System.String.get_Length(%1)
+    %8 = 3
+    br gt %7, %8 ? b2 : b5
   b7:
-    %6 = %0
+    %9 = %0
     goto b3
 func Demo.Router.Arms(%0)
   b0:
@@ -162,33 +171,39 @@ func Demo.Router.Arms(%0)
 func Demo.Router.ArmBinding(%0)
   b0:
     %3 = havoc u1
-    %4 = 0
-    br ne %3, %4 ? b6 : b5
+    %4 = null
+    %5 = ne %0, %4
+    %6 = and %3, %5
+    %7 = 0
+    br ne %6, %7 ? b6 : b5
   b1:
     ret %1
   b2:
-    %10 = global $str:"long "
-    %11 = call System.String.Concat(%10, %2)
-    %1 = %11
+    %16 = global $str:"long "
+    %17 = call System.String.Concat(%16, %2)
+    %1 = %17
     goto b1
   b3:
-    %12 = global $str:"short "
-    %13 = call System.String.Concat(%12, %7)
-    %1 = %13
+    %18 = global $str:"short "
+    %19 = call System.String.Concat(%18, %10)
+    %1 = %19
     goto b1
   b4:
-    %14 = global $str:"other"
-    %1 = %14
+    %20 = global $str:"other"
+    %1 = %20
     goto b1
   b5:
-    %8 = havoc u1
-    %9 = 0
-    br ne %8, %9 ? b7 : b4
+    %11 = havoc u1
+    %12 = null
+    %13 = ne %0, %12
+    %14 = and %11, %13
+    %15 = 0
+    br ne %14, %15 ? b7 : b4
   b6:
     %2 = %0
-    %5 = call System.String.get_Length(%2)
-    %6 = 3
-    br gt %5, %6 ? b2 : b5
+    %8 = call System.String.get_Length(%2)
+    %9 = 3
+    br gt %8, %9 ? b2 : b5
   b7:
-    %7 = %0
+    %10 = %0
     goto b3

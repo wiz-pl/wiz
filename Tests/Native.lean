@@ -530,15 +530,21 @@ def compareTrust (what : String) (actual : List TrustSource) (rows : List TrustR
   for r in rows do
     if r.reason.trimAscii.toString.isEmpty && r.owner.trimAscii.toString.isEmpty &&
         r.review.trimAscii.toString.isEmpty then
-      problems := problems ++ [s!"{TrustRow.key r}: missing a reason, an owner and a review date (new rows need all three)"]
+      problems := s!"{TrustRow.key r}: missing a reason, an owner and a review date (new rows need all three)" :: problems
     else
       let miss := missingMetadata r
       if !miss.isEmpty then
-        problems := problems ++ [s!"{TrustRow.key r}: missing {" and ".intercalate miss}"]
+        problems := s!"{TrustRow.key r}: missing {" and ".intercalate miss}" :: problems
       else if !validDate r.review then
-        problems := problems ++ [s!"{TrustRow.key r}: review date '{r.review}' is not YYYY-MM-DD"]
+        problems := s!"{TrustRow.key r}: review date '{r.review}' is not YYYY-MM-DD" :: problems
       else if r.review < today then
-        problems := problems ++ [s!"{TrustRow.key r}: expired on {r.review} (today {today}; owner {r.owner})"]
+        problems := s!"{TrustRow.key r}: expired on {r.review} (today {today}; owner {r.owner})" :: problems
+      -- A bulk `--update` writes one placeholder reason for the rows it adds; the
+      -- review must replace every one of them. Treat the placeholder as a gate failure
+      -- so a half-finished reason pass cannot be committed (or merged).
+      if (r.reason.splitOn "PENDING-REVIEW").length > 1 then
+        problems := s!"{TrustRow.key r}: placeholder reason (PENDING-REVIEW); replace it with the reviewed reason" :: problems
+  problems := problems.reverse
   if strictLegacy && legacy > 0 then
     problems := problems ++ [s!"{legacy} legacy rows still have the pre-gate reason/owner (review them, or run without --strict-legacy)"]
   if added.isEmpty && removed.isEmpty && problems.isEmpty then
@@ -936,12 +942,14 @@ def group : Group where
         -- real prototype; that is how the `UInt64.ofNat` truncation was found. Before
         -- this case nothing ran it — no test group and no CI job named it — so a
         -- marshalling width that drifted from its C definition would have been silent.
-        -- No `cc`, or a `cc` that cannot find gmp.h, is a skip: the script prints the
-        -- latter as `signature check skipped` and still exits 0, so exit 0 alone is
-        -- not evidence (a pass here must have compiled the signatures).
+        -- No `cc` is a missing dependency (exit 2): a failure by default, a reported
+        -- skip under `--allow-missing-deps`. A `cc` that cannot find gmp.h is a
+        -- *failure*: the audit exits non-zero rather than printing "signature check
+        -- skipped", because a signature check that cannot run must not look like a pass.
         let out ← IO.Process.output { cmd := "sh", args := #["scripts/trust-ffi-audit.sh", "--check"] }
-        if out.exitCode == 2 || (out.stdout.splitOn "signature check skipped").length > 1 then
-          Tests.skip s!"the FFI audit needs a C compiler with GMP: {out.stderr.trimAscii.toString}"
+        if out.exitCode == 2 then
+          Tests.skipMissing s!"the FFI audit needs a C compiler: {out.stderr.trimAscii.toString}"
+          return
         unless out.exitCode == 0 do
           throw (IO.userError
             s!"scripts/trust-ffi-audit.sh --check failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") }
@@ -956,8 +964,7 @@ def hdlVerifiedGroup : Group where
   exercise := "—"
   cases := [
     { name := "V1: kernel-checked on the units' domains, nothing trusted (hdl/examples/hdl-verified.wiz)", run := fun _ => do
-        let path := "hdl/examples/hdl-verified.wiz"
-        let s := runFrontend (R := ZeroOneMany) (← IO.FS.readFile path)
+        let s := runFrontend (R := ZeroOneMany) (← Tests.hdlRead "examples/hdl-verified.wiz")
           { loader := ← Elab.libLoader, trustedModule := Tests.libModule }
         let ms := s.messages.toList.map fun m =>
           s!"{match m.severity with | .error => "error" | .warning => "warning" | .info => "info"}: {m.text}"
@@ -965,10 +972,11 @@ def hdlVerifiedGroup : Group where
         expect ms "info: (20, 19)"
         if has ms "native" then throw (IO.userError s!"the kernel-checked file mentions native evaluation:\n{"\n".intercalate ms}")
         -- the trust ledger's part for this file: it must add no source of trust
-        let _ ← checkExampleTrustLedger path s.globals
+        -- (the label stays the repository-relative one, even under `HDL_ROOT`)
+        let _ ← checkExampleTrustLedger "hdl/examples/hdl-verified.wiz" s.globals
         pure () },
     { name := "V1: full widths by native_refl, each an axiom #print axioms names (hdl/examples/hdl-verified-native.wiz)", run := fun _ => do
-        let ms ← msgsLibs (← IO.FS.readFile "hdl/examples/hdl-verified-native.wiz")
+        let ms ← msgsLibs (← Tests.hdlRead "examples/hdl-verified-native.wiz")
         noErrors ms
         expect ms "root_full is accepted on the strength of native evaluation"
         expect ms "norm_256 is accepted on the strength of native evaluation"

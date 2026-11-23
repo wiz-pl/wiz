@@ -56,6 +56,48 @@ variable, a `jmp` to a missing join point, a constructor tag that does not fit t
 encoded `i32`, and a `pap`/`ap` with more than 256 arguments. A `--target wasm` build with `--lib` or `--no-main` is an error
 rather than a silently different artefact.
 
+## `wiz-web/1`: the browser host ABI
+
+`wiz-web/1` names the boundary between a Wiz-produced **core** Wasm module and a
+JavaScript host in a browser (or Node). It fixes the word widths and the import set; it is
+not a second runtime. The checked-in `web/wasm-host.mjs` is the reference host, and a
+generated adapter must match this table.
+
+* **Words.** Handles, pointers, lengths, tags and counts cross as `i32`. A Wiz value
+  crosses as `i64`; a value that does not fit a machine word is a handle into the host's
+  BigInt table. The JavaScript side must pass a `BigInt` for every `i64` argument and read
+  every `i64` result as one: `WebAssembly.Function` is not shipped, so there is no
+  implicit `i64`↔`Number` conversion to rely on.
+* **Imports.** Exactly five `env` functions, with these signatures
+  (`Wiz/Compiler/Wasm.lean:205-211`): `big_of_dec : (i32, i32) -> i64`,
+  `big_op : (i32, i64, i64, i64, i64) -> i64`, `big_cmp : (i64, i64, i64, i64) -> i32`,
+  `big_log2 : (i64, i64) -> i64`, `big_to_dec : (i64, i32) -> i32`. Nothing else is
+  imported. **No components, no WIT and no WASI in the browser.** No browser hosts
+  components; `jco` transpiles a component back to core Wasm plus JS glue; WASI 0.3
+  (June 2026) is a server/edge interface. A component toolchain in the browser would add
+  a second ABI to keep in step for no capability this target uses.
+* **Exports.** `memory`, `wiz_main` (the IR entry, `() -> ()`), the three decoders
+  `wiz_value_tag : i64 -> i32`, `wiz_value_field` and `wiz_big_digits : i64 -> i64`, and
+  the `i32` global `wiz_caf_builds`
+  (`Wiz/Compiler/Wasm.lean:1565-1567`). The stepping shape for an interactive host,
+  `wiz_step : (state : i32, payload_ptr : i32, payload_len : i32) -> i32`, is the
+  intended 1.x entry for a UI loop, with the `i64` entry kept for tests; it is **not
+  emitted yet**, and the module still runs one `main` to completion.
+* **Memory.** One memory, `i32`-addressed, never shrunk (`memory.grow` is one-way). The
+  host reads a result by offset and length. `memory64` is neither required nor used.
+* **Failure.** A trap is a trap: no exception crosses the boundary, there is no FFI and
+  there are no threads. The host reports a trap as a failed run, never as a value.
+* **Versioning.** `wiz-web/1` is this table. A new import, a changed signature or a wider
+  handle is `wiz-web/2`.
+
+**Unverified.** The per-call (10–50 ns) and BigInt (~15 ns) costs are order-of-magnitude
+figures from secondary benchmarks, not measured here. Safari's JS-string-builtins status
+(platform.uno says 26.2, caniuse says unsupported) and whether `WebAssembly.Function`
+ships in 2026–27 are open. The timings in "Measurements" are Node 26 on one machine and do
+not transfer to a browser without measurement. The no-components/WASI conclusion and the
+cost figures are from `wiz-notes/sota-web-wasm-gpu.md` §1 and §7 (sources fetched
+2026-11-22).
+
 ## Validation
 
 `Wiz/Compiler/WasmValidate.lean` is a structural validator with no external tools: it

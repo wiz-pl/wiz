@@ -12,14 +12,16 @@ namespace Tests.Elab
 # `=selfhost-libdiff`: where replacement parity actually stands
 
 The parity matrix (`wiz-notes/selfhost-parity.md`) counts features; this group measures
-the library. For every `*.wiz` under `lib/` (and `scry/`) it runs **both** compilers on
+the library. For every `*.wiz` under `lib/` and `scry/` it runs **both** compilers on
 the file as a root module and compares
 
 * acceptance (does the frontend report an error at all),
 * the first error's code,
 * its span (file, line, column),
 * its message text (whitespace-normalised), and
-* the number of declarations the frontend produced for that file
+* the elaborated types: one `name : type` line per declaration and per info message,
+  canonicalised (`MTm.pretty` on the host, the driver's `--types` report on the
+  self-hosted side), with the declaration count kept as a cheap pre-check (R3)
 
 and reports the first divergence. Files that both reject are counted apart from files
 whose verdicts differ; the latter are the gap list, grouped by the construct the
@@ -30,16 +32,20 @@ The host side runs the Lean frontend in a child process (`--libdiff-host FILE`, 
 the compiler binary the `selfhost` group builds (`selfhostCompiler`), `check FILE
 --types`, whose info lines are the per-declaration reports.
 
-The group never fails because of a gap: it measures. It fails only when the harness
-itself cannot run (a toolchain problem is a skip, the way the `selfhost` group skips).
+The group measures the gaps and **ratchets** against the checked-in classification
+(`Tests/libdiff-baseline.tsv`, R4): a file the baseline calls `ok` must stay `ok`; the
+listed non-`ok` rows may be fixed or reclassified, and a corpus file newer than the
+classification is measured (and reported) rather than failed. The other failure is the
+harness itself: a toolchain problem is a skip, the way the `selfhost` group skips.
 
-Usage (a work list, not a gate):
+Usage:
 
     tests --libdiff                          # every lib/ and scry/ file
     tests --libdiff --limit 10               # the first ten
     tests --libdiff --only lib/Hoare.wiz     # one file (repeatable)
     tests --libdiff --json                   # one JSON record per line
     tests --libdiff --baseline FILE          # write it, or diff against it
+    tests --libdiff --ratchet FILE           # fail on a baseline regression (R4)
     tests --libdiff --jobs 3                 # three files at a time (capped by CPUs and memory)
 
 `lake test -- '=selfhost-libdiff'` runs the sweep in `libDiffChunks` parts, each over a
@@ -51,9 +57,12 @@ the group, is what takes the time.
 -/
 
 /-- The module roots both toolchains resolve `import M` under, in order. The checkout's
-`lib/` first (the toolchain library), then the package roots of `scry/`. -/
+`lib/` first (the toolchain library), then the package roots of `scry/` and the Hdl
+package's `hdl/src` (which resolves `Hdl.*` from the `hdl/src/Hdl` tree; it is a pending
+walk root, see `libDiffPendingRoots`, not a corpus root yet). -/
 def libDiffRoots : List String :=
-  ["lib", "drafts/feral/lib", "scry/src", "scry/gen", "scry", "scry/tests", "scry/tools"]
+  ["lib", "drafts/feral/lib", "scry/src", "scry/gen", "scry", "scry/tests", "scry/tools",
+   "hdl/src"]
 
 /-- Every `*.wiz` under `dir`, recursively. -/
 partial def libDiffWalk (dir : System.FilePath) (acc : Array String) : IO (Array String) := do
@@ -65,6 +74,13 @@ partial def libDiffWalk (dir : System.FilePath) (acc : Array String) : IO (Array
     else if e.path.extension == some "wiz" then
       acc := acc.push e.path.toString
   pure acc
+
+/-- Package roots that are ready to be swept but whose files are not in the corpus yet,
+each with its reason in `.github/libdiff-corpus.txt`: `hdl/src`'s 32 modules all diverge
+through the Hdl.Core cluster today, so a corpus of them would be 32/32 diverging. The
+import roots and `libDiffModule` already handle the root; adding it to `libDiffFiles`
+(and the corpus lines) is the whole change once the frontend accepts the cluster. -/
+def libDiffPendingRoots : List String := ["hdl/src"]
 
 /-- Every `*.wiz` under `lib/` and `scry/`, sorted. -/
 def libDiffFiles : IO (Array String) := do
@@ -88,7 +104,7 @@ def libDiffChunk (files : Array String) (k : Nat) : Array String :=
   files.extract lo hi
 
 /-- The module a file's path names, for `--only`: `lib/Data/ListLemmas.wiz` is
--- `Data.ListLemmas`. (Hdl moved out of `lib/` to its package; it is not in this walk.) -/
+-- `Data.ListLemmas`, and (for a pending root) `hdl/src/Hdl/Core.wiz` is `Hdl.Core`. -/
 def libDiffModule (file : String) : String :=
   let rel :=
     if file.startsWith "lib/" then (file.drop 4).toString
@@ -97,6 +113,7 @@ def libDiffModule (file : String) : String :=
     else if file.startsWith "scry/tests/" then (file.drop 11).toString
     else if file.startsWith "scry/tools/" then (file.drop 11).toString
     else if file.startsWith "scry/" then (file.drop 5).toString
+    else if file.startsWith "hdl/src/" then (file.drop 8).toString
     else file
   (rel.dropEnd 4).toString.replace "/" "."
 
@@ -113,6 +130,10 @@ structure Side where
   exitCode : UInt32 := 0
   errors : Nat := 0
   decls : Nat := 0
+  /-- the canonical printed types: one `name : type` line per source declaration and
+  per `#check`/`#reduce` info message, as the two frontends print them (`--types` on the
+  self-hosted side, `MTm.pretty` on the host) -/
+  types : List String := []
   /-- the first error's stable code (`""` if it has none) -/
   code : String := ""
   /-- the file the first error is in (the checked file, or an imported module) -/
@@ -129,7 +150,8 @@ structure Side where
 def jsonOfSide (s : Side) : Lean.Json :=
   Lean.Json.mkObj [
     ("accepted", .bool s.accepted), ("exit", .num s.exitCode.toNat), ("errors", .num s.errors),
-    ("decls", .num s.decls), ("code", .str s.code), ("file", .str s.efile),
+    ("decls", .num s.decls), ("types", .arr (s.types.toArray.map .str)),
+    ("code", .str s.code), ("file", .str s.efile),
     ("line", .num s.line), ("col", .num s.col), ("msg", .str s.msg),
     ("status", .str s.status), ("note", .str s.note), ("ms", .num s.ms)]
 
@@ -141,7 +163,9 @@ def jBool (j : Lean.Json) (k : String) : Bool := (j.getObjValAs? Bool k).toOptio
 
 def sideOfJson (j : Lean.Json) : Side :=
   { accepted := jBool j "accepted", exitCode := (jNat j "exit").toUInt32, errors := jNat j "errors",
-    decls := jNat j "decls", code := jStr j "code", efile := jStr j "file",
+    decls := jNat j "decls",
+    types := ((j.getObjValAs? (Array String) "types").toOption.getD #[]).toList,
+    code := jStr j "code", efile := jStr j "file",
     line := jNat j "line", col := jNat j "col", msg := jStr j "msg",
     status := (if (jStr j "status").isEmpty then "ok" else jStr j "status"), note := jStr j "note" }
 
@@ -177,6 +201,44 @@ def libDiffHostDecls (s : CommandState ZeroOneMany) : Nat :=
   let decls := (s.declSites.toList.filter fun (n, (_, m)) => m == "" && src n).length
   decls + (s.messages.filter (·.severity == .info)).size
 
+/-- A declaration's elaborated type, in the canonical printed form the self-hosted
+`--types` report uses: the kernel term's de Bruijn printer (`(x0 : Nat) → …`), not the
+surface syntax and not a declaration count. `none` is the one thing this cannot print
+(a term outside `MTm`), and it is reported as such rather than silently dropped. -/
+def libDiffHostType (s : CommandState ZeroOneMany) (n : Name) : String :=
+  match s.globals.find? n with
+  | some d => match MTm.ofTerm d.type with
+    | some m => m.pretty 0
+    | none => "<term outside the printable fragment>"
+  | none => "<no declaration>"
+
+/-- The lines the host side compares: one `name : type` per source declaration (`""` is
+this file, constructors/fields/projections excluded as in `libDiffHostDecls`) and the
+`#check`/`#reduce` info messages, in source order. The self-hosted `--types` report is
+the same list from the other frontend. -/
+def libDiffHostTypes (s : CommandState ZeroOneMany) : List String :=
+  let src : Name → Bool := fun n =>
+    match s.declDocs.get? n with
+    | none => true
+    | some d => !(["constructor", "field", "auxiliary"].contains d.kind)
+  let decls : List (Name × (SourceInfo × String)) :=
+    s.declSites.toList.filter fun (n, (_, m)) => m == "" && src n
+  let infos : List (Nat × String) :=
+    (s.messages.filter (·.severity == .info)).toList.map fun m => (m.info.start, m.text)
+  let entries : Array (Nat × String) :=
+    (decls.map (fun p => (p.2.1.start, s!"{p.1} : {libDiffHostType s p.1}")) ++ infos).toArray
+  (entries.qsort fun a b => a.1 < b.1 || (a.1 == b.1 && a.2 < b.2)).toList.map (·.2)
+
+/-- Collapse whitespace and drop a trailing full stop: the canonical form two frontends
+can reasonably share. The types are already printed by the same de Bruijn style on both
+sides; this only removes layout differences. -/
+def libDiffNormType (s : String) : String :=
+  let ws := ((s.replace "\n" " ").splitOn " ").filter (· != "")
+  let t := " ".intercalate ws
+  if t.endsWith "." then (t.dropEnd 1).toString else t
+
+def libDiffNormTypes (xs : List String) : List String := xs.map libDiffNormType
+
 /-- What the Lean frontend says about `file`: `--libdiff-host`'s body. -/
 def libDiffHost (file : String) : IO Side := do
   let input ← IO.FS.readFile file
@@ -188,7 +250,7 @@ def libDiffHost (file : String) : IO Side := do
     (l + 1, c + 1)
   let first := errs[0]?
   pure { accepted := errs.isEmpty, exitCode := if errs.isEmpty then 0 else 1,
-         errors := errs.size, decls := libDiffHostDecls s,
+         errors := errs.size, decls := libDiffHostDecls s, types := libDiffHostTypes s,
          code := first.map (ErrorCode.reported ·.code) |>.getD "",
          efile := if first.isSome then file else "",
          line := first.map (fun m => (lineCols m).1) |>.getD 0,
@@ -251,6 +313,14 @@ def libDiffSelfDecls (file : String) (diags : List LibDiag) : Nat :=
       (let head := (d.msg.splitOn " : ").headD ""
        head.contains ' ' || !head.contains '.')).length
 
+/-- The same lines' text, which is the self-hosted side's elaborated types (the driver
+prints one `name : type` per declaration and per `#check`/`#reduce`, in source order). -/
+def libDiffSelfTypes (file : String) (diags : List LibDiag) : List String :=
+  (diags.filter fun d =>
+    d.sev == "info" && d.file == file &&
+      (let head := (d.msg.splitOn " : ").headD ""
+       head.contains ' ' || !head.contains '.')).map (·.msg)
+
 /-- Bounded run: a wall-clock limit (`timeout -k 5`) and, with `memMB > 0`, a
 virtual-memory limit. -/
 def libDiffRun (cmd : String) (args : Array String) (secs memMB : Nat) :
@@ -290,7 +360,7 @@ def libDiffSelf (exe : System.FilePath) (file : String) (secs memMB : Nat)
   -- the first error in the file itself if there is one, else the first import error
   let first := (errs.find? (·.file == file)).orElse (fun _ => errs[0]?)
   pure { accepted := errs.isEmpty, exitCode := code, errors := errs.length,
-         decls := libDiffSelfDecls file diags,
+         decls := libDiffSelfDecls file diags, types := libDiffSelfTypes file diags,
          code := first.map (·.code) |>.getD "",
          efile := first.map (·.file) |>.getD "",
          line := first.map (·.line) |>.getD 0,
@@ -377,14 +447,19 @@ structure LibRec where
 
 def libDiffCompare (file : String) (h s : Side) : LibRec :=
   let bounded := h.status != "ok" || s.status != "ok"
+  -- the count is a cheap pre-check; the elaborated types are the product a DTT
+  -- frontend makes, so they are what agreement means once both accept
+  let typesAgree := libDiffNormTypes h.types == libDiffNormTypes s.types
   let verdict :=
     if bounded then "bounded"
-    else if h.accepted && s.accepted then if h.decls == s.decls then "ok" else "diverging"
+    else if h.accepted && s.accepted then
+      if h.decls == s.decls && typesAgree then "ok" else "diverging"
     else if h.accepted != s.accepted then "diverging"
     else "rejected"
   let divergence :=
     if bounded then "run"
-    else if h.accepted && s.accepted then (if h.decls == s.decls then "" else "decls")
+    else if h.accepted && s.accepted then
+      (if h.decls != s.decls then "decls" else if typesAgree then "" else "types")
     else if h.accepted != s.accepted then "acceptance"
     else if h.code != s.code then "code"
     else if h.line != s.line || h.col != s.col || (s.efile != "" && s.efile != file) then "span"
@@ -403,7 +478,8 @@ def libDiffCompare (file : String) (h s : Side) : LibRec :=
 def jsonOfRec (r : LibRec) : Lean.Json :=
   Lean.Json.mkObj [
     ("file", .str r.file), ("module", .str (libDiffModule r.file)),
-    ("scope", .str (if r.file.startsWith "lib/" then "lib" else "scry")),
+    ("scope", .str (if r.file.startsWith "lib/" then "lib"
+                    else if r.file.startsWith "hdl/src/" then "hdl" else "scry")),
     ("verdict", .str r.verdict), ("divergence", .str r.divergence),
     ("class", .str r.klass), ("note", .str r.note),
     ("host", jsonOfSide r.host), ("self", jsonOfSide r.self)]
@@ -426,6 +502,8 @@ structure LibDiffOpts where
   /-- the files to sweep, when the group checks one part of the list (CI); `none` is every
   `lib/` and `scry/` file (`--limit` and `--only` still narrow it) -/
   files : Option (Array String) := none
+  /-- the checked-in baseline to ratchet against (R4); `none` measures only -/
+  ratchet : Option String := none
   deriving Inhabited
 
 /-- A record as one line of the report: verdict, the two sides, and the first divergence. -/
@@ -438,8 +516,8 @@ def libDiffRender (r : LibRec) : String :=
     | "diverging" => "DIVERGE"
     | "bounded" => "BOUNDED"
     | v => v
-  let hostTex := if h.accepted then s!"host ok ({h.decls} decls)" else s!"host error [{h.code}]"
-  let selfTex := if s.accepted then s!"self ok ({s.decls} decls)" else
+  let hostTex := if h.accepted then s!"host ok ({h.decls} decls, {h.types.length} types)" else s!"host error [{h.code}]"
+  let selfTex := if s.accepted then s!"self ok ({s.decls} decls, {s.types.length} types)" else
     s!"self error [{s.code}] {s.line}:{s.col} {(s.msg.take 100).toString}"
   s!"{tag} {r.file}\t{hostTex} / {selfTex}" ++
     (if r.divergence.isEmpty then "" else s!"\t(first divergence: {r.divergence})") ++
@@ -784,6 +862,70 @@ def libDiffBaselineText (before : Std.HashMap String String) (recs : Array LibRe
     else none
   return String.intercalate "\n" (("vs baseline:" :: lines) ++ details)
 
+/-! ## The ratchet (R4)
+
+The checked-in classification (`Tests/libdiff-baseline.tsv`, generated from
+`wiz-notes/libdiff-classification.md` and `scripts/libdiff-causes.tsv`) is a work list.
+Freezing it turns it into a non-regression gate: a file the classification says is `ok`
+must stay `ok`; the known gaps may be fixed (forward), reclassified, or stay as they
+are. The file has the full 239 rows: the 32 `hdl/src` rows are the pending Hdl root's
+classification (not swept yet, so no records to compare) and become gated when the root
+joins the corpus. A corpus file newer than the classification has no row; the sweep
+measures it and reports it as unclassified (only a backward move is a regression). The
+sweep cases apply the ratchet; the alternative is the measurement the group was (`The
+group never fails because of a gap`). -/
+
+/-- The file the sweep ratchets against. -/
+def libDiffBaselinePath : String := "Tests/libdiff-baseline.tsv"
+
+/-- The verdict of a baseline signature (`verdict/divergence/class`). -/
+def libDiffVerdictOf (sig : String) : String := (sig.splitOn "/").headD ""
+
+/-- A checked-in baseline: `file<TAB>verdict`, blank lines and `#` comments ignored. -/
+def libDiffReadRatchet (f : String) : IO (Std.HashMap String String) := do
+  let mut m : Std.HashMap String String := {}
+  unless ← (System.FilePath.mk f).pathExists do
+    throw (IO.userError s!"selfhost-libdiff: no ratchet baseline at {f} (R4)")
+  for line in (← IO.FS.readFile f).splitOn "\n" do
+    let line := line.trimAscii.toString
+    if line.isEmpty || line.startsWith "#" then continue
+    match line.splitOn "\t" with
+    | [file, verdict] => if !file.isEmpty then m := m.insert file verdict
+    | _ => throw (IO.userError s!"selfhost-libdiff: {f}: not `file<TAB>verdict`: {line}")
+  return m
+
+/-- One file that moved backwards, or a new file with a gap. -/
+structure LibRatchetProblem where
+  file : String
+  before : String
+  after : String
+  deriving Inhabited
+
+/-- The problems a baseline and a run have: a file that was `ok` and no longer is. A
+corpus file with no row is measured, not failed: only a backward move is a regression. -/
+def libDiffRatchetProblems (before : Std.HashMap String String) (recs : Array LibRec) :
+    Array LibRatchetProblem :=
+  recs.filterMap fun r =>
+    let now := libDiffSig r
+    match before.get? r.file with
+    | some b =>
+      if libDiffVerdictOf b == "ok" && libDiffVerdictOf now != "ok" then
+        some { file := r.file, before := b, after := now }
+      else none
+    | none => none
+
+/-- The corpus files the baseline does not name (measured, not failed): reported in the
+part's summary, so a reviewer can add them to the classification. -/
+def libDiffUnclassified (before : Std.HashMap String String) (recs : Array LibRec) :
+    Array String :=
+  (recs.filter fun r => (before.get? r.file).isNone).map (·.file)
+
+/-- The ratchet's failure text: one line per problem, naming the file and both verdicts. -/
+def libDiffRatchetText (ps : Array LibRatchetProblem) : String :=
+  s!"selfhost-libdiff: the ratchet regressed ({ps.size} file(s); " ++
+    s!"Tests/libdiff-baseline.tsv is the checked-in classification):\n" ++
+  String.intercalate "\n" (ps.toList.map fun p => s!"  {p.file}: {p.before} → {p.after}")
+
 /-- A baseline is JSON lines, one per file; read the `file` and `sig` of each. -/
 def libDiffReadBaseline (f : String) : IO (Std.HashMap String String) := do
   let mut m : Std.HashMap String String := {}
@@ -806,6 +948,7 @@ def libDiffParseOptsGo (o : LibDiffOpts) : List String → Except String LibDiff
   | "--only" :: f :: r => libDiffParseOptsGo { o with only := o.only ++ [f] } r
   | "--json" :: r => libDiffParseOptsGo { o with json := true } r
   | "--baseline" :: f :: r => libDiffParseOptsGo { o with baseline := some f } r
+  | "--ratchet" :: f :: r => libDiffParseOptsGo { o with ratchet := some f } r
   | "--timeout" :: n :: r =>
     match n.toNat? with
     | some k => libDiffParseOptsGo { o with hostSecs := k, selfSecs := k } r
@@ -827,7 +970,7 @@ def libDiffParseOptsGo (o : LibDiffOpts) : List String → Except String LibDiff
     | some k => if k > 0 then libDiffParseOptsGo { o with jobs := k } r
       else throw "--jobs needs a count of at least 1"
     | none => throw s!"--jobs needs a count, not {n}"
-  | a :: _ => throw s!"unknown argument {a}\nusage: tests --libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--jobs N]"
+  | a :: _ => throw s!"unknown argument {a}\nusage: tests --libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--ratchet FILE] [--jobs N]"
 
 def libDiffParseOpts (args : List String) : Except String LibDiffOpts :=
   libDiffParseOptsGo {} args
@@ -876,6 +1019,12 @@ def libDiffMain (args : List String) : IO UInt32 := do
           Lean.Json.compress (Lean.Json.mkObj [("file", .str r.file), ("sig", .str (libDiffSig r))]))
         IO.FS.writeFile f (text ++ "\n")
         unless o.json do IO.println s!"baseline written: {f} ({recs.size} files)"
+    if let some f := o.ratchet then
+      let baseline ← libDiffReadRatchet f
+      let probs := libDiffRatchetProblems baseline recs
+      unless probs.isEmpty do
+        IO.eprintln (libDiffRatchetText probs)
+        return 1
     pure 0
 
 /-! ## The group -/
@@ -903,13 +1052,22 @@ def libDiffSweepCase (k : Nat) : Case :=
       let say := fun (_ : String) => pure ()
       -- the per-file lines, a heartbeat and the counts reach the CI log while it runs
       match ← libDiffSweep o say (some progress) with
-      | none => skip "no C toolchain (no self-hosted compiler)"
+      | none => skipMissing "no C toolchain (no self-hosted compiler)"
       | some (recs, workers) =>
         let sum := libDiffSummarize recs
         let label := s!"{k + 1}-of-{libDiffChunks}"
         libDiffWriteReport label recs sum
         note s!"libdiff part={label} files={recs.size} ok={sum.ok} rejected={sum.rejected} diverging={sum.diverging} bounded={sum.bounded} workers={workers}"
-        note s!"libdiff part={label} slowest host={showMs sum.slowHost.1}s/{o.hostSecs}s ({sum.slowHost.2}) self={showMs sum.slowSelf.1}s/{o.selfSecs}s ({sum.slowSelf.2})" }
+        note s!"libdiff part={label} slowest host={showMs sum.slowHost.1}s/{o.hostSecs}s ({sum.slowHost.2}) self={showMs sum.slowSelf.1}s/{o.selfSecs}s ({sum.slowSelf.2})"
+        -- R4: the work list is a ratchet. The records are written first, so a red run
+        -- still has its report and the baseline diff is actionable.
+        let baseline ← libDiffReadRatchet libDiffBaselinePath
+        let probs := libDiffRatchetProblems baseline recs
+        let newFiles := libDiffUnclassified baseline recs
+        unless newFiles.isEmpty do
+          note s!"libdiff part={label} {newFiles.size} file(s) newer than the classification"
+        unless probs.isEmpty do
+          throw (IO.userError (libDiffRatchetText probs)) }
 
 def libDiffGroup : Group where
   name := "selfhost-libdiff"
@@ -928,6 +1086,18 @@ def libDiffGroup : Group where
           check (hi - lo ≤ 1) s!"size {size}: part sizes differ: {lo}..{hi}"
         -- and on the sweep's real list: every lib/ and scry/ file in exactly one part
         let all ← libDiffFiles
+        -- each swept root is actually walked: a list that lost one would still partition
+        -- cleanly, and its files would drop out of the sweep without a red
+        let roots := ["lib/", "scry/"]
+        check (roots.all (fun r => all.any (fun f => f.startsWith r)))
+          "the walk misses lib/ or scry/ (a root is not scanned)"
+        -- the pending roots exist and are deliberately not swept (their reason is in the
+        -- corpus header); scanning one without adding it to the corpus is a red, so the
+        -- cover case pins both halves of the future one-line change
+        for r in libDiffPendingRoots do
+          check (← (System.FilePath.mk r).pathExists) s!"pending root {r} is gone (update the corpus note)"
+          check (!(all.any (fun f => f.startsWith (r ++ "/"))))
+            s!"{r} is swept but not in the corpus (add it to libDiffFiles and the corpus together)"
         let parts := (List.range libDiffChunks).map (libDiffChunk all)
         checkEq all (parts.foldl (· ++ ·) (#[] : Array String)) -- complexity: ok (libDiffChunks is 4)
       },
@@ -1001,7 +1171,9 @@ def libDiffGroup : Group where
         let dir ← IO.FS.createTempDir
         let rx : IO.AccessRight := { read := true, execution := true }
         let host := dir / "host.sh"
-        IO.FS.writeFile host "#!/bin/sh\necho '{\"accepted\":true,\"decls\":2}'\n"
+        -- (the host record carries the elaborated types: R3 compares them, not only the
+        -- declaration count; the stub's self side prints the same two lines)
+        IO.FS.writeFile host "#!/bin/sh\necho '{\"accepted\":true,\"decls\":2,\"types\":[\"a : Nat\",\"b : Nat\"]}'\n"
         let selfExe := dir / "self.sh"
         IO.FS.writeFile selfExe (String.intercalate "\n" [
           "#!/bin/sh",
@@ -1030,7 +1202,52 @@ def libDiffGroup : Group where
           checkEq "bounded" r.verdict
           checkEq "self crash (wiz: out of memory)" r.note
           check (!r.self.accepted || r.self.status == "crash") "an exit 3 counted as accepted"
-        checkEq ["ok", "diverging", "bounded", "ok", "diverging", "ok", "bounded"] (par.toList.map (·.verdict)) }
+        checkEq ["ok", "diverging", "bounded", "ok", "diverging", "ok", "bounded"] (par.toList.map (·.verdict)) },
+    { name := "the elaborated types are compared, not only the declaration count", run := fun _ => do
+        -- (R3) two files with the same declaration count and different types: the
+        -- count is a pre-check, the type lines are what agreement means
+        let dir ← IO.FS.createTempDir
+        let a := dir / "a.wiz"
+        let b := dir / "b.wiz"
+        IO.FS.writeFile a "import Prelude\ndef f : Nat := 1\ndef g : List Nat := .nil\n"
+        IO.FS.writeFile b "import Prelude\ndef f : Bool := .true\ndef g : List Nat := .nil\n"
+        let ha ← libDiffHost a.toString
+        let hb ← libDiffHost b.toString
+        IO.FS.removeDirAll dir
+        check ha.accepted "the host rejected the type fixture"
+        check hb.accepted "the host rejected the changed type fixture"
+        checkEq ha.decls hb.decls
+        check (libDiffNormTypes ha.types != libDiffNormTypes hb.types)
+          "the host's type lines do not see a deliberate type change"
+        let s : Side := { ha with accepted := true, decls := ha.decls, types := hb.types }
+        let r := libDiffCompare "a.wiz" ha s
+        checkEq "diverging" r.verdict
+        checkEq "types" r.divergence
+        let same := libDiffCompare "a.wiz" ha { ha with accepted := true }
+        checkEq "ok" same.verdict },
+    { name := "the ratchet: an ok file that diverges fails; a fixed file and a new ok file pass", run := fun _ => do
+        -- (R4) the checked-in classification is a non-regression baseline, not a work
+        -- list that only reports
+        let mkRec (file verdict divergence klass : String) : LibRec :=
+          { file, host := {}, self := {}, verdict, divergence, klass }
+        let before : Std.HashMap String String := {}
+        let before := before.insert "lib/A.wiz" "ok"
+        let before := before.insert "lib/B.wiz" "diverging/acceptance/by"
+        let probs := libDiffRatchetProblems before
+          #[mkRec "lib/A.wiz" "diverging" "types" "", mkRec "lib/B.wiz" "ok" "" ""]
+        checkEq 1 probs.size
+        checkEq "lib/A.wiz" probs[0]!.file
+        checkEq "ok" probs[0]!.before
+        checkEq "diverging/types/" probs[0]!.after
+        -- a new file is measured, not a regression; a fixed row is forward
+        checkEq 0 (libDiffRatchetProblems before #[mkRec "lib/N.wiz" "diverging" "acceptance" "by"]).size
+        checkEq 0 (libDiffRatchetProblems before #[mkRec "lib/N.wiz" "ok" "" ""]).size
+        checkEq 1 (libDiffUnclassified before #[mkRec "lib/N.wiz" "ok" "" ""]).size
+        -- the checked-in baseline loads, and names the files the classification calls ok
+        let base ← libDiffReadRatchet libDiffBaselinePath
+        checkEq 239 base.size
+        check (base.get? "lib/Class.wiz" == some "ok")
+          "the baseline lost lib/Class.wiz (the classification's ok row)" }
   ]
 
 builtin_initialize registerGroup libDiffGroup

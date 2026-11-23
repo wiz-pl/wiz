@@ -1,7 +1,9 @@
 import Sys
 import Text
 import Functor
+import Word
 import WordArray
+import Intern
 import Scry.CstStore
 import Json
 import Scry.Identity
@@ -40,6 +42,7 @@ An entry is reused only when every one of these agrees:
 | the preprocessed text (headers, macros, `-I`, the environment `cc` saw) | the `pre` digest, recomputed from the actual `cc -E` output |
 | the entry format | the first line (`Scry.projectCacheMagic`); another format is a **miss**, not corruption |
 | the frontend that produced the CST (tree-sitter runtime/grammar, the shim, `Scry.Native`, the `scry-cst` spill, preprocessing/stripping policy) | the `frontend` line (`Scry.projectCacheFrontend`); another frontend is a **miss** |
+| **every CST column** (including `nextSib` and the child CSR that the spill does not write) | the `digest` line: `Scry.cstFullDigest` of the store on save, recomputed on load; a mismatch is `corrupt` and the entry is rewritten |
 | the CST body | `scry-cst 1`'s magic, section counts, row widths and the stored byte length |
 
 A rule pack is deliberately **not** keyed: it cannot change the cached CST, and findings
@@ -122,7 +125,7 @@ def Scry.CacheStats.writeOne (s : Scry.CacheStats) : Scry.CacheStats :=
 
 /-- The cache-entry format version. Bump it when `cacheEntryText`/`cacheEntryOf` change;
 an entry written by another version is a clean miss and is rewritten. -/
-def Scry.projectCacheMagic : String := "scry-project-tu 2"
+def Scry.projectCacheMagic : String := "scry-project-tu 3"
 
 /-- The frontend stamp of a cached CST: everything outside the preprocessed text that can
 change what `Scry.Native.parse` + `Scry.Native.toCstStore` produce for that text. Bump it
@@ -169,6 +172,61 @@ def Scry.cacheKey (path storedPath text : String) (flags : List String)
 entry even when the key is unchanged). -/
 def Scry.preDigest (pre : String) : String := Nat.repr (Scry.fnv pre)
 
+-- ## A content digest of every CST column
+
+/-- Mix a string into a running hash (scry's identity hash: multiply then add; the
+constants are FNV's, see `Scry.Identity`). -/
+def Scry.digestStr (h : U64) (s : String) : U64 :=
+  List.foldl (fun acc c => Scry.fnvStep acc (U64.ofNat (Char.code c)))
+    (Scry.fnvStep h (U64.ofNat (String.length s))) (String.chars s)
+
+/-- Mix an intern table (its names, in id order) into a running hash. -/
+def Scry.digestTable (h : U64) (t : InternTable) : U64 :=
+  List.foldl (fun acc s => Scry.digestStr acc s) h (InternTable.toList t)
+
+/-- Mix a `U32` column, with its length, into a running hash. -/
+def Scry.digestU32 (h : U64) (a : U32Array) : U64 :=
+  U32Array.foldl (fun acc x => Scry.fnvStep acc (U64.ofNat (UIntN.toNat x)))
+    (Scry.fnvStep h (U64.ofNat (U32Array.size a))) a
+
+/-- Mix a `U64` column, with its length, into a running hash. -/
+def Scry.digestU64 (h : U64) (a : U64Array) : U64 :=
+  U64Array.foldl (fun acc x => Scry.fnvStep acc x)
+    (Scry.fnvStep h (U64.ofNat (U64Array.size a))) a
+
+/-- A digest of **every** column of a CST store, including the intern tables and the
+child CSR. `CstStore.render`/`ofText` does not write `nextSib` or the child CSR
+(`ofText` re-derives them from the edge rows), so a spill round trip that loses a column
+has a different digest even when its rendered text is byte-identical. The cache records
+this digest and refuses a loaded entry whose recomputed digest does not match; that turns
+any lossy round trip into a cache miss instead of a stale hit.
+
+Collisions are 64-bit; this is a fast consistency check, not a security commitment. -/
+def Scry.cstFullDigest (s : Scry.CstStore) : String :=
+  let h0 := Scry.digestStr Scry.fnvOffset s.language;
+  let h1 := Scry.digestTable h0 s.kinds;
+  let h2 := Scry.digestTable h1 s.fields;
+  let h3 := Scry.digestTable h2 s.paths;
+  let h4 := Scry.digestU32 h3 s.kindCol;
+  let h5 := Scry.digestU32 h4 s.fieldCol;
+  let h6 := Scry.digestU32 h5 s.flags;
+  let h7 := Scry.digestU32 h6 s.parent;
+  let h8 := Scry.digestU64 h7 s.spans;
+  let h9 := Scry.digestU32 h8 s.fileCol;
+  let h10 := Scry.digestU32 h9 s.nextSib;
+  let h11 := Scry.digestU32 h10 s.childOff;
+  let h12 := Scry.digestU32 h11 s.children;
+  let h13 := Scry.digestU32 h12 s.childField;
+  let h14 := Scry.digestU32 h13 s.edgeSrc;
+  let h15 := Scry.digestU32 h14 s.edgeDst;
+  let h16 := Scry.digestU32 h15 s.edgeLabel;
+  let h17 := Scry.digestU64 h16 s.bytes;
+  let h18 := Scry.digestTable h17 s.relNames;
+  let h19 := Scry.digestU32 h18 s.relArity;
+  let h20 := Scry.digestU32 h19 s.relOff;
+  let h21 := Scry.digestU32 h20 s.relTuples;
+  Nat.repr (UIntN.toNat h21)
+
 /-- Create a directory and its missing parents. -/
 partial def Scry.mkdirp (dir : String) : EIO Unit :=
   match String.isEmpty dir with
@@ -189,15 +247,19 @@ partial def Scry.mkdirp (dir : String) : EIO Unit :=
 def Scry.cachePath (dir key : String) : String :=
   String.append dir (String.append "/" (String.append key ".tu"))
 
-/-- The cache entry text. -/
-def Scry.cacheEntryText (key pre errors cst : String) : String :=
+/-- The cache entry text. `digest` is `Scry.cstFullDigest` of the store the body
+was rendered from: on load the recomputed digest must match, so any lossy round trip (a
+column the spill does not write, a different id assignment) is a miss, not a stale hit. -/
+def Scry.cacheEntryText (key pre errors digest cst : String) : String :=
   Scry.projectCacheMagic ++ "\nfrontend " ++ Scry.projectCacheFrontend
-    ++ "\nkey " ++ key ++ "\npre " ++ pre ++ "\nerrors " ++ errors
+    ++ "\nkey " ++ key ++ "\npre " ++ pre ++ "\ndigest " ++ digest
+    ++ "\nerrors " ++ errors
     ++ "\nbytes " ++ Nat.repr (String.length cst) ++ "\n" ++ cst
 
 /-- Parse a cache entry. Returns `(store, errors)` or a reason: `miss` for an entry
 written by another format or frontend (it is recomputed and rewritten, not corruption),
-`corrupt` for a malformed or truncated body. -/
+`corrupt` for a malformed or truncated body, or a body whose recomputed full-column
+digest is not the recorded one. -/
 def Scry.cacheEntryOf (key pre text : String) :
     Except String (Scry.CstStore × Nat) :=
   match String.splitOn text "\n" with
@@ -207,8 +269,8 @@ def Scry.cacheEntryOf (key pre text : String) :
       | .true => .error "miss"
       | .false => .error "corrupt"
     | .true => match rest with
-      | .cons frontLine (.cons keyLine (.cons preLine
-          (.cons errLine (.cons bytesLine rest2)))) =>
+      | .cons frontLine (.cons keyLine (.cons preLine (.cons digestLine
+          (.cons errLine (.cons bytesLine rest2))))) =>
         match String.startsWith frontLine "frontend " with
         | .false => .error "corrupt"
         | .true => match String.eq (String.drop 9 frontLine) Scry.projectCacheFrontend with
@@ -217,27 +279,32 @@ def Scry.cacheEntryOf (key pre text : String) :
             | .false => .error "corrupt"
             | .true => match String.startsWith preLine "pre " with
               | .false => .error "corrupt"
-              | .true => match String.startsWith errLine "errors " with
+              | .true => match String.startsWith digestLine "digest " with
                 | .false => .error "corrupt"
-                | .true => match String.startsWith bytesLine "bytes " with
+                | .true => match String.startsWith errLine "errors " with
                   | .false => .error "corrupt"
-                  | .true =>
-                    let k := String.drop 4 keyLine;
-                    let p := String.drop 4 preLine;
-                    let es := String.drop 7 errLine;
-                    let bs := String.drop 6 bytesLine;
-                    let cst := String.intercalate "\n" rest2;
-                    match Bool.and (String.eq k key) (String.eq p pre) with
-                    | .false => .error "miss"
-                    | .true => match String.parseNat bs with
-                      | .none => .error "corrupt"
-                      | .some n => match Nat.beq n (String.length cst) with
-                        | .false => .error "corrupt"
-                        | .true => match String.parseNat es with
-                          | .none => .error "corrupt"
-                          | .some e => match Scry.CstStore.ofText cst with
-                            | .error _ => .error "corrupt"
-                            | .ok st => .ok (st, e)
+                  | .true => match String.startsWith bytesLine "bytes " with
+                    | .false => .error "corrupt"
+                    | .true =>
+                      let k := String.drop 4 keyLine;
+                      let p := String.drop 4 preLine;
+                      let dg := String.drop 7 digestLine;
+                      let es := String.drop 7 errLine;
+                      let bs := String.drop 6 bytesLine;
+                      let cst := String.intercalate "\n" rest2;
+                      match Bool.and (String.eq k key) (String.eq p pre) with
+                      | .false => .error "miss"
+                      | .true => match String.parseNat bs with
+                        | .none => .error "corrupt"
+                        | .some n => match Nat.beq n (String.length cst) with
+                          | .false => .error "corrupt"
+                          | .true => match String.parseNat es with
+                            | .none => .error "corrupt"
+                            | .some e => match Scry.CstStore.ofText cst with
+                              | .error _ => .error "corrupt"
+                              | .ok st => match String.eq (Scry.cstFullDigest st) dg with
+                                | .true => .ok (st, e)
+                                | .false => .error "corrupt"
       | _ => .error "corrupt"
   | .nil => .error "corrupt"
 
@@ -257,7 +324,7 @@ def Scry.cacheLoad (dir key pre : String) : EIO (Except String (Scry.CstStore ×
 /-- Write a cache entry atomically (sibling `.tmp`, then rename over the target). A
 `.tmp` that is a symbolic link is refused: `FS.writeFile` opens with `O_TRUNC`, so a
 committed `<entry>.tmp -> ~/.bashrc` would otherwise truncate the target. -/
-def Scry.cacheSave (dir key pre errors cst : String) : EIO Unit := do
+def Scry.cacheSave (dir key pre errors digest cst : String) : EIO Unit := do
   Scry.mkdirp dir;
   let p := Scry.cachePath dir key;
   let tmp := String.append p ".tmp";
@@ -267,7 +334,7 @@ def Scry.cacheSave (dir key pre errors cst : String) : EIO Unit := do
     | .symlink => EIO.fail ("cache: " ++ tmp ++ " is a symbolic link; refusing to write through it")
     | _ => EIO.pure ()
   | .error _ => EIO.pure ();
-  FS.writeFile tmp (Scry.cacheEntryText key pre errors cst);
+  FS.writeFile tmp (Scry.cacheEntryText key pre errors digest cst);
   FS.rename tmp p
 
 /-- Overwrite every entry in `dir` with a malformed body (the corruption test). -/

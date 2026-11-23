@@ -1,0 +1,25 @@
+fingerprints: scry/v1 is the semantic id: ok
+fingerprints: primaryLocationLineHash is present: ok
+fingerprints: without line text the semantic id is the fallback: ok
+fingerprints: with line text the value is Scry.lineHash: ok
+codeFlows: one flow: ok
+codeFlows: one thread flow: ok
+codeFlows: one location per path step: ok
+codeFlows: every step has a physical location: ok
+codeFlows: the last step is the sink: ok
+codeFlows: nestingLevel is 1 inside the callee: ok
+codeFlows: executionOrder is 1..n: ok
+relatedLocations: still the three steps before the sink: ok
+run: complete executionSuccessful is true: ok
+run: complete has no notifications: ok
+run: complete truncated flag is false: ok
+run: truncation has one budget note: ok
+run: truncation sets executionSuccessful false: ok
+run: truncation sets the truncated flag: ok
+run: truncation has one run-level notification: ok
+run: the notification names the budget rule: ok
+run: the notification carries the reason: ok
+truncation: the finding is unchanged: ok
+run: a budget boundary result is promoted to a notification: ok
+run: promotion does not add a result: ok
+run: promotion leaves the finding's rule id alone: ok

@@ -49,7 +49,7 @@ def hdlUartTemporalGroup : Group where
                       "Rx.receives", "Rx.badStop", "Rx.glitch", "Loop.delivers"]
         -- these five are axiom-free; the other two unfold native UIntN operations
         let axiomFree := ["Tx.returns", "Rx.receives", "Rx.badStop", "Rx.glitch", "Loop.delivers"]
-        let src := (← IO.FS.readFile "hdl/examples/hdl-uart-temporal.wiz") ++ "\n" ++
+        let src := (← Tests.hdlRead "examples/hdl-uart-temporal.wiz") ++ "\n" ++
           "\n".intercalate (axiomFree.map fun n => s!"#print axioms {n}")
         let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← libLoader }
         let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src

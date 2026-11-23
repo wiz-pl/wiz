@@ -2267,7 +2267,7 @@ def wizCase (b : Budget) : IO Unit := do
     s!"def q{i} (u : Unit) : String := {if nf then "markedNormalize" else "verdict"} {m.toWiz}\n")
   let calls := (List.range qs.length).map fun i => s!"(q{i} ())"
   let prog := kernel ++ "\n" ++ verdict ++ printAll ++ defs ++ s!"def main : IO Unit := printAll {Elab.wizList calls}\n"
-  let some out ← wizRun prog | IO.println "    (skipped: no toolchain)"
+  let some out ← wizRun prog | skipMissing "no toolchain"
   let got := (out.splitOn "\n").take qs.length
   let norm (x : String) : String := (x.replace "↑(∞)" "∞").replace ", ∞)" ")"
   let mut verdictDiffs := 0

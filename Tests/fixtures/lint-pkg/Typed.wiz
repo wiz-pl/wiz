@@ -1,0 +1,29 @@
+import Prelude
+import Text
+import Lint
+
+/-!
+A fixture package lint set written against `lib/Lint.wiz`: it parses the stable view
+with `Lint.Command.parse` and reads a declaration's typed fields (`name`, `hasDoc`) and
+the binder list, instead of splitting the text by hand. `W503` reports a declaration
+whose name starts with `raw`.
+-/
+
+lint-set "typed" "wiz-lint/1" [decl, spans, facts]
+
+def typedRaw (view : String) : String :=
+  let c := Lint.Command.parse view;
+  match Lint.Command.has c .decl with
+  | .false => ""
+  | .true =>
+    List.foldr (fun (d : Lint.Decl) (acc : String) =>
+      match String.startsWith d.name "raw" with
+      | .true =>
+        let suffix := String.append (String.append " (" (Nat.repr (List.length c.binders)))
+          " binder(s))";
+        let text := String.append (String.append (String.append "typed declaration '" d.name) "'") suffix;
+        let finding := Lint.Finding.mk 0 0 (String.append d.name "#typed") text;
+        String.append (String.append (Lint.Finding.render finding) "\n") acc
+      | .false => acc) "" c.decls
+
+lint W503 "typed-raw" api warning declaration [decl, spans, facts] typedRaw

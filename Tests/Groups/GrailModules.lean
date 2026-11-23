@@ -32,7 +32,11 @@ def modulesGroup : Group where
         checkEq "A/B/C.wiz" (Module.relPath "A.B.C").toString
         checkEq "A.B" (Module.nameOf "A/B.wiz")
         checkEq ["Prelude", "Data.Two"] (Module.importsOf "import Prelude\n-- c\n  import Data.Two\nimport_c \"m.h\"\ndef x := 1\n")
-        checkEq ["m.h"] (Module.headersOf "import_c \"m.h\" (pure)\n") },
+        checkEq ["m.h"] (Module.headersOf "import_c \"m.h\" (pure)\n")
+        -- the scan is textual, so a `--` comment that documents the syntax must not
+        -- become a header (it did: selfhost/Frontend.wiz, and F09 rejected the `…`)
+        checkEq [] (Module.headersOf "-- the `import_c \"…\"` names\n")
+        checkEq ["m.h"] (Module.headersOf "  -- import_c \"x.h\"\ndef x := 1\nimport_c \"m.h\"\n") },
     { name := "a file reaches modules in subdirectories", run := fun _ => do
         let dir ← mkTree libFiles
         let ms ← Module.loadClosure ["lib", dir] "import Use\n#eval four\n"
@@ -302,7 +306,7 @@ def modulesGroup : Group where
           check (!(← (ro / entry.fileName).pathExists)) s!"also written to the read-only cache: {entry.fileName}" },
     { name := "the command line: a warm and an empty read-only cache plus a write cache match --no-cache", run := fun _ => do
         let wiz := ((← IO.appPath).parent.getD ".") / "wiz"
-        unless ← wiz.pathExists do skip "no wiz binary"; return
+        unless ← wiz.pathExists do skipMissing "no wiz binary"; return
         let dir ← mkTree [("main.wiz", "import M\ndef n : Nat := two + 3\n#eval n\n"),
                           ("M.wiz", "import Prelude\ndef two : Nat := 2\n")]
         let ro := dir / "ro"
@@ -317,7 +321,8 @@ def modulesGroup : Group where
         checkEq 0 cold.exitCode
         check ((cold.stdout.splitOn "info: 5").length > 1) s!"cold: {cold.stdout}{cold.stderr}"
         let before ← snapshot ro
-        let cached ← run (["--cache-ro", ro.toString, "--cache-ro", empty.toString, "--cache", write.toString] ++ base)
+        let cached ← run (["--cache-ro", ro.toString, "--cache-ro-unsigned",
+                           "--cache-ro", empty.toString, "--cache", write.toString] ++ base)
         let plain ← run (["--no-cache"] ++ base)
         checkEq 0 cached.exitCode
         checkEq plain.exitCode cached.exitCode
@@ -819,8 +824,9 @@ def modulesGroup : Group where
         let some a ← Cache.readModuleRegion (R := ZeroOneMany) cache binary rig k2
           | throw (IO.userError "no readable region for the edited module")
         checkEq k2.fast a.key },
-    { name := "regions layer over read-only caches (and never repair them)", run := fun _ => do
-        -- (`--region-cache` + `--cache-ro`: regions live in the same directory layers)
+    { name := "regions layer over read-only caches when opted in (and never repair them)", run := fun _ => do
+        -- (`--region-cache` + `--cache-ro`: regions live in the same directory layers; the
+        -- layer is unauthenticated, so serving it is an explicit opt-in)
         let dir ← mkTree libFiles
         let ms ← Module.loadAll ["lib", dir]
         let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
@@ -828,9 +834,10 @@ def modulesGroup : Group where
         let stats ← IO.mkRef ({} : Cache.RegionCounts)
         let opts : Cache.RegionOptions := { rig, stats := some stats }
         let src := "import Use\nimport Other\n#eval four + one\n"
-        -- (cold: the text entries and the regions in `ro`, as a Nix store would ship them)
+        -- (cold: the text entries, manifests and regions in `ro`, as a Nix store would ship them)
         let ro ← IO.FS.createTempDir
         let (cold, _) ← Cache.elaborateCached (some ro) [] src init 0 (region := some opts)
+          (verify := .warn) (rig := rig)
         check (!cold.messages.any (·.severity == .error)) s!"messages: {cold.messages.toList.map (·.text)}"
         check ((← regionFiles ro).size > 0) "no region was written"
         let expected := cold.messages.toList.map (·.render src)
@@ -838,6 +845,7 @@ def modulesGroup : Group where
         -- (read caches only: a region is served from the read-only layer, nothing is written)
         let h0 ← stats.get
         let (s1, _) ← Cache.elaborateCached none [ro] src init 0 (region := some opts)
+          (verify := .warn) (rig := rig) (roUnsigned := true)
         check ((← stats.get).hits > h0.hits) "no module came from a region in the read-only layer"
         checkEq expected (s1.messages.toList.map (·.render src))
         checkEq before (← snapshot ro)
@@ -845,6 +853,7 @@ def modulesGroup : Group where
         let write ← IO.FS.createTempDir
         let h1 ← stats.get
         let (s2, _) ← Cache.elaborateCached (some write) [ro] src init 0 (region := some opts)
+          (verify := .warn) (rig := rig) (roUnsigned := true)
         check ((← stats.get).hits > h1.hits) "the read-only region did not answer through the write layer"
         checkEq expected (s2.messages.toList.map (·.render src))
         checkEq before (← snapshot ro)
@@ -858,6 +867,7 @@ def modulesGroup : Group where
         let beforeBad ← snapshot ro
         let h2 ← stats.get
         let (s3, _) ← Cache.elaborateCached (some write) [ro] src init 0 (region := some opts)
+          (verify := .warn) (rig := rig) (roUnsigned := true)
         checkEq expected (s3.messages.toList.map (·.render src))
         check ((← stats.get).misses > h2.misses) "a truncated read-only region was not a miss"
         checkEq beforeBad (← snapshot ro)
