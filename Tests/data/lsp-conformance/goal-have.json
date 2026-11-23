@@ -1,0 +1,11 @@
+{
+  "name": "goal-have",
+  "servers": ["selfhost"],
+  "uri": "file:///conf/goal-have.wiz",
+  "text": "import Prelude\ndef h (n : Nat) : Nat := by\n  have m : Nat := by exact n\n  exact m\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 18 } } }
+  ],
+  "expected": [{ "match": "exact", "path": "result.goals", "value": ["n : Nat\n⊢ Nat"] }],
+  "note": "the host has no `have` tactic, so this pins the self-hosted server alone"
+}

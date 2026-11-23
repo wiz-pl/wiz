@@ -1,0 +1,22 @@
+{
+  "name": "goal-siblings",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-siblings.wiz",
+  "text": "import Prelude\ndef p : Nat → Nat := by\n  intro x\n  exact (Nat.add (by exact x) (by exact 1))\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 3, "character": 31 } } },
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 3, "character": 28 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.goals", "value": ["x : Nat\n⊢ Nat"] },
+    { "match": "exact", "path": "result.rendered", "value": "no goals" }
+  ],
+  "note": "two sibling `by` blocks as arguments: the second block's state, then the first block's end",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "at 3:28 (the `)` closing `(by exact x)`) it answers the block's entry state `x : Nat ⊢ Nat` where the host reports no goals",
+      "issue": "goal-block-end"
+    }
+  ]
+}

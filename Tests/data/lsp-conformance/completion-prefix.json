@@ -1,0 +1,38 @@
+{
+  "name": "completion-prefix",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/completion-prefix.wiz",
+  "text": "import Prelude\ndef label : String := \"x\"\ndef three : String := lab\n",
+  "requests": [
+    { "method": "textDocument/completion", "params": { "position": { "line": 2, "character": 25 } } }
+  ],
+  "diagNote": "the half-typed `lab` is an unknown identifier on both servers; the end of its range is the end of the line",
+  "diagnostics": [
+    {
+      "match": "subset",
+      "path": "diagnostics",
+      "value": [
+        {
+          "severity": 1,
+          "code": "unknown-identifier",
+          "range": { "start": { "line": 2, "character": 22 } }
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "match": "subset",
+      "path": "result.items",
+      "value": [
+        {
+          "label": "label",
+          "textEdit": {
+            "range": { "start": { "line": 2, "character": 22 }, "end": { "line": 2, "character": 25 } },
+            "newText": "label"
+          }
+        }
+      ]
+    }
+  ]
+}

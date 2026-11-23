@@ -1,0 +1,25 @@
+{
+  "name": "astral",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/astral.wiz",
+  "text": "import Prelude\ndef s : String := \"😀\"\ndef t : String := String.append \"😀\" s\n",
+  "requests": [
+    { "method": "textDocument/hover", "params": { "position": { "line": 2, "character": 37 } } },
+    { "method": "textDocument/definition", "params": { "position": { "line": 2, "character": 37 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.contents.value", "value": "```wiz\ns : String\n```" },
+    {
+      "match": "subset",
+      "path": "result",
+      "value": { "uri": "$URI", "range": { "start": { "line": 1 } } }
+    }
+  ],
+  "knownGap": [
+    {
+      "server": "host",
+      "reason": "positions are counted in code points, not UTF-16 units, so 2:37 is past the `s` it names (H2)",
+      "issue": "H2"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "name": "goal-inner-by",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-inner-by.wiz",
+  "text": "import Prelude\ndef k : Nat → Nat := by\n  exact (by intro x; exact x)\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 9 } } }
+  ],
+  "expected": [{ "match": "exact", "path": "result.goals", "value": ["⊢ Nat → Nat"] }],
+  "note": "the host prints a nondependent function type without its binder; the self-hosted server keeps the frontend's (`(x0 : Nat) → Nat`)",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "a goal whose target is a function type prints its binder (`⊢ (x0 : Nat) → Nat`) where the host drops it (`⊢ Nat → Nat`)",
+      "issue": "goal-printing"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "name": "col-past-eol",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/col-past-eol.wiz",
+  "text": "import Prelude\ndef one : Nat := 1\ndef two : Nat := one\n",
+  "requests": [
+    { "method": "textDocument/hover", "params": { "position": { "line": 0, "character": 25 } } },
+    { "method": "textDocument/hover", "params": { "position": { "line": 1, "character": 999 } } }
+  ],
+  "expected": [
+    { "match": "absent", "path": "result" },
+    { "match": "absent", "path": "result" }
+  ],
+  "knownGap": [
+    {
+      "server": "host",
+      "reason": "a character past the end of a line is not clamped to the line, so 0:25 lands on the next line (H3)",
+      "issue": "H3"
+    }
+  ]
+}
