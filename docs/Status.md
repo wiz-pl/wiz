@@ -1333,9 +1333,12 @@ that checks everything. Wiz's situation:
   rules; #123's rules have been in it since #135. Its review found D2 (§4).
   The marking bridge and the open switches are tested, not assumed (group *meta*, "D3
   (marking bridge)" and "D6 (open switches)"). The kernel checks the **marked** term and
-  WizMeta the **unmarked** one; marking preserves the kernel's verdict on all 537
-  differential terms, with a `fun` at a proposition as the negative control (rejected
-  unmarked, accepted after `Mark.infer`, accepted by WizMeta unmarked). For the 216
+  WizMeta the **unmarked** one; marking preserves the kernel's verdict on the 484
+  differential terms inside the spec's fragment (of 537; the 53 outside it are not
+  evaluated by the bridge, and one of them reaches a kernel `panic!`,
+  `wiz-notes/kernel-assurance.md` §11), with a `fun` at a proposition as the negative
+  control (rejected unmarked, accepted after `Mark.infer`, accepted by WizMeta unmarked).
+  For the 216
   declaration types, `Mark.type`'s level is the kernel's `checkType` level, the marked
   type is a type at the same level, `Mark.type` is idempotent, and `Mark.inferCore`
   computes the kernel's type. Each open rule choice now has a distinguishing term —

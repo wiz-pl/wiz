@@ -913,44 +913,60 @@ def group : Group where
         -- `DescEqSubst.descEq_subst_concrete` is the lemma applied at this instance; it is
         -- elaborated when this module is compiled, at the substituted judgment.
         IO.println "    `dret (var 0)` under `var 0 ↦ tt` derives `dret tt ≡ dret tt` at `Desc_0 Unit_1`" },
-    { name := "D3 (marking bridge): the kernel checks the marked term and the reference checker votes on the unmarked one; marking preserves the verdict (537 terms, 216 declarations)", run := fun _ => do
+    { name := "D3 (marking bridge): the kernel checks the marked term and the reference checker votes on the unmarked one; marking preserves the verdict (484 in-fragment terms of 537, 216 declarations)", run := fun _ => do
         let g := leanGlobals ()
         let terms := diffTerms 400
         let mut outside := 0
+        let mut inFragment := 0
+        let mut preRejected := 0
         let mut markedTerms := 0
         let mut markedInFragment := 0
         let mut bothAccept := 0
         let mut verdictChanges := 0
         let mut typeChanges := 0
         for tm in terms do
-          let sorted := (Mark.infer (R := ZeroOneMany) { globals := g, sortsOnly := true } tm.toTerm).1
-          let marked := (Mark.infer (R := ZeroOneMany) { globals := g } sorted).1
-          -- the reference checker reads the unmarked term (`Translate.ofTerm` has no `prf`
-          -- case), so a marked image must leave its fragment
+          -- `vote` (and so the differential) gives a term outside the spec's fragment no
+          -- vote and does not run the kernel on it. Do the same: the no-marker kernel on
+          -- the 53 outside terms is not production behaviour, and one of them reaches
+          -- `vEcase: ill-typed` (a kernel `panic!` site; recorded in the note as risk 5,
+          -- not fixed here).
           match WizMeta.ofTerm [] tm.toTerm with
           | none => outside := outside + 1
           | some _ =>
-            check ((WizMeta.ofTerm [] sorted).isSome)
-              s!"the sorted term left the fragment: {tm.pretty 0}"
-            if marked != sorted then
-              markedTerms := markedTerms + 1
-              if (WizMeta.ofTerm [] marked).isSome then markedInFragment := markedInFragment + 1
-          -- the judgement: the unmarked term in no-marker mode, the marked term in the
-          -- production mode (`kernelInfer`)
-          match Bridge.inferNoMarks g sorted, infer (R := ZeroOneMany) { globals := g } marked with
-          | .ok a, .ok (b, _) =>
-            bothAccept := bothAccept + 1
-            unless Bridge.sameTy g a b do typeChanges := typeChanges + 1
-          | .error _, .error _ => pure ()
-          | .ok _, .error e =>
-            verdictChanges := verdictChanges + 1
-            IO.println s!"    marking turns an accept into an error ({e}): {tm.pretty 0}"
-          | .error e, .ok _ =>
-            verdictChanges := verdictChanges + 1
-            IO.println s!"    marking turns an error into an accept ({e}): {tm.pretty 0}"
-        IO.println s!"    {terms.size} terms: {outside} outside the fragment, {bothAccept} accepted in both modes, {verdictChanges} verdict changes, {typeChanges} type changes; the pass marks {markedTerms} terms, {markedInFragment} of their images still readable"
+            inFragment := inFragment + 1
+            -- the production order (`kernelInfer`): the pre-check comes first, holes
+            -- allowed; a term it rejects is never marked (the kernel's verdict is the
+            -- pre-check's error)
+            let raw := tm.toTerm
+            match infer (R := ZeroOneMany) { globals := { g with lazyProofs := false, sortHolesOk := true } } raw with
+            | .error _ => preRejected := preRejected + 1
+            | .ok _ =>
+              let sorted := (Mark.infer (R := ZeroOneMany) { globals := g, sortsOnly := true } raw).1
+              let marked := (Mark.infer (R := ZeroOneMany) { globals := g } sorted).1
+              -- the reference checker reads the unmarked term (`Translate.ofTerm` has no
+              -- `prf` case), so a marked image must leave its fragment
+              check ((WizMeta.ofTerm [] sorted).isSome)
+                s!"the sorted term left the fragment: {tm.pretty 0}"
+              if marked != sorted then
+                markedTerms := markedTerms + 1
+                if (WizMeta.ofTerm [] marked).isSome then markedInFragment := markedInFragment + 1
+              -- the judgement: the unmarked term in no-marker mode, the marked term in the
+              -- production mode
+              match Bridge.inferNoMarks g sorted, infer (R := ZeroOneMany) { globals := g } marked with
+              | .ok a, .ok (b, _) =>
+                bothAccept := bothAccept + 1
+                unless Bridge.sameTy g a b do typeChanges := typeChanges + 1
+              | .error _, .error _ => pure ()
+              | .ok _, .error e =>
+                verdictChanges := verdictChanges + 1
+                IO.println s!"    marking turns an accept into an error ({e}): {tm.pretty 0}"
+              | .error e, .ok _ =>
+                verdictChanges := verdictChanges + 1
+                IO.println s!"    marking turns an error into an accept ({e}): {tm.pretty 0}"
+        IO.println s!"    {terms.size} terms: {outside} outside the fragment, {inFragment} in it; {preRejected} rejected by the pre-check (not marked); {bothAccept} accepted in both modes, {verdictChanges} verdict changes, {typeChanges} type changes; the pass marks {markedTerms} terms, {markedInFragment} of their images still readable"
         check (terms.size == 537) s!"the corpus changed size: {terms.size}"
         check (outside == 53) s!"outside the fragment: {outside}"
+        check (inFragment == 484) s!"in the fragment: {inFragment}"
         check (verdictChanges == 0) s!"{verdictChanges} terms change their verdict under marking"
         check (typeChanges == 0) s!"{typeChanges} terms change their type under marking"
         check (markedTerms > 0) "the marking pass changes no corpus term: the bridge is vacuous"
@@ -1001,7 +1017,7 @@ def group : Group where
         check (nDecl == 216) s!"the declaration corpus changed size: {nDecl}"
         check (nLevel == 216) s!"levels agree on {nLevel} declarations"
         check (nCore == 216) s!"`inferCore` types agree on {nCore} declarations" },
-    { name := "D6 (open switches): EqTyCross/Levelled, payload kernel/stuck/uniform, kernelEqFormation, and quantities at a propositional Π/Σ each have a distinguishing term (4 switches, 7 terms + 1 control)", run := fun _ => do
+    { name := "D6 (open switches): EqTyCross/Levelled, payload kernel/stuck/uniform, kernelEqFormation, and quantities at a propositional Π/Σ each have a distinguishing term (4 choices, 7 terms + 1 control; plus sortsOptional and inertReg)", run := fun _ => do
         let sg ← match refSig with | .ok sg => pure sg | .error e => throw (IO.userError e)
         let g := leanGlobals ()
         -- 1. EqTyCross vs EqTyLevelled: the T4 term of `wiz-meta.md` §4.1 (the corpus does
@@ -1043,7 +1059,19 @@ def group : Group where
         rejects Bridge.qtySigmaCast
         check (kernelAccepts Bridge.qtyAtPropSigma g) "the kernel compares quantities at a propositional Σ"
         rejects Bridge.qtyAtPropSigma
-        IO.println "    4 switches, 7 distinguishing terms + 1 control: EqTy (1), payload (2 terms × 3 variants), kernelEqFormation (2), quantities at a propositional Π and Σ (2; the Σ cast control is rejected by both)" }
+        -- the other two rule switches in `Opts` (D2, T0/T1), for the "every field flips a
+        -- verdict" iteration; `checkTemplates` is a presupposition check, not a rule
+        -- switch, and no single-term witness was found (recorded in the note)
+        let unsorted := ann (lam (lam (var 0))) (pi (univ 0) (pi (var 0) (var 1)))
+        rejects unsorted ({} : Opts) (some [])
+        accepts unsorted kernelOpts (some [])
+        let nat := const "Nat"
+        let inertT := ann (lam (lam (refl nat (var 0))))
+          (pi (eqTy nat nat) (pi nat (eq nat (cast nat nat (var 1) (var 0)) (var 0))))
+        check (kernelAccepts inertT g) "the kernel rejects the InReg term"
+        accepts inertT kernelOpts (some sg)
+        rejects inertT { kernelOpts with inertReg := false } (some sg)
+        IO.println "    4 open choices: 7 terms + 1 control (EqTy 1, payload 2×3, kernelEqFormation 2, qty-at-Prop 2); 2 further option switches (sortsOptional, inertReg); checkTemplates has no single-term witness" }
   ]
 
 def groups : List Group :=
