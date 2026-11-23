@@ -14,7 +14,7 @@
       "sha256": "81132f3947da02c7d2af6b79986fc805e72e70941b328394f98545d811dd6f2f"
     },
     "lean": {
-      "files": 162,
+      "files": 163,
       "paths": [
         "Wiz/**",
         "Grail/**",
@@ -27,7 +27,7 @@
         "lake-manifest.json",
         "lean-toolchain"
       ],
-      "sha256": "8ba940e5f7e60c48bc3b823a1ac433502cb8bb550bdb23029968fab60d7de197"
+      "sha256": "6112493fa45afcadea705a4569259031eff1315c06bd08759bc95ad1e887d75e"
     },
     "packages": {
       "files": 916,
@@ -52,7 +52,7 @@
         "Tests/**",
         "web/**"
       ],
-      "sha256": "96f9bb005d55eb51446910bb31295e7f16bf99340f09b37d9f28de4a7c2aac67"
+      "sha256": "bfdb2528a39c6f2670881a16b857063b70cd0e263a7d581e07ddeb293a48c34c"
     },
     "wizlib": {
       "files": 109,

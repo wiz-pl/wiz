@@ -251,8 +251,9 @@ backend. `selfhost/Backend.wiz` must not pretend otherwise until that emitter ex
 
 ## 9. What "adding a target" cost
 
-The closed list for `--target` lives in `Main.lean` (`targets`) and the build path
-branches on the name; there is no plugin registry. This target added:
+The closed list for `--target` lives in `Wiz/Compiler/Target.lean` (`Target.all`; the
+self-hosted driver has the same names in `selfhost/Cli.wiz`) and the build path branches
+on the name; there is no plugin registry. This target added:
 
 * one emitter file (~250 lines) and one runtime file (~600 lines);
 * `buildJs`/`runJsGlobal` in `Build.lean` (the Wasm path is the template);

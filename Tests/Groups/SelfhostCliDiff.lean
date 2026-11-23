@@ -1,5 +1,6 @@
 import Tests.Elab
 import Tests.Groups.SelfhostCli
+import Wiz.Compiler.Target
 
 open Wiz
 
@@ -566,6 +567,47 @@ def cliDiffGroup : Group where
         checkEq "" s.out
         cliCheck s.err "unsupported target wasm" "the driver's rejection"
         skip "backend: --target wasm selects WebAssembly in the host (C5); the self-hosted backend emits C and LLVM (a first slice), so the driver refuses the name (exit 1) instead of silently building C" },
+    { name := "--target bpf and --target js: known names refused by capability, not as unknown names (F42)", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let files := #[("good.wiz", cliGood)]
+        -- (the host has a backend for both: bpf takes a manifest and its typed core,
+        -- js emits an ES module; the self-hosted driver emits C and LLVM, so it knows
+        -- the names and refuses the *capability* — the distinction F42 asks for)
+        for t in ["bpf", "js"] do
+          let spec : CliDiffSpec := { files := files, args := #["check", "good.wiz", "--target", t] }
+          let (h, s) ← cliDiffBoth host exe spec
+          checkEq 0 h.code
+          checkEq 1 s.code
+          checkEq "" s.out
+          checkEq s!"unsupported target {t}: the self-hosted backend emits C and LLVM (C5)\n" s.err
+          check (!cliHas s.err "unknown target") "a known target was refused as an unknown one"
+        -- (the rejection half of the `--target c` case: an unknown name and a missing
+        -- value are the same sentence and exit code in both, including the full list)
+        for args in [#["check", "good.wiz", "--target", "bogus"],
+                     #["check", "good.wiz", "--target"]] do
+          let spec : CliDiffSpec := { files := files, args := args }
+          let (h, s) ← cliDiffBoth host exe spec
+          cliDiffSame spec h s
+          checkEq 1 s.code
+          checkEq 1 h.code
+        cliDiffKnown "target names: the host has c/llvm/wasm/bpf/js; the self-hosted driver has the same five names and emits C and LLVM, so it refuses wasm/bpf/js by capability (exit 1). An unknown name, and `--target` without a value, are the identical sentence and exit code in both, so the two tables agree on the names" },
+    { name := "the target table: five names, one per backend, and unknown ≠ unsupported", run := fun _ => do
+        checkEq "c llvm wasm bpf js" (" ".intercalate (Wiz.Target.all.map (·.name)))
+        checkEq "c, llvm, wasm, bpf or js" Wiz.Target.choices
+        check (Wiz.Target.all.all (·.supported)) "a host target is marked unsupported"
+        check (Wiz.Target.ofName? "js").isSome "the host does not know js"
+        check (Wiz.Target.ofName? "bogus").isNone "a made-up name is a known target"
+        checkEq "unknown target bogus (choose c, llvm, wasm, bpf or js)"
+          (Wiz.Target.unknown "bogus")
+        -- (the mechanism's second refusal, on a table with an absent backend: the
+        -- self-hosted table is the one that has three such entries today (C5))
+        let ts : List Wiz.Target :=
+          [{ name := "ghost", supported := false, reason := "no ghost backend" }]
+        match Wiz.Target.resolve ts "ghost", Wiz.Target.resolve ts "bogus" with
+        | .error e, .error u =>
+          checkEq "unsupported target ghost: no ghost backend" e
+          checkEq "unknown target bogus (choose c, llvm, wasm, bpf or js)" u
+        | _, _ => throw (IO.userError "the target resolver accepted a name") },
     { name := "--cache-verify: the modes are accepted, and strict is warm in both", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("cv.wiz", cliGood)]

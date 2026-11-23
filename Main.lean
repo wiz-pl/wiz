@@ -1,6 +1,7 @@
 import Wiz
 import Wiz.Attest
 import Wiz.Version
+import Wiz.Compiler.Target
 import Wiz.Doc.Build
 import Wiz.Doc.Serve
 import Lean.Data.Json
@@ -920,9 +921,6 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
     if m.severity == .error then IO.eprintln s!"{path}:{m.render input}"
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
-/-- The backend names `wiz build --target` accepts. -/
-def targets : List String := ["c", "llvm", "wasm", "bpf", "js"]
-
 /-- `wiz verify [--attest FILE] [--artifact-only] ARTIFACT`. -/
 def verifyCmd (tc : Toolchain) (attest : Option String) (args : List String) : IO UInt32 := do
   let artifactOnly := args.contains "--artifact-only"
@@ -941,12 +939,15 @@ def verifyCmd (tc : Toolchain) (attest : Option String) (args : List String) : I
 
 /-- Take `--target NAME`, `--llvm` and `--wasm` out of the arguments; return the selected
 backend and the rest. A flag and a conflicting `--target` are an error, as is two
-different targets. -/
+different targets. The accepted names and the two refusals (an unknown name, and a name
+this toolchain has no backend for) are in `Wiz/Compiler/Target.lean`. -/
 def takeTarget : List String → Except String (Option String × List String)
   | [] => pure (none, [])
-  | "--target" :: [] => throw "--target needs c, llvm, wasm, bpf or js"
+  | "--target" :: [] => throw s!"--target needs {Wiz.Target.choices}"
   | "--target" :: t :: rest => do
-    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm, wasm, bpf or js)"
+    match Wiz.Target.resolve Wiz.Target.all t with
+    | .error e => throw e
+    | .ok _ => pure ()
     let (other, rest) ← takeTarget rest
     match other with
     | some u => if u != t then throw s!"two targets: {t} and {u}" else pure (some t, rest)
