@@ -41,8 +41,9 @@ structure Options where
   title : String := "Wiz documentation"
   /-- the Wasm module and its JS (`web/build.sh`'s output) -/
   web : Option System.FilePath := none
-  /-- where the site's own files are (scroll.css, scroll.js, tagged.js, and with
-  `--serve` lsp-client.js, goals.js, doc-live.js, doc-live.css): searched in order,
+  /-- where the site's own files are (scroll.css, scroll.js, scroll-search.js, the
+  runtime modules and `framework/`, and with `--serve` lsp-client.js, doc-live.js,
+  doc-live.css): searched in order,
   `web/` of a checkout or share/wiz/web of a release -/
   assets : List System.FilePath := []
   /-- (11s) `--serve`: the pages carry the live documentation client, which asks a
@@ -60,6 +61,14 @@ structure Options where
   verbose : Nat := 0
   /-- modules elaborated and rendered at once (`--jobs`; `1`: one at a time) -/
   jobs : Nat := 1
+  /-- highlight fenced code at render time (`--no-highlight` turns it off: the pages
+  are then byte-identical to the pre-highlighting output) -/
+  highlight : Bool := true
+  /-- external language-registry files (`--languages FILE`, repeatable); the compiler
+  reads no environment variable for them -/
+  languages : List System.FilePath := []
+  /-- the resolved registry: built-ins merged with `languages` (`Build.run` fills it) -/
+  registry : Highlight.Registry := Highlight.Registry.builtins
 
 /-- What `run` made: the site's pages, the reference files that are not up to date (with
 `--check`), and the reference files it wrote. -/
@@ -108,6 +117,10 @@ structure Ctx where
   modules : List String
   /-- the module being documented -/
   current : String
+  /-- highlight fenced code (`--no-highlight`: false, for the old bytes) -/
+  highlight : Bool := true
+  /-- the language registry (built-ins plus any `--languages` file) -/
+  registry : Highlight.Registry := Highlight.Registry.builtins
 
 /-- Where a constant is documented: `M.html#n`, if it is. -/
 def Ctx.href? (c : Ctx) (n : Name) : Option String := do
@@ -244,8 +257,24 @@ def docLink (c : Ctx) (code : String) : Option String :=
 
 def docHtml (c : Ctx) (doc : Option String) : String :=
   match doc with
-  | some d => s!"<div class=\"doc\">{render (docLink c) d}</div>"
+  | some d => s!"<div class=\"doc\">{(renderWith (docLink c) c.registry c.st.tables.tokens c.highlight d).html}</div>"
   | none => ""
+
+/-- The fenced blocks of a doc comment, in order (for the page's `wizHighlight` data;
+a plain fence has no spans; empty with `--no-highlight`). -/
+def docBlocks (c : Ctx) (doc : Option String) : Array Highlight.Block :=
+  match doc with
+  | some d => if c.highlight then (renderWith (docLink c) c.registry c.st.tables.tokens true d).blocks else #[]
+  | none => #[]
+
+/-- A page's `wizHighlight` data: the spans of every `wiz` fence, for the hover runtime
+to assemble after P1. The static HTML already has the same spans; this is the hook, not
+another renderer. -/
+def highlightData (blocks : Array Highlight.Block) : Json :=
+  Json.mkObj [("schema", "wiz.highlight/1"),
+    ("blocks", Json.arr (blocks.zipIdx.map fun (b, i) =>
+      Json.mkObj [("index", Json.num i), ("language", b.language),
+        ("spans", Highlight.spansJson b.source.toList.toArray b.spans)]))]
 
 def sourceLink (o : Options) (m : Module) (line : Nat) : String :=
   match o.sourceUrl with
@@ -340,6 +369,7 @@ def head (o : Options) (title : String) (wasm : Bool) (live : Bool := false) : S
   s!"<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">" ++
   s!"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" ++
   s!"<title>{htmlEscape title}</title><link rel=\"stylesheet\" href=\"scroll.css\">" ++
+  (if o.highlight then "<link rel=\"stylesheet\" href=\"highlight.css\">" else "") ++
   (if live then "<link rel=\"stylesheet\" href=\"doc-live.css\">" else "") ++
   -- the search (a classic script: it works from file:// too), and with the Wasm module
   -- the interactive signatures (a module script: needs http)
@@ -358,7 +388,13 @@ def nav (mods : List String) (current : String) : String :=
   s!"<nav><div class=\"nav-title\">Modules</div><ul>{String.join items}</ul></nav>\n"
 
 def modulePage (c : Ctx) (o : Options) (m : Module) (es : Array Entry) (wasm : Bool) : String :=
-  let data := Json.mkObj [("module", m.name), ("decls", Json.arr (es.flatMap fun e => #[e.data] ++ e.children.map (·.data)))]
+  let c : Ctx := { c with highlight := o.highlight }
+  let docs : List (Option String) :=
+    moduleDocOf m.src :: es.toList.flatMap fun e => e.doc :: e.children.toList.map (·.doc)
+  let hlBlocks := docs.toArray.flatMap fun d => docBlocks c d
+  let data := Json.mkObj ([("module", Json.str m.name),
+    ("decls", Json.arr (es.flatMap fun e => #[e.data] ++ e.children.map (·.data)))] ++
+    (if o.highlight then [("wizHighlight", highlightData hlBlocks)] else []))
   let toc := es.toList.map fun e => s!"<li><a href=\"#{htmlEscape e.name}\">{htmlEscape e.name}</a></li>"
   -- (11s) the live client: where it asks, and the source it opens in the server
   let live := o.serve

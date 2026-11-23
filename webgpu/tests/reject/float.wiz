@@ -1,1 +1,2 @@
+-- expect: Float64
 def f (x : Float64) : Float64 := x

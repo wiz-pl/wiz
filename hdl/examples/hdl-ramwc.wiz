@@ -1,0 +1,189 @@
+-- `Bus.ramWC` (`import Hdl.Bus`): the byte-enabled, two-cycle RAM, checked against the
+-- laws in `Hdl.BusLaw` and `Hdl.Mem` rather than by a smoke test.
+--
+-- * the wait counter: a request at wait 0 is not taken for two cycles; while `wait < 2`
+--   no second request is taken; the answer resets it, and a dropped `valid` withdraws
+--   the request (one outstanding, no bursts);
+-- * read-after-write: a read offered after a write's answering cycle sees the masked
+--   word (`Mem.merge`), for every 8-, 16- and 32-bit strobe pattern, and a read of a
+--   different word is unchanged (no alias);
+-- * no read-during-write bypass: a write's answering cycle returns the old word with
+--   `rvalid` low; the write is visible to the next transaction only;
+-- * byte addressing (`shift = 2`): two byte addresses in one word hit the same word;
+-- * value simulation = `Netlist.simulate` (hash-consed and naive) = `Circuit.simFast`.
+-- Run by the `hdl` and `bus-law` test groups.
+import Hdl.Core
+import Hdl.Sim
+import Hdl.Bus
+import Hdl.BusLaw
+import Hdl.Mem
+import IO
+
+def yes (b : Bool) : String := match b with
+  | .true => "yes"
+  | .false => "NO"
+
+def shows : List Nat → String
+  | .nil => ""
+  | .cons x xs => match xs with
+    | .nil => Hdl.show x
+    | .cons _ _ => Hdl.show x <+> " " <+> shows xs
+
+def allTrue : List Bool → Bool
+  | .nil => .true
+  | .cons b bs => Bool.and b (allTrue bs)
+
+def agree {ω i o : HwTy} (c : Circuit i o) (ins : List (HwTy.El i)) : Bool :=
+  let ω v := Circuit.runLeaves c ins;
+  Bool.and (BEq.beq v (Circuit.simFast c ins))
+    (Bool.and (BEq.beq v (Circuit.simLeaves .true c ins)) (BEq.beq v (Circuit.simLeaves .false c ins)))
+
+def reqWE (aw dw : Nat) (valid we addr wdata strb : Nat) : HwTy.El (Bus.ReqW.code aw dw) :=
+  Bundle.toEl (Bus.ReqW.bundle aw dw)
+    (Bus.ReqW.mk (BitVec.ofNat 1 valid) (BitVec.ofNat 1 we)
+      (BitVec.ofNat aw addr) (BitVec.ofNat dw wdata)
+      (BitVec.ofNat (Nat.div dw 8) strb))
+
+-- One transaction: the source holds `valid` for three cycles, so the request is taken
+-- in the third (wait 2) and the answer is at that cycle. Chunks concatenate directly:
+-- the next request starts in the cycle after the answer, when the counter is back at 0.
+def chunk (aw dw : Nat) (valid we addr wdata strb : Nat) : List (HwTy.El (Bus.ReqW.code aw dw)) :=
+  .cons (reqWE aw dw valid we addr wdata strb)
+    (.cons (reqWE aw dw valid we addr wdata strb)
+      (.cons (reqWE aw dw valid we addr wdata strb) .nil))
+
+def chunkW (dw : Nat) (addr wdata strb : Nat) : List (HwTy.El (Bus.ReqW.code 8 dw)) :=
+  chunk 8 dw 1 1 addr wdata strb
+
+def chunkR (dw : Nat) (addr : Nat) : List (HwTy.El (Bus.ReqW.code 8 dw)) :=
+  chunk 8 dw 1 0 addr 0 0
+
+def reads (dw : Nat) (ys : List (HwTy.El (Bus.Resp.code dw))) : List Nat :=
+  match ys with
+  | .nil => .nil
+  | .cons p ps =>
+    let r := Bus.Resp.unpack dw p;
+    if BitVec.isTrue r.rvalid then .cons (BitVec.toNat r.rdata) (reads dw ps) else reads dw ps
+
+def firstRead (dw : Nat) (xs : List (HwTy.El (Bus.ReqW.code 8 dw))) : Nat :=
+  match reads dw (Circuit.run (Bus.ramWC 0 8 6 dw) xs) with
+  | .nil => 0
+  | .cons x _ => x
+
+-- The independent byte model of a masked write: byte k is the new byte when strobe k is
+-- set, the old byte otherwise. (`Bus.ramWMerged` is `Mem.merge`; this is the same claim
+-- without using either implementation.)
+def byteAt (w k : Nat) : Nat := Nat.mod (Nat.div w (Nat.pow 2 (Nat.mul 8 k))) 256
+
+def mergeAux (old new strb : Nat) : Nat → Nat → Nat → Nat
+  | .zero, _, acc => acc
+  | .succ k, i, acc =>
+    let b := if Nat.beq (Nat.mod (Nat.div strb (Nat.pow 2 i)) 2) 1
+      then byteAt new i else byteAt old i;
+    mergeAux old new strb k (Nat.succ i) (acc + Nat.mul b (Nat.pow 2 (Nat.mul 8 i)))
+
+def mergeModel (dw old new strb : Nat) : Nat := mergeAux old new strb (Nat.div dw 8) 0 0
+
+-- write d0 with every strobe, write d1 with `strb`, then read: the independent model.
+def maskedRead (dw : Nat) (a d0 d1 strb : Nat) : Bool :=
+  Nat.beq (firstRead dw
+    (List.append (chunkW dw a d0 (Nat.sub (Nat.pow 2 (Nat.div dw 8)) 1))
+      (List.append (chunkW dw a d1 strb) (chunkR dw a))))
+    (mergeModel dw d0 d1 strb)
+
+def strobePatterns (n : Nat) : List Nat := Hdl.upto (Nat.pow 2 n) 0
+
+def maskedAll (dw : Nat) (ds : List Nat) : Bool :=
+  let nb := Nat.div dw 8;
+  let d0 := Nat.sub (Nat.pow 2 dw) 1;
+  allTrue (Hdl.map (fun (strb : Nat) =>
+    allTrue (Hdl.map (fun (d1 : Nat) =>
+      Bool.and (maskedRead dw 7 d0 d1 strb) (maskedRead dw 0 d0 d1 strb)) ds))
+    (strobePatterns nb))
+
+-- no alias: a write to word a leaves word b (b ≠ a) at zero
+def noAlias (dw : Nat) : Bool :=
+  let d := Nat.sub (Nat.pow 2 dw) 1;
+  Bool.and
+    (Nat.beq (firstRead dw (List.append (chunkW dw 3 d (Nat.sub (Nat.pow 2 (Nat.div dw 8)) 1))
+      (chunkR dw 4))) 0)
+    (Nat.beq (firstRead dw (List.append (chunkW dw 5 d (Nat.sub (Nat.pow 2 (Nat.div dw 8)) 1))
+      (chunkR dw 5))) d)
+
+-- no bypass: the write's own answer is `ready` with `rvalid` low and the old word; the
+-- write becomes visible only to the next transaction.
+def writeAnswerRvalid (dw : Nat) : Nat :=
+  let xs := chunkW dw 2 4242 (Nat.sub (Nat.pow 2 (Nat.div dw 8)) 1);
+  let ys := Circuit.run (Bus.ramWC 0 8 6 dw) xs;
+  match ys with
+  | .nil => 9
+  | .cons _ ys => match ys with
+    | .nil => 9
+    | .cons _ ys => match ys with
+      | .nil => 9
+      | .cons p _ => BitVec.toNat (Bus.Resp.unpack dw p).rvalid
+
+def writeAnswerData (dw : Nat) : Nat :=
+  let xs := chunkW dw 2 4242 (Nat.sub (Nat.pow 2 (Nat.div dw 8)) 1);
+  let ys := Circuit.run (Bus.ramWC 0 8 6 dw) xs;
+  match ys with
+  | .nil => 9
+  | .cons _ ys => match ys with
+    | .nil => 9
+    | .cons _ ys => match ys with
+      | .nil => 9
+      | .cons p _ => BitVec.toNat (Bus.Resp.unpack dw p).rdata
+
+def firstRead16 (xs : List (HwTy.El (Bus.ReqW.code 10 16))) : Nat :=
+  match reads 16 (Circuit.run (Bus.ramWC 2 10 6 16) xs) with
+  | .nil => 0
+  | .cons x _ => x
+
+-- byte addressing: `shift = 2`, word `a` is the bytes 4a … 4a+3
+def byteAddrOk : Bool :=
+  let xs := List.append (chunk 10 16 1 1 13 4660 3) (chunk 10 16 1 0 15 0 0);
+  Nat.beq (firstRead16 xs) 4660
+
+-- the wait timeline, on closed values (the kernel-checked lemmas in `Hdl.BusLaw`)
+def q1 : Bus.ReqW 8 8 HwTy.El := Bus.Law.reqW1
+def q0 : Bus.ReqW 8 8 HwTy.El := Bus.noReqW
+def s0 : Bus.Ram 6 8 HwTy.El := Bus.Law.ramW0 6 8
+def s1 : Bus.Ram 6 8 HwTy.El := Bus.Law.ramW1 6 8
+
+def waitNat (w : BitVec 2) : Nat := BitVec.toNat w
+
+def goNat (b : BitVec 1) : Nat := BitVec.toNat b
+
+def timeline : List Nat :=
+  .cons (goNat (Bus.ramWGo s0 q1))
+  (.cons (goNat (Bus.ramWGo (Bus.ramWNext 0 s0 q1) q1))
+  (.cons (goNat (Bus.ramWGo (Bus.ramWNext 0 (Bus.ramWNext 0 s0 q1) q1) q1))
+  (.cons (waitNat (Bus.ramWNext 0 s0 q1).wait)
+  (.cons (waitNat (Bus.ramWNext 0 (Bus.ramWNext 0 s0 q1) q1).wait)
+  (.cons (waitNat (Bus.ramWNext 0 (Bus.ramWNext 0 (Bus.ramWNext 0 s0 q1) q1) q1).wait)
+  (.cons (waitNat (Bus.ramWNext 0 s1 q0).wait) .nil))))))
+
+-- running the same trace at values and through the circuit
+def allAgree : Bool :=
+  let xs := List.append (chunkW 16 1 43690 3) (List.append (chunkW 16 1 21845 1)
+    (List.append (chunkR 16 1) (chunkR 16 2)));
+  Bool.and (agree (Bus.ramWC 0 8 6 16) xs)
+    (Bool.and (agree (Bus.ramWC 0 8 6 8)
+      (List.append (chunkW 8 4 170 1) (chunkR 8 4)))
+      (agree (Bus.ramWC 0 8 6 32)
+        (List.append (chunkW 32 3 2863311530 9) (chunkR 32 3))))
+
+def main : IO Unit := do
+  IO.println ("wait timeline " <+> shows timeline);
+  IO.println ("masked read-after-write 8/16/32: "
+    <+> yes (maskedAll 8 (.cons 90 (.cons 165 .nil)))
+    <+> " " <+> yes (maskedAll 16 (.cons 21845 (.cons 43690 (.cons 129 .nil))))
+    <+> " " <+> yes (maskedAll 32 (.cons 1431655765 (.cons 2863311530 (.cons 305419896 .nil)))));
+  IO.println ("no alias 8/16/32: " <+> yes (noAlias 8) <+> " " <+> yes (noAlias 16)
+    <+> " " <+> yes (noAlias 32));
+  IO.println ("write answer rvalid " <+> Hdl.show (writeAnswerRvalid 16)
+    <+> ", data " <+> Hdl.show (writeAnswerData 16)
+    <+> " (no bypass; the write is visible to the next read)");
+  IO.println ("byte addressing shift=2 " <+> yes byteAddrOk);
+  IO.println ("value = simulate = simFast " <+> yes allAgree);
+  IO.println ("well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "ramwc" (Bus.ramWC 0 8 6 16))))

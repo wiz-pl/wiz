@@ -1,0 +1,133 @@
+import Scry.QuireStorage
+import Cursor
+/-!
+# Storage cursors: table scans, index scans, index-only scans, pushdown
+
+The same `Cursor` type for a table scan and an index scan; `Cursor.follow` turns an
+index cursor (primary keys) into a node cursor. The snapshot is ω (copyable); only the
+cursor is linear, so a query does not make the transaction linear.
+
+Three shapes, one type:
+
+* a table scan is `Cursor Node` and fetches every primary node;
+* an index scan is `Cursor U64` over the index entries (keys and primary ids, no node
+  fetch), and `Cursor.follow` is the composite optic that follows each key to its node;
+* an index-only scan is the same `Cursor U64` with the projection in the plan and no
+  `follow`: the plan records `indexOnly = true` and never calls `Snapshot.fetch`, so
+  its `Cost.nodes` is zero.
+
+`Cursor.filterKey`/`Cursor.filterOnNode` are the pushdown entry points: a `KeyPred` on
+the source's indexed field tightens the plan's `KeyRange` (equality or an inclusive
+range over the ordered index) and rebuilds the entry list; an opaque predicate, a
+different field, or the table remains a post-filter. The results of the pushed-down and
+the unfiltered-then-filtered paths are identical; the tests check that and the read
+counts.
+
+The plan is list-backed here (slice 1). The production plan streams index/primary leaf
+pages; the API does not change.
+-/
+
+-- ## Entries from the store
+
+/-- The index keys in `kr`, in increasing order (the index is ordered, so a range is a
+contiguous slice of `U64Map.keys`). -/
+def Root.indexKeysInRange (r : Root) (ix : U64) (kr : KeyRange) : List U64 :=
+  List.filter (fun v => KeyRange.contains kr v) (U64Map.keys (Root.indexOf r ix))
+
+/-- The index entries in `kr`: `(key, primary id)` pairs. This reads no primary node;
+the ids are the index's payload. -/
+def Snapshot.indexEntries (d : IndexDef) (kr : KeyRange) (s : Snapshot) : List Entry :=
+  List.flatMap (Root.indexKeysInRange s.root (IndexDef.uid d) kr)
+    (fun v => List.map (fun id => Entry.mk v id)
+      (Root.lookupIndex s.root (IndexDef.uid d) v))
+
+/-- The pushdown hook of one index scan: rebuild the entry list for a new range. It
+captures the snapshot and the index definition, so the plan only carries the range. -/
+def Snapshot.rerangeOf (d : IndexDef) (s : Snapshot) (kr : KeyRange) : Rerange :=
+  Rerange.mk d.field kr (fun kr' => Snapshot.indexEntries d kr' s)
+
+/-- The index-only scan's type: a `Cursor` over the projection, with the plan recording
+that no primary node is needed. It is the same `Cursor` type, not a special case; the
+name is here so a signature can say what it means. -/
+def IndexOnly (a : Type) : Type := Cursor a
+
+-- ## Table scan
+
+/-- Every primary key as an entry (no node fetched yet). -/
+def Snapshot.tableEntries (s : Snapshot) : List Entry :=
+  List.map (fun id => Entry.mk id id) (Snapshot.nodeIds s)
+
+/-- A table scan: every node, fetched through the counted read path. -/
+def Snapshot.tableCursor (s : Snapshot) : Cursor Node :=
+  Cursor.fromEntries Source.table (Snapshot.tableEntries s)
+    (fun _ n => n) (Snapshot.fetch s) .true .false Projection.node Option.none
+
+-- ## Index scans (primary keys, then the composite)
+
+/-- An index scan over `kr` yielding the **primary keys** in the index entries (the
+prototype's `Cursor U64` for an index scan). No primary node is fetched; `indexOnly` is
+true because the projection is a field of the index entry. -/
+def Snapshot.indexCursorRange (d : IndexDef) (kr : KeyRange) (s : Snapshot) : Cursor U64 :=
+  Cursor.fromEntries (Source.index d.field d.unique)
+    (Snapshot.indexEntries d kr s)
+    (fun e _ => Option.some e.id)
+    (Snapshot.fetch s)
+    .false .true Projection.id
+    (Option.some (Snapshot.rerangeOf d s kr))
+
+/-- An index-only scan over `kr` yielding the **indexed field** (the index key). This
+is the projection the brief means by an index-only scan: the entry carries the value,
+so the primary node is never touched. -/
+def Snapshot.indexOnlyRange (d : IndexDef) (kr : KeyRange) (s : Snapshot) : IndexOnly U64 :=
+  Cursor.fromEntries (Source.index d.field d.unique)
+    (Snapshot.indexEntries d kr s)
+    (fun e _ => Option.some e.key)
+    (Snapshot.fetch s)
+    .false .true Projection.key
+    (Option.some (Snapshot.rerangeOf d s kr))
+
+/-- An index scan for one key (equality range). -/
+def Snapshot.indexCursor (d : IndexDef) (v : U64) (s : Snapshot) : Cursor U64 :=
+  Snapshot.indexCursorRange d (KeyRange.eq v) s
+
+/-- The composite: follow each primary key to its node (the index→table optic). A key
+the primary map does not have is skipped: the index is derived, so under repair it can
+lag, and the primary map is the source of truth. -/
+def Cursor.follow (s : Snapshot) (1 c : Cursor U64) : Cursor Node :=
+  Cursor.followKeys (Snapshot.fetch s) (fun _ n => n) c
+
+/-- An index scan whose elements are nodes. -/
+def Snapshot.indexNodesRange (d : IndexDef) (kr : KeyRange) (s : Snapshot) : Cursor Node :=
+  Cursor.follow s (Snapshot.indexCursorRange d kr s)
+
+/-- Every entry of an index, followed to its node. The unfiltered path that a pushed
+predicate is compared against. -/
+def Snapshot.indexNodesAll (d : IndexDef) (s : Snapshot) : Cursor Node :=
+  Snapshot.indexNodesRange d KeyRange.all s
+
+/-- An index scan whose elements are nodes, for one key. -/
+def Snapshot.indexNodes (d : IndexDef) (v : U64) (s : Snapshot) : Cursor Node :=
+  Snapshot.indexNodesRange d (KeyRange.eq v) s
+
+-- ## Pushdown
+
+/-- Push an inspectable predicate into an index-only plan (the key *is* the indexed
+field); a literal plan keeps it as a post-filter. -/
+def Cursor.filterKey (pred : KeyPred) (1 c : Cursor U64) : Cursor U64 :=
+  Cursor.pushKeyAny pred (fun k => KeyPred.test pred k) .false c
+
+/-- Push a predicate on `d.field` into a followed index scan: the range tightens and the
+node is fetched only for the surviving entries. On any other source it is a node
+post-filter. -/
+def Cursor.filterOnNode (d : IndexDef) (pred : KeyPred)
+    (1 c : Cursor Node) : Cursor Node :=
+  Cursor.pushKey d.field pred
+    (fun n => KeyPred.test pred (Node.field n d.field.toNat)) .true c
+
+/-- An index-only query with a pushed predicate: the plan has the range, no node read. -/
+def Snapshot.indexOnlyWhere (d : IndexDef) (pred : KeyPred) (s : Snapshot) : IndexOnly U64 :=
+  Cursor.filterKey pred (Snapshot.indexOnlyRange d KeyRange.all s)
+
+/-- An index→primary query with a pushed predicate. -/
+def Snapshot.indexNodesWhere (d : IndexDef) (pred : KeyPred) (s : Snapshot) : Cursor Node :=
+  Cursor.filterOnNode d pred (Snapshot.indexNodesAll d s)

@@ -1,14 +1,24 @@
 import FeralCore
 import Feral
--- Returning a mutable borrow. Hand-lowered: drafts/feral/lowered/03_get_mut.wiz (which also
--- has the generated lens laws and the proof of the spec below; the front end does not
--- emit specs yet).
+-- Returning a mutable borrow. The front end emits `get_mut.Spec` from the `spec` item
+-- below; hand-lowered: drafts/feral/lowered/03_get_mut.wiz (which also has the generated
+-- lens laws and the proof of the same spec over the place).
+
+-- the model's `set` (the spec's `final(v) = old(v).set i final(result)`)
+def List.set {A : Type} : Nat → List A → A → List A
+  | _, .nil, _ => .nil
+  | .zero, .cons _ xs, y => .cons y xs
+  | .succ i, .cons x xs, y => .cons x (List.set i xs y)
 
 feral
   fn get_mut {'a} (v : &'a mut Vec U64) (i : USize) : &'a mut U64
-    -- ensures *result = old(v)[i]                      -- wishful: spec-clauses
-    -- ensures final(v) = old(v).set i final(result)    -- wishful: final-specs
   := &mut v[i]                                       -- a place expression: a lawful partial lens
+
+  -- `result` is the borrow's value; `final(result)` is the fresh `fin` the spec
+  -- quantifies, and `final(v)` is the lender's value when the borrow ends.
+  spec get_mut
+    ensures (Vec.index old(v) i = Result.ok result)
+    ensures ((final(v)).items = List.set i.val (old(v)).items final(result))
 
   fn bump (v : &mut Vec U64) : Unit := {
     *get_mut (&mut v) 1 += 10

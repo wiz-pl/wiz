@@ -1,5 +1,6 @@
 import Word
 import Text
+import Data.PMap
 import Logic
 /-!
 # WordMap
@@ -9,12 +10,12 @@ Maps from 64-bit words (`import WordMap`): `U64Map V`, a functional finite map w
 types, typed ids (`NodeId k`, 22e) and interned strings (lib/Intern.wiz) go through
 `U64` (`UIntN.resize`, or the id's bits).
 
-The model. A map is its entries, `mk (entries : List (U64 × V))`, with the keys
-strictly increasing: the module keeps that invariant (the constructor is private and
-every operation here preserves it), so each map has exactly one model, and `toList`
-and `foldl` see the entries by increasing key, in the kernel, the interpreters and
-compiled code alike. The kernel computes with the definitions and proofs see them
-(the laws at the end).
+The model. A map is the persistent map `mk (entries : PMap U64 V)` (lib/Data/PMap.wiz):
+`insert`, `find`, `erase` and `size` are the tree's, so they are O(log n) in the kernel,
+under `#eval` and under `#run`, and `toList` sees the entries by increasing key. The
+curried list helpers `insertL`/`eraseL`/`findL` at the top of the file are kept as the
+plain sorted-list baseline (`examples/persistent-bench.wiz`'s `list` mode); the map does
+not use them.
 
 Compiled code runs natives instead (`runtime/`, `wiz_wmap_*`): an open-addressing
 hash table of `uint64_t` keys and Wiz values (linear probing, deletion by backward
@@ -50,36 +51,41 @@ def U64Map.findL {V : Type} (k : U64) : List (U64 × V) → Option V
 -- ## U64Map
 
 sealed inductive U64Map (V : Type) where
-  | private mk (entries : List (U64 × V))
+  | private mk (entries : PMap U64 V)
 
+-- the persistent map behind a map
+private def U64Map.entries {V : Type} : U64Map V → PMap U64 V
+  | .mk m => m
 -- the entries, by increasing key
-def U64Map.toList {V : Type} : U64Map V → List (U64 × V)
-  | .mk l => l
-def U64Map.empty {V : Type} : U64Map V := .mk .nil
+def U64Map.toList {V : Type} (m : U64Map V) : List (U64 × V) := PMap.toList m.entries
+def U64Map.empty {V : Type} : U64Map V := .mk PMap.empty
 -- `k` mapped to `v` (replacing `k`'s value, if any)
-def U64Map.insert {V : Type} (m : U64Map V) (k : U64) (v : V) : U64Map V := .mk (U64Map.insertL k v m.toList)
+def U64Map.insert {V : Type} (m : U64Map V) (k : U64) (v : V) : U64Map V :=
+  .mk (PMap.insert m.entries k v)
 -- without `k`
-def U64Map.erase {V : Type} (m : U64Map V) (k : U64) : U64Map V := .mk (U64Map.eraseL k m.toList)
-def U64Map.find {V : Type} (m : U64Map V) (k : U64) : Option V := U64Map.findL k m.toList
+def U64Map.erase {V : Type} (m : U64Map V) (k : U64) : U64Map V :=
+  .mk (PMap.erase m.entries k)
+def U64Map.find {V : Type} (m : U64Map V) (k : U64) : Option V := PMap.find m.entries k
 -- `k`'s value, or `d`
-def U64Map.findD {V : Type} (m : U64Map V) (k : U64) (d : V) : V := match U64Map.find m k with
-  | .none => d
-  | .some v => v
-def U64Map.contains {V : Type} (m : U64Map V) (k : U64) : Bool := match U64Map.find m k with
+def U64Map.findD {V : Type} (m : U64Map V) (k : U64) (d : V) : V :=
+  PMap.findD m.entries k d
+def U64Map.contains {V : Type} (m : U64Map V) (k : U64) : Bool :=
+  match U64Map.find m k with
   | .none => .false
   | .some _ => .true
-def U64Map.size {V : Type} (m : U64Map V) : Nat := List.length m.toList
+def U64Map.size {V : Type} (m : U64Map V) : Nat := PMap.size m.entries
 -- (Wiz functions over the operations above, so natives too when compiled)
-def U64Map.ofList {V : Type} (l : List (U64 × V)) : U64Map V :=
-  List.foldl (fun m e => U64Map.insert m e.1 e.2) U64Map.empty l
+def U64Map.ofList {V : Type} (l : List (U64 × V)) : U64Map V := .mk (PMap.fromList l)
 -- `f (… (f b k₀ v₀) …) kₙ vₙ`, by increasing key
 def U64Map.foldl {V B : Type} (f : B → U64 → V → B) (b : B) (m : U64Map V) : B :=
-  List.foldl (fun acc e => f acc e.1 e.2) b m.toList
-def U64Map.keys {V : Type} (m : U64Map V) : List U64 := List.map (fun e => e.1) m.toList
+  List.foldl (fun acc e => f acc e.1 e.2) b (U64Map.toList m)
+def U64Map.keys {V : Type} (m : U64Map V) : List U64 :=
+  List.map (fun e => e.1) (U64Map.toList m)
 
 extern "wiz_wmap_of_list" U64Map.ofListNative : {V : Type} → List (U64 × V) → U64Map V
 extern "wiz_wmap_to_list" U64Map.toListNative : {V : Type} → U64Map V → List (U64 × V)
-attribute [implemented_by U64Map.ofListNative U64Map.toListNative] U64Map.mk
+attribute [implemented_by U64Map.ofListNative] U64Map.ofList
+attribute [implemented_by U64Map.toListNative] U64Map.toList
 extern "wiz_wmap_empty" U64Map.emptyNative : {V : Type} → U64Map V
 extern "wiz_wmap_insert" U64Map.insertNative : {V : Type} → U64Map V → U64 → V → U64Map V
 extern "wiz_wmap_erase" U64Map.eraseNative : {V : Type} → U64Map V → U64 → U64Map V
@@ -93,9 +99,10 @@ attribute [implemented_by U64Map.findNative] U64Map.find
 attribute [implemented_by U64Map.findDNative] U64Map.findD
 attribute [implemented_by U64Map.sizeNative] U64Map.size
 
--- ## Laws (on the model; the natives are trusted to keep them). `find` after `erase`
--- and `insert` at another key also hold, given the module invariant (sorted keys); they
--- are tested, not proved, here.
+-- ## Laws (on the model; the natives are trusted to keep them). `find` after `insert`
+-- and `erase` (and `size_insert`) hold for the map because its model is `PMap`'s tree;
+-- like `PMap`'s own `find_insert`, they are checked by `examples/persistent.wiz` rather
+-- than proved here. The list helpers keep their own laws.
 
 def U64Map.natBeqSelf : (n : Nat) → Nat.beq n n = .true
   | .zero => rfl
@@ -142,6 +149,4 @@ def U64Map.findL_insertL {V : Type} (k : U64) (v : V) : (l : List (U64 × V)) �
             | .false => List.cons e (U64Map.insertL k v rest)) = .some v)
           (Eq.trans (U64Map.findL_skip k e (U64Map.insertL k v rest) hb) (U64Map.findL_insertL k v rest)) (Eq.symm hb))
         (Eq.symm hl)))
-def U64Map.find_insert {V : Type} (m : U64Map V) (k : U64) (v : V) : U64Map.find (U64Map.insert m k v) k = .some v :=
-  U64Map.findL_insertL k v m.toList
 def U64Map.find_empty {V : Type} (k : U64) : U64Map.find (U64Map.empty : U64Map V) k = .none := rfl

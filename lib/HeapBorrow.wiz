@@ -1,5 +1,5 @@
 import HoareTactics
-import Optic
+import Data.Result
 /-!
 # HeapBorrow
 

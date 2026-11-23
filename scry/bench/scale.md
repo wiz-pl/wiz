@@ -280,7 +280,7 @@ and origins < 0.1 s.
 Restacked onto `ba1834a7`, #438's bounds rules read `rd`/`dom` from the plan's
 `Scry.FnInfo`, which the linearised engine builds flow-only (both empty), so they found
 nothing (`tests/oob.wiz` failed). `Scry.boundsReaching` now answers reaching definitions
-from the def-use index (every query is at a use), and `Scry.boundsOfFunc` computes a
+from the def-use index (every query is at a use), and `Scry.boundsOfUnitWith` computes a
 function's dominators only when it has a candidate finding (guards only remove findings).
 
 Output changes against the base (`agent/scry-scale-lower` `ba1834a7`: master `5522efd4`
@@ -312,3 +312,21 @@ said 12 boundary and 2 memory warnings, 2 points-to rounds); the CLI on this bra
 8 063, 36 and 3 (the lowering's 8 062 boundary warnings already appear on
 `agent/scry-scale-lower` and on `a0938b97`), and the expected line says so; the pending
 heavy `grail test scale` run confirms it.
+
+## 2026-11-19: the span index re-measured on the train
+
+PR #463 was freshened onto `integration/train7`. Its analysis fix had already landed from
+`agent/scry-scale` (`eeb1b172`), so this isolates the span index on the current tree: the
+same binary built with `Cst.ofPreprocessed` calling `Scry.mapSpan` ("before") and with the
+committed `Scry.mapSpanAt` ("after"). One `heavy` job on one node,
+`scripts/perf-scale.sh -n 1 --timeout 300`; **informational**, not a `perf-run` window.
+
+| input | nodes | functions | lower before | lower after | total before | total after | peak |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `native/tree-sitter-c/src/parser.c` | 1 110 871 | 2 | 60.68 s | 1.94 s | 66.72 s | 7.99 s | 1.08 GiB |
+| `native/tree-sitter/lib/src/parser.c` | 17 163 | 51 | 1.65 s | 0.08 s | 1.95 s | 0.39 s | 64 MiB |
+| `native/tree-sitter/lib/src/query.c` | 34 450 | 113 | 4.05 s | 0.14 s | 4.36 s | 0.46 s | 75 MiB |
+
+The lowering half is 31x / 20x / 29x. The original >300 s / 142.6 s figures were the span
+mapping *and* the per-point analysis together; the analysis half is `eeb1b172`, already in
+the train, so the table above is the span index's own contribution.

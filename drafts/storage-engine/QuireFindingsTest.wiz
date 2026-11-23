@@ -1,0 +1,77 @@
+import Sys
+import Text
+import Scry.QuireFindings
+import Scry.ProjectCache
+/-!
+# The findings index on both backends, without the project driver
+
+`Scry.ProjectIO`'s `--taint` path needs the native shim and, in a worktree without the
+vendored tree-sitter C# sources, cannot build (`Scry.NativeLink`). This program exercises
+the index half directly: the same rows through `Scry.cacheFindings` with the JSON and
+Quire backends, the severity query, duplicate-id collapse, and the corrupt/truncated
+Quire cases that must be clean misses.
+
+```
+wiz run -I scry/src -I scry/gen drafts/storage-engine/QuireFindingsTest.wiz
+```
+-/
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def rowsOf : List Scry.FindingsIndexRow :=
+  [ Scry.FindingsIndexRow.make "rule/a" 0 "io.c" 12 "run" "message one"
+  , Scry.FindingsIndexRow.make "rule/b" 1 "util.c" 7 "helper" "message two"
+  , Scry.FindingsIndexRow.make "rule/a" 0 "io.c" 13 "run" "message three" ]
+
+def sameKeys (a b : List Scry.FindingKey) : Bool :=
+  Bool.and (Nat.beq (List.length a) (List.length b))
+    (UIntN.beq (Scry.fiPrint a) (Scry.fiPrint b))
+
+def main : IO Unit := EIO.toIO (do
+  tmp ← FS.createTempDir;
+  let id := "probe";
+  let json : Scry.CacheOpts := Scry.CacheOpts.mk .true tmp .json;
+  let quire : Scry.CacheOpts := Scry.CacheOpts.mk .true tmp .quire;
+  j1 ← Scry.cacheFindings json id rowsOf;
+  check "json cold" (String.eq j1.reason "cold");
+  j2 ← Scry.cacheFindings json id rowsOf;
+  check "json hit" (String.eq j2.reason "hit");
+  q1 ← Scry.cacheFindings quire id rowsOf;
+  check "quire cold" (String.eq q1.reason "cold");
+  q2 ← Scry.cacheFindings quire id rowsOf;
+  check "quire hit" (String.eq q2.reason "hit");
+  jl ← Scry.findingsLoad json id;
+  ql ← Scry.findingsLoad quire id;
+  check "the same findings" (match jl, ql with
+    | .ok a, .ok b => sameKeys a b
+    | _, _ => Bool.false);
+  qc0 ← Scry.findingsQuery quire id 0;
+  check "quire severity 0 has two" (match qc0 with
+    | .ok n => Nat.beq n 2 | .error _ => Bool.false);
+  qc1 ← Scry.findingsQuery quire id 1;
+  check "quire severity 1 has one" (match qc1 with
+    | .ok n => Nat.beq n 1 | .error _ => Bool.false);
+  jc0 ← Scry.findingsQuery json id 0;
+  check "json severity 0 has two" (match jc0 with
+    | .ok n => Nat.beq n 2 | .error _ => Bool.false);
+  -- a duplicate identity is one index row (the report still lists both findings)
+  let dup := List.append rowsOf [Scry.FindingsIndexRow.make "rule/a" 0 "io.c" 12 "run"
+    "message one"];
+  jd ← Scry.cacheFindings json "dup" dup;
+  check "duplicate ids collapse" (Nat.beq jd.rows 3);
+  let qpath := Scry.findingsCachePath quire id;
+  FS.writeFile qpath "not a quire image\n";
+  q3 ← Scry.cacheFindings quire id rowsOf;
+  check "corrupt quire is a miss" (String.eq q3.reason "corrupt");
+  q4 ← Scry.cacheFindings quire id rowsOf;
+  check "hit after repair" (String.eq q4.reason "hit");
+  qb ← FS.readBytes qpath;
+  FS.writeBytes qpath (Bytes.slice qb 0 100);
+  q5 ← Scry.cacheFindings quire id rowsOf;
+  check "truncated quire is a miss" (String.eq q5.reason "corrupt");
+  FS.removeAll tmp;
+  EIO.lift (IO.println "quire-findings: all checks passed"))

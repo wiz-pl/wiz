@@ -1,0 +1,14 @@
+registered checks cover the three shipped names: ok
+no row is unreachable: ok
+a shadowed row is reported unreachable: ok
+the oob pack has no unknown check: ok
+the uaf pack has no unknown check: ok
+a typo check is unknown: ok
+the shipped oob.scry has no unknown check: ok
+the shipped uaf.scry has no unknown check: ok
+selection: oob picks the bounds row only: ok
+selection: uaf picks the lifetime row only: ok
+selection: both rules pick both rows, lifetime first: ok
+the table implements a row's check and no row for a typo: ok
+a new row in a local registry runs (one-place addition): ok
+the CLI refuses an unknown check: ok

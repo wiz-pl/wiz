@@ -1,0 +1,308 @@
+import Sys
+import Word
+import Text
+import MVar
+import Scry.QuireStorage
+import Scry.QuireDurable
+import Scry.QuireRegistry
+import Scry.QuireCompact
+/-!
+# The persisted retention registry (format v2), end to end
+
+`wiz run -I drafts/storage-engine drafts/storage-engine/RegistryTest.wiz`. The registry
+page is what makes `K > 2` survive a restart; this file checks the promises the format
+makes:
+
+* `K = 5` survives a close/reopen, and the reopened store uses the **persisted** `K`
+  (the opener asks for 1 and still gets 5 roots);
+* a retained root is still readable through the durable loader after the reopen (and a
+  commit from it still validates);
+* a commit from a base below the persisted horizon is `expired` after the reopen;
+* compaction writes a new registry, remaps the retained roots, and keeps all five;
+* a corrupt registry page falls back to the slot's bare root, and the store still opens
+  and commits;
+* the registry validators reject duplicate generations and duplicate nonzero roots;
+* a slot with another format version is refused with a clear error (format v2 only).
+
+Leases are process-local: `pins` is in the page layout but always written as 0 and reset
+to 0 on read, so an abandoned lease cannot leak across a restart. `K` is the only policy
+value persisted.
+-/
+
+-- ## Assertions with a count
+
+def expect (r : Nat) (what : String) (b : Bool) : EIO Nat :=
+  match b with
+  | .true => EIO.pure (Nat.succ r)
+  | .false => EIO.fail (String.append "check failed: " what)
+
+def succeeded (o : Outcome) : Bool :=
+  match o with
+  | .committed _ => .true
+  | .rejected _ => .false
+
+def isExpired (o : Outcome) : Bool :=
+  match o with
+  | .rejected (.expired _ _) => .true
+  | _ => .false
+
+-- ## Small list helpers
+
+/-- The generations of a registry, newest first. -/
+def gens : List RootRef → List Nat
+  | .nil => []
+  | .cons e es => List.cons e.gen.toNat (gens es)
+
+/-- Two registries name the same generations in the same order. -/
+def sameGens (a b : List RootRef) : Bool :=
+  match a, b with
+  | .nil, .nil => .true
+  | .cons x xs, .cons y ys => Bool.and (UIntN.beq x.gen y.gen) (sameGens xs ys)
+  | _, _ => .false
+
+/-- Find a retained root by generation (as in `CompactTest.wiz`). -/
+def findRef (refs : List RootRef) (gen : Nat) : Option RootRef :=
+  List.find (fun e => UIntN.beq e.gen (U64.ofNat gen)) refs
+
+/-- The node count of a snapshot, for the content checks. -/
+def snapCount (s : Snapshot) (id : U64) : Nat :=
+  match Snapshot.getNode s id with
+  | .none => 0
+  | .some n => n.count.toNat
+
+/-- `n` single `+1` commits, each from the current snapshot. -/
+def bumpTimes (h : DurableHandle) : Nat → Nat → EIO Nat
+  | .zero, r => EIO.pure r
+  | .succ k, r => do
+    s ← getDb h;
+    o ← putDb h (bumpCount (U64.ofNat 1) s);
+    r' ← expect r "a +1 commit" (succeeded o);
+    bumpTimes h k r'
+
+-- ## Reading a retained root, and using it as a base
+
+/-- Every retained root's chain still loads (two records: the seed nodes). -/
+def checkRootsLoad (fd : Fd) (pageCount : U64) : List RootRef → Nat → EIO Nat
+  | .nil, r => EIO.pure r
+  | .cons e es, r => do
+    recs ← readRef fd e pageCount;
+    r' ← expect r "a retained root's pages still load"
+      (match recs with
+        | .none => .false
+        | .some rs => Nat.beq (List.length rs) 2);
+    checkRootsLoad fd pageCount es r'
+
+/-- A `Snapshot` from a retained `RootRef`, using the same durable loader. -/
+def snapshotOfRef (fd : Fd) (r : RootRef) (pageCount : U64)
+    (indices : List IndexDef) : EIO (Option Snapshot) := do
+  recs ← readRef fd r pageCount;
+  match recs with
+  | .none => EIO.pure .none
+  | .some rs =>
+    let m := Meta.mk r.gen r.root (U64.ofNat 0) (U64.ofNat 0) (U64.ofNat 0)
+      r.delEpoch (U64.ofNat 0) (U64.ofNat 0) pageCount;
+    EIO.pure (.some (Db.snapshot (dbOf m rs indices)))
+
+-- ## K across a restart, a retained root, an expired base
+
+def retainedTest (dir : String) (r0 : Nat) : EIO Nat := do
+  let path := Path.join dir "retain-k5.db";
+  let indices := [kindIndex, uniqueLabel];
+  h ← openDbWith path indices 5;
+  s0 ← getDb h;
+  oSeed ← putDb h (seedNodes s0);
+  r1 ← expect r0 "seed commits" (succeeded oSeed);
+  sSeed ← getDb h;
+  r2 ← expect r1 "the seed is generation 1" (Nat.beq sSeed.gen.toNat 1);
+  r3 ← bumpTimes h 8 r2;
+  before ← getDb h;
+  r4 ← expect r3 "eight +1 commits leave generation 9" (Nat.beq before.gen.toNat 9);
+  roots0 ← retainedRoots h;
+  r5 ← expect r4 "K = 5 keeps five roots in process" (Nat.beq (List.length roots0) 5);
+  -- Compaction carries the registry: same five generations, new root pages.
+  c ← compactStore h;
+  after ← getDb h;
+  roots1 ← retainedRoots h;
+  r6 ← expect r5 "compaction keeps the generation" (Nat.beq after.gen.toNat 9);
+  r7 ← expect r6 "compaction keeps five retained roots" (Nat.beq (List.length roots1) 5);
+  r8 ← expect r7 "compaction keeps the same generations" (sameGens roots0 roots1);
+  r9 ← expect r8 "the compacted image has a registry page" (Nat.lt 0 c.after.registryPages);
+  st ← EIO.lift (MVar.read h.state);
+  r10 ← checkRootsLoad st.fd st.pageCount roots1 r9;
+  closeDb h;
+  -- Reopen asking for K = 1: the persisted K = 5 must win.
+  h2 ← openDbWith path indices 1;
+  s2 ← getDb h2;
+  roots2 ← retainedRoots h2;
+  r11 ← expect r10 "a reopen reads the compacted image" (Nat.beq s2.gen.toNat 9);
+  r12 ← expect r11 "the persisted K = 5 survives the restart" (Nat.beq (List.length roots2) 5);
+  r13 ← expect r12 "and the same generations are retained" (sameGens roots1 roots2);
+  -- A retained (not newest) root still loads after the reopen.
+  st2 ← EIO.lift (MVar.read h2.state);
+  match findRef roots2 5 with
+  | .none => EIO.fail "the oldest retained root (generation 5) is missing"
+  | .some ref5 => do
+    recs ← readRef st2.fd ref5 st2.pageCount;
+    r14 ← expect r13 "the oldest retained root still reads after reopen"
+      (match recs with
+        | .none => .false
+        | .some rs => Nat.beq (List.length rs) 2);
+    -- A base below the persisted horizon is expired.
+    oOld ← putDb h2 (bumpCount (U64.ofNat 1) sSeed);
+    r15 ← expect r14 "a commit from an expired base is rejected after reopen" (isExpired oOld);
+    -- The retained generation-5 root is still an admissible base.
+    sb ← snapshotOfRef st2.fd ref5 st2.pageCount indices;
+    match sb with
+    | .none => EIO.fail "could not build a snapshot from the retained root"
+    | .some base5 => do
+      oBase ← putDb h2 (bumpCount (U64.ofNat 1) base5);
+      r16 ← expect r15 "a commit from a retained root succeeds after reopen" (succeeded oBase);
+      s3 ← getDb h2;
+      r17 ← expect r16 "that commit is generation 10" (Nat.beq s3.gen.toNat 10);
+      closeDb h2;
+      h3 ← openDbWith path indices 5;
+      s4 ← getDb h3;
+      r18 ← expect r17 "the post-reopen commit is durable" (Nat.beq s4.gen.toNat 10);
+      expect r18 "and its value landed" (Nat.beq (snapCount s4 1) 9)
+
+-- ## A lease is process-local: closing with it held does not pin forever
+
+def leaseTest (dir : String) (r0 : Nat) : EIO Nat := do
+  let path := Path.join dir "lease-process.db";
+  let indices := [kindIndex, uniqueLabel];
+  h ← openDbWith path indices 1;
+  s0 ← getDb h;
+  oSeed ← putDb h (seedNodes s0);
+  r1 ← expect r0 "lease: seed commits" (succeeded oSeed);
+  s1 ← getDb h;
+  held ← leaseRoot h s1.gen;
+  r2 ← expect r1 "lease: generation 1 is leased" held;
+  r3 ← bumpTimes h 3 r2;
+  roots0 ← retainedRoots h;
+  r4 ← expect r3 "lease: the in-process lease keeps the old root under K = 1"
+    (Nat.beq (List.length roots0) 2);
+  -- Close while the lease is still held: the registry page was written with pins = 0.
+  closeDb h;
+  h2 ← openDbWith path indices 1;
+  roots1 ← retainedRoots h2;
+  r5 ← expect r4 "the abandoned lease does not survive the restart"
+    (Nat.beq (List.length roots1) 1);
+  r6 ← expect r5 "the newest root is the only one retained"
+    (match findRef roots1 4 with | .none => .false | .some _ => .true);
+  oOld ← putDb h2 (bumpCount (U64.ofNat 1) s1);
+  r7 ← expect r6 "a commit from the dropped leased base is expired" (isExpired oOld);
+  sNow ← getDb h2;
+  oNow ← putDb h2 (bumpCount (U64.ofNat 1) sNow);
+  r8 ← expect r7 "a commit from the current base still works" (succeeded oNow);
+  closeDb h2;
+  EIO.pure r8
+
+-- ## A corrupt registry falls back to the slot's bare root
+
+def corruptTest (dir : String) (r0 : Nat) : EIO Nat := do
+  let path := Path.join dir "corrupt-registry.db";
+  let indices := [kindIndex, uniqueLabel];
+  h ← openDbWith path indices 5;
+  s0 ← getDb h;
+  oSeed ← putDb h (seedNodes s0);
+  r1 ← expect r0 "corrupt: seed commits" (succeeded oSeed);
+  r2 ← bumpTimes h 6 r1;
+  sNow ← getDb h;
+  closeDb h;
+  -- Overwrite the chosen slot's registry page: a checksum/kind failure, not an old file.
+  fd ← Fd.open path .readWrite OpenFlags.none;
+  raw ← readAt fd (slotOffset sNow.gen) metaSize;
+  match raw with
+  | .none => EIO.fail "corrupt: the chosen meta slot is missing"
+  | .some b => match Meta.decode b with
+    | .none => EIO.fail "corrupt: the chosen meta slot does not decode"
+    | .some m => writeAt fd m.registryRoot (Bytes.zeros pageSize);
+  Fd.close fd;
+  h2 ← openDbWith path indices 5;
+  s2 ← getDb h2;
+  roots ← retainedRoots h2;
+  r3 ← expect r2 "a corrupt registry still opens at the slot's root"
+    (Nat.beq s2.gen.toNat sNow.gen.toNat);
+  r4 ← expect r3 "and the content is the committed content" (Nat.beq (snapCount s2 1) 6);
+  r5 ← expect r4 "the fallback is the bare root plus the other slot, not five roots"
+    (Nat.beq (List.length roots) 2);
+  -- The store is not wedged: the next commit writes a fresh registry and reopens.
+  oNext ← putDb h2 (bumpCount (U64.ofNat 1) s2);
+  r6 ← expect r5 "a commit after the fallback works" (succeeded oNext);
+  s3 ← getDb h2;
+  closeDb h2;
+  h3 ← openDbWith path indices 5;
+  s4 ← getDb h3;
+  r7 ← expect r6 "the fallback commit is durable" (Nat.beq s4.gen.toNat s3.gen.toNat);
+  closeDb h3;
+  EIO.pure r7
+
+-- ## Validation predicates, and a version this build refuses
+
+def validateTest (dir : String) (r0 : Nat) : EIO Nat := do
+  -- Duplicate generation: not strictly descending.
+  let dupGen : List RootRef :=
+    [RootRef.mk (U64.ofNat 3) (U64.ofNat 10) 1 (U64.ofNat 0) 0,
+     RootRef.mk (U64.ofNat 3) (U64.ofNat 11) 1 (U64.ofNat 0) 0];
+  r1 ← expect r0 "duplicate generations are rejected"
+    (Bool.not (refsDescending dupGen));
+  -- Duplicate nonzero root.
+  let dupRoot : List RootRef :=
+    [RootRef.mk (U64.ofNat 3) (U64.ofNat 10) 1 (U64.ofNat 0) 0,
+     RootRef.mk (U64.ofNat 2) (U64.ofNat 10) 1 (U64.ofNat 0) 0];
+  r2 ← expect r1 "duplicate roots are rejected"
+    (Bool.not (noDuplicateRoots dupRoot));
+  -- The well-formed order passes both.
+  let good : List RootRef :=
+    [RootRef.mk (U64.ofNat 3) (U64.ofNat 10) 1 (U64.ofNat 0) 0,
+     RootRef.mk (U64.ofNat 2) (U64.ofNat 11) 1 (U64.ofNat 0) 0];
+  r3 ← expect r2 "a well-formed registry passes both checks"
+    (Bool.and (refsDescending good) (noDuplicateRoots good));
+  -- Write a real store, then give one slot format version 1 and a valid checksum.
+  let path := Path.join dir "version.db";
+  let indices := [kindIndex, uniqueLabel];
+  h ← openDbWith path indices 5;
+  s0 ← getDb h;
+  oSeed ← putDb h (seedNodes s0);
+  r4 ← expect r3 "version: seed commits" (succeeded oSeed);
+  sNow ← getDb h;
+  closeDb h;
+  fd ← Fd.open path .readWrite OpenFlags.none;
+  raw ← readAt fd (slotOffset sNow.gen) metaSize;
+  match raw with
+  | .none => EIO.fail "version: the chosen meta slot is missing"
+  | .some b => do
+    let b := LE.setU64 b 8 (U64.ofNat 1);        -- format = 1, flags = 0
+    let b := LE.setU64 b 88 (U64.ofNat 0);       -- clear the checksum
+    let b := LE.setU64 b 88 (fnv b);             -- a checksum-valid v1 slot
+    at ← Fd.seek fd (.start (slotOffset sNow.gen));
+    Fd.write fd b;
+  Fd.close fd;
+  opened ← EIO.lift (openDbWith path indices 5);
+  match opened with
+  | .error msg => do
+    r5 ← expect r4 "an unsupported format is refused"
+      (String.contains msg "unsupported format version");
+    expect r5 "the error names the version" (String.contains msg "version 1")
+  | .ok hBad => do
+    closeDb hBad;
+    expect r4 "an unsupported format is refused" .false
+
+def main : IO Unit := EIO.toIO (do
+  dir ← FS.createTempDir;
+  EIO.lift (IO.println (String.append "registry: in " dir));
+  r1 ← retainedTest dir 0;
+  EIO.lift (IO.println (String.append "registry: K across restart ok ("
+    (String.append (Nat.toString r1) " checks)")));
+  r2 ← leaseTest dir r1;
+  EIO.lift (IO.println (String.append "registry: leases are process-local ("
+    (String.append (Nat.toString r2) " checks)")));
+  r3 ← corruptTest dir r2;
+  EIO.lift (IO.println (String.append "registry: corruption fallback ok ("
+    (String.append (Nat.toString r3) " checks)")));
+  r4 ← validateTest dir r3;
+  EIO.lift (IO.println (String.append "registry: validation and version ok ("
+    (String.append (Nat.toString r4) " checks)")));
+  FS.removeAll dir;
+  EIO.lift (IO.println (String.append "registry: all checks passed ("
+    (String.append (Nat.toString r4) ")"))))

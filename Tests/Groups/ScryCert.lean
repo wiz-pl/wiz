@@ -5,7 +5,7 @@ import Tests.Elab
 /-!
 # scry's derivation certificates (S8)
 
-The group `scry-cert` checks `lib/Scry/Cert.wiz` through
+The group `scry-cert` checks `scry/src/Scry/Cert.wiz` through
 `examples/scry-derivation.wiz`:
 
 * a valid transitive-closure derivation is accepted, rendered and explained from the
@@ -15,7 +15,7 @@ The group `scry-cert` checks `lib/Scry/Cert.wiz` through
   accepted, and a wrong join is rejected;
 * the same example compiled to C and LLVM.
 
-The checker, its shape and the soundness theorems are described in `lib/Scry/Cert.wiz`'s
+The checker, its shape and the soundness theorems are described in `scry/src/Scry/Cert.wiz`'s
 module doc.
 -/
 
@@ -41,7 +41,7 @@ def compiled (name expected : String) : IO Unit := do
 
 def scryCertGroup : Group where
   name := "scry-cert"
-  exercise := "S8: lib/Scry/Cert.wiz"
+  exercise := "S8: scry/src/Scry/Cert.wiz"
   parallel := true
   cases := [
     { name := "transitive closure: a valid derivation is accepted (and `main`)", run := fun _ =>

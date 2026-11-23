@@ -88,13 +88,13 @@ def boolExpr (b : Bool) : Expr := .ctor (if b then 1 else 0) #[]
 
 /-- Fold an operation on known numbers (the kernel's semantics), unless the result
 could be huge. -/
-def foldNat (op : Name) (ns : Array Nat) : Option Expr :=
+def foldNat (op : PrimOp) (ns : Array Nat) : Option Expr :=
   match op, ns with
-  | "nat.beq", #[a, b] => some (boolExpr (a == b))
-  | "nat.blt", #[a, b] => some (boolExpr (a < b))
-  | "nat.pow", #[a, b] => if a ≤ 1 || a.log2 * b ≤ 4096 then (natNative? op ns).map .lit else none
-  | "nat.shiftLeft", #[a, b] => if b ≤ 4096 || a == 0 then (natNative? op ns).map .lit else none
-  | _, _ => if op.startsWith "nat." then (natNative? op ns).map .lit else none
+  | .natBeq, #[a, b] => some (boolExpr (a == b))
+  | .natBlt, #[a, b] => some (boolExpr (a < b))
+  | .natPow, #[a, b] => if a ≤ 1 || a.log2 * b ≤ 4096 then (natNative? op.key ns).map .lit else none
+  | .natShiftLeft, #[a, b] => if b ≤ 4096 || a == 0 then (natNative? op.key ns).map .lit else none
+  | _, _ => if op.isNat then (natNative? op.key ns).map .lit else none
 
 /-- The simplified expression, or the variable it is equal to. -/
 def foldExpr (env : SimpEnv) : Expr → Expr ⊕ Var
@@ -102,15 +102,15 @@ def foldExpr (env : SimpEnv) : Expr → Expr ⊕ Var
     | some (.ctor t as) =>
       if h : i < as.size ∧ t < lazyTagBase then .inr (as[i]'h.1) else .inl (.proj i y)
     | _ => .inl (.proj i y)
-  | .prim "tag" #[y] => match env.defs.get? y with
-    | some (.ctor t _) => if t < lazyTagBase then .inl (.ctor t #[]) else .inl (.prim "tag" #[y])
-    | _ => .inl (.prim "tag" #[y])
-  | .prim "natTag" #[y] => match env.lits.get? y with
+  | .prim .tag #[y] => match env.defs.get? y with
+    | some (.ctor t _) => if t < lazyTagBase then .inl (.ctor t #[]) else .inl (.prim .tag #[y])
+    | _ => .inl (.prim .tag #[y])
+  | .prim .natTag #[y] => match env.lits.get? y with
     | some n => .inl (.ctor (if n == 0 then 0 else 1) #[])
-    | none => .inl (.prim "natTag" #[y])
+    | none => .inl (.prim .natTag #[y])
   | .prim op as =>
-    if op == "nat.beq" && as.size == 2 && as[0]! == as[1]! then .inl (boolExpr true)
-    else if op == "nat.blt" && as.size == 2 && as[0]! == as[1]! then .inl (boolExpr false)
+    if op == .natBeq && as.size == 2 && as[0]! == as[1]! then .inl (boolExpr true)
+    else if op == .natBlt && as.size == 2 && as[0]! == as[1]! then .inl (boolExpr false)
     else match as.mapM env.lits.get? with
       | some ns => match foldNat op ns with
         | some e => .inl e
@@ -122,8 +122,8 @@ def foldExpr (env : SimpEnv) : Expr → Expr ⊕ Var
 def learn (env : SimpEnv) (x i : Var) : SimpEnv :=
   let env := { env with tags := env.tags.insert x i }
   match env.defs.get? x, i with
-  | some (.prim "natTag" #[y]), 0 => { env with lits := env.lits.insert y 0 }
-  | some (.prim "nat.beq" #[a, b]), 1 =>
+  | some (.prim .natTag #[y]), 0 => { env with lits := env.lits.insert y 0 }
+  | some (.prim .natBeq #[a, b]), 1 =>
     match env.lits.get? a, env.lits.get? b with
     | some n, none => { env with lits := env.lits.insert b n }
     | none, some n => { env with lits := env.lits.insert a n }
@@ -148,7 +148,7 @@ partial def Body.simp (env : SimpEnv) : Body → Body
         | _ => env.lits
       -- (a lazy cell observed is overwritten: its fields read before are stale)
       let projs := match e with
-        | .prim "lazySet" _ => ∅
+        | .prim .lazySet _ => ∅
         | _ => env.projs
       .vdecl x e (Body.simp { env with defs := env.defs.insert x e, lits, projs } rest)
   | .case x alts =>

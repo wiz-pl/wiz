@@ -1,4 +1,5 @@
 import Wiz.Toolchain
+import Tests.Loader
 
 /-!
 # A tiny test harness
@@ -58,8 +59,10 @@ structure Group where
   directory in the work tree), and none of them assert on wall time or on the machine's
   load: see "Running cases in parallel" in `docs/building.md`. -/
   parallel : Bool := false
-  /-- The CI shard that runs the group (`.github/test-shards.json`), when no shard's
-  selectors pick it; empty: the default shard. `tests --list-shards` prints it. -/
+  /-- A hint at the shard that is meant to run the group (`.github/test-shards.json`).
+  It is not a fallback: `scripts/check-shards.py` fails when no shard's selectors pick
+  the group, and shows this hint in the error so the fix is a selector or an exclusion.
+  `tests --list-shards` prints it. -/
   shard    : String := ""
 
 /-- The groups of the modules under `Tests/Groups/`, in their import order: each module
@@ -168,8 +171,42 @@ partial def readCaseStderr (h : IO.FS.Handle) : IO String := do
 /-- Mark the running case as skipped (it could not run here, e.g. without a C toolchain),
 with the reason; the case then returns normally. The driver shows it as skipped, not
 passed (`Group.run`), and records the note `skipped REASON` (`--timings`). A skipped case
-is not evidence that the case passes. -/
+is not evidence that the case passes.
+
+This is for a skip the case *declares* --- a documented gap or a `-- test: skip` marker;
+an environment skip goes through `skipMissing`. -/
 def skip (reason : String) : IO Unit := note s!"skipped {reason}"
+
+/-- Whether a missing dependency may be reported as a skip rather than a failure. Set by
+`Tests/Main.lean` from `--allow-missing-deps` or the environment variable
+`WIZ_ALLOW_MISSING_DEPS`; both are explicit, and neither is on by default. -/
+initialize allowMissingDepsRef : IO.Ref Bool ← IO.mkRef false
+
+def setAllowMissingDeps (on : Bool) : IO Unit := allowMissingDepsRef.set on
+
+/-- Whether missing dependencies are being reported as skips (an explicit opt-out). -/
+def allowMissingDeps : IO Bool := allowMissingDepsRef.get
+
+/-- The note a `skipMissing` case records when the missing dependency was allowed as a
+skip: `missing-dep REASON`. It is separate from the `skipped REASON` note so the driver
+and `scripts/ci.py check-skips` can count the environment skips, and so a CI job cannot
+hide an unexpected missing dependency behind `--allow-missing-deps`: the skip lint
+requires an `.github/skip-allowlist.json` entry for it. -/
+def missingDepMarker : String := "missing-dep "
+
+/-- A case that cannot run because a dependency is absent (no `cc`, GMP, Boehm GC,
+`node`, `yosys`, `iverilog`, `z3`, `llc`, a `wiz`/`grail` binary, a self-host toolchain,
+...). By default this **fails**, naming the dependency: a green suite must not be green
+because the machine could not run the test. `--allow-missing-deps` (or
+`WIZ_ALLOW_MISSING_DEPS=1`) turns it into a reported skip --- the shard driver sets that
+only for a shard whose environment lacks a documented optional tool, and the skip lint
+still requires an allow-list entry for it. A declared gap stays `skip`, not this. -/
+def skipMissing (reason : String) : IO Unit := do
+  if ← allowMissingDeps then
+    note s!"skipped {reason}"
+    note (missingDepMarker ++ reason)
+  else
+    throw (IO.userError s!"missing dependency: {reason}\n      this case cannot run without it; install it, or pass --allow-missing-deps (or set WIZ_ALLOW_MISSING_DEPS=1) to report it as a skip")
 
 /-- The reason a passing case's process gave for skipping: its `skipped` note, or a line
 in the old style (`(skipped: REASON)`, `(no X: skipped)`) that a case printed itself. -/
@@ -200,15 +237,17 @@ structure CaseResult where
   skipped : Option String := none
   output : String := ""
 
-/-- A case's result as the suite prints it: `✓` passed, `✗` failed (with its output),
-`⊘` skipped (with the reason). -/
-def renderResult (r : CaseResult) : String :=
+/-- A case's result as the suite prints it: its position `[n/total]` among the cases this
+run selected, then `✓` passed, `✗` failed (with its output), or `⊘` skipped (with the
+reason). -/
+def renderResult (r : CaseResult) (n total : Nat) : String :=
+  let num := s!"[{n}/{total}] "
   if let some why := r.skipped then
-    s!"  ⊘ {r.name} ({showMs r.ms} s)\n      skipped ({why})"
+    s!"{num}  ⊘ {r.name} ({showMs r.ms} s)\n      skipped ({why})"
   else if r.ok then
-    s!"  ✓ {r.name} ({showMs r.ms} s)"
+    s!"{num}  ✓ {r.name} ({showMs r.ms} s)"
   else
-    s!"  ✗ {r.name} ({showMs r.ms} s)\n      {r.output}"
+    s!"{num}  ✗ {r.name} ({showMs r.ms} s)\n      {r.output}"
 
 /-- The result of a case's process: its child's exit code and output, and the time the
 child ran for (`now` - `start`, measured in the process, not around a queue). -/
@@ -237,11 +276,16 @@ def forwardGuessLines (g : Group) (index : Nat) (stderr : String) : IO Unit := d
 
 /-- Run each case in a child process (`<self> --run-case <group> <index>`), because an
 executed `sorry` aborts the whole process; `only` restricts the run to the cases with
-these indices. Prints each case with its wall time (`✓` passed, `✗` failed, with its
-output, `⊘` skipped, with the reason) and gives its result to `onResult` as soon as it
-finishes. -/
+these indices. Prints each case with its position in the run (`[n/total]`) and wall time
+(`✓` passed, `✗` failed, with its output, `⊘` skipped, with the reason) and gives its
+result to `onResult` as soon as it finishes. `start` is the first case's position in the
+whole invocation's selection (the driver runs several groups) and `total` that selection's
+size; both default to this group's own selected cases. -/
 def Group.run (g : Group) (only : Option (List Nat) := none)
-    (onResult : CaseResult → IO Unit := fun _ => pure ()) : IO (List CaseResult) := do
+    (onResult : CaseResult → IO Unit := fun _ => pure ())
+    (start : Nat := 1) (total : Option Nat := none) : IO (List CaseResult) := do
+  let selected := (List.range g.cases.length).filter fun i => only.all (·.contains i)
+  let total := total.getD selected.length
   IO.println s!"── {g.name} ({g.exercise})"
   let stdout ← IO.getStdout
   stdout.flush
@@ -256,10 +300,11 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
   let part ← casePart
   let partArgs := if part.isEmpty then #[] else #["--part", part]
   let mut results := #[]
+  let mut n := start
   for c in g.cases, i in [0:g.cases.length] do
     if let some ixs := only then
       unless ixs.contains i do continue
-    let start ← IO.monoMsNow
+    let began ← IO.monoMsNow
     let child ← IO.Process.spawn
       { cmd := self.toString,
         args := #["--run-case", g.name, toString i] ++ jobArgs ++ partArgs ++ (← flagsRef.get).toArray
@@ -267,15 +312,16 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
     let outT ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
     let errT ← IO.asTask (readCaseStderr child.stderr) Task.Priority.dedicated
     let code ← child.wait
-    let ms := (← IO.monoMsNow) - start
+    let ms := (← IO.monoMsNow) - began
     let out ← IO.ofExcept outT.get
     let err ← IO.ofExcept errT.get
     forwardGuessLines g i err
     let r := caseResult c i code out err ms
-    IO.println (renderResult r)
+    IO.println (renderResult r n total)
     stdout.flush
     onResult r
     results := results.push r
+    n := n + 1
   pure results.toList
 
 /-! ## Running cases in parallel (`--jobs N`, opt-in per group)
@@ -311,20 +357,25 @@ private def startCase (self : System.FilePath) (g : Group) (i : Nat) (flags : Ar
 
 /-- Run the cases of `g` that `only` picks with a bounded pool of `jobs` child processes
 at a time, printing each case's result (and calling `onResult`) in the group's case
-order, so the log is deterministic. A group must opt in with `parallel := true`.
+order, so the log is deterministic; the `[n/total]` position is assigned when the
+result is printed (not in the child), so parallel cases cannot interleave numbers.
+`start` and `total` are the whole invocation's first position and size, as in
+`Group.run`. A group must opt in with `parallel := true`.
 
 A case's failure does not stop the other cases (the suite reports every failure, as it
 does sequentially); an exception (such as a pipe that could not be read) kills the
 processes still alive before it propagates. -/
 def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
-    (onResult : CaseResult → IO Unit := fun _ => pure ()) : IO (List CaseResult) := do
-  if jobs <= 1 then return ← g.run only onResult
+    (onResult : CaseResult → IO Unit := fun _ => pure ())
+    (start : Nat := 1) (total : Option Nat := none) : IO (List CaseResult) := do
+  if jobs <= 1 then return ← g.run only onResult start total
   IO.println s!"── {g.name} ({g.exercise})"
   (← IO.getStdout).flush
   let self ← IO.appPath
   let part ← casePart
   let flags := (if part.isEmpty then #[] else #["--part", part]) ++ (← flagsRef.get).toArray
   let todo := (List.range g.cases.length).filter fun i => only.all (·.contains i)
+  let total := total.getD todo.length
   let pending ← IO.mkRef todo
   let live ← IO.mkRef ([] : List Live)
   let results ← IO.mkRef ([] : List CaseResult)
@@ -354,7 +405,11 @@ def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
           | throw (IO.userError s!"no case {l.index} in {g.name}")
         forwardGuessLines g l.index stderr
         let r := caseResult c l.index code stdout stderr ms
-        IO.println (renderResult r)
+        -- cases are printed in `todo` order, so the results collected so far are the
+        -- numbers just before this one; numbering here (not in the child) keeps the
+        -- pool's parallel processes from interleaving numbers
+        let n := start + (← results.get).length
+        IO.println (renderResult r n total)
         (← IO.getStdout).flush
         results.modify (· ++ [r])
         onResult r
@@ -381,7 +436,10 @@ def driverFixtures : Group where
         IO.println "fixture output before the failure"
         throw (IO.userError "fixture failure") },
     { name := "fixture: skips", run := fun _ => skip "fixture reason" },
-    { name := "fixture: skips (old style)", run := fun _ => IO.println "    (skipped: old fixture reason)" }
+    { name := "fixture: skips (old style)", run := fun _ => IO.println "    (skipped: old fixture reason)" },
+    -- the environment-skip policy: a missing dependency fails by default and is a
+    -- reported skip only under `--allow-missing-deps` / `WIZ_ALLOW_MISSING_DEPS`
+    { name := "fixture: missing dependency", run := fun _ => skipMissing "no fixture-dep on PATH" }
   ]
 
 end Tests

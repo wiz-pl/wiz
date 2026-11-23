@@ -28,6 +28,17 @@ has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regene
   names every out-of-scope construct they contain. The case fails when one of them
   regresses from a warning to a silent skip (a construct that lowers to nothing without
   a diagnostic, so the analysis reports nothing about code it never read).
+* **Nullability**: `null/*.cs` pairs each fact with its counter-case — an unguarded
+  `T?` dereference (`cwe476-deref-unsafe`), the `x != null` / `x is not null` /
+  `x is T y` guards (`cwe476-deref-safe`), `?.`/`??` (`cwe476-coalesce-safe`), a
+  non-null-annotated local assigned `null` (`cwe476-annotated-unsafe`, which reports
+  `scry/cs/nullable-assignment` separately from the dereference), `!`
+  (`cwe476-forgiving-safe`), a `T?` field read (`cwe476-field-unsafe`), and the
+  `as`/`FirstOrDefault` models (`cwe476-models-unsafe`). The tests run
+  `Scry.Cs.nullWarningsOf` (the `Scry.Nullness` pass over the facts the lowering
+  publishes in `Scry.Cs.Lowered.nulls`/`nullPoints`) and pin the annotation EDB
+  (`nullable(func, %var)` / `nonnull(func, %var)`) with `nullEdbText`. `coalesce` and
+  `forgiving` also have lowering goldens.
 * **End-to-end taint**: `taint/cwe78-process-unsafe.cs` (console input reaches
   `Process.Start` through string concatenation) fires the `command-injection` rule of
   `scry/corpus/csharp/csharp.scry`; its sanitised twin (`int.Parse` first) does not. Two
@@ -43,39 +54,22 @@ always reviewed in the diff and never passes silently.
 `lower/lambda.cs` is a port of Joern's `csharpsrc2cpg` `LambdaTests` fixture. It is a
 **characterization case for a known gap**, not a claim of support: the golden records
 what scry does today, and the case is then reported as skipped with the gap as its
-reason. When the gap is fixed the golden changes, the case fails, and both the golden
-and the skip must be updated (see `.github/skip-allowlist.json`). Joern's
-`TopLevelStatementTests` fixture is `lower/toplevel.cs`; that gap is fixed on this
-branch, so it is an ordinary lowering case (lowered as `<stem>.Main`).
+reason. A lambda assigned to a local or field and invoked in the same method is now
+lowered inline (so `Run`'s `Process.Start` is in the program); the gap that remains is a
+lambda passed to a callee whose call site is unknown (`Select` here), which is still an
+opaque `fnptr` plus a warning. When that gap is fixed the golden changes, the case fails,
+and both the golden and the skip must be updated (see `.github/skip-allowlist.json`).
+Joern's `TopLevelStatementTests` fixture is `lower/toplevel.cs`; that gap is fixed, so it
+is an ordinary lowering case (lowered as `<stem>.Main`).
 -/
 
 open Wiz
 
 namespace Tests.ScryCSharp
 
-/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`). -/
-def loader : IO (Name → Option String) := do
-  let mut m : List (Name × String) := []
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then
-      m := (e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then
-          m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
-  for e in ← System.FilePath.readDir "scry/src/Scry" do
-    if e.path.extension == some "wiz" then
-      m := ("Scry." ++ e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-  pure fun n => m.lookup n
-
-/-- A Wiz string literal for `s`. -/
-def wizStr (s : String) : String :=
-  "\"" ++ s.foldl (fun acc c => acc ++ match c with
-    | '"' => "\\\""
-    | '\\' => "\\\\"
-    | '\n' => "\\n"
-    | '\t' => "\\t"
-    | c => c.toString) "" ++ "\""
+/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`),
+by module name: one loader for the suite (`Tests.scryLoader`). -/
+def loader : IO (Name → Option String) := Tests.scryLoader
 
 /-- Undo `#eval`'s quoting of a string result (`"…"` with `\"`, `\\`, `\n`, `\t`). -/
 def unquote (s : String) : String := Id.run do
@@ -110,10 +104,14 @@ def lowerImports : String := "import Scry.CsLower\n"
 def taintImports : String :=
   "import Scry.CsLower\nimport Scry.Rules\nimport Scry.Models\nimport Scry.RuleTaint\nimport Scry.Interproc\n"
 
+
 def csCmdImports : String :=
   "import Scry.CsCmd\nimport Scry.Wil\nimport Scry.Rules\nimport Scry.Interproc\nimport Json\n"
 
 def modelImports : String := "import Scry.Models\n"
+
+def nullImports : String :=
+  "import Scry.CsLower\nimport Scry.CsNull\nimport Scry.Nullness\nimport Scry.RuleTaint\n"
 
 /-- A fixture's C# text and its checked-in spill (`dir/name.cs`, `dir/name.cst`). -/
 def fixture (dir name : String) : IO (String × String) := do
@@ -135,10 +133,15 @@ def fixtures : List (String × String) :=
    ("lower", "unicode"), ("lower", "expansions"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
-   ("taint", "cwe78-stringop-unsafe"), ("taint", "cwe78-macro-unsafe"),
    ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe"),
+   ("taint", "cwe78-stringop-unsafe"), ("taint", "cwe78-macro-unsafe"),
    ("taint", "cwe78-pattern-unsafe"), ("taint", "cwe78-switch-unsafe"), ("taint", "cwe78-await-unsafe"),
-   ("taint", "cwe117-log-unsafe"), ("taint", "cwe117-log-safe")]
+   ("taint", "cwe78-lambda-unsafe"), ("taint", "cwe78-bcl-unsafe"),
+   ("taint", "cwe117-log-unsafe"), ("taint", "cwe117-log-safe"),
+   ("null", "cwe476-deref-unsafe"), ("null", "cwe476-deref-safe"),
+   ("null", "cwe476-coalesce-safe"), ("null", "cwe476-annotated-unsafe"),
+   ("null", "cwe476-forgiving-safe"), ("null", "cwe476-field-unsafe"),
+   ("null", "cwe476-models-unsafe")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
 def golden (path : String) (actual : String) : IO Unit := do
@@ -172,6 +175,40 @@ def lowerLocGolden (name : String) : IO Unit := do
   | [m] => golden s!"scry/corpus/csharp/lower/{name}.loc" (unquote m)
   | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
 
+/-- The lowering golden of a `null/*.cs` fixture (the `?.`/`??`/`!` lowering). -/
+def nullGolden (name : String) : IO Unit := do
+  let (src, spill) ← fixture "null" name
+  match ← runProbe lowerImports (fixtureDefs src spill ++
+      s!"#eval Scry.Cs.lowerRender {wizStr (name ++ ".cs")} src spill\n") with
+  | [m] => golden s!"scry/corpus/csharp/null/{name}.wil" (unquote m)
+  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+
+/-- The nullness diagnostics of a `null/*.cs` fixture, as their rules in program order
+(the pass's own `Scry.Cs.nullWarningsOf`; no C toolchain, the spill is checked in). -/
+def nullWarnings (name : String) : IO (List String) := do
+  let (src, spill) ← fixture "null" name
+  let body := fixtureDefs src spill ++
+    s!"#eval match Scry.Cs.frontend {wizStr (name ++ ".cs")} src spill with\n" ++
+    "  | .ok l => String.intercalate \"|\" (List.map (fun w => Scry.MemWarnKind.ruleId w.kind) (Scry.Cs.nullWarningsOf l))\n" ++
+    "  | .err m => m\n"
+  match ← runProbe nullImports body with
+  | [m] =>
+    let s := unquote m
+    if s.startsWith "error" then throw (IO.userError s!"{name}: {s}") else
+    pure (if s.isEmpty then [] else s.splitOn "|")
+  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+
+/-- The annotation EDB (`nullable(func, %var)` / `nonnull(func, %var)`) of a fixture. -/
+def nullEdb (name : String) : IO String := do
+  let (src, spill) ← fixture "null" name
+  let body := fixtureDefs src spill ++
+    s!"#eval match Scry.Cs.frontend {wizStr (name ++ ".cs")} src spill with\n" ++
+    "  | .ok l => Scry.Cs.nullEdbText l\n" ++
+    "  | .err m => m\n"
+  match ← runProbe nullImports body with
+  | [m] => pure (unquote m)
+  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+
 /-- The rendering of a lowered fixture (functions and warnings), read from the lowering
 itself rather than from its golden. -/
 def loweredText (name : String) : IO String := do
@@ -195,6 +232,7 @@ def requiredWarnings : List (String × String) :=
    ("unsupported", "delegate_declaration not modelled"),
    ("unsupported", "local function Local not modelled"),
    ("unsupported", "lambda body not lowered"),
+   ("unsupported", "passed to Demo.Unsupported.Control.Apply"),
    ("unsupported", "lock_statement not modelled"),
    ("unsupported", "goto_statement not modelled"),
    ("unsupported", "labeled_statement not modelled"),
@@ -376,10 +414,10 @@ def repoCoverage : IO Unit := do
     "#eval String.intercalate \"|\" (List.map (fun r => Scry.Severity.show r.level ++ \" \" ++ Nat.repr r.count ++ \" \" ++ r.construct) repoReport.coverage)\n")
   checkEq
     ("error 1 parse failure"
-     ++ "|warning 1 lambda body not lowered: an opaque function value"
-     
-     ++ "|warning 1 unmodelled-external"
+     ++ "|warning 1 lambda body not lowered: assigned to local twice but never invoked in this method, so its call site is unknown"
+     -- Equal severity and count sort by construct name: "unknown…" < "unmodelled…".
      ++ "|warning 1 unknown name not modelled: havoc"
+     ++ "|warning 1 unmodelled-external"
      ++ "|note 1 excluded: *.Designer.cs"
      ++ "|note 1 excluded: *.g.cs"
      ++ "|note 1 excluded: bin/"
@@ -452,6 +490,38 @@ def group : Group where
       run := fun _ => lowerGolden "primary-ctor" },
     { name := "lower: known expansions (method groups, Format, FromResult, ConfigureAwait, ThrowIfNull)",
       run := fun _ => lowerGolden "expansions" },
+    { name := "nullness: a T? parameter dereferenced without a guard is a finding",
+      run := fun _ => do
+        checkEq ["scry/memory/null-dereference"] (← nullWarnings "cwe476-deref-unsafe") },
+    { name := "nullness: x != null and x is not null guards silence the dereference",
+      run := fun _ => do
+        checkEq ([] : List String) (← nullWarnings "cwe476-deref-safe") },
+    { name := "nullness: ?. and ?? guard the receiver and yield a non-null value",
+      run := fun _ => do
+        checkEq ([] : List String) (← nullWarnings "cwe476-coalesce-safe") },
+    { name := "nullness: a non-null-annotated local assigned null is nullable-assignment plus a dereference",
+      run := fun _ => do
+        checkEq ["scry/cs/nullable-assignment", "scry/memory/null-dereference"]
+          (← nullWarnings "cwe476-annotated-unsafe") },
+    { name := "nullness: ! records an assertion and suppresses the dereference alarm",
+      run := fun _ => do
+        checkEq ([] : List String) (← nullWarnings "cwe476-forgiving-safe") },
+    { name := "nullness: a T? field read is maybe-null, so the next member access is a finding",
+      run := fun _ => do
+        checkEq ["scry/memory/null-dereference"] (← nullWarnings "cwe476-field-unsafe") },
+    { name := "nullness: the annotation EDB publishes nullable(var) and nonnull(var)",
+      run := fun _ => do
+        checkEq "nullable(NullFixtures.Unsafe.Length, %0)" (← nullEdb "cwe476-deref-unsafe")
+        checkEq "nonnull(NullFixtures.Violation.Length, %1)" (← nullEdb "cwe476-annotated-unsafe") },
+    { name := "lower: ?. and ?? lower as guarded branches (the null path yields default)",
+      run := fun _ => nullGolden "cwe476-coalesce-safe" },
+    { name := "lower: the ! null-forgiving operator copies its operand and records an assertion",
+      run := fun _ => nullGolden "cwe476-forgiving-safe" },
+    { name := "nullness: as and FirstOrDefault are maybe-null, so assigning them to a non-null local is a violation",
+      run := fun _ => do
+        checkEq ["scry/cs/nullable-assignment", "scry/memory/null-dereference",
+          "scry/cs/nullable-assignment", "scry/memory/null-dereference"]
+          (← nullWarnings "cwe476-models-unsafe") },
     { name := "macro guard: an unknown name is still a havoc with a warning, not a value",
       run := fun _ => do
         let text ← loweredText "expansions"
@@ -481,10 +551,10 @@ def group : Group where
           "#eval Wil.Result.show (Wil.runFunction prog 10000 \"Demo.Calc.Fact\" [Wil.Val.ofNat 32 .true 5])\n"
         let ms ← runProbe lowerImports body
         checkEq ["\"ok 45\"", "\"ok 120\""] ms },
-    { name := "known gap: lambda bodies are opaque function values (Joern lowers them as methods)",
+    { name := "known gap: a lambda passed to an unknown callee keeps its body out of the program",
       run := fun _ => do
         lowerGolden "lambda"
-        skip "known gap: lambda bodies are an opaque fnptr and its body is not in the program; Joern's LambdaTests lowers each lambda as a method" },
+        skip "known gap: a lambda passed to an unknown callee (Select) is an opaque fnptr; a lambda assigned to a local and invoked in the same method is lowered inline" },
     { name := "taint: CWE-78, console input concatenated into Process.Start fires command-injection",
       run := fun _ => do
         let fs ← taintFindings "cwe78-process-unsafe"
@@ -567,7 +637,15 @@ def group : Group where
     { name := "taint: CWE-78 across an await (the awaited Task<T> value reaches the setter sink)",
       run := fun _ => do
         let fs ← taintFindings "cwe78-await-unsafe"
-        checkEq ["command-injection Fixtures.AsyncShell.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs }
+        checkEq ["command-injection Fixtures.AsyncShell.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs },
+    { name := "taint: CWE-78 through an invoked lambda (captured value and a sink in the body)",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-lambda-unsafe"
+        checkEq ["command-injection Fixtures.LambdaShell.Run System.Diagnostics.Process.Start arg 0"] fs },
+    { name := "taint: CWE-78 through a modelled BCL call (Process.get_StartInfo -> set_Arguments)",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-bcl-unsafe"
+        checkEq ["command-injection Fixtures.BclShell.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs }
   ]
 
 builtin_initialize registerGroup group

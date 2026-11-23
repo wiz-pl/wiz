@@ -22,6 +22,10 @@
 static struct termios iv_saved;
 static int iv_raw = 0;
 static int iv_pipe[2] = {-1, -1};
+/* end of file per stream: [0] the keys (stdin), [1] the socket. A key stream at end of
+   file is readable for ever, so `iv_wait` drops it; a socket's end is what `iv_closed`
+   reports. (`--dump` reads no keys at all and uses `iv_wait_fd`.) */
+static int iv_eof[2];
 
 static void iv_write_all(int fd, const char *s, size_t n) {
   while (n > 0) {
@@ -126,21 +130,22 @@ uint64_t iv_accept(uint64_t lfd) {
 void iv_close(uint64_t fd) { if (fd) close((int)fd - 1); }
 
 /* Wait up to `ms` milliseconds (0: forever) for input. The result is a bit set:
-   1 a key, 2 data on `fd` (or it closed), 4 the window changed size. */
+   1 a key, 2 data on `fd` (or it closed), 4 the window changed size. Once stdin has
+   reached end of file it stays "readable" for ever, so it is dropped from the poll: a
+   loop that treated that as a key would spin (and run out of stack). */
 uint64_t iv_wait(uint64_t fd, uint64_t ms) {
   struct pollfd p[3];
-  int n = 0;
-  p[n].fd = 0; p[n].events = POLLIN; n++;
-  int ip = -1, sp = -1;
-  if (iv_pipe[0] >= 0) { ip = n; p[n].fd = iv_pipe[0]; p[n].events = POLLIN; n++; }
-  if (fd) { sp = n; p[n].fd = (int)fd - 1; p[n].events = POLLIN; n++; }
+  int n = 0, kp = -1, ip = -1, sp = -1;
+  if (!iv_eof[0]) { kp = n; p[n].fd = 0; p[n].events = POLLIN; p[n].revents = 0; n++; }
+  if (iv_pipe[0] >= 0) { ip = n; p[n].fd = iv_pipe[0]; p[n].events = POLLIN; p[n].revents = 0; n++; }
+  if (fd) { sp = n; p[n].fd = (int)fd - 1; p[n].events = POLLIN; p[n].revents = 0; n++; }
   int r = poll(p, n, ms ? (int)ms : -1);
   if (r < 0 && errno == EINTR) {
     r = poll(p, n, 0);   /* the signal interrupted us: look again, without waiting */
   }
-  uint64_t bits = 0;
   if (r <= 0) return 0;
-  if (p[0].revents) bits |= 1;
+  uint64_t bits = 0;
+  if (kp >= 0 && p[kp].revents) bits |= 1;
   if (ip >= 0 && p[ip].revents) {
     char buf[64];
     while (read(iv_pipe[0], buf, sizeof buf) > 0) {}
@@ -150,10 +155,22 @@ uint64_t iv_wait(uint64_t fd, uint64_t ms) {
   return bits;
 }
 
+/* Wait for the socket only (bit 2). `--dump` never reads keys, so it must not be woken
+   by stdin: an inherited stdin at end of file is readable for ever, and a wait that
+   reported it as input made the dump loop spin until its stack ran out. A window resize
+   is not reported either: --dump has no terminal. */
+uint64_t iv_wait_fd(uint64_t fd, uint64_t ms) {
+  if (!fd) return 0;
+  struct pollfd p;
+  p.fd = (int)fd - 1; p.events = POLLIN; p.revents = 0;
+  int r = poll(&p, 1, ms ? (int)ms : -1);
+  if (r < 0 && errno == EINTR) r = poll(&p, 1, 0);
+  return (r > 0 && p.revents) ? 2 : 0;
+}
+
 /* Reading. Bytes are handed to Wiz as UTF-8 text; a multi-byte character cut in two
    by a read is kept back until the rest arrives. NUL bytes are dropped (they would end
    the C string). An empty result and `iv_closed` mean end of file. */
-static int iv_eof = 0;
 static char iv_carry[2][4];
 static int iv_ncarry[2];
 static char *iv_buf = NULL;
@@ -165,7 +182,8 @@ static const char *iv_read_into(int fd, int slot) {
   memcpy(iv_buf, iv_carry[slot], (size_t)n);
   ssize_t k;
   do { k = read(fd, iv_buf + n, CAP - n); } while (k < 0 && errno == EINTR);
-  iv_eof = (k == 0) || (k < 0 && errno != EAGAIN && errno != EWOULDBLOCK);
+  int *eof = &iv_eof[slot];
+  *eof = (k == 0) || (k < 0 && errno != EAGAIN && errno != EWOULDBLOCK);
   if (k < 0) k = 0;
   size_t len = (size_t)n + (size_t)k;
   /* drop NULs */
@@ -178,7 +196,7 @@ static const char *iv_read_into(int fd, int slot) {
   if (back < len) {
     unsigned char lead = (unsigned char)iv_buf[len - 1 - back];
     int need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
-    if ((size_t)need > back + 1 && !iv_eof) cut = len - 1 - back;
+    if ((size_t)need > back + 1 && !*eof) cut = len - 1 - back;
   }
   iv_ncarry[slot] = (int)(len - cut);
   memcpy(iv_carry[slot], iv_buf + cut, len - cut);
@@ -187,10 +205,10 @@ static const char *iv_read_into(int fd, int slot) {
 }
 const char *iv_read_keys(void) { return iv_read_into(0, 0); }
 const char *iv_read_fd(uint64_t fd) {
-  if (!fd) { iv_eof = 1; iv_buf = iv_buf ? iv_buf : (char *)calloc(1, 65544); iv_buf[0] = 0; return iv_buf; }
+  if (!fd) { iv_eof[1] = 1; iv_buf = iv_buf ? iv_buf : (char *)calloc(1, 65544); iv_buf[0] = 0; return iv_buf; }
   return iv_read_into((int)fd - 1, 1);
 }
-uint64_t iv_closed(void) { return (uint64_t)iv_eof; }
+uint64_t iv_closed(void) { return (uint64_t)iv_eof[1]; }
 
 /* Send text on a socket, all of it; 0 if the peer is gone. */
 uint64_t iv_send(uint64_t fd, const char *s) {

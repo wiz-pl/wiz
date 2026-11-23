@@ -1,5 +1,5 @@
 /* The live documentation panel (`wiz doc --serve --lsp PORT`, web/doc-live.js). It uses
-   scroll.css's colours and the goals markup of web/goals.js (the playground's). Without
+   scroll.css's colours and the goals markup of the playground's Wiz runtime (`lib/Web/Goals.wiz`). Without
    a language server the panel is never created, so a static page is unaffected. */
 .doc-live {
   position: fixed; right: 14px; bottom: 14px; z-index: 4;

@@ -69,18 +69,22 @@ inductive Done (ρ : Region) where
 /-- Run `body` in a new scope. Its region `ρ` is fresh, so nothing that mentions it (a
 `Join ρ A`) is in its result; the body ends by closing the scope (`Scope.close`), whose
 `Done ρ` it returns with the result. -/
-def Scope.with {A : Type} (1 body : (ω ρ : Region) → (1 s : Scope ρ) → IO (A × Done ρ)) : IO A :=
+def Scope.with {A : Type} (1 body : (0 ρ : Region) → (1 s : Scope ρ) → IO (A × Done ρ)) : IO A :=
   IO.bind (body Region.static (Scope.mk List.nil)) (fun r => IO.pure r.1)
+
+-- (the region is a type-level parameter and never reaches run time, so every binder for
+-- it is 0. At ω, compiled code would *evaluate* `Region.static` — an axiom with no
+-- value — and stop with "wiz: reached an impossible case" before the scope could spawn.)
 
 /-- Start `act` in the scope `s`; `k` continues with the scope and the task's handle. The
 model runs `act` here, at once; compiled code runs it on a new thread
 (`Scope.spawnThreads`). -/
-def Scope.spawn {ρ : Region} {A B : Type} (1 s : Scope ρ) (act : IO A)
+def Scope.spawn {0 ρ : Region} {A B : Type} (1 s : Scope ρ) (act : IO A)
     (1 k : (1 s : Scope ρ) → (j : Join ρ A) → IO B) : IO B :=
   IO.bind act (fun a => k s (Join.mk (IO.pure a)))
 
 /-- The task's result: wait for it (if the scope is still open) and return it. -/
-def Join.get {ρ : Region} {A : Type} (j : Join ρ A) : IO A := j.wait
+def Join.get {0 ρ : Region} {A : Type} (j : Join ρ A) : IO A := j.wait
 
 -- (each wait in turn)
 private def Scope.waitAll : List (IO Unit) → IO Unit
@@ -88,7 +92,7 @@ private def Scope.waitAll : List (IO Unit) → IO Unit
   | .cons w ws => IO.bind w (fun u => Scope.waitAll ws)
 
 /-- Close the scope: wait for every task spawned in it. -/
-def Scope.close {ρ : Region} (1 s : Scope ρ) : IO (Done ρ) :=
+def Scope.close {0 ρ : Region} (1 s : Scope ρ) : IO (Done ρ) :=
   match s with
   | .mk ws => IO.bind (Scope.waitAll ws) (fun u => IO.pure Done.mk)
 
@@ -102,7 +106,7 @@ private def Scope.fork {A : Type} (act : IO A) (m : MVar A) : IO Unit :=
 
 /-- `Scope.spawn` in compiled code: `act` runs on a new thread and its result goes into an
 `MVar`, written once; the scope records a wait for it, and the handle reads it. -/
-def Scope.spawnThreads {ρ : Region} {A B : Type} (1 s : Scope ρ) (act : IO A)
+def Scope.spawnThreads {0 ρ : Region} {A B : Type} (1 s : Scope ρ) (act : IO A)
     (1 k : (1 s : Scope ρ) → (j : Join ρ A) → IO B) : IO B :=
   IO.bind (MVar.new (A := A)) (fun m =>
     IO.bind (Scope.fork act m) (fun u =>
@@ -123,13 +127,13 @@ def Scope.both {A B : Type} (a : IO A) (b : IO B) : IO (A × B) :=
     IO.bind (Join.get jb) (fun y => IO.pure ((x, y), d)))))))
 
 -- (spawn every action, then hand the scope and the handles, in order, to `k`)
-private def Scope.spawnAll {ρ : Region} {A B : Type} : List (IO A) → (1 s : Scope ρ) →
+private def Scope.spawnAll {0 ρ : Region} {A B : Type} : List (IO A) → (1 s : Scope ρ) →
     (1 k : (1 s : Scope ρ) → List (Join ρ A) → IO B) → IO B
   | .nil => fun s k => k s List.nil
   | .cons a as => fun s k =>
       Scope.spawn s a (fun s j => Scope.spawnAll as s (fun s js => k s (List.cons j js)))
 -- (every handle's result, in order)
-private def Scope.getAll {ρ : Region} {A : Type} : List (Join ρ A) → IO (List A)
+private def Scope.getAll {0 ρ : Region} {A : Type} : List (Join ρ A) → IO (List A)
   | .nil => IO.pure List.nil
   | .cons j js => IO.bind (Join.get j) (fun x => IO.bind (Scope.getAll js) (fun xs => IO.pure (List.cons x xs)))
 

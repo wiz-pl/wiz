@@ -70,11 +70,11 @@ to CST spans for the dynamic-evidence report), `repl` (the Wiz REPL with `Scry.R
 preloaded) and `egraph FILE.c [--fuel N] [--rewrite]` (C -> Wil ->
 e-classes, then a deterministic fold/identity saturation report). The `egraph` report is
 read-only: it does not change the CST, the Wil program or any Datalog fact. `--rewrite`
-additionally runs `lib/Scry/EgraphExtract.wiz`, which extracts the saturated classes back
+additionally runs `src/Scry/EgraphExtract.wiz`, which extracts the saturated classes back
 into a **checked** `Wil.Program` (straight-line functions, single-definition registers, no
 registers outside the original right-hand side, strictly cheaper terms) and prints the
 transformation report. That program is an optional input to a later analysis;
-`lib/Scry/EgraphTaint.wiz` is the differential used by the tests, and Datalog stays
+`src/Scry/EgraphTaint.wiz` is the differential used by the tests, and Datalog stays
 authoritative. `parse --stats` prints counts only; the perf agent owns throughput numbers.
 
 ## Command-line reference
@@ -82,8 +82,9 @@ authoritative. `parse --stats` prints counts only; the perf agent owns throughpu
 `scry help` prints the command list and `scry findings help` the subcommands. Exit status
 is 0 on success and 1 on an error, including a usage error (a `scry: …` line on stderr);
 `taint` with an expired `--timeout` exits 124, and `--fail-on-finding` exits 1 when a
-finding or a boundary/memory warning is shown. The accepted flags, grouped as the CLI
-groups them, are:
+finding or a boundary/memory warning is shown. The four frontend drivers (`project`,
+`cs`, `prover`, `egraph`) use the 0/1/2/3 vocabulary below instead. The accepted flags,
+grouped as the CLI groups them, are:
 
 | command | arguments and flags |
 |---|---|
@@ -103,20 +104,30 @@ groups them, are:
 | `findings list` | `--db FILE`, `--state STATE`, `--json` |
 | `findings show` | `ID` + `--db FILE`, `--json` |
 | `findings triage` | `ID --state new\|triaged\|confirmed\|false-positive\|fixed` + `--reason TEXT`, `--by NAME`, `--db FILE` |
-| `findings repro` | `ID` + `--db FILE`, `--artifacts DIR`, `--cc CMD`, `--sanitize address\|undefined\|both\|none` (`both`), `--input FILE`, `--harness FILE`, `--env K=V` (repeatable), `--witness FILE`, `--timeout SECS` (10), `--json` |
+| `findings repro` | `ID` + `--db FILE`, `--artifacts DIR`, `--cc CMD`, `--sanitize address\|undefined\|both\|none` (`both`), `--input FILE`, `--harness FILE`, `--env K=V` (repeatable), `--witness FILE`, `--timeout SECS` (10), `--probe FILE`, `--probe-events FILE`, `--json` |
 | `findings verify` | `ID` + `--db FILE`, `--json` |
+| `findings emit` | `FILE.c\|DIR` + `--json OUT`, `--sarif OUT`, `--baseline FILE`, `--update-baseline FILE`, `--budget N\|SCOPE=N` (repeatable), `--fail-on-finding`, `--rules FILE`, `--allow-errors`, `--timeout SECS`, `--max-nodes N`, `--max-rounds N` |
 | `fuzz-span` | `FILE` + `--offset N`, `--json`, `--out FILE` |
-| `egraph` | `FILE.c` + `--fuel N` (8), `--rewrite` |
+| `egraph` | `FILE.c` + `--fuel N` (8), `--rewrite`, `--json`, `--sarif OUT`, `--fail-on-rewrite` |
+| `prover` | `FILE FUNCTION` + `--cover`, `--cut`, `--dump`, `--rows p:v,…`, `--guards p,…`, `--entry`, `--classify`, `--pack FILE`, `--json`, `--sarif OUT` |
+| `cs` | `PATH` (directory, `.csproj`, `.sln`/`.slnx`, or one `.cs`) + `--json`, `--sarif OUT`, `--fail-on error\|warning\|note`, `--rules FILE`, `--no-taint` |
 | `repl` | `[FILE.c]`; the remaining arguments go to `wiz repl` (`--script FILE`, `--init CMD`, `--llvm`, `--prelude MODULE`) |
+
+The four frontend drivers use one exit vocabulary: **0** clean, **1** gated (a finding
+at/above `--fail-on-finding` for `project`, `--fail-on` for `cs`, a refuted or refused
+claim for `prover`, `--fail-on-rewrite` for `egraph`), **2** usage or IO, **3** nothing
+analysed (no translation unit or function, no analysable `.cs` file, no such function or
+spill, a vacuous claim, or a file with no function). The other commands keep the older
+contract (`0` success, `1` error, `taint`'s `124` timeout).
 
 Two flags are accepted by the parser but missing from the top-level `scry help` text:
 `bench --baseline-bootstrap` (it is in `scry bench --help`) and `project --cache-dir`
 (an alias for `--cache=DIR`). `bench --no-baseline` also appears only in
-`scry bench --help`. The default rule pack is `lib/Scry/rules/default.scry`.
+`scry bench --help`. The default rule pack is `rules/default.scry`.
 
 ## Optics and accessors
 
-`lib/Scry/Optics.wiz` and `src/Scry/CstOptics.wiz` add a read-only `Getter`/`Fold`/
+`src/Scry/Optics.wiz` and `src/Scry/CstOptics.wiz` add a read-only `Getter`/`Fold`/
 `Lens`/`Traversal` layer over the existing Wil, analysis, CST and fact types. It is
 additive and non-mutating: no pass or existing query is migrated, and no second
 representation is introduced. The CST/facts half is direct traversal (`Fold`), not a
@@ -204,7 +215,7 @@ not define one.
 
 ```sh
 grail run scry -- taint tests/fixtures/taint-unsafe.c
-grail run scry -- taint FILE.c --rules ../lib/Scry/rules/default.scry --sarif out.sarif
+grail run scry -- taint FILE.c --rules rules/default.scry --sarif out.sarif
 grail run scry -- taint FILE.c --json --allow-errors
 grail run scry -- taint FILE.c --fail-on-finding
 ```
@@ -213,7 +224,7 @@ The stages are: parse with the vendored tree-sitter shim (S1) and build the
 `Scry.CstStore`; lower the translation unit with `Scry.Lower` (S2), whose `Wil.Stmt`/
 `Wil.Term` carry a `Wil.Span` (file, byte range, CST node); run the rule-pack engine
 (`Scry.RuleTaint`) and the direct-call summaries/path stitching (`Scry.Interproc`) with
-the default pack `lib/Scry/rules/default.scry` (or `--rules FILE`); certify each alert's
+the default pack `rules/default.scry` (or `--rules FILE`); certify each alert's
 derivation with `Scry.Certify`; print findings with their source spans; and, with
 `--sarif OUT`, write SARIF 2.1.0 (`Scry.Sarif`). `--origin-map` prints the
 `(function, program point) -> span` table used for the locations.
@@ -240,6 +251,33 @@ external/Wiz caller supplies them. `main`, `static` functions, internally called
 functions and callbacks keep the ordinary parameter summary, so the policy does not
 turn every helper into a source. `tests/fixtures/taint-entry-*.c` and the
 `tests/fixtures/taint-exec-*.c` pair are the positive/negative controls.
+
+## `scry findings emit`: one per-finding output pipeline
+
+`scry findings emit` writes the machine-readable side of one run: the same
+`Scry.analyzeFile` pipeline `taint`/`report`/`web` use, rendered as both JSON
+(`scry-findings/1`) and SARIF 2.1.0 from `Scry.Sarif`'s one writer. A finding's id is
+`Scry.semanticId` (`f_<16 hex>`), the same `partialFingerprints.scry/v1` value the HTML
+report and the web bundle's `data/findings.json` carry; there is no second derivation.
+
+```sh
+# one run, both formats: the ids in the JSON rows and the SARIF results are equal
+grail run scry -- findings emit FILE.c --json out.json --sarif out.sarif
+
+# bootstrap a baseline, then gate only new findings (exit 1 names each new id)
+grail run scry -- findings emit DIR --json before.json --update-baseline known.json
+grail run scry -- findings emit DIR --json after.json --baseline known.json
+
+# cap the number of new findings (N, or error=N / warning=N / note=N)
+grail run scry -- findings emit DIR --json out.json --budget 0
+```
+
+`--baseline` accepts its own `scry-baseline/1` document, a previous `--json` report or a
+SARIF log, and suppresses the ids it names; a new finding is named on stderr and exits 1.
+`--budget` counts the post-baseline findings and fails with the count in its message;
+`--fail-on-finding` is the no-baseline gate. Outputs are written before a gate is
+decided, and ordering is by id, so a rerun is byte-identical. Human diagnostics go to
+stderr; `--json -` keeps stdout a clean JSON pipe.
 
 ## Points-to and memory
 
@@ -317,11 +355,11 @@ turn a one-minute CVE analysis into a ten-minute one.
 
 ## Path traversal (opt-in pack)
 
-`lib/Scry/rules/path-traversal.scry` is the default pack **plus** a `path-traversal`
+`rules/path-traversal.scry` is the default pack **plus** a `path-traversal`
 rule: taint from `getenv`/`read`/`recv`/`fgets`/`getline`/`fread` or C's `argv` reaches
 `open`, `openat`, `creat`, `fopen`, `freopen`, `stat`/`lstat`, `unlink`, `remove`,
 `rename`, `chdir`, `opendir`, `access`, `mkdir` or `rmdir`. Run it with
-`--rules ../lib/Scry/rules/path-traversal.scry`.
+`--rules rules/path-traversal.scry`.
 
 `source argv result` is a pack directive, not a call pattern: it seeds the second
 parameter of `main` as a source. It is in this pack only, so the default pack's results do
@@ -488,9 +526,15 @@ URIs relative to the project root and `uriBaseId: "%SRCROOT%"`; every result's
 header. The single-file `scry taint` SARIF writer is unchanged.
 
 `--cache[=DIR]` (default `.scry-project-cache`) caches each TU's `scry-cst 1` store. The
-key covers the source path/text and flags; the entry is validated against a digest of the
-**actual preprocessed text**, so a changed header or macro is a miss, not a stale hit.
-`--cache-stats` adds hit/miss/write/corrupt counts and implies `--cache`.
+key covers the source path/text, the unit's flags, `--allow-errors` and
+`--keep-system-headers`; the entry is validated against a digest of the **actual
+preprocessed text**, so a changed header or macro is a miss, not a stale hit. The entry
+also names its cache format and frontend stamp (tree-sitter runtime/grammar, shim,
+`scry-cst` spill and preprocessing policy), so a frontend change is a clean miss and an
+older entry is rewritten; a corrupt or truncated entry is recomputed. A rule pack is not
+keyed (findings are recomputed from the cached CST), so a warm cache with a changed pack
+reports the new findings. `--cache-stats` adds hit/miss/write/corrupt counts and implies
+`--cache`.
 `--fail-on-finding` returns exit 1 when a finding, boundary warning or memory warning is
 reported.
 `--skip-broken` records a TU whose `cc -E`/parse fails in the `skipped` list and analyses
@@ -624,11 +668,19 @@ results are kept with `baselineState: "unchanged"` when the diff proves the line
 unchanged, in-diff ones are `"new"`, and no state is claimed when the diff cannot decide
 (a binary file, no matching entry, a deleted file), so an upload diff never marks an
 untouched finding as fixed. Every result carries
-`partialFingerprints: {"scry/v1": "f_<16 hex>"}` (or `b_…` for a boundary warning), a
-line-independent id built from the rule, normalized path, sink function/callee/argument
-and path shape; moving a finding keeps the id, renaming the sink or changing the path
-shape creates a new one. Two identical sinks in one function with the same path shape can
-still collide (the id is a handle, not a proof of uniqueness).
+`partialFingerprints: {"scry/v1": "f_<16 hex>", "primaryLocationLineHash": "…"}` (or
+`b_…` for a boundary warning). `scry/v1` is the line-independent id built from the rule,
+normalized path, sink function/callee/argument and path shape; moving a finding keeps the
+id, renaming the sink or changing the path shape creates a new one. Two identical sinks in
+one function with the same path shape can still collide (the id is a handle, not a proof
+of uniqueness). `primaryLocationLineHash` is the key GitHub code scanning uses for
+cross-run identity: `Scry.lineHash` when the writer has the primary line's text, and the
+semantic id as a stable fallback. A taint result also carries a `codeFlows` entry with
+one `threadFlowLocation` per path step (source -> sink, with `nestingLevel` for call
+depth), so the evidence path renders in the code-scanning UI. A partial run (a
+`scry/budget/*` note) is a run-level `invocations[0].toolExecutionNotifications` entry
+with `executionSuccessful: false`; a consumer that sees only the results can no longer
+mistake a truncated run for a complete one.
 
 ## `scry report`: one self-contained HTML page
 
@@ -682,7 +734,7 @@ collapsing beyond the browser's native `<details>`.
 
 `tests/report.wiz` pins the tainted/safe/XSS fixtures, the sink and step spans, the
 suppressed-count line, finding-id anchors and two-run byte identity. The reusable
-renderer is `lib/Scry/Report.wiz`; the IO half is `scry/src/Scry/ReportCmd.wiz`.
+renderer is `src/Scry/Report.wiz`; the IO half is `scry/src/Scry/ReportCmd.wiz`.
 
 ## `scry dynamic`: observed execution evidence
 
@@ -814,12 +866,14 @@ illegal edge is an error. `fixed` is a triage decision, never an automatic resul
 `repro` selects or generates a deterministic harness/input, builds with
 `-fsanitize=address,undefined` when the compiler accepts it (and records a fallback to an
 uninstrumented build when it does not), runs under `timeout`, and stores the exact
-commands, exit status, stdout/stderr and the first sanitizer lines as `dynamic.json`.
-`verify` re-runs the same analysis and the stored repro and reports the verdict
-`not-reported-and-repro-clean` (or `...no-dynamic`), `still-reported`,
-`not-reported-but-repro-crashed`, or `inconclusive`: **"not reported by this run" is
-never "absent from the program"**. The static certificate and the dynamic trace are
-separate evidence items; see `wiz-notes/scry-workflow.md`.
+commands, exit status, stdout/stderr and the first sanitizer lines as `dynamic.json`,
+beside the `repro.json` recipe that `verify` re-runs. The two are written together and a
+torn pair is refused. `verify` re-runs the same analysis and the stored recipe and
+reports the verdict `not-reported-and-repro-clean` (or `...no-dynamic`), `still-reported`,
+`not-reported-but-repro-crashed`, or `not-reported-dynamic-skipped`: **"not reported by
+this run" is never "absent from the program"**. A probe with no event (`heartbeat=false`)
+is skipped, never clean. The static certificate and the dynamic trace are separate
+evidence items; see `wiz-notes/scry-workflow.md`.
 
 A concolic-witness slot is reserved for the future S6a slice
 (`wiz-notes/prior-art/symbolic-execution.md` §11): `repro --witness FILE` accepts a

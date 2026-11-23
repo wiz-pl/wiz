@@ -1,0 +1,16 @@
+import Plot
+/-!
+# A program that imports `Plot` from a separate root
+
+With `-I drafts/split/plot/lib` and no `lib/Plot.wiz`, `Plot` resolves from the package
+root. With `lib/Plot.wiz` present, the toolchain's library wins and this is the library's
+`Plot` (the package copy is reported as shadowed).
+-/
+
+def frame : Plot.Frame := Plot.frame [
+  Plot.bar "2024" [Plot.pt 0 12, Plot.pt 1 18],
+  Plot.line "2025" [Plot.pt 0 14, Plot.pt 1 22]]
+
+def chart : Plot.Chart := Plot.labels "quarter" "units" (Plot.chart "Sales" frame)
+
+#eval Plot.svg chart

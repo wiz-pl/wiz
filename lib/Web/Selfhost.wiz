@@ -1,0 +1,689 @@
+import Prelude
+import Text
+import Json
+import Web.EditorModel
+
+/-!
+# Web.Selfhost
+
+The in-page language server's pure half (`web/selfhost-lsp-shim.js`): the engine's
+lines as diagnostics, its command splitter, the completion/hover/definition answers and
+their JSON shapes. The shim keeps the part that is a server — one JSON-RPC message in,
+messages out, the engine calls, the WebSocket stand-in — and asks these questions one
+at a time.
+
+Text and offsets are **UTF-16 code units**, the LSP wire format and a JavaScript string
+index; `Web.EditorModel` owns the boundary to Wiz's code points and the check's
+position/declaration index. This module is what `wiz_loom_lsp_*` in
+`web/playground-ui.wiz` exposes to the page (`createIndexer` in
+`web/playground-lsp.js`), and its test oracle is `web/framework/index-oracle.mjs`
+(test-only; nothing in production imports it).
+
+The shapes match the shim's old JavaScript exactly, because the Node test
+(`web/selfhost_lsp_test.mjs`) pins them there:
+
+  * `commandsJson`: `[{start, head, end, keyword, silent, result}]`;
+  * `diagnosticsJson`: LSP diagnostics (`{severity, source, message, range}`; a parse
+    error also carries `code: "parse-error"`);
+  * `completionJson`: a `CompletionList` (`{isIncomplete, items}`, item `textEdit`);
+  * `hoverJson`: `{contents: {kind: "markdown", value}, range}` or `null`;
+  * `definitionJson`: `{uri, range}` or `null`.
+-/
+
+-- ## Small string helpers
+
+/-- `s`'s first character, if any. -/
+def Selfhost.firstChar (s : String) : Option Char :=
+  match String.chars s with
+  | .cons c _ => .some c
+  | .nil => .none
+
+/-- Whether a line starts with white space (`^\s`). -/
+def Selfhost.isIndented (line : String) : Bool :=
+  match Selfhost.firstChar line with
+  | .some c => Char.isSpace c
+  | .none => .false
+
+/-- A word character for `\b` (ASCII letters, digits, `_`). -/
+def Selfhost.isWordUnit (c : Char) : Bool :=
+  let n := Char.code c;
+  (Nat.le 65 n && Nat.le n 90) || (Nat.le 97 n && Nat.le n 122) ||
+  (Nat.le 48 n && Nat.le n 57) || Nat.beq n 95
+
+/-- `s` starts with the word `w` (a non-word character or the end follows it). -/
+def Selfhost.startsWord (s w : String) : Bool :=
+  if Bool.not (String.startsWith s w) then .false
+  else match String.chars (String.drop (String.length w) s) with
+    | .nil => .true
+    | .cons c _ => Bool.not (Selfhost.isWordUnit c)
+
+/-- The first white-space-delimited token of `s`. -/
+partial def Selfhost.tokenGo (cs : List Char) (acc : List Char) : String :=
+  match cs with
+  | .nil => String.ofChars (List.reverse acc)
+  | .cons c rest =>
+    if Char.isSpace c then String.ofChars (List.reverse acc)
+    else Selfhost.tokenGo rest (.cons c acc)
+
+/-- The first white-space-delimited token of `s` (`""` for an empty line). -/
+def Selfhost.firstToken (s : String) : String := Selfhost.tokenGo (String.chars s) []
+
+/-- Whether one of the words is a prefix of `s` (with a word boundary). -/
+def Selfhost.oneOfWords (s : String) (ws : List String) : Bool :=
+  List.any (fun w => Selfhost.startsWord s w) ws
+
+/-- Drop through the first `]` of an attribute. -/
+partial def Selfhost.dropToBracket : List Char → Option (List Char)
+  | .nil => .none
+  | .cons c rest => if Nat.beq (Char.code c) 93 then .some rest
+    else Selfhost.dropToBracket rest
+
+/-- `s` without a leading `@[ … ]` attribute (one, as the shim's `replace` did). -/
+def Selfhost.stripAttrs (s : String) : String :=
+  match String.stripPrefix s "@[" with
+  | .some _ => match Selfhost.dropToBracket (String.chars s) with
+    | .some rest => String.trimLeft (String.ofChars rest)
+    | .none => s
+  | .none => s
+
+/-- `s` starts with the modifier `w` followed by white space (the shim's `\s+`). -/
+def Selfhost.startsMod (s w : String) : Bool :=
+  if Bool.not (Selfhost.startsWord s w) then .false
+  else match String.chars (String.drop (String.length w) s) with
+    | .cons c _ => Char.isSpace c
+    | .nil => .false
+
+/-- `s` without a leading modifier (`private`, `protected`, `noncomputable`, `partial`,
+`unsafe`), repeated with their white space. A bare `partial` with nothing after it is a
+keyword, as the shim's `\s+` left it. -/
+partial def Selfhost.stripMods (s : String) : String :=
+  if Selfhost.startsMod s "noncomputable" then
+    Selfhost.stripMods (String.trimLeft (String.drop 13 s))
+  else if Selfhost.startsMod s "protected" then
+    Selfhost.stripMods (String.trimLeft (String.drop 9 s))
+  else if Selfhost.startsMod s "private" then
+    Selfhost.stripMods (String.trimLeft (String.drop 7 s))
+  else if Selfhost.startsMod s "partial" then
+    Selfhost.stripMods (String.trimLeft (String.drop 7 s))
+  else if Selfhost.startsMod s "unsafe" then
+    Selfhost.stripMods (String.trimLeft (String.drop 6 s))
+  else s
+
+/-- The keyword line with its attribute and modifiers removed (what `SILENT`/`RESULT`
+were tested against). -/
+def Selfhost.strippedLine (line : String) : String :=
+  Selfhost.stripMods (Selfhost.stripAttrs line)
+
+/-- Lines at column 0 that continue a command instead of starting one. -/
+def Selfhost.continues (line : String) : Bool :=
+  String.startsWith line "|" || Selfhost.startsWord line "where" ||
+  Selfhost.startsWord line "deriving" || Selfhost.startsWord line "with" ||
+  String.startsWith line ")" || String.startsWith line "]" ||
+  String.startsWith line "}" || String.startsWith line "," ||
+  String.startsWith line ":="
+
+/-- Commands that print no line (`stepCommand` in `selfhost/Frontend.wiz`). -/
+def Selfhost.isSilent (s : String) : Bool :=
+  Selfhost.oneOfWords s
+    [ "import", "syntax", "notation", "infixl", "infixr", "infix", "prefix"
+    , "postfix", "macro_rules", "macro", "declare_syntax_cat" ] ||
+  (Selfhost.startsWord s "deriving" &&
+    (match String.chars (String.drop 8 s) with
+      | .cons c _ => Char.isSpace c
+      | .nil => .false : Bool) &&
+    Selfhost.startsWord (String.trimLeft (String.drop 8 s)) "instance")
+
+/-- What the frontend prints for these is a result worth showing as information. -/
+def Selfhost.isResult (s : String) : Bool :=
+  Selfhost.oneOfWords s ["#check", "#eval", "#reduce", "#print"]
+
+/-- A `--` on the line (after any indentation) starts a line comment. -/
+def Selfhost.isLineComment (line : String) : Bool :=
+  String.startsWith (String.trimLeft line) "--"
+
+-- ## Comments and attributes
+
+/-- The block-comment depth after `line`, starting at `depth` (a `/-` opens, `-/`
+closes; the scan skips the second character of a pair). -/
+partial def Selfhost.blockGo (cs : List Char) (depth : Nat) : Nat :=
+  match cs with
+  | .nil => depth
+  | .cons a rest =>
+    match rest with
+    | .nil => depth
+    | .cons b tail =>
+      if Nat.beq (Char.code a) 47 && Nat.beq (Char.code b) 45 then
+        Selfhost.blockGo tail (depth + 1)
+      else if Nat.beq (Char.code a) 45 && Nat.beq (Char.code b) 47 then
+        Selfhost.blockGo tail (if Nat.lt 0 depth then depth - 1 else 0)
+      else Selfhost.blockGo rest depth
+
+/-- The block-comment depth after `line`. -/
+def Selfhost.blockDepth (line : String) (depth : Nat) : Nat :=
+  Selfhost.blockGo (String.chars line) depth
+
+/-- Whether an `@[…]` line has code after the attribute (`/\]\s*\S/`). -/
+partial def Selfhost.afterBracket (cs : List Char) (seen : Bool) : Bool :=
+  match cs with
+  | .nil => .false
+  | .cons c rest =>
+    if seen then
+      if Char.isSpace c then Selfhost.afterBracket rest .true
+      else .true
+    else if Nat.beq (Char.code c) 93 then Selfhost.afterBracket rest .true
+    else Selfhost.afterBracket rest .false
+
+/-- Whether an `@[ … ]` line carries a command after the attribute. -/
+def Selfhost.attrHasBody (line : String) : Bool :=
+  Selfhost.afterBracket (String.chars line) .false
+
+-- ## Lines with UTF-16 offsets
+
+/-- `text`'s lines with their line-start offset in UTF-16 code units. A trailing
+newline yields a final empty line, as `String.splitOn text "\n"` does. -/
+partial def Selfhost.linesGo (cs : List Char) (off start : Nat) (cur : List Char)
+    (acc : List (Nat × String)) : List (Nat × String) :=
+  match cs with
+  | .nil => List.reverse (.cons (start, String.ofChars (List.reverse cur)) acc)
+  | .cons c rest =>
+    if Nat.beq (Char.code c) 10 then
+      let next := off + 1;
+      Selfhost.linesGo rest next next [] (.cons (start, String.ofChars (List.reverse cur)) acc)
+    else
+      let step := List.length (EditorModel.unitsOf c);
+      Selfhost.linesGo rest (off + step) start (.cons c cur) acc
+
+/-- The lines of `text` with their UTF-16 offsets. -/
+def Selfhost.lines (text : String) : List (Nat × String) :=
+  Selfhost.linesGo (String.chars text) 0 0 [] []
+
+-- ## Commands
+
+/-- One top-level command (`splitCommands`'s `{start, head, end, keyword, silent,
+result}`): `start` is the doc comment's or attribute's start, `head` the keyword line,
+`end` the next command's start (or the text's end). -/
+structure Selfhost.Command where
+  start : Nat
+  head : Nat
+  stop : Nat
+  keyword : String
+  silent : Bool
+  result : Bool
+
+/-- A command as JSON (the field is `end`, as the shim returned it). -/
+def Selfhost.commandJson (c : Selfhost.Command) : Json :=
+  Json.mkObj
+    [ ("start", Json.ofNat c.start)
+    , ("head", Json.ofNat c.head)
+    , ("end", Json.ofNat c.stop)
+    , ("keyword", Json.mkStr c.keyword)
+    , ("silent", Json.mkBool c.silent)
+    , ("result", Json.mkBool c.result)
+    ]
+
+/-- The command splitter's walk over the lines. -/
+partial def Selfhost.splitGo (textLen : Nat) (lines : List (Nat × String))
+    (inBlock : Nat) (inMutual : Bool) (pending : Option Nat)
+    (acc : List Selfhost.Command) : List Selfhost.Command :=
+  match lines with
+  | .nil => List.reverse acc
+  | .cons (here, line) rest =>
+    if Nat.lt 0 inBlock then
+      Selfhost.splitGo textLen rest (Selfhost.blockDepth line inBlock) inMutual pending acc
+    else if String.isEmpty (String.trim line) || Selfhost.isLineComment line then
+      Selfhost.splitGo textLen rest 0 inMutual pending acc
+    else if Selfhost.isIndented line then
+      Selfhost.splitGo textLen rest 0 inMutual pending acc
+    else if String.startsWith line "/-" then
+      let depth := Selfhost.blockDepth line 0;
+      let pending : Option Nat := if String.startsWith line "/--"
+        then (match pending with | .some _ => pending | .none => .some here)
+        else pending;
+      Selfhost.splitGo textLen rest depth inMutual pending acc
+    else if inMutual then
+      let inMutual : Bool := if Selfhost.startsWord line "end" then .false else .true;
+      Selfhost.splitGo textLen rest 0 inMutual pending acc
+    else if Selfhost.continues line then
+      Selfhost.splitGo textLen rest 0 inMutual pending acc
+    else if String.startsWith line "@[" && Bool.not (Selfhost.attrHasBody line) then
+      let pending : Option Nat := match pending with
+        | .some _ => pending | .none => .some here;
+      Selfhost.splitGo textLen rest 0 inMutual pending acc
+    else
+      let stripped := Selfhost.strippedLine line;
+      let command := Selfhost.Command.mk
+        (match pending with | .some p => p | .none => here) here textLen
+        (Selfhost.firstToken stripped)
+        (Selfhost.isSilent stripped) (Selfhost.isResult stripped);
+      let acc := match acc with
+        | .nil => []
+        | .cons prev rest =>
+          List.cons (Selfhost.Command.mk prev.start prev.head command.start prev.keyword
+            prev.silent prev.result) rest;
+      let acc := List.cons command acc;
+      let inMutual : Bool := if Selfhost.startsWord stripped "mutual" then .true else inMutual;
+      Selfhost.splitGo textLen rest 0 inMutual .none acc
+
+/-- The `initialize` answer's capabilities: UTF-16 positions, full sync, hover,
+definition and completion, and the Wiz infoview methods. -/
+def Selfhost.capabilitiesJson : String :=
+  Json.render (Json.mkObj
+    [ ("positionEncoding", Json.mkStr "utf-16")
+    , ("textDocumentSync", Json.ofNat 1)
+    , ("hoverProvider", Json.mkBool .true)
+    , ("definitionProvider", Json.mkBool .true)
+    , ("completionProvider", Json.mkObj
+        [ ("triggerCharacters", Json.mkArr [Json.mkStr "."])
+        , ("resolveProvider", Json.mkBool .false) ])
+    , ("experimental", Json.mkObj
+        [ ("wizInfoview", Json.mkObj
+          [ ("version", Json.ofNat 1)
+          , ("methods", Json.mkArr
+              [Json.mkStr "wiz/plainGoal", Json.mkStr "wiz/plainTermGoal"]) ]) ])
+    ])
+
+/-- The top-level commands of `text`, as JSON. -/
+def Selfhost.commandsJson (text : String) : String :=
+  Json.render (Json.mkArr (List.map Selfhost.commandJson
+    (Selfhost.splitGo (EditorModel.length text) (Selfhost.lines text) 0 .false .none [])))
+
+-- ## The engine's lines
+
+/-- `wiz_playground_eval`'s output: `pgJoin` ends every line with `"\n"`, and a command
+may print an empty line, so only the final empty piece is dropped. -/
+def Selfhost.outputLines (out : String) : List String :=
+  let ls := String.splitOn out "\n";
+  match List.reverse ls with
+  | .cons last rest => if String.isEmpty last then List.reverse rest else ls
+  | .nil => []
+
+/-- The decimal digits from the start of `cs`, and the rest. -/
+partial def Selfhost.digitsGo (cs : List Char) (n : Nat) : Nat × List Char :=
+  match cs with
+  | .nil => (n, [])
+  | .cons c rest =>
+    if Char.isDigit c then Selfhost.digitsGo rest (n * 10 + (Char.code c - 48))
+    else (n, cs)
+
+/-- A leading decimal number and the rest, if there is one. -/
+def Selfhost.leadingNat (cs : List Char) : Option (Nat × List Char) :=
+  match cs with
+  | .cons c rest => if Char.isDigit c then
+      let r := Selfhost.digitsGo (.cons c rest) 0; .some (r.1, r.2)
+    else .none
+  | .nil => .none
+
+/-- `parse error 57: …` → 57 (a code-point offset), as selfhost/Cli.wiz's `parseOff`. -/
+def Selfhost.parseErrorOffset (line : String) : Option Nat :=
+  match String.stripPrefix line "parse error " with
+  | .none => .none
+  | .some rest => match Selfhost.leadingNat (String.chars rest) with
+    | .none => .none
+    | .some (n, after) => match after with
+      | .cons c _ => if Nat.beq (Char.code c) 58 then .some n else .none
+      | .nil => .none
+
+/-- A line's severity (1 error, 2 warning, 3 information). -/
+def Selfhost.severityOf (line : String) : Nat :=
+  if String.startsWith line "error:" || String.startsWith line "parse error" then 1
+  else if String.startsWith line "warning:" then 2
+  else 3
+
+/-- A line's message without the engine's prefix. -/
+def Selfhost.messageOf (line : String) : String :=
+  if String.startsWith line "error: " then String.drop 7 line
+  else if String.startsWith line "warning: " then String.drop 9 line
+  else match String.stripPrefix line "parse error " with
+    | .some rest => match Selfhost.leadingNat (String.chars rest) with
+      | .some (_, after) => match after with
+        | .cons c tail => if Nat.beq (Char.code c) 58 then
+            let body := String.ofChars tail;
+            let body := if String.startsWith body " " then String.drop 1 body else body;
+            String.append "parse error: " body
+          else line
+        | .nil => line
+      | .none => line
+    | .none => line
+
+-- ## Positions and ranges
+
+/-- The UTF-16 offset of a code-point offset into `prefix ++ text`, moved back into
+`text` and clamped (the engine counts code points, the editor units). -/
+def Selfhost.editorOffset (text prefix : String) (codePoints : Nat) : Nat :=
+  let source := EditorModel.index (String.append prefix text);
+  let at := EditorModel.utf16OffsetFromCodePoints source codePoints;
+  let cut := List.length (EditorModel.units prefix);
+  let at := if Nat.lt at cut then 0 else at - cut;
+  if Nat.lt (EditorModel.length text) at then EditorModel.length text else at
+
+/-- The end of the token at `at`: white space or the end of the text (the parse error's
+underline). -/
+partial def Selfhost.tokenStopUnits (us : U32Array) (len at : Nat) : Nat :=
+  if Nat.le len at then at
+  else if EditorModel.isSpaceUnit (U32Array.getD us at 0).toNat then at
+  else Selfhost.tokenStopUnits us len (at + 1)
+
+/-- The end of the token at `at` in the indexed text. -/
+def Selfhost.tokenStop (i : EditorModel.PositionIndex) (at : Nat) : Nat :=
+  let at := EditorModel.clampOffset i at;
+  Selfhost.tokenStopUnits (EditorModel.unitsOfIndex i) i.length at
+
+/-- The parse error's range: the token at `at`, and always at least one unit. -/
+def Selfhost.parseErrorRange (i : EditorModel.PositionIndex) (at : Nat) : Json :=
+  let to := Selfhost.tokenStop i at;
+  let cap := if Nat.lt at i.length then at + 1 else i.length;
+  let stop := if Nat.lt to cap then cap else to;
+  EditorModel.lspRange i at stop
+
+/-- `n`-th element of a list, if any. -/
+partial def Selfhost.nthGo {A : Type} (k : Nat) : List A → Option A
+  | .nil => .none
+  | .cons x xs => match k with
+    | .zero => .some x
+    | .succ k' => Selfhost.nthGo k' xs
+
+/-- The last element of a list, if any. -/
+def Selfhost.last {A : Type} (xs : List A) : Option A :=
+  match List.reverse xs with
+  | .cons x _ => .some x
+  | .nil => .none
+
+/-- The editor text and the Prelude prefix: a source without an `import` gets
+`import Prelude\n\n` (the page's rule, `Web.Draft.withPrelude`). -/
+def Selfhost.preludeOf (text : String) : String × String :=
+  let hasImport := List.any (fun (p : Nat × String) =>
+    Selfhost.startsWord (String.trimLeft p.2) "import") (Selfhost.lines text);
+  match hasImport with
+  | .true => (text, "")
+  | .false => (String.append "import Prelude\n\n" text, "import Prelude\n\n")
+
+/-- `withPrelude` as JSON: `{source, prefix}`. -/
+def Selfhost.preludeJson (text : String) : String :=
+  let p := Selfhost.preludeOf text;
+  Json.render (Json.mkObj [("source", Json.mkStr p.1), ("prefix", Json.mkStr p.2)])
+
+-- ## The frontend's lines as diagnostics
+
+/-- The diagnostics for `text` (the editor's) given `output`, the engine's answer for
+`withPrelude(text).source`. Errors and warnings always; the result of a
+`#check`/`#eval`/`#reduce`/`#print` as information when its command is known. -/
+partial def Selfhost.diagnosticsOutputGo (i : EditorModel.PositionIndex) (text : String)
+    (commands : List Selfhost.Command) (aligned : Bool) (placed : Nat)
+    (k : Nat) (lines : List String) (acc : List Json) : List Json :=
+  if Nat.le placed k then List.reverse acc
+  else match lines with
+  | .nil => List.reverse acc
+  | .cons line rest =>
+    let severity := Selfhost.severityOf line;
+    let command : Option Selfhost.Command := if aligned then Selfhost.nthGo k commands else .none;
+    let keep : Bool := if Nat.beq severity 3 then
+        (match command with
+          | .some c => c.result
+          | .none => .false : Bool) && Bool.not (String.isEmpty line)
+      else .true;
+    let acc := if keep then
+        let message := match command with
+          | .some _ => Selfhost.messageOf line
+          | .none => String.append (Selfhost.messageOf line)
+              " (position unknown: the output did not line up with the commands)";
+        let range := match command with
+          | .some c => EditorModel.lspRange i c.head
+              (EditorModel.lineEndAt i (EditorModel.lineOfOffset i c.head))
+          | .none => EditorModel.lspRange i 0 0;
+        .cons (Json.mkObj
+          [ ("severity", Json.ofNat severity)
+          , ("source", Json.mkStr "wiz-selfhost")
+          , ("message", Json.mkStr message)
+          , ("range", range) ]) acc
+      else acc;
+    Selfhost.diagnosticsOutputGo i text commands aligned placed (k + 1) rest acc
+
+/-- The diagnostics for `text` from the engine's text output, as JSON. -/
+def Selfhost.diagnosticsOutputJson (text output : String) : String :=
+  let i := EditorModel.index text;
+  let p := Selfhost.preludeOf text;
+  let lines := Selfhost.outputLines output;
+  let commands := List.filter (fun c => Bool.not c.silent)
+    (Selfhost.splitGo (EditorModel.length text) (Selfhost.lines text) 0 .false .none []);
+  let last := Selfhost.last lines;
+  let parseAt : Option Nat := match last with
+    | .some l => Selfhost.parseErrorOffset l
+    | .none => .none;
+  -- `placed`: lines before the parse error belong to the commands before it.
+  let placed := match parseAt with
+    | .none => List.length lines
+    | .some _ => List.length lines - 1;
+  let aligned := match parseAt with
+    | .none => Nat.beq placed (List.length commands)
+    | .some _ => Nat.le placed (List.length commands);
+  let diags := Selfhost.diagnosticsOutputGo i text commands aligned placed 0 lines [];
+  let parseDiag := match last with
+    | .none => []
+    | .some l => match Selfhost.parseErrorOffset l with
+      | .none => []
+      | .some cp =>
+        let at := Selfhost.editorOffset text p.2 cp;
+        [ Json.mkObj
+          [ ("severity", Json.ofNat 1)
+          , ("source", Json.mkStr "wiz-selfhost")
+          , ("code", Json.mkStr "parse-error")
+          , ("message", Json.mkStr (Selfhost.messageOf l))
+          , ("range", Selfhost.parseErrorRange i at) ] ];
+  Json.render (Json.mkArr (List.append diags parseDiag))
+
+-- ## Stage 1: `wiz_playground_check`'s JSON
+
+/-- `{"v":1,"lines":[…]}` as the parsed answer, or `null` when it is not one (an old
+module, or garbage): the caller falls back to the text path. -/
+def Selfhost.parseCheck (json : String) : String :=
+  match Json.parse json with
+  | .error _ => "null"
+  | .ok j => match Json.get j "lines" with
+    | .some (.arr _) => Json.render j
+    | _ => "null"
+
+/-- The diagnostics for `text` from a parsed check answer, as JSON. -/
+partial def Selfhost.diagnosticsCheckGo (i : EditorModel.PositionIndex) (text prefix : String)
+    (lines : List Json) (acc : List Json) : List Json :=
+  match lines with
+  | .nil => List.reverse acc
+  | .cons line rest =>
+    let raw := Json.getStr line "text";
+    let severity := match Json.get line "sev" with
+      | .some v => match Json.asNat v with
+        | .some n => if Nat.beq n 1 || Nat.beq n 2 then n else Selfhost.severityOf raw
+        | .none => Selfhost.severityOf raw
+      | .none => Selfhost.severityOf raw;
+    match Selfhost.parseErrorOffset raw with
+    | .some cp =>
+      let at := Selfhost.editorOffset text prefix cp;
+      let diag := Json.mkObj
+        [ ("severity", Json.ofNat 1)
+        , ("source", Json.mkStr "wiz-selfhost")
+        , ("code", Json.mkStr "parse-error")
+        , ("message", Json.mkStr (Selfhost.messageOf raw))
+        , ("range", Selfhost.parseErrorRange i at) ];
+      Selfhost.diagnosticsCheckGo i text prefix rest (.cons diag acc)
+    | .none =>
+      let known := EditorModel.hasNat line "off";
+      let at := if known then Selfhost.editorOffset text prefix (Json.getNat line "off") else 0;
+      let keep : Bool := if Nat.beq severity 3 then
+          Bool.not (String.isEmpty raw) && known &&
+          Selfhost.isResult (EditorModel.slice i at i.length)
+        else .true;
+      let acc := if keep then
+          let message := if known then Selfhost.messageOf raw
+            else String.append (Selfhost.messageOf raw) " (position unknown)";
+          let range := if known then
+              EditorModel.lspRange i at (EditorModel.lineEndAt i (EditorModel.lineOfOffset i at))
+            else EditorModel.lspRange i 0 0;
+          .cons (Json.mkObj
+            [ ("severity", Json.ofNat severity)
+            , ("source", Json.mkStr "wiz-selfhost")
+            , ("message", Json.mkStr message)
+            , ("range", range) ]) acc
+        else acc;
+      Selfhost.diagnosticsCheckGo i text prefix rest acc
+
+/-- The diagnostics for `text` from a parsed check answer (`parseCheck`'s result). -/
+def Selfhost.diagnosticsCheckJson (text answer : String) : String :=
+  let i := EditorModel.index text;
+  let p := Selfhost.preludeOf text;
+  let lines := match Json.parse answer with
+    | .ok j => Json.getList j "lines"
+    | .error _ => [];
+  Json.render (Json.mkArr (Selfhost.diagnosticsCheckGo i text p.2 lines []))
+
+-- ## Completions, hover and definition (the declaration index)
+
+/-- The identifier before the caret: its start and text. -/
+def Selfhost.completionPrefixJson (text : String) (offset : Nat) : String :=
+  let p := EditorModel.identifierPrefix (EditorModel.index text) offset;
+  Json.render (Json.mkObj [("start", Json.ofNat p.1), ("prefix", Json.mkStr p.2)])
+
+/-- Walk back over identifier units from `i`. -/
+partial def Selfhost.wordStartGo (us : U32Array) (i : Nat) : Nat :=
+  if Nat.beq i 0 then 0
+  else if EditorModel.isIdentUnit (U32Array.getD us (i - 1) 0).toNat
+    then Selfhost.wordStartGo us (i - 1)
+    else i
+
+/-- Walk forward over identifier units from `i`. -/
+partial def Selfhost.wordEndGo (us : U32Array) (len i : Nat) : Nat :=
+  if Nat.le len i then i
+  else if EditorModel.isIdentUnit (U32Array.getD us i 0).toNat
+    then Selfhost.wordEndGo us len (i + 1)
+    else i
+
+/-- The identifier under (or just before) the caret: `{start, end, word}`. -/
+def Selfhost.wordAtJson (text : String) (offset : Nat) : String :=
+  let i := EditorModel.index text;
+  let at := EditorModel.clampOffset i offset;
+  let us := EditorModel.unitsOfIndex i;
+  let start := Selfhost.wordStartGo us at;
+  let stop := Selfhost.wordEndGo us i.length at;
+  Json.render (Json.mkObj
+    [ ("start", Json.ofNat start)
+    , ("end", Json.ofNat stop)
+    , ("word", Json.mkStr (EditorModel.slice i start stop)) ])
+
+/-- A completion item from a declaration: `{label, kind, detail?}`. -/
+def Selfhost.completionItem (d : Json) : Json :=
+  let label := Json.getStr d "label";
+  let kind := Json.getNat d "kind";
+  let detail := Json.getStr d "detail";
+  if String.isEmpty detail then
+    Json.mkObj [("label", Json.mkStr label), ("kind", Json.ofNat kind)]
+  else
+    Json.mkObj [("label", Json.mkStr label), ("kind", Json.ofNat kind),
+      ("detail", Json.mkStr detail)]
+
+/-- The declarations whose label starts with `prefix` (case-insensitive), capped. -/
+def Selfhost.filterDeclarations (decls : List Json) (prefix : String) (limit : Nat) : List Json :=
+  let want := EditorModel.lower prefix;
+  let matched := List.filter (fun d =>
+    let label := Json.getStr d "label";
+    Bool.not (String.isEmpty label) &&
+    (String.isEmpty want || String.startsWith (EditorModel.lower label) want)) decls;
+  if Nat.beq limit 0 then matched else List.take limit matched
+
+/-- The names whose label starts with `prefix`, as completion items (`limit` 0 = all). -/
+def Selfhost.filterCompletionsJson (names prefix limit : String) : String :=
+  let decls := match Json.parse names with
+    | .ok j => Json.asList j
+    | .error _ => [];
+  let matched := Selfhost.filterDeclarations decls prefix (EditorModel.natOf limit);
+  Json.render (Json.mkArr (List.map Selfhost.completionItem matched))
+
+/-- The position a JSON object names (`{line, character}`). -/
+def Selfhost.positionOfJson (j : Json) : EditorModel.Position :=
+  EditorModel.Position.mk (Json.getNat j "line") (Json.getNat j "character")
+
+/-- The declarations of an index, parsed. -/
+def Selfhost.declarationsOf (text index : String) : List Json :=
+  match Json.parse (EditorModel.lspDeclarationsJson text index) with
+  | .ok j => Json.asList j
+  | .error _ => []
+
+/-- A completion item with its `textEdit` over the identifier prefix. -/
+def Selfhost.completionEdit (range : Json) (d : Json) : Json :=
+  let label := Json.getStr d "label";
+  let item := Selfhost.completionItem d;
+  -- Rebuild the object so `textEdit` is the last field, as the shim's `Object.assign`
+  -- produced it.
+  let detail := Json.getStr d "detail";
+  let base := [("label", Json.mkStr label), ("kind", Json.ofNat (Json.getNat d "kind"))];
+  let base := if String.isEmpty detail then base else List.append base [("detail", Json.mkStr detail)];
+  Json.mkObj (List.append base [("textEdit",
+    Json.mkObj [("range", range), ("newText", Json.mkStr label)])])
+
+/-- `textDocument/completion` at a position, from the check's declaration index:
+`{isIncomplete, items}` (an empty list without an index). -/
+def Selfhost.completionJson (text index position : String) : String :=
+  let i := EditorModel.indexFromJson text index;
+  let p := match Json.parse position with
+    | .ok j => j
+    | .error _ => Json.mkObj [];
+  let offset := EditorModel.offsetFromPosition i (Selfhost.positionOfJson p);
+  let prefix := EditorModel.identifierPrefix i offset;
+  let decls := Selfhost.declarationsOf text index;
+  let matched := Selfhost.filterDeclarations decls prefix.2 200;
+  let range := EditorModel.lspRange i prefix.1 offset;
+  Json.render (Json.mkObj
+    [ ("isIncomplete", Json.mkBool .false)
+    , ("items", Json.mkArr (List.map (Selfhost.completionEdit range) matched)) ])
+
+/-- The declaration a source name denotes, as JSON (`"null"` when there is none). -/
+def Selfhost.declarationJson (text index name : String) : String :=
+  EditorModel.lspDeclarationJson text index name
+
+/-- `textDocument/hover` at a position: Markdown with the declaration's signature, and
+its range. -/
+def Selfhost.hoverJson (text index position : String) : String :=
+  let i := EditorModel.indexFromJson text index;
+  let p := match Json.parse position with
+    | .ok j => j
+    | .error _ => Json.mkObj [];
+  let at := EditorModel.offsetFromPosition i (Selfhost.positionOfJson p);
+  let us := EditorModel.unitsOfIndex i;
+  let start := Selfhost.wordStartGo us at;
+  let stop := Selfhost.wordEndGo us i.length at;
+  let word := EditorModel.slice i start stop;
+  if String.isEmpty word then "null"
+  else match Json.parse (Selfhost.declarationJson text index word) with
+    | .error _ => "null"
+    | .ok j => if Json.isNull j then "null"
+      else
+        let label := Json.getStr j "label";
+        let detail := Json.getStr j "detail";
+        let signature := if String.isEmpty detail then label
+          else String.append label (String.append " : " detail);
+        Json.render (Json.mkObj
+          [ ("contents", Json.mkObj
+            [ ("kind", Json.mkStr "markdown")
+            , ("value", Json.mkStr (String.append "```wiz\n"
+                (String.append signature "\n```"))) ])
+          , ("range", match Json.get j "range" with
+              | .some r => r
+              | .none => EditorModel.lspRange i 0 0) ])
+
+/-- `textDocument/definition` at a position: a `Location` in this document. -/
+def Selfhost.definitionJson (text index position uri : String) : String :=
+  let i := EditorModel.indexFromJson text index;
+  let p := match Json.parse position with
+    | .ok j => j
+    | .error _ => Json.mkObj [];
+  let at := EditorModel.offsetFromPosition i (Selfhost.positionOfJson p);
+  let us := EditorModel.unitsOfIndex i;
+  let start := Selfhost.wordStartGo us at;
+  let stop := Selfhost.wordEndGo us i.length at;
+  let word := EditorModel.slice i start stop;
+  if String.isEmpty word then "null"
+  else match Json.parse (Selfhost.declarationJson text index word) with
+    | .error _ => "null"
+    | .ok j => if Json.isNull j then "null"
+      else Json.render (Json.mkObj
+        [ ("uri", Json.mkStr uri)
+        , ("range", match Json.get j "range" with
+            | .some r => r
+            | .none => EditorModel.lspRange i 0 0) ])

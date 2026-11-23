@@ -1,3 +1,3 @@
-examples/inductive.wiz:12:1: info: Vec.cons : {A : Type} → {n : Nat} → A → Vec A n → Vec A (.succ n)
+examples/inductive.wiz:12:1: info: Vec.cons : {A : Type} → {0 n : Nat} → A → Vec A n → Vec A (.succ n)
 examples/inductive.wiz:16:1: info: .cons (.succ .zero) .zero (.cons .zero (.succ .zero) .nil)
 examples/inductive.wiz:23:1: info: .succ .zero

@@ -1,3 +1,4 @@
+import Scry.NativeLink
 import Scry.Cli
 /-! `scry` (the S1 skeleton): `Scry.Cli.mainArgs` on the process arguments. -/
 def main : IO Unit := IO.bind IO.args Scry.mainArgs

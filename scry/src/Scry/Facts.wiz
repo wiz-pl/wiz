@@ -237,6 +237,52 @@ def Scry.Facts.ofText (text : String) : Except String Scry.Facts :=
   | .error e => .error ("invalid JSON: " ++ e)
   | .ok j => Scry.Facts.ofJson j
 
+-- ## Writing
+
+/-- A source file as the store's JSON row. -/
+def Scry.fileJson (f : Scry.SourceFile) : Json :=
+  Json.mkObj [("id", Json.ofNat f.id), ("path", Json.mkStr f.path), ("bytes", Json.ofNat f.bytes)]
+
+/-- A node as JSON; `parent`, `error` and `missing` appear only when set, so a round
+trip reads the same defaults. -/
+def Scry.nodeJson (n : Scry.Node) : Json :=
+  Json.mkObj (List.append
+    [ ("id", Json.ofNat n.id.n), ("kind", Json.mkStr n.kind), ("field", Json.mkStr n.field)
+    , ("span", Json.mkArr [Json.ofNat n.span.start, Json.ofNat n.span.stop])
+    , ("named", Json.mkBool n.named) ]
+    (List.append
+      (match n.parent with
+        | .some p => [("parent", Json.ofNat p.n)]
+        | .none => [])
+      (List.append
+        (match n.isError with | .true => [("error", Json.mkBool .true)] | .false => [])
+        (match n.missing with | .true => [("missing", Json.mkBool .true)] | .false => []))))
+
+/-- An edge as JSON. -/
+def Scry.edgeJson (e : Scry.Edge) : Json :=
+  Json.mkObj [("id", Json.ofNat e.id.n), ("src", Json.ofNat e.src.n),
+    ("dst", Json.ofNat e.dst.n), ("label", Json.mkStr e.label)]
+
+/-- A relation as JSON. -/
+def Scry.relationJson (r : Scry.Relation) : Json :=
+  Json.mkObj [("id", Json.ofNat r.id.n), ("name", Json.mkStr r.name),
+    ("arity", Json.ofNat r.arity),
+    ("tuples", Json.mkArr (List.map (fun t => Json.mkArr (List.map Json.ofNat t)) r.tuples))]
+
+/-- The store as the JSON document `Scry.Facts.ofText` reads. -/
+def Scry.Facts.toJson (f : Scry.Facts) : Json :=
+  Json.mkObj [
+    ("format", Json.mkStr f.format),
+    ("version", Json.ofNat f.version),
+    ("language", Json.mkStr f.language),
+    ("files", Json.mkArr (List.map Scry.fileJson f.files)),
+    ("nodes", Json.mkArr (List.map Scry.nodeJson f.nodes)),
+    ("edges", Json.mkArr (List.map Scry.edgeJson f.edges)),
+    ("relations", Json.mkArr (List.map Scry.relationJson f.relations)) ]
+
+/-- The store as JSON text (one line; the reader does not care about layout). -/
+def Scry.Facts.toText (f : Scry.Facts) : String := Json.render (Scry.Facts.toJson f)
+
 -- ## Printing
 
 /-- Counts as `title:` and one indented `key count` line each. -/

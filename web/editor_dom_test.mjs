@@ -4,9 +4,11 @@
 //
 //   usage: node web/editor_dom_test.mjs
 "use strict";
+import { readFileSync } from "node:fs";
 import { document as minidoc, Element } from "./framework/minidom.mjs";
 import { mountSquiggles, wantsSquiggles } from "./squiggles.js";
 import { mountCompletions, wantsCompletions } from "./completions.js";
+import { rules } from "./framework/editor-model.mjs";
 
 let failed = 0;
 function check(name, got, want) {
@@ -87,43 +89,67 @@ function squiggleTexts(layer) {
   const pane = doc.createElement("div");
   pane.appendChild(editor);
   doc.body.appendChild(pane);
-  const squiggles = mountSquiggles(editor, { document: doc });
+  const squiggles = mountSquiggles(editor, { document: doc, segments: rules.segments });
   checkThat("squiggles: a layer beside the editor", !!squiggles);
-  const wrapper = editor.parentNode;
-  check("squiggles: the editor is wrapped", wrapper.getAttribute("data-editor-wrap"), "1");
-  check("squiggles: the layer is in the wrapper", wrapper.childNodes.length, 2);
+  // The editor is not wrapped: it stays where it was and the layer is appended after it,
+  // so a child-index patch applier still finds the textarea at its original path.
+  checkThat("squiggles: the editor is not wrapped", editor.parentNode === pane);
+  check("squiggles: the layer is the parent's last child", pane.childNodes.length, 2);
+  check("squiggles: the layer is beside the editor", pane.childNodes[1].getAttribute("class"), "squiggle-layer");
 
   squiggles.update([{
     range: { start: { line: 0, character: 15 }, end: { line: 0, character: 19 } },
     severity: 1, message: "unknown identifier",
   }]);
-  check("squiggles: one underline", squiggleTexts(wrapper).length, 1);
-  check("squiggles: under the offending text", squiggleTexts(wrapper), ["nope"]);
-  check("squiggles: the message is the tooltip", firstSquiggle(wrapper).getAttribute("title"), "unknown identifier");
-  check("squiggles: the severity class", firstSquiggle(wrapper).getAttribute("class"), "squiggle sev-error");
-  check("squiggles: the count is on the wrapper", wrapper.getAttribute("data-squiggles"), "1");
+  check("squiggles: one underline", squiggleTexts(pane).length, 1);
+  check("squiggles: under the offending text", squiggleTexts(pane), ["nope"]);
+  check("squiggles: the message is the tooltip", firstSquiggle(pane).getAttribute("title"), "unknown identifier");
+  check("squiggles: the severity class", firstSquiggle(pane).getAttribute("class"), "squiggle sev-error");
+
+  check("squiggles: the count is on the parent", pane.getAttribute("data-squiggles"), "1");
 
   // Diagnostics clear: nothing is drawn.
   squiggles.update([]);
-  check("squiggles: cleared", squiggleTexts(wrapper).length, 0);
-  checkThat("squiggles: the layer is hidden", wrapper.childNodes[1].getAttribute("hidden") === "");
+  check("squiggles: cleared", squiggleTexts(pane).length, 0);
+  checkThat("squiggles: the layer is hidden", pane.childNodes[1].getAttribute("hidden") === "");
 
   // A missing end underlines the token, and a multi-line range is one span per line.
   squiggles.update([{ range: { start: { line: 0, character: 15 } }, message: "m" }]);
-  check("squiggles: a range with no end", squiggleTexts(wrapper), ["nope"]);
+  check("squiggles: a range with no end", squiggleTexts(pane), ["nope"]);
   squiggles.update([{
     range: { start: { line: 0, character: 4 }, end: { line: 1, character: 2 } }, severity: 2,
   }]);
-  check("squiggles: a multi-line range underlines each line", squiggleTexts(wrapper), ["f : Nat := nope"]);
+  check("squiggles: a multi-line range underlines each line", squiggleTexts(pane), ["f : Nat := nope"]);
 
   // Typing re-renders the same spans against the new text (the offsets are stale until
   // the server answers, and must not throw).
   editor.value = "def g : Nat := nope\n";
   for (const fn of editor._ls.get("input") || []) fn({ type: "input" });
-  checkThat("squiggles: re-rendered after typing", squiggleTexts(wrapper).length === 1);
+  checkThat("squiggles: re-rendered after typing", squiggleTexts(pane).length === 1);
 
   squiggles.destroy();
-  check("squiggles: destroyed, the layer is gone", wrapper.childNodes.length, 1);
+  check("squiggles: destroyed, the layer is gone", pane.childNodes.length, 1);
+  checkThat("squiggles: destroyed, the editor stays", editor.parentNode === pane);
+}
+
+// The class suffix is the runtime's `severityName`, not a numeric map in the widget: a
+// name the page does not know is still the one painted (`sev-hint` for a severity-1
+// span). The oracle's `rules.segments` would re-derive the name, so this uses a rule
+// that returns a runtime-shaped span directly.
+{
+  const doc = makeDoc();
+  const editor = makeEditor(doc, "def f : Nat := nope\n");
+  const pane = doc.createElement("div");
+  pane.appendChild(editor);
+  doc.body.appendChild(pane);
+  const squiggles = mountSquiggles(editor, {
+    document: doc,
+    segments: () => [{ start: 15, stop: 19, severity: 1, severityName: "hint", message: "m" }],
+  });
+  squiggles.update([]);
+  check("squiggles: the runtime's severity name is painted verbatim",
+    firstSquiggle(pane).getAttribute("class"), "squiggle sev-hint");
+  squiggles.destroy();
 }
 
 check("squiggles: on by default", wantsSquiggles(""), true);
@@ -145,7 +171,8 @@ function completionPage(options = {}) {
   doc.body.appendChild(editor);
   const calls = [];
   const popup = mountCompletions({
-    editor, document: doc, debounce: options.debounce === undefined ? 5 : options.debounce,
+    editor, document: doc, rules: options.rules || rules,
+    debounce: options.debounce === undefined ? 5 : options.debounce,
     autoTrigger: options.autoTrigger,
     onRequest: options.onRequest || (async (position) => { calls.push(position); return options.items || NAT_ITEMS; }),
   });
@@ -198,6 +225,30 @@ function completionPage(options = {}) {
   check("completions: the caret", editor.selectionStart, 7);
   check("completions: one input event", inputs, 1);
   check("completions: closed after accepting", popup.isOpen(), false);
+}
+
+{
+  // The host has no key table: it carries out whichever command the runtime names, even
+  // when the key is not one a real popup binds (here ArrowDown means "close").
+  const command = { action: "close" };
+  const { popup } = completionPage({
+    value: "Nat.", caret: 4, rules: { ...rules, key: () => command },
+  });
+  await popup.request({ line: 0, character: 4 });
+  let prevented = false;
+  popup.handleKey({ key: "ArrowDown", preventDefault() { prevented = true; } });
+  check("completions: the runtime's key command is carried out", popup.isOpen(), false);
+  check("completions: a handled key is prevented", prevented, true);
+}
+
+{
+  // A move command carries the index itself; the host sets it, it does not add a delta.
+  const { popup } = completionPage({
+    value: "Nat.", caret: 4, rules: { ...rules, key: () => ({ action: "move", index: 2 }) },
+  });
+  await popup.request({ line: 0, character: 4 });
+  popup.handleKey({ key: "x", preventDefault() {} });
+  check("completions: the runtime's index is the selection", popup.selectedIndex(), 2);
 }
 
 {
@@ -296,6 +347,17 @@ function completionPage(options = {}) {
   popup.handleKey({ key: "Enter", preventDefault() {}, stopPropagation() {} });
   check("completions: a textEdit from older text is not applied", editor.value, "def x := Nat.add");
   check("completions: the caret after a re-anchored edit", editor.selectionStart, 16);
+}
+
+// The popup may not bring back the policy the runtime owns: a local key table, a page
+// size, or scoring/filtering/acceptance arithmetic is the regression this pins.
+{
+  const source = readFileSync(new URL("./completions.js", import.meta.url), "utf-8");
+  checkThat("source: no local key table",
+    !/case\s+"(?:Arrow|Page|Enter|Tab|Escape)/.test(source));
+  checkThat("source: no local page size", !/\bPAGE\b/.test(source));
+  checkThat("source: no local completion scoring, filtering or acceptance",
+    !/completionScore|filterCompletions|acceptCompletion|completionPopupState/.test(source));
 }
 
 check("completions: on by default", wantsCompletions(""), true);

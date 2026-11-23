@@ -1,6 +1,6 @@
 # Stage 34: Clash-style signals
 
-Wiz's HDL (`lib/Hdl/Core.wiz`, docs/libraries.md "H14") describes a design as a
+Wiz's HDL (`hdl/src/Hdl/Core.wiz`, docs/libraries.md "H14") describes a design as a
 `Circuit`: a Mealy machine whose step is tagless-final code over a representation
 `r : HwTy → Type`, run at values for simulation and proofs and at `Wire` for a netlist.
 Clash describes the same hardware as functions on *signals*, infinite streams of values
@@ -9,10 +9,10 @@ in a clock domain, with registers inline. This stage adds that view as a layer o
 circuits stay where they are, and a signal is connected to them by a theorem. The plan
 and its later lanes are in `wiz-notes/clash-hdl-plan.md`; this is lane L1.
 
-## 34a: signals as ν-streams (`lib/Hdl/Signal.wiz`)
+## 34a: signals as ν-streams (`hdl/src/Hdl/Signal.wiz`)
 
 ```wiz no-check
--- (from lib/Hdl/Signal.wiz; the whole module is checked by the hdl-signal group)
+-- (from hdl/src/Hdl/Signal.wiz; the whole module is checked by the hdl-signal group)
 coinductive Signal (d : ClockDomain) (A : Type) where
   head : A
   tail : Signal d A
@@ -32,7 +32,7 @@ corecursive call, and to `cocon` when there is none; both are total in the kerne
 **The operations.**
 
 * Observation: `Signal.at`, `Signal.sample n`, `Signal.toTrace` (a `Trace A`, the
-  semantics `Circuit.trace` and lib/Hdl/Temporal.wiz use), `Signal.fromList`.
+  semantics `Circuit.trace` and hdl/src/Hdl/Temporal.wiz use), `Signal.fromList`.
 * Combinational: `pure`, `map`, `zipWith`/`zipWith3`/`zipWith4`, each a `coit`, with
   `map_at`, `zipWith_at`, `pure_at`.
 * State: `register init s` (`init, s₀, s₁, …`; one `cocon` cell, no corecursion),
@@ -55,14 +55,14 @@ the bundle's code; `bundle2`/`unbundle2` do the same for plain pairs.
 decision"), so two signals are equivalent when they agree at every cycle
 (`Signal.Eqv`, with `refl`/`symm`/`trans`). `Signal.bisim` is the bisimulation
 principle: a relation that relates heads and is closed under `tail` relates only
-equivalent signals. Temporal properties are the `TL` formulas of lib/Hdl/Temporal.wiz
+equivalent signals. Temporal properties are the `TL` formulas of hdl/src/Hdl/Temporal.wiz
 over `toTrace` (`Signal.sat`), so every proof rule there applies, and `Signal.sat_eqv`
 moves a property between equivalent signals.
 
 **The bridge to `Circuit`.**
 
 ```wiz no-check
--- (from lib/Hdl/Signal.wiz)
+-- (from hdl/src/Hdl/Signal.wiz)
 def Signal.ofCircuit {d : ClockDomain} {i o : HwTy} (c : Circuit i o) (xs : Signal d (HwTy.El i)) : Signal d (HwTy.El o) :=
   Signal.mealy (Circuit.stepEl c) c.init xs
 
@@ -72,17 +72,20 @@ def Signal.ofCircuit_at {d : ClockDomain} {i o : HwTy} (c : Circuit i o) (xs : S
 
 `ofCircuit_at` is proved from `mealy_at`; `toTrace_ofCircuit` states it as an equation of
 traces and `sat_ofCircuit` transfers a temporal property between a circuit's signal and
-its trace (and from there through `Circuit.Simulates` to the netlist).
+its trace (and from there through `Circuit.Simulates` to the netlist, on a design for
+which the relation is discharged — today the one-bit-delay template in
+`hdl/examples/hdl-sim-theorem.wiz`, not designs generally; see
+[libraries.md](../libraries.md#when-netlistsimulate-is-circuitrun-hdlsrchdlnetlistwiz)).
 `Signal.ofCircuit_delay` proves that `register` is `Circuit.delay`.
 
-**Example** (`examples/hdl-signal.wiz`, the `hdl-signal` test group): counters as Mealy
+**Example** (`hdl/examples/hdl-signal.wiz`, the `hdl-signal` test group): counters as Mealy
 machines (`natCounter` is `t` at every cycle `t`, and always steps by one as a `TL`
 property), the three registers on ten cycles, `Hw` code and a derived bundle on signals,
 and wiz-rv's baud generator (`Uart.baudCw 10 4`, a 10-bit counter with period 4) driven
 as a signal:
 
 ```wiz no-check
--- (from examples/hdl-signal.wiz)
+-- (from hdl/examples/hdl-signal.wiz)
 def baud4 {d : ClockDomain} (ce : Signal d (BitVec 1)) : Signal d (BitVec 1) :=
   Signal.ofCircuit (Uart.baudCw 10 4) ce
 
@@ -104,10 +107,129 @@ the size: today a size-preserving `map : (Signal d A)^i → (Signal d B)^i` is r
 `scofix` has no surface syntax. That kernel change is lane L2 of the plan, after the
 μ/ν size checks it shares code with. Until then, state is written with `register`,
 `mealy`, `moore`, or as a `Circuit` driven through `ofCircuit`. Blocked behind it:
-`Signal.fix` and size-polymorphic operators on sized signals (L3), the ν denotation of a
-feedback loop in the deep embedding with verified extraction to `Circuit` (L4) and the
-Clash-style surface built on it (L5).
+`Signal.fix` and the observing size-polymorphic operators on sized signals (`+`, `if`;
+numerals already type, see 34b), the ν denotation of a feedback loop in the deep
+embedding with verified extraction to `Circuit` (L4) and the Clash-style surface built on
+it (L5).
 
 **Cost.** Signals are for specifications and short simulations. A `mealy` signal costs
 O(1) per cycle, but a long or feedback-heavy simulation belongs on the circuit
 (`Circuit.run`, `Hdl.Sim`).
+
+## 34b: L2/L3 status — feedback and the sized operator surface
+
+Lane L3 of the plan is `Signal.fix`, the `Hw`-style operators at a *size* (`+`,
+numerals and `if` on `(Signal d A)^i`), and Clash's counter and baud generator written
+with them. Lane L2 (the kernel change) landed on `hdl-l2`: `scofix` has a
+size-dependent state, sized copatterns compile to it, and the library has the sized
+operators. The design is `wiz-notes/hdl-l2.md`.
+
+* The kernel's `scofix` state is `A : (j : Size) → I → Type`
+  (`scofixStateTy`, `scofixFunTy` in `Wiz/Core/Conv.lean`, mirror
+  `selfhost/Kernel.wiz`). The body runs at `A (↑j)` and produces `ν^{↑j}`; the recursive
+  argument is the value at the predecessor, `A j → ν^j`. The fixpoint's size is still
+  the *result* size (`scofix A f s i a : ν^s D i`, `a : A s i`). `↑` therefore appears
+  in the body state and result, not in the seed.
+* `scofix` also has surface syntax (like `coit`/`cocon`): `scofix A f s i a`.
+* Sized copatterns: `def mapS {i : Size} (s : (Signal d A)^i) : (Signal d B)^i` with
+  `.head`/`.tail` clauses is `elabCopatternsScofix` (`Wiz/Elab/Command.lean`). It views
+  `i` as `↑j`, checks the body at `↑j`, binds the explicit arguments from the state, and
+  turns a recursive call into the `rec` argument at `j`. A clause that recurses at the
+  same size is a size error. `elabSizedDef`'s `sfix` path is unchanged.
+* `Signal.mapS`/`zipWithS`/`zipWith3S` (`hdl/src/Hdl/Signal.wiz`) preserve the size; only
+  `registerS` raises it. `Add`/`Sub` and `Mux` at `(Signal d A)^i` are the pointwise
+  operations, so `c + 1` and `if c then a else b` work at size `i`.
+* `Signal.fix g` is `scofix` with unit state: `g j (rec idx ())` is the body at `j`, so
+  the loop value is the recursive argument. `Signal.fix (fun i c => registerS 0 (c + 1))`
+  is the counter; `Signal.fix (fun i c => c + 1)` is a size error at the lambda (the
+  body is not a `Signal^i → Signal^{↑i}`), which is the causality check.
+
+The `hdl` group checks `hdl/examples/hdl-l3.wiz` (the counter, the baud generator, the sized
+`map`, `+` and `if`); the `hdl-signal` group pins the sized `map` positive, the
+same-size-recursion rejection and the combinational-loop rejection. The workaround
+(`register`/`mealy`/`moore`/`ofCircuit`) stays for designs that do not need the sized
+surface; the Mealy baud generator is still in `hdl/examples/hdl-signal.wiz`.
+
+## 34c: the laws (P2.1)
+
+`hdl/src/Hdl/Signal.wiz` proves what the sized layer makes definitional, all in the
+kernel:
+
+* **The knot.** `Signal.fix_unfold` (`fix g` is `g ∞ (fix g)`),
+  `Signal.register_fixed_unique` (a fixed point of `register init` is `pure init`),
+  `Signal.fix_pure` (`fix` of the pure delay is `pure init`) and
+  `Signal.fix_delay_eq_circuit` (the same fixed point is
+  `Signal.ofCircuit (Circuit.delay t init) (pure init)`, through `ofCircuit_delay`).
+  `Signal.counter_sample` states the counter's `0, 1, 2, …`, and
+  `Signal.counterLoop_sample` states that `Signal.ofCircuit` of the same step as a
+  `Circuit.loop` samples the same list: the `Signal.fix` and `Circuit.loop` spellings
+  agree on the counter.
+* **The delay.** `Signal.registerS_head` (the register's head is `init`) and
+  `Signal.registerS_eq_register` (`registerS` at `∞` is `register`).
+* **Congruence.** `Signal.Eqv.map`, `Eqv.zipWith`, `Eqv.zipWith3`, `Eqv.register`,
+  `Eqv.registerS`, `Eqv.mealy` and `Eqv.ofCircuit`: equivalent signals give equivalent
+  results, so a proof about the model transfers under the combinators and across the
+  circuit bridge.
+
+### 34c.1: `out`'s payload at the predecessor (HDL-2.2a)
+
+**The defect.** A surface `out x` inferred its payload at `ν^∞`: the builtin `out` case
+in `Wiz/Elab/Term.lean` used `nuFamily` (`λ j. ν^∞ D j`), while the kernel's rule
+(`inferCore`, `Wiz/Core/Check.lean`, and `selfhost/Kernel.wiz`) types it at the
+*predecessor* of the observed size — `out x : Desc.interp D (ν^{s'}) i` where
+`s' = sizePred? s`, `∞ ↦ ∞` — which is also what the sized copattern elaborator and
+`Mark` already used. For a value at `∞` the two agree; for a value at `↑j` they do not,
+and the elaborator's type is one the kernel cannot accept at the let (a value at `ν^j`
+does not check against `ν^∞`: `ν` is contravariant in its size). So the one body shape
+that is both linear and unfolding — `let p := out a`, project `p` — was rejected:
+`expected … ν (Signal.desc d A) …  inferred … ν^j …`.
+
+**The fix.** The builtin `out` case now reads the size out of the coinductive type and
+types the payload with `nuFamilyAt l I D s'` (`s' = sizePred? s`), throwing the kernel's
+error ("only a value of size ↑s or ∞ can be observed") for a size variable, exactly as
+`inferCore` does. `selfhost/Frontend.wiz`'s `inferBuiltin` mirrors it (its `cocon` case
+already did). No kernel, evaluator or erasure change: they already had the rule, and
+`Mark` (which infers `out`'s type for the marking pass) and the sized copattern
+elaborator already computed this type.
+
+With that, `Signal.mapS`/`zipWithS`/`zipWith3S` observe their input once through a
+shared `let`:
+
+```wiz no-check
+def Signal.mapS {A B : Type} {i : Size} (f : A → B) (s : (Signal d A)^i) : (Signal d B)^i :=
+  scofix (fun (j : Size) => fun _ => (Signal d A)^j)
+    (fun (j : Size) rec idx a =>
+      let p := out a
+      cocon (f p.1, rec idx p.2.1, (), ()))
+    i () s
+```
+
+and the sized-observation laws are `rfl`:
+
+* `Signal.mapS_head`, `Signal.mapS_tail`, `Signal.zipWithS_head` (one `scofix` step),
+* `Signal.mapS_at`, `Signal.zipWithS_at`, `Signal.zipWith3S_at` (`f` on the value of
+  every cycle, by induction on `t` with `rfl` in both cases),
+* `Signal.mapS_id` and `Signal.mapS_comp` (as `Signal.Eqv`, pointwise, `rfl`).
+
+The knot stays linear: `let p := out a` evaluates the observation once per cycle and
+both projections read the shared value, so `Signal.fix`'s counter and the baud generator
+in `hdl/examples/hdl-l3.wiz` still run in the `hdl` group's time (the `hdl` case, and
+`hdl-signal`'s L3 case, are the check). The shapes this replaced are not an option: a
+`let (h, r) := out a` splits a neutral payload (stuck, so no law unfolds), and two
+separate `(out a).1`/`(out a).2.1` observations re-evaluate `out a` at every step, which
+made the same L3 example run for over 45 minutes before it was killed (2026-11-22).
+
+**What it does not do.** `out` on a value at a *size variable* is still an error (that
+is the kernel's rule, and a value at an unknown size cannot be observed); the `Eqv`
+congruences for `mapS`/`zipWithS`/`zipWith3S` are not yet written (they follow from the
+`_at` lemmas and `Eq.congrArg`, but each is a proof, not `rfl`); and nothing about the
+size is computed at run time — sizes stay erased bounds.
+
+The `hdl-signal` group pins the proved statements with `#check` (the rendered text, so a
+changed statement fails) and `#print axioms` (none for the algebraic ones; the
+four that mention a `Circuit` or compute `BitVec` literals inherit the library's trusted
+`Hw HwTy.El`/`UIntN` natives, exactly as `ofCircuit_at`/`ofCircuit_delay` do).
+
+A `partial def` knot is not a substitute: it has neither the delay discipline (a
+combinational loop diverges) nor a totality story, and it is opaque to the kernel, so a
+property of a feedback design would not compute.

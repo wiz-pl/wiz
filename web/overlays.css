@@ -1,0 +1,51 @@
+/* The editor's overlays, shared by every page that has one: the playground (static
+   markup and `?ui=loom`) and the standalone infoview page (`wiz lsp --ws`). They were
+   in playground.css, which the infoview page does not load, so the page had to leave
+   the squiggles and the completion popup off; this file is loaded by both pages.
+
+   The colours fall back to the light palette when a page has not defined a variable,
+   and both pages' own palettes (web/playground.css, web/infoview.html) override it. */
+
+/* The squiggle layer: the editor's text again, transparent, with a wavy underline under
+   every diagnostic range. It is absolutely positioned over the textarea's box by
+   web/squiggles.js — the textarea itself is never wrapped — and never takes a pointer
+   event, so typing and selection stay the textarea's. The font and padding are copied
+   from the textarea by web/squiggles.js where the browser can measure, so the underlines
+   line up; these declarations are the no-layout fallback. */
+.squiggle-layer { position: absolute; overflow: hidden; pointer-events: none; }
+.squiggle-layer[hidden] { display: none; }
+.squiggle-text { position: absolute; top: 0; left: 0; width: 100%; margin: 0; box-sizing: border-box;
+  padding: 12px 16px; color: transparent; font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap; overflow-wrap: break-word; word-break: normal; tab-size: 2;
+  will-change: transform; }
+.squiggle { text-decoration: underline wavy; text-decoration-skip-ink: none; text-underline-offset: 2px; }
+.squiggle.sev-error { text-decoration-color: var(--err, #b3261e); }
+.squiggle.sev-warning { text-decoration-color: var(--warn, #a15c00); }
+.squiggle.sev-info, .squiggle.sev-hint { text-decoration-color: var(--val, #1f4fbf); }
+
+/* The completion popup: fixed over the page at the caret, never in the layout (so a
+   patch or a re-render cannot move it under the cursor). */
+.completions { position: fixed; z-index: 40; min-width: 180px; max-width: 420px; max-height: 40vh;
+  overflow-y: auto; padding: 2px; background: var(--bg, #fdfdfb); border: 1px solid var(--line, #ddd);
+  border-radius: 6px; box-shadow: 0 6px 18px rgba(0, 0, 0, .18);
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.completions[hidden] { display: none; }
+.completion { display: flex; gap: 12px; align-items: baseline; padding: 3px 8px; border-radius: 4px; white-space: nowrap; }
+.completion.sel { background: var(--hover, #e8eefc); }
+.completion-label { color: var(--fg, #1d1d1b); }
+.completion-detail { margin-left: auto; color: var(--dim, #777); font-size: 12px; }
+
+/* The hover card: `web/hover.js` places it under the caret with fixed coordinates, so it
+   follows the editor when the page scrolls; it never takes a pointer event, so a click
+   still goes to the textarea. */
+.wiz-hover { position: fixed; z-index: 40; max-width: min(46ch, 80vw); max-height: 40vh;
+             overflow: auto; padding: 6px 10px; border: 1px solid var(--line, #ddd); border-radius: 6px;
+             background: var(--panel, var(--bg, #f5f5f0)); color: var(--fg, #1d1d1b);
+             box-shadow: 0 4px 16px rgba(0, 0, 0, .12);
+             font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+             white-space: pre-wrap; pointer-events: none; }
+.wiz-hover[hidden] { display: none; }
+.wiz-hover .hover-head { font: 600 12px system-ui, sans-serif; color: var(--dim, #777); margin-bottom: 4px; }
+.wiz-hover .hover-line.code { color: var(--const, #1f4fbf); }
+.wiz-hover .hover-line.more { color: var(--dim, #777); }
+.wiz-hover hr { border: 0; border-top: 1px solid var(--line, #ddd); margin: 6px 0; }

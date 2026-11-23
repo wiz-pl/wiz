@@ -1,0 +1,159 @@
+import IO
+import Json
+import Web.Goals
+import Web.Hover
+import Web.InfoPanel
+import Web.InfoTree
+import Web.Loom
+
+/-!
+# Web.DocLive
+
+The live documentation panel (`wiz doc --serve --lsp PORT`, `web/doc-live.js`): the
+language server's hover, goals, expected type and diagnostics for the declaration under
+the mouse. The transport (the page's fetch and WebSocket) is JavaScript; the panel's
+markup and Markdown are here, reusing `Web.Goals` and `Web.Hover`.
+-/
+
+/-- What the panel shows: the connection, the answers at the declaration, and whether
+the selection is pinned. -/
+structure DocLive where
+  state : String
+  endpoint : String
+  server : String
+  hover : String
+  /-- the page's `wizHighlight` data (the docs page's already-emitted blocks) -/
+  highlight : String
+  goals : String
+  goalsKind : String
+  term : String
+  termKind : String
+  diagnostics : List Json
+  message : String
+  pinned : Bool
+  position : String
+  reconnect : Bool
+
+def DocLive.initial : DocLive :=
+  DocLive.mk "idle" "" "" "" "" "" "" "" "" [] "" .false "" .false
+
+/-- The status line. -/
+def DocLive.status (s : DocLive) : String :=
+  if String.eq s.state "open" then
+    String.append "connected" (match String.isEmpty s.server with
+      | .true => "" | .false => String.append " · " s.server)
+  else if String.eq s.state "connecting" then "connecting…"
+  else if String.eq s.state "closed" then "disconnected"
+  else if String.eq s.state "failed" then "no server"
+  else s.state
+
+/-- A hover result as the panel shows it. A `wiz.hover/1` payload supplies its own
+Markdown and `wizHighlight` blocks; the LSP `contents` path falls back to the page's
+already-emitted `wizHighlight` data (`DocLive.effect "highlight"`). -/
+def DocLive.hoverView {M : Type} (s : DocLive) : Loom.VNode M :=
+  match Json.parse s.hover with
+  | .error _ => InfoPanel.nothing "hover a signature"
+  | .ok j => match InfoTree.Answer.ofJson j with
+    | .some a =>
+      InfoPanel.hoverLines (Hover.linesWith (InfoTree.Answer.markdown a) 40 a.highlight)
+    | .none => match Hover.textOf j with
+      | .none => InfoPanel.nothing "hover a signature"
+      | .some t =>
+        let page := match Json.parse s.highlight with
+          | .ok h => h
+          | .error _ => Json.mkNull;
+        InfoPanel.hoverLines (Hover.linesWith t 40 (InfoTree.highlightBlocks page))
+
+/-- The panel's messages: the reconnect button and the (inert) tagged-text handlers. -/
+inductive DocLiveMsg where
+  | reconnect
+  | tag (idx : Nat)
+  | span (span : String)
+  | none
+
+/-- The panel's view. -/
+def DocLive.view (s : DocLive) : Loom.VNode DocLiveMsg :=
+  let open := String.eq s.state "open";
+  let dot := Loom.el "span" [Loom.class (String.append "dot " s.state)] [];
+  let status := Loom.el "span" [Loom.class "status"]
+    [Loom.text (DocLive.status s),
+     (match String.isEmpty s.endpoint with
+       | .true => Loom.text ""
+       | .false => Loom.el "code" [] [Loom.text s.endpoint])];
+  let pin := match s.pinned with
+    | .true => Loom.el "span" [Loom.class "pin"] [Loom.text "pinned · Esc unpins"]
+    | .false => Loom.text "";
+  let head := Loom.el "div" [Loom.class "doc-live-head"]
+    [dot, Loom.el "span" [Loom.class "title"] [Loom.text "live docs"], status, pin];
+  let whereNode := match String.isEmpty s.position with
+    | .true => Loom.text ""
+    | .false => Loom.el "div" [Loom.class "where"] [Loom.text s.position];
+  let body := if open then
+      let g := Goals.goalResultView DocLiveMsg.tag DocLiveMsg.span
+        (match Json.parse s.goals with | .ok j => j | .error _ => Json.mkNull) s.goalsKind 0;
+      let t := Goals.termResultView DocLiveMsg.tag DocLiveMsg.span
+        (match Json.parse s.term with | .ok j => j | .error _ => Json.mkNull) s.termKind 0;
+      let why := match String.isEmpty s.message with
+        | .true => Loom.text ""
+        | .false => Loom.el "p" [Loom.class "reason"] [Loom.text s.message];
+      let sections : List (InfoPanel.Section DocLiveMsg) :=
+        [ InfoPanel.section "Type and documentation" (DocLive.hoverView s)
+        , InfoPanel.section "Goals"
+            (match String.isEmpty s.goalsKind with
+              | .true => InfoPanel.nothing "hover a signature"
+              | .false => g.1)
+        , InfoPanel.section "Expected type"
+            (match String.isEmpty s.termKind with
+              | .true => InfoPanel.nothing "hover a signature"
+              | .false => t.1)
+        , InfoPanel.section "Diagnostics" (Goals.diagnosticsView s.diagnostics) ];
+      Loom.seq [why, InfoPanel.render sections]
+    else
+      let why := match String.isEmpty s.message with
+        | .true => Loom.text ""
+        | .false => Loom.el "p" [Loom.class "reason"] [Loom.text s.message];
+      Loom.seq [why, Loom.el "p" [Loom.class "hint"]
+        [Loom.text "Start a language server with ",
+         Loom.el "code" [] [Loom.text "wiz lsp --ws PORT --no-stdio"],
+         Loom.text ", from the module root, make the pages with ",
+         Loom.el "code" [] [Loom.text "--lsp PORT"],
+         Loom.text ", and open them with ",
+         Loom.el "code" [] [Loom.text "?token=T"],
+         Loom.text ", where T is the token the server prints."],
+        Loom.el "p" [] [Loom.on "click" DocLiveMsg.reconnect
+          (Loom.el "button" [Loom.attr "type" "button", Loom.attr "data-live-reconnect" "1"]
+            [Loom.text "reconnect"])]];
+  Loom.seq [head, whereNode, Loom.el "div" [Loom.class "doc-live-body"] [body]]
+
+/-- The page's effects. -/
+def DocLive.effect (s : DocLive) (kind a b : String) : DocLive :=
+  if String.eq kind "state" then { s with state := a, endpoint := b }
+  else if String.eq kind "server" then { s with server := a }
+  else if String.eq kind "hover" then { s with hover := a }
+  else if String.eq kind "highlight" then { s with highlight := a }
+  else if String.eq kind "goals" then { s with goals := a, goalsKind := b }
+  else if String.eq kind "term" then { s with term := a, termKind := b }
+  else if String.eq kind "diagnostics" then { s with diagnostics := match Json.parse a with
+      | .ok j => Json.asList j
+      | .error _ => [] }
+  else if String.eq kind "message" then { s with message := a }
+  else if String.eq kind "pinned" then { s with pinned := String.eq a "1" }
+  else if String.eq kind "position" then { s with position := a }
+  else if String.eq kind "ack" then { s with reconnect := .false }
+  else s
+
+/-- The panel's pending requests (a reconnect). -/
+def DocLive.requests (s : DocLive) : String :=
+  match s.reconnect with
+  | .true => "[{\"kind\":\"reconnect\",\"payload\":\"\"}]"
+  | .false => "[]"
+
+/-- A message: only the reconnect does anything in the runtime. -/
+def DocLive.update (m : DocLiveMsg) (_payload : String) (s : DocLive) : DocLive :=
+  match m with
+  | .reconnect => { s with reconnect := .true }
+  | _ => s
+
+/-- The panel as a `Loom.LiveApp`. -/
+def docLiveApp : Loom.LiveApp DocLive DocLiveMsg :=
+  Loom.LiveApp.mk DocLive.initial DocLive.update DocLive.view

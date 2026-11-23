@@ -1,0 +1,11 @@
+import Optic
+
+-- `TraverseMut` is an in-place, state-threading, *fallible* loop:
+--   traverseM : (A → σ → Result (A × σ)) → S → σ → Result (S × σ).
+-- A `Wandering` traversal runs a pure applicative copy; `overT` has no error branch and
+-- gives no focus to the next step of a `σ`-threading fold. The failing term: the
+-- traversal's result is an `S`, but the loop body needs an `A`.
+def fromTraversal {S A σ : Type} (t : TraversalP S S A A)
+    (f : A → σ → Result (A × σ)) (s : S) (st : σ) : Result (S × σ) :=
+  let s' : S := overT (S := S) (T := S) (A := A) (B := A) t (fun a => a) s;
+  Result.map (fun (p : A × σ) => (s, p.2)) (f s' st)

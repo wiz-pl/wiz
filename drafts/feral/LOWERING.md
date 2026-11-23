@@ -29,9 +29,9 @@ Files:
 What `lib/Feral.wiz` parses and lowers today is the fragment of §1a. The sketch below is
 the wider design; in it, `struct`/`enum`/`fn`, `let`/`let mut`, borrows, `match`, `if`,
 `if let`, `while`, `while let`, `for`, `return`, `?` and the library calls of the table
-are real, while `requires`/`ensures`/`invariant`/`decreases`, `loop`, `break`/`continue`,
+are real, while `invariant`/`decreases`, `loop`, `break`/`continue`,
 `impl`/`trait`, field and index assignment, closures and tuples of more than two
-components are not parsed yet (spec clauses are comments in `surface/`).
+components are not parsed yet (loop clauses are comments in `surface/`).
 
 ```
 import Feral
@@ -43,10 +43,10 @@ feral
     | leaf
     | node (key : U64) (left : Box Tree) (right : Box Tree)
 
-  fn get_mut {'a} (v : &'a mut Vec U64) (i : USize) : &'a mut U64   -- Wiz binders; region params in braces
-    requires i < v.len                     -- RD13 clauses between the signature and :=
-    ensures final(v) = old(v).set i final(result)
-  := &mut v[i]
+  fn get_mut {'a} (v : &'a mut Vec U64) (i : USize)                 -- Wiz binders; region params in braces
+    requires (i < v.len)                   -- RD13 clauses between the binders and the result type
+    ensures (final(v) = old(v).set i final(result))
+  : &'a mut U64 := &mut v[i]
 
   fn sum_from (s0 : U64) (n : U64) : Result U64 Overflow := {        -- a block: statements separated by ;
     let mut i : U64 := 0;                  -- let / let mut, Wiz's :=
@@ -85,8 +85,9 @@ feral                             -- `#lower feral … end` also shows the gener
   items                           -- `#unchecked feral … end` lowers without the front end's borrow verdict (tests)
 end
 ```
-* items: `fn f {'a 'b} {'a : 'b} {T : Type} (x : τ) … : τ := e`, `struct S where f : τ …`,
-  `enum E where | c (x : τ) …`;
+* items: `fn f {'a 'b} {'a : 'b} {T : Type} (x : τ) … : τ := e`, optionally with inline
+  clauses `requires (P) ensures (Q)` between the binders and the result type,
+  `struct S where f : τ …`, `enum E where | c (x : τ) …`;
 * types: names, `Vec τ`, `Option τ`, `Result τ ε`, `Box τ`, `τ × τ`, `&'a τ`, `&'a mut τ`
   (the region may be elided: a fresh one per parameter; in a result, the first
   reference parameter's; in a local annotation, inferred), `USize` = `U64`;
@@ -161,8 +162,10 @@ returns `R (MutOpt ρ A S)`: `.some m` (a `Mut`) or `.none r` (the lender) (L12)
 **L5. Sequencing.** **(changed, 22j: layout)** The front end parenthesises every `match`
 it emits and writes `Result.ok`/`Flow.brk` qualified (a `.c` inside a tuple gets no
 expected type); a join's scrutinee carries its type, `((…) : Result T)`, and a scope its
-type arguments, `@Uniq.borrow S B σ s (fun …)`, so that a region escaping through `B` is
-an error at `B`. A call or primitive that may fail is a direct `match`:
+type arguments, `Uniq.borrow (S := …) (B := …) σ s (fun …)`, so the elaborator poses
+`RegionFree B` at the result type: a `B` that quantifies over the scope's region
+(`(0 r : Region) × Shr r A`) is an error at `B` (R2). A call or primitive that may fail
+is a direct `match`:
 `match ⟦e⟧ with | .ok x => ⟦rest⟧ | .err e => .err e` — never `Monad.bind`, never a
 closure around an owner (plan §5.1 req. 2). Pure steps are `let`. Each nested match
 is laid out with its alternatives on their own lines; a non-final nested match is
@@ -290,7 +293,13 @@ handle is the same borrow). A call that **returns a borrow** of a `&mut` argumen
 => …)`: inside, `v` is a `Lent` token until the returned borrow's last use, where it is
 released (03, 08).
 
-**L18. Specs (RD13, RD11).** `requires P ensures Q` ↦ `def f.spec (args) : Prop :=
+**L18. Specs (RD13, RD11).** **(changed, 22j)** The clauses are written inline on the
+`fn` (`fn f … requires (P) ensures (Q) : R := e`; between the binders, because after the
+result type the type's juxtaposition would read the clause words as type arguments) or in
+a `spec f requires (P) ensures (Q)` item; a function has one specification (both is an
+error), and either emits the same `f.Spec`. `final(x)`/`old(x)` (Rust's spelling) are
+`final x`/`old x`.
+`requires P ensures Q` ↦ `def f.spec (args) : Prop :=
 P → Result.All (fun r => Q[result := …, old(x) := x, final(x) := …]) (f args)`; for a
 returned borrow `r : Mut ρ A S`, `*result` is `r.1`, `final(result)` is a universally
 quantified `fin`, and `final(v)` is `r.2 fin` (03: `get_mut.spec`, proved as
@@ -298,7 +307,10 @@ quantified `fin`, and `final(v)` is `r.2 fin` (03: `get_mut.spec`, proved as
 stated on values: `f.Spec` takes each `&mut` argument's value, runs the call inside the
 caller's borrow scopes (`Uniq.borrow`/`borrowIn`), and `Result.Holds` states the clauses
 on the values the scopes hand back (`old(x)` is the argument, `final(x)` the lender's
-final value).
+final value). For a returned borrow the one lender's scope is opened, the call's
+`Borrowed` is matched in it, and the borrow is closed there (`Mut.peek`/`Mut.close`):
+`result` is the borrow's value, `final(result)` the quantified `fin`, and `final(v)` the
+lender's value the scope hands back (`lib/Feral.wiz`, `Fe.specBorrow`).
 
 **L19. Interop (RD16).** Wiz calls lowered functions as they are (`R`, handed-back
 tuples, backward closures); `Result.map`, `Result.show`, `Mut.release`, `MutOpt.over`
@@ -331,8 +343,10 @@ say `σ` for all of them; lib/Region.wiz never did).
 first region parameter, else `Region.static`. The lambda rebinds the lender's own name
 (`s`, `r`): to a `Lent ρ S` token for a mutable borrow, to the `Shr ρ S` for a shared
 one. Variables that live on after the scope leave it in its result `B`; `B` is
-chosen outside, where `ρ` doesn't exist, so a handle of region `ρ` can't leave (as
-`runST`). Each scope's body hands its borrow back last.
+chosen outside, where `ρ` doesn't exist, and must be `RegionFree` (lib/Region.wiz, R2):
+a closed type that quantifies over `ρ` (`(0 r : Region) × Shr r A`) is rejected, so a
+handle of region `ρ` can't leave (as `runST`, now with the side condition). Each scope's
+body hands its borrow back last.
 
 **L21. What is rejected, and how** (drafts/feral/rejected/, each a type mismatch).
 **(22j)** The front end's checker has the same types (regions included), so it meets each
@@ -368,12 +382,17 @@ lowering of the same program, and the `feral` tests require both verdicts:
 **(changed, cohesion M4)** Handles are linear (linear-case stage 2), so the kernel also
 rejects duplicating one (`swap r r`, E0499; `swap (&mut a) (&mut a)` in Feral, on its
 `#unchecked` lowering) and a handle packed with its region (`(0 r : Region) × Uniq r A`)
-leaving its scope: it would have to be handed back as well. What is still **not**
-rejected by the type checker, only by the lowering's shape (a known gap, pinned in test
-group `regions`): the lender's outer name is only *shadowed* by the `Lent` token, and the
-lender is an ω value, so a body that names the token differently can read the lender
-while it is borrowed (E0502). Closing it needs linear lenders, and then a Copy notion to
-read `*x` out of one (K3).
+leaving its scope: it would have to be handed back as well. **(R2)** The other region-
+packing shape, `B := (0 r : Region) × Shr r A`, is rejected by the scope's `RegionFree B`
+side condition (group `regions`; `drafts/feral/rejected/region_pack_*`), so the lowering
+does not have to avoid it by construction. What is still **not** rejected by the type
+checker, only by the lowering's shape (a known gap, pinned in test group `regions`): the
+lender's outer name is only *shadowed* by the `Lent` token, and the lender is an ω value,
+so a body that names the token differently can read the lender while it is borrowed
+(E0502). Closing it needs linear lenders, and then a Copy notion to read `*x` out of one
+(K3). E0506 (assignment to a `Lent` lender) is tested by the Feral case *"the lender is
+unusable while a named borrow of it lives (E0499, E0502, E0506)"* (front end; no
+separate `rejected/surface` fixture), `drafts/feral/OBLIGATIONS.md`.
 
 **L22. Outlives.** `'a : 'b` is `(0 h : Outlives ρa ρb)` (an opaque `Prop`: proofs come
 from `Outlives.refl`/`trans`/`static` and from scopes). A scope nested in `σ` hands
@@ -394,10 +413,17 @@ borrow error of each function. If any item has an error nothing is emitted. A lo
 item that the kernel rejects is reported at the item with the generated text: for an
 accepted program that is a bug of the front end (and a test failure).
 
-## 3. What the lowering guarantees about in-place execution (informal)
+## 3. What the lowering claims about in-place execution (empirical)
 
 At every update the updated value has rc 1 when the Feral program is accepted: `&mut`
 arguments are moved into the callee and back (02), struct updates unpack first (07),
 enum cells matched and rebuilt in one block are reused (04, 05), element borrows go
 through take/fill (natively; the model copies). The dynamic check is `--check-unique`
 (R7, not yet built).
+
+This is an empirical property of the generated Wiz and its RC, **not** a consequence of
+quantity 1: linearity says a handle is used once, not that the buffer is unaliased, and a
+linear `&mut` scope itself allocates the handle's cell. The pinned measurement is 3 → 4 →
+6 objects for direct → one scope → two nested (`Tests/Groups/Regions.lean`, R5 case), with
+3 → 15 → 29 as the pre-inlining history (`wiz-notes/linear-scope-cost.md`); the `#ir` and
+allocation counts are the evidence, and a change is a test change.

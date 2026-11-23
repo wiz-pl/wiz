@@ -56,5 +56,34 @@ run p5-helper-safe && expect p5-helper-safe '^VERDICT[[:space:]]+proved$' \
   && expect p5-helper-safe '^ROWS[[:space:]]+3$'
 run p5b-helper-unsafe && expect p5b-helper-unsafe '^VERDICT[[:space:]]+refuted:' \
   && expect p5b-helper-unsafe 'path .* -> sink\(8,0,7\)'
+# The C fixtures' spills are checked in when available; regenerate one with scry-cst
+# (SCRY_CST=/path/to/scry-cst) if it is missing.
+ensure_spill() { # c-file
+  local c=$1 tool=${SCRY_CST:-}
+  [ -f "$c.cst" ] && return 0
+  if [ -z "$tool" ]; then tool=$(command -v scry-cst || true); fi
+  if [ -z "$tool" ]; then
+    echo "FAIL $c: no spill and no scry-cst (set SCRY_CST=...)" >&2
+    exit 2
+  fi
+  "$tool" "$c" > "$c.cst"
+}
+ensure_spill "$ROOT/scry/corpus/prover/c/memcpy-safe.c"
+ensure_spill "$ROOT/scry/corpus/prover/c/memcpy-weak.c"
+ensure_spill "$ROOT/scry/corpus/prover/c/memcpy-unguarded.c"
+# P7: the cut. The memcpy length is guarded by n <= 16 and the destination has 32 cells.
+run p7-memcpy-safe && expect p7-memcpy-safe '^VERDICT[[:space:]]+proved \(every write is preceded by a check\)$' \
+  && expect p7-memcpy-safe '^GUARDS[[:space:]]+1$' \
+  && expect p7-memcpy-safe '^WRITES[[:space:]]+1$'
+# P8: the guard is before the copy but permits 64 into a 32-cell buffer; the witness
+# names the guard and the use.
+run p8-memcpy-weak && expect p8-memcpy-weak '^VERDICT[[:space:]]+refuted:' \
+  && expect p8-memcpy-weak 'guard\(' \
+  && expect p8-memcpy-weak 'use\(' \
+  && expect p8-memcpy-weak 'allows register'
+# P9: no guard at all; the witness names the use and says there is no guard.
+run p9-memcpy-unguarded && expect p9-memcpy-unguarded '^VERDICT[[:space:]]+refuted:' \
+  && expect p9-memcpy-unguarded 'has no guard on register' \
+  && expect p9-memcpy-unguarded 'use\('
 
 exit $fail

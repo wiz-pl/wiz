@@ -1,44 +1,18 @@
-// The goals pane: the bridge between a page's editor and a language client
-// (`web/lsp-client.js`), with the rendering in `web/goals.js`. It is the one
-// implementation of the browser infoview, shared by the playground
-// (`web/playground.html`, `web/playground.js`) and the standalone infoview page
-// (`web/infoview.html`, `web/infoview.js`, served by `wiz lsp --ws`). The file keeps
-// the name it grew up with: `web/build-playground.sh` lists the playground's scripts by
-// name, and it is not this change's to touch (`agent/engine-trampoline` owns it);
-// renaming it is a one-line follow-up once that branch lands.
+// The goals pane's transport: the language client (`web/lsp-client.js`) and the editor's
+// carets, with the rendering in `lib/Web/Goals.wiz` and the card in `lib/Web/Hover.wiz`.
+// The pane itself is a runtime; this file sends it the server's answers (`update`) and
+// does what it asks for (`request`: reveal a source span, describe a subterm, reconnect).
 //
-// What it does, in the order a page needs it:
-//
-//   * `?lsp=` (or a config object) names the server; with none, or when the connection
-//     fails, the pane says so and the playground stays exactly a local Wasm checker.
-//     The transport is the config's: a WebSocket URL (`ws://`, the standalone page and
-//     `?lsp=ws://…`), or a `WebSocketImpl` that is not a socket at all (the playground's
-//     in-page server, `web/selfhost-lsp-shim.js`, `?lsp=selfhost`).
-//   * After the handshake it opens the editor's text as one document (a fresh
-//     `file:///playground-….wiz` URI, so pages do not overwrite each other), sends
-//     `didChange` on edits, and asks for goals at the caret.
-//   * `follow: true` is the standalone page's `?follow=1`: no document of its own and no
-//     editor events. The page calls `goTo(uri, position)` on the server's
-//     `wiz/infoview/cursor` notification, and the pane shows the state there — the
-//     editor's document, not a copy (the server shares documents between connections).
-//   * The panel renders the goals, the expected type and the term tree; clicking a
-//     hypothesis or a subterm selects its source span in the textarea, and a
-//     `wiz/subtermInfo` answer (when the server has one) describes it. Hover and arrow
-//     keys reuse `web/tagged.js`'s `delegate`, the infoview's own highlighting code.
-//   * `info` (an element) puts the selected subterm in its own box (the standalone
-//     page's `#info`) instead of at the end of the panel; `onRender(view)` is called
-//     after every render, so the page can mirror the state into its own status line.
-//
-// Positions are UTF-16 code units, as `lsp-client.js` negotiates; `positionAt` is the
-// only conversion the page needs.
+// What stays here is host work: the URL's endpoint rule, the WebSocket, document sync,
+// the debounce, the underlines (`web/squiggles.js`) and the completion popup
+// (`web/completions.js`). The page's `update(kind, a, b)` is its runtime effect.
 "use strict";
-import { LspClient, endpointFromSearch } from "./lsp-client.js";
-import { readGoalState, renderPanel, renderSelection, positionAt, parseSpan, rangeOffsets } from "./goals.js";
-import { delegate } from "./tagged.js";
+import { LspClient, endpointFromSearch, mapOffset } from "./lsp-client.js";
+import { mountWidgets } from "./widgets.js";
 import { mountSquiggles, wantsSquiggles } from "./squiggles.js";
 import { mountCompletions, wantsCompletions } from "./completions.js";
 import { mountHover, wantsHover } from "./hover.js";
-import { caretOffset } from "./editor-model.js";
+import { caretOffset } from "./framework/editor-text.js";
 
 // A document URI of our own: the server shares documents between every page, so two
 // playground tabs must not edit the same file.
@@ -47,27 +21,130 @@ function scratchUri() {
   return `file:///playground-${random}.wiz`;
 }
 
-// `config` is `{url}` (a `ws://` URL, or `null` for no server) or the whole endpoint
-// from `parseEndpoint`; `search` defaults to the page's query string. `follow` makes the
-// pane a viewer of another editor's document (`api.goTo`); `info` is an optional element
-// for the selected subterm; `onRender` sees the view after every render.
-//
-// Options: `squiggles`/`completions` (false disables the overlay; they are on by
-// default), `hover: false` (or `?hover=off`) turns the hover card and go-to-definition
-// off, `onRender(view)` (called after every panel render: the Loom page uses it to
-// mirror the panel HTML into its model), `eventsFrom` (the element the panel's clicks and
-// keys arrive on; `panel` itself by default, and the live Loom container when the panel
-// is rendered into a model), `document` (the page's document; the Node tests pass a
-// double), and `positionDebounce` (ms, 120 by default).
+// The runtime's position index (`lib/Web/EditorModel.wiz`), read through `mount.ask`.
+// `ask(name, ...strings) -> string` invokes a `wiz_loom_*` export; `versionOf()` (when
+// given) is the document version the cache is keyed by. The line table is built once per
+// (version, text) and reused by every query: the previous keyup path rebuilt the whole
+// UTF-16 expansion on each call, and the selfhost index repeated it per caret.
+export function createIndexer(ask, versionOf = null) {
+  let cache = { text: null, version: undefined, index: "" };
+  const indexOf = (text) => {
+    const version = versionOf ? versionOf() : undefined;
+    if (cache.text === text && cache.version === version) return cache.index;
+    const index = ask("wiz_loom_editor_index", "0", text);
+    cache = { text, version, index };
+    return index;
+  };
+  return {
+    index: indexOf,
+    position: (text, offset) =>
+      JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(offset | 0))),
+    offset: (text, position) => {
+      const line = position && Number.isFinite(position.line) ? Math.trunc(position.line) : 0;
+      const character = position && Number.isFinite(position.character) ? Math.trunc(position.character) : 0;
+      return Number(ask("wiz_loom_editor_offset_index", indexOf(text),
+        String(line), String(character)));
+    },
+    lineEnd: (text, offset) =>
+      Number(ask("wiz_loom_editor_line_end_index", indexOf(text), String(offset | 0))),
+    range: (text, from, to) => ({
+      start: JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(from | 0))),
+      end: JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(to | 0))),
+    }),
+    utf16: (text, codePoints) => Number(ask("wiz_loom_editor_utf16", text, String(codePoints | 0))),
+    editorOffset: (text, prefix, codePoints) =>
+      Number(ask("wiz_loom_editor_editor_offset", text, prefix, String(codePoints | 0))),
+    segments: (text, diagnostics) =>
+      JSON.parse(ask("wiz_loom_editor_segments_index", indexOf(text), text,
+        JSON.stringify(diagnostics || []), "0")),
+    build: (text, entries, prefix) =>
+      ask("wiz_loom_index_build", text, prefix || "", JSON.stringify(entries || [])),
+    size: (index) => Number(ask("wiz_loom_index_size", index)),
+    term: (text, index, offset) =>
+      JSON.parse(ask("wiz_loom_index_term", text, index, String(offset | 0))),
+    goal: (text, index, offset) =>
+      JSON.parse(ask("wiz_loom_index_goal", text, index, String(offset | 0))),
+    declarations: (text, index) => JSON.parse(ask("wiz_loom_index_declarations", text, index)),
+    declarationNamed: (text, index, name) =>
+      JSON.parse(ask("wiz_loom_index_declaration", text, index, name)),
+    // The in-page server's pure rules (`Web.Selfhost.wiz`): the initialize capabilities,
+    // the engine's lines as diagnostics, the command splitter, the Prelude rule and the
+    // completion/hover/definition answers. The shim is the server around them.
+    initializeCapabilities: () => JSON.parse(ask("wiz_loom_lsp_capabilities")),
+    withPrelude: (text) => JSON.parse(ask("wiz_loom_lsp_prelude", text)),
+    splitCommands: (text) => JSON.parse(ask("wiz_loom_lsp_commands", text)),
+    outputLines: (output) => JSON.parse(ask("wiz_loom_lsp_output_lines", output)),
+    parseErrorOffset: (line) => {
+      const n = Number(ask("wiz_loom_lsp_parse_error", line));
+      return n < 0 ? null : n;
+    },
+    diagnosticsFromOutput: (text, output) =>
+      JSON.parse(ask("wiz_loom_lsp_diagnostics_output", text, output)),
+    parseCheck(json) {
+      const text = json === null || json === undefined ? ""
+        : (typeof json === "string" ? json : JSON.stringify(json));
+      return JSON.parse(ask("wiz_loom_lsp_parse_check", text));
+    },
+    diagnosticsFromCheck: (text, answer) =>
+      JSON.parse(ask("wiz_loom_lsp_diagnostics_check", text,
+        JSON.stringify(answer === null || answer === undefined ? {} : answer))),
+    completionPrefix: (text, offset) =>
+      JSON.parse(ask("wiz_loom_lsp_completion_prefix", text, String(offset | 0))),
+    wordAt: (text, offset) =>
+      JSON.parse(ask("wiz_loom_lsp_word_at", text, String(offset | 0))),
+    filterCompletions: (names, prefix, limit = 200) =>
+      JSON.parse(ask("wiz_loom_lsp_filter_completions", JSON.stringify(names || []),
+        String(prefix || ""), String(limit))),
+    completion: (text, index, position) =>
+      JSON.parse(ask("wiz_loom_lsp_completion", text, index || "",
+        JSON.stringify(position || {}))),
+    hover: (text, index, position) =>
+      JSON.parse(ask("wiz_loom_lsp_hover", text, index || "",
+        JSON.stringify(position || {}))),
+    definition: (text, index, position, uri) =>
+      JSON.parse(ask("wiz_loom_lsp_definition", text, index || "",
+        JSON.stringify(position || {}), uri || "")),
+    // The completion popup's rules (`Web.EditorModel`): the result's items, the popup's
+    // filtered items/selection/prefix, the key command and the accepted edit. The popup
+    // only paints them, so none of this is decided in `web/completions.js`.
+    items: (result) => JSON.parse(ask("wiz_loom_editor_items", JSON.stringify(result))),
+    popup: (text, offset, items, index) =>
+      JSON.parse(ask("wiz_loom_editor_popup", text, JSON.stringify(items || []),
+        String(index), String(offset))),
+    key: (key, index, count) =>
+      JSON.parse(ask("wiz_loom_editor_key", String(key || ""), String(index), String(count))),
+    accept: (item, text, offset) =>
+      JSON.parse(ask("wiz_loom_editor_accept", text, JSON.stringify(item), String(offset))),
+    trigger: (text, offset, c) => ask("wiz_loom_editor_trigger", text, c, String(offset)) === "1",
+    // The popup's tooltip and ask key, and the goals pane's source spans (`highlight`),
+    // so neither decides a rule.
+    itemTitle: (item) => ask("wiz_loom_editor_item_title", JSON.stringify(item || {})),
+    askKey: (key, code, ctrl, meta) =>
+      ask("wiz_loom_editor_ask_key", String(key || ""), String(code || ""),
+        ctrl ? "1" : "0", meta ? "1" : "0") === "1",
+    span: (text, span) => JSON.parse(ask("wiz_loom_editor_span", text, span)),
+    rangeText: (range) => ask("wiz_loom_editor_range_text", JSON.stringify(range || {})),
+    // A `textDocument/definition` answer's target, range and label (`Web.Hover`); the
+    // page only decides whether it can open the target's document.
+    target: (result) => JSON.parse(ask("wiz_loom_hover_target",
+      result === null || result === undefined ? "null" : JSON.stringify(result))),
+  };
+}
+
+// `config` is `{url}` (a `ws://` URL, or `null` for no server), an endpoint from
+// `endpointFromSearch`, or the page's in-page endpoint (`?lsp=selfhost`). `update(kind,
+// a, b)` is the runtime's effect (`view`, `info`, `hover`); a page that still passes a
+// `render` callback (the Node tests) gets the same events there. `widgetPane` is an
+// element for the widget host: the cards are mounted there by `mountWidgets`, never
+// rendered into the goals panel.
 export function startInfoview({
-  editor, panel, config, search, uri, follow = false, info, onRender, eventsFrom,
+  editor, update, render, config, search, uri, follow = false,
   document: pageDocument, squiggles: wantSquigglesLayer, completions: wantCompletionsPopup,
-  hover: wantHover, positionDebounce = 120,
+  hover: wantHover, positionDebounce = 120, onRender, rules, widgetPane,
 } = {}) {
-  if (!editor || !panel) return null;
-  // The panel's markup may be produced here and rendered elsewhere (the `?ui=loom`
-  // model): clicks and arrow keys then arrive on the live container, not on `panel`.
-  const eventRoot = eventsFrom || panel;
+  if (!editor && !follow) return null;
+  const send = typeof update === "function" ? update
+    : (kind, a, b) => { if (typeof render === "function") render(kind, a, b); };
   const query = search === undefined ? (typeof location !== "undefined" ? location.search : "") : search;
   const endpoint = config === undefined
     ? endpointFromSearch(query)
@@ -79,12 +156,10 @@ export function startInfoview({
   let refreshTimer = null;
   let settleTimer = null;
   let suppressCursor = false;
-  let selected = -1;
-  let lastCursor = null;          // the position the goals were last asked about
+  let lastCursor = null;
 
   const view = {
     state: endpoint ? "connecting" : "no-server",
-    // (#430: the label leaves the token out)
     endpoint: endpoint ? (endpoint.label || endpoint.url) : null,
     serverInfo: null,
     infoview: null,
@@ -95,20 +170,46 @@ export function startInfoview({
     term: null,
     termKind: null,
     info: null,
+    items: [],
     position: null,
     canReconnect: false,
     follow,
   };
 
-  // ## Hover and go-to-definition
+  // The widget pane is rebuilt only when the payload changed: `mountWidgets` clears the
+  // container and sanitises every card, and `publish` runs on every answer, diagnostics
+  // notification and cursor move (a plot's SVG is up to 2 MB). The key is the serialized
+  // payload, so identical items keep the mounted DOM (and its `<details open>`, scroll
+  // and focus) across publishes.
+  let lastWidgets = null;
+  const widgetKey = (items) => {
+    try { return JSON.stringify(items || []); } catch { return ""; }
+  };
+  const publish = () => {
+    send("view", JSON.stringify(view), "");
+    if (widgetPane) {
+      const key = widgetKey(view.items);
+      if (key !== lastWidgets) {
+        mountWidgets(widgetPane, view.items, pageDocument || globalThis.document);
+        lastWidgets = key;
+      }
+    }
+    if (typeof onRender === "function") {
+      try { onRender(view); } catch (_) { /* the page's mirror must not break the pane */ }
+    }
+  };
+  const publishInfo = (info) => send("info", JSON.stringify(info), "");
 
-  // The card shows the server's `textDocument/hover` at the caret and jumps to a
-  // definition (`textDocument/definition`). A definition in the editor's own document
-  // moves the caret and selects the name; one in a library has no page here, so the card
-  // says `Prelude.wiz:7:1` and the editor stays where it was.
-  const hover = wantHover === false || !wantsHover(query) ? null : mountHover({
+  // ## Hover
+
+  const hover = wantHover === false || !wantsHover(query) || !rules ||
+    typeof rules.position !== "function" ? null : mountHover({
     editor,
     document: pageDocument,
+    // The caret and the definition answer are the runtime's rules (`Web.EditorModel`,
+    // `Web.Hover`); this module supplies the browser's caret and the socket's answer.
+    position: (text, offset) => rules.position(text, offset),
+    target: typeof rules.target === "function" ? (result) => rules.target(result) : undefined,
     onHover: (position) => (client && client.state === "open" ? client.hover(documentUri, position) : null),
     onDefinition: (position) => (client && client.state === "open" ? client.definition(documentUri, position) : null),
     onJump: (target) => {
@@ -116,47 +217,47 @@ export function startInfoview({
       highlight(target.range);
       return true;
     },
+    show: (raw, label) => {
+      send("hover", JSON.stringify({ raw, label }), "");
+      if (hover) hover.place();
+    },
   });
-
-  // Keep the panel's scroll position across re-renders (a click re-renders the panel).
-  function render() {
-    const top = panel.scrollTop || 0;
-    // With `info`, the panel leaves the selection out and the box has it alone.
-    renderPanel(panel, info ? Object.assign({}, view, { info: null }) : view);
-    panel.scrollTop = top;
-    if (info) info.innerHTML = view.info ? renderSelection(view.info) : "";
-    if (typeof onRender === "function") {
-      try { onRender(view); } catch (_) { /* the page's mirror must not break the pane */ }
-    }
-  }
 
   // The editor's features: squiggles under the diagnostics, and the completion popup at
   // the caret. Both are plain overlay DIVs (no dependency, no editor rewrite) and both
-  // are absent without a DOM (the Node tests pass a stub textarea).
-  const squiggles = wantSquigglesLayer === false || !wantsSquiggles(query)
-    ? null : mountSquiggles(editor, { document: pageDocument });
-  const completions = wantCompletionsPopup === false || !wantsCompletions(query)
+  // are absent without a DOM or without the runtime's rules (the standalone infoview
+  // passes `squiggles: false`/`completions: false`).
+  const squiggles = wantSquigglesLayer === false || !wantsSquiggles(query) || !rules
+    ? null : mountSquiggles(editor, {
+      document: pageDocument,
+      segments: (text, diagnostics) => rules.segments(text, diagnostics),
+    });
+  const completions = wantCompletionsPopup === false || !wantsCompletions(query) || !rules
     ? null : mountCompletions({
       editor,
       document: pageDocument,
+      rules,
       onRequest: (position) => {
         if (!client || client.state !== "open") return null;
         return client.completion(documentUri, position);
       },
     });
 
-  // ## Source highlighting (a textarea's native selection: UTF-16 offsets)
+  // ## Source highlighting (the textarea's native selection)
 
-  function highlight(span) {
-    const { start, end } = rangeOffsets(editor.value, span);
+  function highlight(range) {
+    if (!editor || !rules) return;
+    const span = rules.span(editor.value,
+      typeof range === "string" ? range : rules.rangeText(range || {}));
+    if (!span) return;
+    const start = span[0];
+    const end = Math.max(start, span[1]);
     suppressCursor = true;
     try { editor.focus({ preventScroll: true }); } catch (_) { try { editor.focus(); } catch (_) { /* no focus */ } }
     try { editor.setSelectionRange(start, end); } catch (_) { /* not a text field */ }
     try {
-      const line = span && span.start ? span.start.line : 0;
-      const style = typeof getComputedStyle === "function" ? getComputedStyle(editor) : null;
-      const lineHeight = (style && parseFloat(style.lineHeight)) || 21;
-      const top = line * lineHeight;
+      const lineHeight = 21;
+      const top = rules.position(editor.value, start).line * lineHeight;
       if (top < editor.scrollTop || top + lineHeight > editor.scrollTop + editor.clientHeight) {
         editor.scrollTop = Math.max(0, top - lineHeight * 2);
       }
@@ -164,47 +265,146 @@ export function startInfoview({
     setTimeout(() => { suppressCursor = false; }, 0);
   }
 
-  function spanOf(element) {
-    for (let el = element; el && el !== eventRoot; el = el.parentElement) {
-      if (el.dataset && el.dataset.span) return parseSpan(el.dataset.span);
+  function currentPosition() {
+    if (follow) return followPosition;
+    return rules ? rules.position(editor.value, caretOffset(editor)) : null;
+  }
+
+  // ## Formatting (`wiz fmt` through the server)
+
+  // Positions for the edit applier: the runtime's offset rule when it has one (`Web.
+  // EditorModel`), else the client's UTF-16 default. The same function converts the
+  // returned `TextEdit` ranges and maps the caret.
+  const offsetOf = rules && typeof rules.offset === "function"
+    ? (text, position) => rules.offset(text, position)
+    : undefined;
+
+  function selectionOffsets() {
+    const text = typeof editor.value === "string" ? editor.value : "";
+    const start = caretOffset(editor);
+    const end = typeof editor.selectionEnd === "number"
+      ? Math.min(text.length, Math.max(start, editor.selectionEnd)) : start;
+    return { start, end };
+  }
+
+  // A normal `input` event after the host changed the textarea: the page's own listeners
+  // send `didChange` (one synchronisation path), refresh the goals and re-render. A
+  // stub editor without `dispatchEvent` falls back to the page's edit handler.
+  function dispatchInput() {
+    const doc = (editor && editor.ownerDocument) || (typeof document !== "undefined" ? document : null);
+    const EventImpl = (doc && doc.defaultView && doc.defaultView.Event) ||
+      (typeof Event === "function" ? Event : null);
+    if (!EventImpl || typeof editor.dispatchEvent !== "function") return false;
+    try { editor.dispatchEvent(new EventImpl("input", { bubbles: true })); return true; } catch (_) {
+      return false;
     }
-    return null;
+  }
+
+  // `textDocument/formatting` (or `rangeFormatting` with a range of this document), the
+  // shared `WorkspaceEdit` applier, and the caret mapped through the same edits. The
+  // version captured before the request is the guard: typing while it is in flight
+  // refuses the edit (`ContentModified`) rather than replacing a newer text.
+  async function format(range) {
+    if (!client || client.state !== "open") return { ok: false, reason: "no language server" };
+    if (!documentUri) return { ok: false, reason: "no document" };
+    if (!rules) return { ok: false, reason: "no editor rules" };
+    const caps = client.capabilities || {};
+    const provider = range ? caps.documentRangeFormattingProvider : caps.documentFormattingProvider;
+    if (!provider) return { ok: false, reason: "this server has no formatter" };
+    const doc = client.docs.get(documentUri);
+    if (!doc) return { ok: false, reason: "the document is not open on the server" };
+    const version = doc.version;
+    const bounds = selectionOffsets();
+    let edits;
+    try {
+      edits = range
+        ? await client.rangeFormatting(documentUri, range, { tabSize: 2, insertSpaces: true })
+        : await client.formatting(documentUri, { tabSize: 2, insertSpaces: true });
+    } catch (e) {
+      return { ok: false, reason: e && e.message ? e.message : String(e), stale: !!(e && e.isStale) };
+    }
+    if (!Array.isArray(edits) || edits.length === 0) return { ok: true, applied: false, edits: [] };
+    const before = typeof editor.value === "string" ? editor.value : "";
+    let applied;
+    try {
+      applied = client.applyWorkspaceEdit({ changes: { [documentUri]: edits } },
+        { expectedVersion: version, offsetOf });
+    } catch (e) {
+      return { ok: false, reason: e && e.message ? e.message : String(e), stale: !!(e && e.isStale) };
+    }
+    const mine = applied.find((r) => r.uri === documentUri);
+    if (!mine || mine.text === before) return { ok: true, applied: false, edits };
+    const caret = mapOffset(edits, bounds.start, before, offsetOf);
+    const selectionEnd = Math.max(caret, mapOffset(edits, bounds.end, before, offsetOf));
+    editor.value = mine.text;
+    try { editor.setSelectionRange(caret, selectionEnd); } catch (_) {
+      editor.selectionStart = caret;
+      editor.selectionEnd = selectionEnd;
+    }
+    // the page's normal edit path: an `input` event where the host can dispatch one,
+    // else this module's own handler (a stub textarea in a test)
+    if (!dispatchInput()) onEdit();
+    return { ok: true, applied: true, edits };
+  }
+
+  // The selection as an LSP range (a plain caret formats the whole document).
+  function formatSelection() {
+    if (!rules) return format();
+    const text = typeof editor.value === "string" ? editor.value : "";
+    const bounds = selectionOffsets();
+    if (bounds.start === bounds.end) return format();
+    return format({ start: rules.position(text, bounds.start), end: rules.position(text, bounds.end) });
+  }
+
+  // Ctrl/⌘+Shift+F: the document (or the selection when there is one).
+  function onFormatKey(event) {
+    if (!event) return;
+    const key = typeof event.key === "string" ? event.key.toLowerCase() : "";
+    if (key === "f" && !!(event.ctrlKey || event.metaKey) && !!event.shiftKey && !event.altKey) {
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      formatSelection();
+    }
   }
 
   // ## Asking the server
 
-  // The position the pane asks about: the caret in its own editor, or the position the
-  // followed editor announced (`?follow=1`).
-  function currentPosition() {
-    if (follow) return followPosition;
-    return positionAt(editor.value, editor.selectionStart || 0);
-  }
-
   async function refresh() {
     if (!client || client.state !== "open") return;
-    if (!documentUri) return;   // following: nothing announced yet
+    if (!documentUri) return;
     const position = currentPosition();
     if (!position) return;
     const mine = ++generation;
     const doc = client.docs.get(documentUri);
     const version = doc ? doc.version : null;
     view.position = position;
-    const state = await readGoalState(client, documentUri, position);
-    if (mine !== generation) return;   // a newer cursor/edit won
-    // The text moved while the answer was in flight: the server answered about a
-    // version the page no longer has, so its goals and ranges point at other text.
+    const infoP = client.interactiveInfo(documentUri, position).then(
+      (answer) => (answer && Array.isArray(answer.items) ? answer.items : []),
+      () => []);
+    const goals = await client.interactiveGoals(documentUri, position).then(
+      (answer) => ({ value: answer, kind: "interactive" }),
+      async () => {
+        try { return { value: await client.plainGoal(documentUri, position), kind: "plain" }; } catch (_) { return null; }
+      });
+    const term = await client.interactiveTermGoal(documentUri, position).then(
+      (answer) => ({ value: answer, kind: "interactive" }),
+      async () => {
+        try { return { value: await client.plainTermGoal(documentUri, position), kind: "plain" }; } catch (_) { return null; }
+      });
+    const items = await infoP;
+    if (mine !== generation) return;
     const current = client.docs.get(documentUri);
     if (version !== null && (!current || current.version !== version)) return;
     lastCursor = position.line + ":" + position.character;
-    view.goals = state.goals;
-    view.goalsKind = state.goalsKind;
-    view.term = state.term;
-    view.termKind = state.termKind;
-    if (state.session !== null) view.session = state.session;
+    view.goals = goals ? goals.value : null;
+    view.goalsKind = goals ? goals.kind : null;
+    view.term = term ? term.value : null;
+    view.termKind = term ? term.kind : null;
+    if (goals && goals.value && typeof goals.value.session === "number") view.session = goals.value.session;
+    else if (term && term.value && term.value.goal && typeof term.value.goal.session === "number") view.session = term.value.goal.session;
+    view.items = items;
     view.info = null;
-    view.message = state.goalsKind === null && state.termKind === null && state.errors.length
-      ? state.errors[0] : null;
-    render();
+    view.message = !view.goalsKind && !view.termKind ? "nothing at the cursor" : null;
+    publish();
   }
 
   function scheduleRefresh(delay = positionDebounce) {
@@ -213,104 +413,35 @@ export function startInfoview({
   }
 
   function onEdit() {
-    // An edit invalidates a queued and an in-flight refresh, and the server gets the
-    // new text at once: a goal asked 120 ms after a keyup must not be about text the
-    // server has not received (didChange used to wait 250 ms, and continuous typing
-    // reset that timer, so no didChange was sent at all until the user paused).
     clearTimeout(refreshTimer);
     generation++;
     if (!client || client.state !== "open") return;
     client.changeDocument(documentUri, editor.value);
-    // Diagnostics or `wiz/elaborated` normally arrive first; this is the fallback for a
-    // server that sends neither.
     clearTimeout(settleTimer);
     settleTimer = setTimeout(refresh, 400);
   }
 
-  // The caret moved: ask for the goals there after a short pause. `closePopup` is set by
-  // a mouse selection (the user is going somewhere else); a keyup is how typing settles,
-  // and must not close the completion list the typing just opened.
   function onCursor(closePopup = false) {
     if (suppressCursor) return;
     if (closePopup && completions) completions.close();
-    const position = positionAt(editor.value, caretOffset(editor));
+    if (!rules) return;
+    const position = rules.position(editor.value, caretOffset(editor));
     const where = position.line + ":" + position.character;
-    // The same caret: the server already answered (diagnostics still force a re-ask).
     if (where === lastCursor && view.goalsKind !== null) return;
     scheduleRefresh();
   }
 
-  // ## Clicking and the keyboard
-
-  async function describeSubterm(tag) {
-    const ref = tag && tag.dataset ? tag.dataset.ref : undefined;
-    if (ref === undefined || view.session === null || view.session === undefined) return;
+  async function describeSubterm(ref) {
+    if (view.session === null || view.session === undefined) return;
     if (!client || client.state !== "open") return;
     const mine = generation;
     try {
       const info = await client.subtermInfo(documentUri, view.session, Number(ref));
       if (mine !== generation) return;
       view.info = info;
-      render();
-    } catch (_) {
-      // A stale session (ContentModified) or a server without subtermInfo: keep the
-      // goal view and say nothing.
-    }
+      publishInfo(info);
+    } catch (_) { /* a stale session or a server without subtermInfo: say nothing */ }
   }
-
-  function selectTag(index) {
-    const tags = Array.from(eventRoot.querySelectorAll(".tt"));
-    if (tags.length === 0) return;
-    selected = Math.max(0, Math.min(tags.length - 1, index));
-    for (let i = 0; i < tags.length; i++) tags[i].classList.toggle("sel", i === selected);
-    const tag = tags[selected];
-    // Following another editor: there is no local source to select a span in.
-    const span = follow ? null : spanOf(tag);
-    if (span) highlight(span);
-    // Keep the keys on the panel: `highlight` focused the editor to show the selection,
-    // and a second arrow must walk the tags again rather than the caret. In the Loom
-    // page the panel is a detached model, and the focusable element is `#goals` inside
-    // the live container.
-    const focusTarget = panel === eventRoot ? panel
-      : (eventRoot.querySelector ? (eventRoot.querySelector("#goals") || eventRoot) : eventRoot);
-    try { focusTarget.focus({ preventScroll: true }); } catch (_) { /* a stub panel in a test */ }
-    try { tag.scrollIntoView({ block: "nearest" }); } catch (_) { /* a stub panel in a test */ }
-  }
-
-  function clearSelection() {
-    selected = -1;
-    for (const tag of eventRoot.querySelectorAll(".tt.sel")) tag.classList.remove("sel");
-  }
-
-  eventRoot.addEventListener("click", (event) => {
-    const action = event.target.closest ? event.target.closest("[data-action]") : null;
-    if (action && action.dataset.action === "reconnect") {
-      event.preventDefault();
-      reconnect();
-      return;
-    }
-    const span = follow ? null : spanOf(event.target);
-    if (span) {
-      event.preventDefault();
-      highlight(span);
-    }
-    const tag = event.target.closest ? event.target.closest(".tt") : null;
-    if (tag) {
-      // Select it the way the arrows do (the infoview's `.sel`), then describe it.
-      selectTag(Array.from(eventRoot.querySelectorAll(".tt")).indexOf(tag));
-      describeSubterm(tag);
-    }
-  });
-
-  // Hovering a subterm is the infoview's `.hover`; the arrows walk the tags in order and
-  // Escape clears the selection. `delegate` adds the classes and prevents the default.
-  delegate(eventRoot, {
-    key: (name) => {
-      if (name === "Escape") { clearSelection(); return; }
-      const step = name === "ArrowDown" || name === "ArrowRight" ? 1 : -1;
-      selectTag(selected < 0 ? 0 : selected + step);
-    },
-  });
 
   // ## Following another editor's cursor (`?follow=1`)
 
@@ -324,36 +455,33 @@ export function startInfoview({
   // ## The connection
 
   async function start() {
-    if (!endpoint) { view.state = "no-server"; render(); return null; }
+    if (!endpoint) { view.state = "no-server"; publish(); return null; }
     view.state = "connecting";
     view.message = null;
     view.canReconnect = true;
-    render();
+    publish();
     client = new LspClient({
       url: endpoint.url,
       WebSocketImpl: endpoint.WebSocketImpl,
       requestTimeout: endpoint.requestTimeout,
       languageId: endpoint.languageId,
     });
-    // Store the text before the handshake: `openDocument` sends nothing while the
-    // client is not open, and `connect()` opens every stored document. A first connect
-    // that fails therefore leaves the document in the map, and a later reconnect opens
-    // it instead of leaving the pane "connected" with a server that has no document.
     if (!follow && documentUri) client.openDocument(documentUri, editor.value);
     client.on("close", (info) => {
       if (info && info.intentional) return;
       if (hover) hover.close();
       view.state = "closed";
       view.info = null;
+      view.items = [];
       view.diagnostics = [];
       if (squiggles) squiggles.update([]);
-      render();
+      publish();
     });
     client.on("diagnostics", (params) => {
       if (!params || params.uri !== documentUri) return;
       view.diagnostics = params.diagnostics || [];
       if (squiggles) squiggles.update(view.diagnostics);
-      render();
+      publish();
       clearTimeout(settleTimer);
       scheduleRefresh(0);
     });
@@ -369,25 +497,21 @@ export function startInfoview({
       view.message = e && e.message ? e.message : String(e);
       view.serverInfo = null;
       view.infoview = null;
-      render();
+      publish();
       return null;
     }
     if (client.state !== "open") return null;
     view.state = "open";
     view.serverInfo = client.serverInfo;
     view.infoview = client.infoview;
-    // Following: the document belongs to the editor that opened it; do not touch it.
     if (!follow) client.openDocument(documentUri, editor.value);
-    render();
+    publish();
     refresh();
     return api;
   }
 
   async function reconnect() {
     if (!client) return start();
-    // The editor's text may have changed while the connection was down. Store it (this
-    // sends nothing unless the client is open) and let `connect()` open it after the
-    // handshake; `connect()` only re-opens documents already in its map.
     if (client.state !== "open" && !follow && documentUri) client.openDocument(documentUri, editor.value);
     view.state = "connecting";
     view.message = null;
@@ -395,26 +519,33 @@ export function startInfoview({
     view.goalsKind = null;
     view.term = null;
     view.termKind = null;
-    render();
+    view.items = [];
+    publish();
     try {
       await client.reconnect();
     } catch (e) {
       view.state = "failed";
       view.message = e && e.message ? e.message : String(e);
-      render();
+      publish();
       return null;
     }
     view.state = "open";
     view.serverInfo = client.serverInfo;
     view.infoview = client.infoview;
-    render();
+    publish();
     refresh();
     return api;
   }
 
+  // ## The runtime's requests
+
+  function request(kind, payload) {
+    if (kind === "reveal") highlight(payload);
+    else if (kind === "subterm") describeSubterm(payload);
+    else if (kind === "reconnect") reconnect();
+  }
+
   const api = {
-    // `uri` is the document opened at start; `target` is the one being shown (they differ
-    // only in follow mode, where the server's notification moves it).
     uri: documentUri,
     target: () => documentUri,
     view,
@@ -422,11 +553,18 @@ export function startInfoview({
     hover: () => hover,
     refresh,
     reconnect,
+    // `wiz fmt` through the server: `format()` formats the document, `format(range)`
+    // formats that LSP range, `formatSelection()` the textarea's selection (if any).
+    format,
+    formatSelection,
     // The caret as the page and the tests see it (UTF-16, line 0-based).
-    position: () => positionAt(editor.value, caretOffset(editor)),
+    position: () => editor && rules
+      ? rules.position(editor.value, caretOffset(editor))
+      : { line: 0, character: 0 },
     squiggles: () => squiggles,
     completions: () => completions,
     goTo,
+    request,
     stop() {
       if (hover) hover.close();
       if (completions) completions.destroy();
@@ -437,15 +575,14 @@ export function startInfoview({
     },
   };
 
-  if (!follow) {
+  if (!follow && editor) {
     editor.addEventListener("input", onEdit);
-    // Caret → LSP: a keyup is typing settling, a click/mouseup/select is the user moving
-    // the caret (and closes a popup they are leaving).
     editor.addEventListener("keyup", () => onCursor(false));
     editor.addEventListener("click", () => onCursor(true));
     editor.addEventListener("mouseup", () => onCursor(true));
     editor.addEventListener("select", () => onCursor(true));
     editor.addEventListener("focus", () => onCursor(false));
+    editor.addEventListener("keydown", onFormatKey);
   }
   if (typeof addEventListener === "function") addEventListener("pagehide", () => api.stop());
 

@@ -4,6 +4,7 @@ import Grail.Registry
 import Grail.IndexCheck
 import Grail.Lsp
 import Grail.New
+import Wiz.Attest
 import Wiz.Version
 
 /-!
@@ -23,8 +24,10 @@ def usage : String := "usage:
                           into DIR (default: ./NAME); an existing non-empty
                           directory is refused, the name must be a letter then
                           letters, digits, '_' or '-'
-  grail build [TARGET…]   build the package's targets (by default all but the
-                          bootstrap check, which takes minutes)
+  grail build [TARGET…] [--attest DIR]
+                          build the package's targets (by default all but the
+                          bootstrap check, which takes minutes); --attest DIR also
+                          writes one unsigned build attestation per executable
   grail test [FILTER…] [--update] [--rerun]
                           run the tests (of `tests` targets) whose path contains a
                           filter; --update writes the actual output to .expected;
@@ -59,9 +62,15 @@ def usage : String := "usage:
   grail index snapshot [INDEX] [--seq N] [--updated T] [--key FP] [--expires T]
                           write index/snapshot.sexpr from the entries (then sign it
                           with ssh-keygen -Y sign -n grail-index)
-  grail publish ARCHIVE --source URL
-                          hash a release archive and print its index entry (after
-                          checking the manifest and the archive layout)
+  grail publish ARCHIVE --source URL [--commit SHA] [--entry FILE]
+                          [--index DIR [--key FILE] [--identity ID] [--expires T]
+                           [--allow-unsigned]]
+                          check a release archive and print its index entry (the
+                          archive's own grail.wiz is authoritative; --entry FILE also
+                          checks a declared entry against it); --index DIR also writes
+                          the entry into that index checkout and, with --key, regenerates
+                          and signs index/snapshot.sexpr and updates DIR/allowed_signers;
+                          writing an entry without --key needs --allow-unsigned
   grail run TARGET [-- ARGS…]
                           build an exe or command target's needs and run it with
                           ARGS, its input and output grail's own; exits with its code
@@ -73,6 +82,10 @@ def usage : String := "usage:
                           documentation of the package's lib targets (all by
                           default): `wiz doc` with the package's module roots, into
                           .grail/doc (see `wiz doc`)
+  grail lint FILE… [--baseline FILE|--baseline-write FILE]
+                          `wiz lint` with the package's module roots and the lint sets
+                          `grail.wiz` declares and `lint.conf` enables; the two baseline
+                          flags are `wiz lint`'s `--lint-baseline[-write]`
   grail targets           list the targets
   grail config            print the toolchain grail would use
   grail --version         print the version
@@ -85,17 +98,22 @@ options: -C DIR (the package directory), --dir DIR (with `new`: where to write t
   a test's `-- test: run timeout SECS` line may ask for more),
   --cc X --cflags \"…\" --ldflags \"…\" --libs \"…\" --llc X --gc-cflags \"…\" --gc-ldflags \"…\" -I DIR,
   --cache DIR (the elaboration cache, default ~/.cache/wiz), --cache-ro DIR (repeatable:
-  a read-only cache, searched in order after the write cache), --no-cache (both),
+  a read-only cache, searched in order after the write cache; refused unless
+  --cache-ro-unsigned, because its manifests are self-signed), --cache-ro-unsigned,
+  --no-cache (both),
   --index URL (the package index: a directory, a file, or a git URL; default: the
   `index` setting of grail.wiz), --index-commit COMMIT (pin a git index),
   --require-signature (require a verified signed index snapshot; CI and the install
   docs pass it), --allow-unsigned (the explicit escape: accept an index with no signed
-  snapshot), --allowed-signers FILE
+  snapshot; also the opt-in for `publish --index` without --key), --allowed-signers FILE
   (the trust root for the snapshot; default: the key a grail.lock pinned),
   --allow-rewind (accept a rewritten index history or a lower snapshot seq),
   --offline (never touch the network),
   --vendor DIR (a directory of vendored archives; default: the `vendor` setting),
   --source URL (grail publish: the archive's public URL),
+  --entry FILE (grail publish: an entry to check the archive against),
+  --key FILE --identity ID --expires T (grail publish --index: sign the new snapshot and
+  name its key in allowed_signers; the expiry defaults to one year),
   --region-cache (experimental: serve module effects from mmap'ed .wizr regions in the
   same cache layers; the text entries remain the authority and the fallback),
   --region-stats (print what those regions served, per job),
@@ -138,6 +156,16 @@ structure Opts where
   vendor : Option String := none
   /-- (23m) `grail publish`: the archive's public URL -/
   source : Option String := none
+  /-- (P0) `grail publish`: the release commit the signed entry binds -/
+  commit : Option String := none
+  /-- `grail publish --entry FILE`: an entry to check the archive against -/
+  publishEntry : Option String := none
+  /-- `grail publish --identity ID`: the name written to `allowed_signers` -/
+  publishIdentity : String := ""
+  /-- `--allow-unsigned`: the explicit opt-in for an unsigned `publish --index` -/
+  allowUnsigned : Bool := false
+  /-- `grail build --attest DIR`: write one statement per built executable -/
+  attest : Option String := none
 
 /-- `-C DIR`, `--dir DIR`, `--std DIR`, `-j N`, `--timeout SECS`, `--test-timeout SECS`, taken out of the arguments. -/
 partial def grailOpts (o : Opts) : List String → Opts × List String
@@ -153,16 +181,31 @@ partial def grailOpts (o : Opts) : List String → Opts × List String
   | "--vendor" :: v :: rest => grailOpts { o with vendor := some v } rest
   | "--allow-rewind" :: rest => grailOpts { o with allowRewind := true } rest
   | "--require-signature" :: rest => grailOpts { o with requireSignature := true } rest
-  | "--allow-unsigned" :: rest => grailOpts { o with requireSignature := false } rest
+  | "--allow-unsigned" :: rest =>
+    grailOpts { o with requireSignature := false, allowUnsigned := true } rest
   | "--allowed-signers" :: f :: rest => grailOpts { o with allowedSigners := some f } rest
   | "--source" :: s :: rest => grailOpts { o with source := some s } rest
+  | "--commit" :: c :: rest => grailOpts { o with commit := some c } rest
+  | "--entry" :: f :: rest => grailOpts { o with publishEntry := some f } rest
+  | "--identity" :: i :: rest => grailOpts { o with publishIdentity := i } rest
   | "--fetch" :: rest => grailOpts { o with fetch := true } rest
   | "--offline" :: rest => grailOpts { o with offline := true } rest
   | "--locked" :: rest => grailOpts { o with locked := true } rest
+  | "--attest" :: d :: rest => grailOpts { o with attest := some d } rest
   | a :: rest =>
     if a.startsWith "-j" && (a.drop 2).toString.toNat?.isSome then grailOpts { o with jobs := (a.drop 2).toString.toNat? } rest
     else let (o, r) := grailOpts o rest; (o, a :: r)
   | [] => (o, [])
+
+/-- `grail publish`: `--key`/`--expires` are publish-local because `grail index snapshot`
+parses the same flag names, and taking them in `grailOpts` would strip them from that
+command's arguments. Everything else the publish branch reads is already in `Opts`. -/
+def publishFlags (key expires : Option String) : List String →
+    Option String × Option String × List String
+  | "--key" :: k :: t => publishFlags (some k) expires t
+  | "--expires" :: e :: t => publishFlags key (some e) t
+  | a :: t => let (k, e, r) := publishFlags key expires t; (k, e, a :: r)
+  | [] => (key, expires, [])
 
 /-- The standard library: `--std`, else `lib/` of the checkout this binary was built in
 (`.lake/build/bin/grail`), else `./lib`. -/
@@ -262,6 +305,16 @@ def cliMain (args : List String) : IO UInt32 := do
     match ← Registry.loadIndex cache spec true "" opts.allowRewind true opts.allowedSigners pinned with
     | .error e => IO.eprintln e; return 1
     | .ok src =>
+      -- (P0) `--locked` audits the committed lock against the signed state: the lock is
+      -- not signed itself, so a hand-edited `pkg` line (archive/tree swapped, bytes from
+      -- --vendor) passes every local check; this is the only place both are available.
+      if opts.locked then
+        match src.snapshot with
+        | none => IO.eprintln "the index signature was not verified"; return 1
+        | some snap =>
+          match ← Registry.checkLockSnapshot dir snap with
+          | .error e => IO.eprintln e; return 1
+          | .ok () => pure ()
       match src.signature with
       | none => IO.eprintln "the index is not signed"; return 1
       | some s =>
@@ -404,6 +457,57 @@ def cliMain (args : List String) : IO UInt32 := do
     let child ← try IO.Process.spawn { cmd := wiz, args, cwd := dirAbs }
       catch e => IO.eprintln s!"grail doc: {wiz}: {e}"; return 127
     child.wait
+  -- (lint P2) the package's lint policy: `wiz lint` with the sets `grail.wiz` declares
+  -- and `lint.conf` enables, and the package's module roots. A set that does not load,
+  -- an unknown capability or an undeclared set name is the driver's error, reported
+  -- before a single rule runs.
+  | "lint" :: lintOpts =>
+    let wiz ← wizExe opts.wiz
+    let dirAbs ← absolute dir
+    let (pkg, localSettings) ← match ← readConfig flagged binId std dir with
+      | .ok r => pure r
+      | .error e => do IO.eprintln e; return 1
+    let mut tc := defaults
+    for (k, v) in pkg.settings ++ localSettings do
+      if k == "index" || k == "index-commit" || k == "vendor" then continue
+      match tc.set k v with
+      | some t => tc := t
+      | none => IO.eprintln s!"grail lint: unknown setting {k}"; return 1
+    tc := (tc.parseFlags raw).1
+    let conf ← match ← readLintPolicy dir pkg with
+      | .ok c => pure c
+      | .error e => do IO.eprintln e; return 1
+    -- `--baseline FILE` and `--baseline-write FILE` are `wiz lint`'s flags under a
+    -- shorter spelling; anything else that starts with `-` is passed through
+    let rec splitLint : List String → List String × List String
+      | "--baseline" :: f :: rest =>
+        let (fs, bs) := splitLint rest; (fs, "--lint-baseline" :: f :: bs)
+      | "--baseline-write" :: f :: rest =>
+        let (fs, bs) := splitLint rest; (fs, "--lint-baseline-write" :: f :: bs)
+      | a :: rest =>
+        let (fs, bs) := splitLint rest
+        if a.startsWith "-" then (fs, a :: bs) else (a :: fs, bs)
+      | [] => ([], [])
+    let (files, flags) := splitLint lintOpts
+    if files.isEmpty then
+      IO.eprintln "grail lint: name at least one FILE (a package-wide sweep is not wired yet)"
+      return 2
+    let readPkg (d : System.FilePath) : IO (Except String Package) := do
+      pure ((← readConfig tc binId std d).map (·.1))
+    let deps ← match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint opts.offline
+        (vendorOf dir opts.vendor pkg localSettings) with
+      | .ok rs => rs.mapM absolute
+      | .error e => do IO.eprintln s!"grail lint: {e}"; pure []
+    let roots := [dirAbs] ++ libRootsOf dirAbs pkg.targets ++ deps
+    let setArgs := conf.sets.flatMap fun (n, _) => ["--set", n]
+    let moduleArgs := conf.sets.flatMap fun (_, m) => ["--package-lint", (dirAbs / m).toString]
+    let rootArgs := conf.publicRoots.flatMap fun r => ["--public-roots", r]
+    let rest := tc.searchPath.filter (!roots.contains ·)
+    let args := ({ tc with searchPath := roots ++ rest }.toFlags ++ "lint" :: files.reverse ++
+      moduleArgs ++ setArgs ++ rootArgs ++ flags).toArray
+    let child ← try IO.Process.spawn { cmd := wiz, args, cwd := dirAbs }
+      catch e => IO.eprintln s!"grail lint: {wiz}: {e}"; return 127
+    child.wait
   | "build" :: _ | "test" :: _ | ["targets"] | ["config"] | "update" :: _ | "fetch" :: _
   | "vendor" :: _ | "index" :: _ | "publish" :: _ | ["run", _] =>
     let (pkg, localSettings) ← match ← readConfig flagged binId std dir with
@@ -517,10 +621,34 @@ def cliMain (args : List String) : IO UInt32 := do
           for line in lines do IO.println line
           pure 0
     | "publish" :: rest =>
-      let archive := rest.find? (fun a => !a.startsWith "-")
-      match ← Registry.publish (archive.map System.FilePath.mk) (opts.source.getD "") pkg with
+      let (key, expires, positional) := publishFlags none none rest
+      let archive := positional.find? (fun a => !a.startsWith "-")
+      let declared : Except String (Option IxVersion) ←
+        match opts.publishEntry with
+        | none => pure (.ok none)
+        | some f =>
+          let p := inPackage dir f
+          if !(← p.pathExists) then pure (.error s!"--entry {p}: no such file")
+          else match Registry.parseDeclared (← IO.FS.readFile p) pkg.name pkg.version with
+            | .error e => pure (.error s!"--entry {p}: {e}")
+            | .ok v => pure (.ok (some v))
+      match declared with
       | .error e => IO.eprintln e; pure 1
-      | .ok entry => IO.println entry; pure 0
+      | .ok declared =>
+        match ← Registry.publishVersion (archive.map System.FilePath.mk) (opts.source.getD "")
+            pkg (opts.commit.getD "") declared tc binId std with
+        | .error e => IO.eprintln e; pure 1
+        | .ok v =>
+          IO.println (Index.renderVersion v)
+          match opts.index with
+          | none => pure 0
+          | some dest =>
+            match ← Registry.publishInto (inPackage dir dest) pkg.name v key
+                opts.publishIdentity (expires.getD "") opts.allowUnsigned with
+            | .error e => IO.eprintln e; pure 1
+            | .ok lines =>
+              for l in lines do IO.println l
+              pure 0
     | "index" :: "resolve" :: _ =>
       if pkg.requires.isEmpty then pure 0 else
         let pinned ← Registry.lockSignature dir
@@ -589,7 +717,20 @@ def cliMain (args : List String) : IO UInt32 := do
         unless pkg.targets.any (·.name == w) do IO.eprintln s!"no target {w}"; return 1
       let some roots ← depRoots | return 1
       let r ← mkRunner { dir, std, tc, binId, libRoots := libRootsOf dir pkg.targets ++ roots }
-      let ok ← r.build pkg.targets targets
+      let mut ok ← r.build pkg.targets targets
+      if let some a := opts.attest then do
+        let adir := System.FilePath.mk a
+        IO.FS.createDirAll adir
+        for t in targets do
+          if let .exe n f := t then do
+            let bin := dir / ".grail" / "bin" / n
+            if ← bin.pathExists then do
+              let src := if System.FilePath.isAbsolute f then System.FilePath.mk f else dir / f
+              let out := adir / (n ++ ".attest.json")
+              match ← Wiz.Attest.emit tc src.toString bin false false false 0 out (some r.ctx.roots) with
+              | .ok () => IO.eprintln s!"grail: attestation written to {out}"
+              | .error e => IO.eprintln s!"grail attest: {e}"; ok := false
+          else pure ()
       let st ← r.stats.get
       IO.println s!"{st.ran} jobs run, {st.upToDate} up to date{if st.failed > 0 then s!", {st.failed} failed" else ""}{if st.skipped > 0 then s!", {st.skipped} skipped" else ""}"
       pure (if ok then 0 else 1)

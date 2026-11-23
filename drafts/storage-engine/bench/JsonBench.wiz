@@ -1,0 +1,213 @@
+import Sys
+import Word
+import Text
+import Functor
+import Json
+/-!
+# The incumbent side of the findings-store benchmark
+
+`json-bench OP N PATH`: the same operations as `QuireBench.wiz`, using the way scry keeps
+its data today — `Json.render` + one whole-file write, `FS.readFile` + `Json.parse` for
+every read, and parse/mutate/render/rewrite for an update.
+
+A record is
+`{"id":i,"rule":"r7","severity":"s2","state":"o3","path":"p12","line":42,"function":"f9"}`
+(about 100 bytes). 100k records is ~10 MB, inside `Json.maxInput`.
+
+The array is written as bytes (one rendered record at a time, comma-separated) rather
+than as one `Json.mkArr`: `Jsons.toList`/the renderer are not tail-recursive, and a
+100k-element list would be a 100k-frame recursion in the baseline. The file is still
+one JSON array written with one `FS.writeBytes`; `read`/`parse` is `lib/Json` unchanged.
+-/
+
+def i2s (n : Nat) : String := Nat.toString n
+
+def mkRec (i : Nat) : Json :=
+  let rule := Nat.mod i 100;
+  let sev := Nat.mod (Nat.div i 7) 5;
+  let state := Nat.mod i 5;
+  let path := Nat.mod i 16384;
+  let line := Nat.mod i 1048576;
+  let fn := Nat.mod i 16384;
+  Json.mkObj
+    [ ("id", Json.ofNat i)
+    , ("rule", Json.mkStr (String.append "r" (i2s rule)))
+    , ("severity", Json.mkStr (String.append "s" (i2s sev)))
+    , ("state", Json.mkStr (String.append "o" (i2s state)))
+    , ("path", Json.mkStr (String.append "p" (i2s path)))
+    , ("line", Json.ofNat line)
+    , ("function", Json.mkStr (String.append "f" (i2s fn))) ]
+
+/-- `b` with a comma unless it is the first element. -/
+def comma (first : Bool) (b : Bytes) : Bytes :=
+  match first with
+  | .true => b
+  | .false => Bytes.push b 44
+
+/-- `b` with record `i` (and a comma unless `first`). -/
+partial def appendChunk (b : Bytes) (n : Nat) (i : Nat) (first : Bool) : Bytes :=
+  match Nat.le i n with
+  | .true =>
+    let b := comma first b;
+    appendChunk (Bytes.append b (Bytes.ofUtf8 (Json.render (mkRec i))))
+      n (Nat.succ i) .false
+  | .false => b
+
+/-- The end of the chunk starting at `i`. -/
+def chunkEnd (n i : Nat) : Nat :=
+  match Nat.le (Nat.add i 500) n with
+  | .true => Nat.add i 500
+  | .false => n
+
+/-- The body of the array, in chunks of 500 (bounded recursion). -/
+partial def appendRecs (b : Bytes) (n : Nat) (i : Nat) : Bytes :=
+  match Nat.le i n with
+  | .true => appendRecs (appendChunk b (chunkEnd n i) i (Nat.beq i 1)) n
+      (Nat.succ (chunkEnd n i))
+  | .false => b
+
+def renderAllBytes (n : Nat) : Bytes :=
+  Bytes.append (Bytes.ofUtf8 "[")
+    (Bytes.append (appendRecs Bytes.empty n 1) (Bytes.ofUtf8 "]"))
+
+def readJson (path : String) : EIO Json := do
+  text ← FS.readFile path;
+  match Json.parse text with
+  | .error e => EIO.fail (String.append "json parse: " e)
+  | .ok j => EIO.pure j
+
+/-- The record's array, or an empty one for a non-array (a parse of the wrong shape). -/
+def arrayOf : Json → Jsons
+  | .arr xs => xs
+  | _ => .nil
+
+def withState (r : Json) (state : String) : Json :=
+  Json.mkObj
+    [ ("id", Json.ofNat (Json.getNat r "id"))
+    , ("rule", Json.mkStr (Json.getStr r "rule"))
+    , ("severity", Json.mkStr (Json.getStr r "severity"))
+    , ("state", Json.mkStr state)
+    , ("path", Json.mkStr (Json.getStr r "path"))
+    , ("line", Json.ofNat (Json.getNat r "line"))
+    , ("function", Json.mkStr (Json.getStr r "function")) ]
+
+def isState (r : Json) (s : String) : Bool := String.eq (Json.getStr r "state") s
+
+-- Tail folds over the parser's `Jsons` (never `Jsons.toList`, which is not tail).
+partial def countJsonsGo (acc : Nat) : Jsons → Nat
+  | .nil => acc
+  | .cons _ xs => countJsonsGo (Nat.succ acc) xs
+
+def countJsons (xs : Jsons) : Nat := countJsonsGo 0 xs
+
+partial def countStateGo (s : String) (acc : Nat) : Jsons → Nat
+  | .nil => acc
+  | .cons x xs =>
+    match isState x s with
+    | .true => countStateGo s (Nat.succ acc) xs
+    | .false => countStateGo s acc xs
+
+def countState (s : String) (xs : Jsons) : Nat := countStateGo s 0 xs
+
+/-- The first `n` elements (bounded recursion: the chunk size). -/
+def Jsons.take : Nat → Jsons → Jsons
+  | .zero, _ => .nil
+  | .succ _, .nil => .nil
+  | .succ k, .cons x xs => .cons x (Jsons.take k xs)
+
+/-- Without the first `n` elements. -/
+partial def Jsons.drop : Nat → Jsons → Jsons
+  | .zero, xs => xs
+  | .succ _, .nil => .nil
+  | .succ k, .cons _ xs => Jsons.drop k xs
+
+/-- Rewrite a chunk of at most 500 elements, rendering each with `Json.render`. -/
+partial def rewriteChunk (b : Bytes) (mid : Nat) (first : Bool) : Jsons → Bytes
+  | .nil => b
+  | .cons r rs =>
+    let b := comma first b;
+    let r' := match Nat.beq (Json.getNat r "id") mid with
+      | .true => withState r "o4"
+      | .false => r;
+    rewriteChunk (Bytes.append b (Bytes.ofUtf8 (Json.render r'))) mid .false rs
+
+/-- The rewritten array body, in chunks (bounded recursion). -/
+partial def rewriteAll (b : Bytes) (mid : Nat) (first : Bool) : Jsons → Bytes
+  | .nil => b
+  | xs => rewriteAll (rewriteChunk b mid first (Jsons.take 500 xs)) mid .false
+      (Jsons.drop 500 xs)
+
+def renderRewritten (xs : Jsons) (mid : Nat) : Bytes :=
+  Bytes.append (Bytes.ofUtf8 "[")
+    (Bytes.append (rewriteAll Bytes.empty mid .true xs) (Bytes.ofUtf8 "]"))
+
+def firstWord (s : String) : String :=
+  match String.splitOn (String.trim s) " " with
+  | List.cons x _ => x
+  | [] => s
+
+partial def rssLines : List String → Option Nat
+  | [] => .none
+  | List.cons l ls =>
+    match String.stripPrefix l "VmHWM:" with
+    | .some rest => String.parseNat (firstWord rest)
+    | .none => rssLines ls
+
+def peakRss : IO Nat := do
+  text ← IO.readFile "/proc/self/status";
+  IO.pure (match rssLines (String.splitOn text "\n") with
+    | .some n => n
+    | .none => 0)
+
+def report (op : String) (t0 t1 : Duration) (extra : String) : IO Unit := do
+  rss ← peakRss;
+  IO.println (String.append "BENCH op=" op);
+  IO.println (String.append "time_ns " (Nat.toString (Nat.sub t1.ns t0.ns)));
+  IO.println (String.append "rss_kb " (Nat.toString rss));
+  IO.println extra
+
+def parseN (n : String) : EIO Nat :=
+  match String.parseNat n with
+  | .some k => EIO.pure k
+  | .none => EIO.fail "bad N"
+
+def parseArg (args : List String) : EIO (String × Nat × String) :=
+  match args with
+  | op :: n :: path :: _ => do
+    k ← parseN n;
+    EIO.pure (op, k, path)
+  | _ => EIO.fail "usage: json-bench OP N PATH"
+
+def runBuild (n : Nat) (path : String) : EIO Unit :=
+  FS.writeBytes path (renderAllBytes n)
+
+def runReopen (n : Nat) (path : String) : EIO Unit := do
+  j ← readJson path;
+  let c := countJsons (arrayOf j);
+  EIO.lift (IO.println (String.append "count " (Nat.toString c)))
+
+def runQuery (n : Nat) (path : String) : EIO Unit := do
+  j ← readJson path;
+  let c := countState "o2" (arrayOf j);
+  EIO.lift (IO.println (String.append "count " (Nat.toString c)))
+
+def runUpdate (n : Nat) (path : String) : EIO Unit := do
+  j ← readJson path;
+  FS.writeBytes path (renderRewritten (arrayOf j) (Nat.div n 2))
+
+def run (op : String) (n : Nat) (path : String) : EIO Unit :=
+  match op with
+  | "build" => runBuild n path
+  | "batch" => runBuild n path
+  | "reopen" => runReopen n path
+  | "query" => runQuery n path
+  | "update" => runUpdate n path
+  | _ => EIO.fail "unknown op"
+
+def main : IO Unit := EIO.toIO (do
+  args ← EIO.lift IO.args;
+  p ← parseArg args;
+  t0 ← EIO.lift Clock.monotonic;
+  run p.1 p.2.1 p.2.2;
+  t1 ← EIO.lift Clock.monotonic;
+  EIO.lift (report p.1 t0 t1 (String.append "n " (Nat.toString p.2.1))))

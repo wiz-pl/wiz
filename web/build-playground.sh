@@ -17,8 +17,6 @@
 # module (wiz-infoview.mjs) is unchanged and can live in the same OUT directory.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-# without emcc on the PATH, run again with Emscripten from nixpkgs
-if ! command -v emcc >/dev/null; then exec nix shell --inputs-from "$ROOT" nixpkgs#emscripten -c "$0" "$@"; fi
 GMPSRC=
 FROM=${WIZ_PLAYGROUND_FROM:-}
 OPT=
@@ -94,10 +92,15 @@ ENGINE="$OUT/playground.wiz"
 -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString \
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build "$ENGINE" -o "$OUT/wiz-playground.mjs" --no-main)
-cp "$ROOT/web/playground.html" "$ROOT/web/playground.js" "$ROOT/web/playground-values.js" \
-  "$ROOT/web/playground-presets.js" "$ROOT/web/playground-state.js" \
-  "$ROOT/web/playground.css" "$ROOT/web/lsp-client.js" "$ROOT/web/goals.js" \
-  "$ROOT/web/playground-lsp.js" "$ROOT/web/tagged.js" "$ROOT/web/selfhost-lsp-shim.js" \
-  "$ROOT/web/playground-engine.js" "$ROOT/web/editor-model.js" \
+cp "$ROOT/web/playground.html" "$ROOT/web/playground.js" \
+  "$ROOT/web/playground.css" "$ROOT/web/overlays.css" "$ROOT/web/widgets.css" \
+  "$ROOT/web/lsp-client.js" "$ROOT/web/widgets.js" \
+  "$ROOT/web/playground-lsp.js" "$ROOT/web/selfhost-lsp-shim.js" \
+  "$ROOT/web/playground-engine.js" \
   "$ROOT/web/squiggles.js" "$ROOT/web/completions.js" "$ROOT/web/hover.js" "$OUT/"
+# The entry point imports the mount contract statically (web/framework/mount.js), which
+# imports the driver and its patch applier.
+mkdir -p "$OUT/framework"
+cp "$ROOT/web/framework/mount.js" "$ROOT/web/framework/driver.js" \
+  "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/editor-text.js" "$OUT/framework/"
 echo "built $OUT/wiz-playground.mjs"

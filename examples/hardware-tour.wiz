@@ -118,7 +118,7 @@ def refines (xs : Trace (Bool × Bool)) (t : Nat) :
 
 ------------------------------------------------------------------------------------
 -- 4. A temporal property, proved for every input trace: the light never goes from green
--- straight to red (□ (green → ○ ¬red); with lib/Hdl/Temporal.wiz,
+-- straight to red (□ (green → ○ ¬red); with hdl/src/Hdl/Temporal.wiz,
 -- `TL.always (TL.imp (TL.now isGreen) (TL.next (TL.not (TL.now isRed))))`).
 
 def Color.isGreen : Color → Bool

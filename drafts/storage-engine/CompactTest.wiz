@@ -1,0 +1,350 @@
+import Sys
+import Word
+import Text
+import MVar
+import Scry.QuireStorage
+import Scry.QuireDurable
+import Scry.QuireRegistry
+import Scry.QuireCompact
+import Scry.QuireMmap
+/-!
+# Compaction, retention and crash states, end to end
+
+`wiz run -I drafts/storage-engine drafts/storage-engine/CompactTest.wiz`. The pure
+policy/plan is in `CompactPure.wiz` (`#eval`); this file is the file-backed half:
+
+* `compactTest` — commit until the never-reuse store is mostly waste, take a snapshot's
+  content, build the compacted image, **assert the old file still opens unchanged before
+  the switch**, assert the temp image is complete and holds the same generation and
+  content, switch, then assert the after-state: the same snapshot content and versions,
+  `wastedPages = 0`, a smaller total, the same content through the **mmap read path**,
+  a clean reopen, and a commit past the compacted image that survives another reopen;
+* `retentionTest` — K = 1 with a lease on generation 1: the lease keeps the old chain in
+  the live set across six commits and one compaction (its pages still load), then release
+  and compact again: the chain is dropped, the file shrinks once more, and a commit from
+  the evicted base is `expired`;
+* `crashTest` — prepare and abandon: a leftover `.compact` file (complete or truncated)
+  does not change the store that the path still names.
+-/
+
+-- ## Assertions with a count
+
+/-- `expect r what b`: count a passing check, abort on a failing one. -/
+def expect (r : Nat) (what : String) (b : Bool) : EIO Nat :=
+  match b with
+  | .true => EIO.pure (Nat.succ r)
+  | .false => EIO.fail (String.append "check failed: " what)
+
+def succeeded (o : Outcome) : Bool :=
+  match o with
+  | .committed _ => .true
+  | .rejected _ => .false
+
+def isExpired (o : Outcome) : Bool :=
+  match o with
+  | .rejected (.expired _ _) => .true
+  | _ => .false
+
+/-- The node count of a root, for a test's output. -/
+def countIn (root : Root) (id : Nat) : Nat :=
+  match U64Map.find root.pages (U64.ofNat id) with
+  | .none => 0
+  | .some n => n.count.toNat
+
+-- ## Snapshot content, from the pure API and from the mmap path
+
+/-- The ids the tests look at (three nodes, two absent). -/
+def ids : List Nat := [1, 2, 3, 4, 5]
+
+/-- `true` when two optional records are the same node. -/
+def nodeEq (a b : Option Node) : Bool :=
+  match a, b with
+  | .none, .none => .true
+  | .some x, .some y => Node.beq x y
+  | _, _ => .false
+
+/-- The same nodes and versions in two snapshots. -/
+def sameContent (a b : Snapshot) (is : List Nat) : Bool :=
+  List.all (fun id => Bool.and
+    (nodeEq (Snapshot.getNode a (U64.ofNat id)) (Snapshot.getNode b (U64.ofNat id)))
+    (UIntN.beq (Root.versionOf a.root (U64.ofNat id))
+               (Root.versionOf b.root (U64.ofNat id)))) is
+
+/-- One node as the mapped read path sees it. -/
+structure ReadNode where
+  id : Nat
+  kind : Nat
+  label : Nat
+  count : Nat
+
+/-- The record from a `Storage` snapshot. -/
+def readFromStorage (s : Snapshot) (id : Nat) : Option ReadNode :=
+  match Snapshot.getNode s (U64.ofNat id) with
+  | .none => .none
+  | .some n => .some (ReadNode.mk id n.kind.toNat n.label.toNat n.count.toNat)
+
+/-- The record from a mapped snapshot. -/
+def readFromMapped (s : MappedSnapshot) (id : Nat) : Option ReadNode :=
+  match MappedSnapshot.getNode s (U64.ofNat id) with
+  | .error _ => .none
+  | .ok .none => .none
+  | .ok (.some r) => .some (ReadNode.mk r.id.toNat r.kind.toNat r.label.toNat r.count.toNat)
+
+def readNodeEq (a b : Option ReadNode) : Bool :=
+  match a, b with
+  | .none, .none => .true
+  | .some x, .some y => Bool.and (Nat.beq x.id y.id)
+      (Bool.and (Nat.beq x.kind y.kind)
+        (Bool.and (Nat.beq x.label y.label) (Nat.beq x.count y.count)))
+  | _, _ => .false
+
+/-- Map `path` read-only and read `is` through the slice-3 decoder. -/
+def mapRead (path : String) (is : List Nat) : EIO (List (Option ReadNode)) := do
+  fstat ← FS.stat path;
+  fd ← Fd.open path .read OpenFlags.none;
+  m ← Sys.check "mmap" (Map.ofFd fd fstat.size);
+  Fd.close fd;
+  match MappedSnapshot.open m with
+  | .error e => EIO.fail (StoreError.message e)
+  | .ok s => EIO.pure (List.map (fun id => readFromMapped s id) is)
+
+/-- The mapped records agree with the pure snapshot's. -/
+def mappedAgrees (s : Snapshot) (mapped : List (Option ReadNode)) (is : List Nat) : Bool :=
+  match mapped, is with
+  | .nil, .nil => .true
+  | .cons got gs, .cons id is' =>
+    Bool.and (readNodeEq got (readFromStorage s id)) (mappedAgrees s gs is')
+  | _, _ => .false
+
+-- ## Commit a few times (each commit rewrites the chain: the store is never-reuse)
+
+/-- `n` single `+1` commits, each from the current snapshot. -/
+def bumpTimes (h : DurableHandle) : Nat → Nat → EIO Nat
+  | .zero, r => EIO.pure r
+  | .succ k, r => do
+    s ← getDb h;
+    o ← putDb h (bumpCount (U64.ofNat 1) s);
+    r' ← expect r "a +1 commit" (succeeded o);
+    bumpTimes h k r' 
+
+-- ## The main compaction test
+
+def compactTest (dir : String) (r0 : Nat) : EIO Nat := do
+  let path := Path.join dir "compact.db";
+  let indices := [kindIndex, uniqueLabel];
+  h ← openDbWith path indices 2;
+  s0 ← getDb h;
+  oSeed ← putDb h (seedNodes s0);
+  r1 ← expect r0 "seed commits" (succeeded oSeed);
+  r2 ← bumpTimes h 20 r1;
+  before ← getDb h;
+  st0 ← storeStats h;
+  r3 ← expect r2 "the never-reuse store has waste" (Nat.lt 0 st0.wastedPages);
+  r4 ← expect r3 "and live pages are below the total" (Nat.lt st0.livePages st0.totalPages);
+  size0 ← FS.stat path;
+  -- Build the image; the store is not touched yet (crash states 1-3).
+  p ← prepareCompaction h;
+  size1 ← FS.stat path;
+  r5 ← expect r4 "the image is written beside the store" (Nat.beq size1.size size0.size);
+  -- The old file still opens, unchanged, and the old root is still valid.
+  hOld ← openDbWith path indices 2;
+  sOld ← getDb hOld;
+  r6 ← expect r5 "before the switch the old file still opens"
+    (Bool.and (Nat.beq sOld.gen.toNat before.gen.toNat) (sameContent sOld before ids));
+  closeDb hOld;
+  -- ... and the temp image is complete: it opens at the same generation and content.
+  hTmp ← openDbWith p.temp indices 2;
+  sTmp ← getDb hTmp;
+  r7 ← expect r6 "the prepared image holds the same generation and content"
+    (Bool.and (Nat.beq sTmp.gen.toNat before.gen.toNat) (sameContent sTmp before ids));
+  closeDb hTmp;
+  -- The switch.
+  c ← finishCompaction h p;
+  after ← getDb h;
+  st1 ← storeStats h;
+  r8 ← expect r7 "the switch keeps the generation" (Nat.beq after.gen.toNat before.gen.toNat);
+  r9 ← expect r8 "the switch keeps every node and version" (sameContent after before ids);
+  r10 ← expect r9 "the switch keeps the values" (Nat.beq (countIn after.root 1) 20);
+  r11 ← expect r10 "the compacted image wastes nothing" (Nat.beq st1.wastedPages 0);
+  r12 ← expect r11 "the compacted image is live plus the two meta pages and its registry"
+    (Nat.beq st1.totalPages (Nat.add (Nat.add st1.livePages 2) st1.registryPages));
+  r12b ← expect r12 "the compacted image has a registry page" (Nat.lt 0 st1.registryPages);
+  r13 ← expect r12b "compaction lowered the total" (Nat.lt st1.totalPages st0.totalPages);
+  r14 ← expect r13 "the reclaimed bytes are the old waste"
+    (Nat.beq (Nat.sub st0.totalPages st1.totalPages) st0.wastedPages);
+  -- The plan's own accounting agrees with the store's read-back.
+  r15 ← expect r14 "the plan's after-stats are the measured after-stats"
+    (Bool.and (Nat.beq c.after.livePages st1.livePages) (Nat.beq c.after.totalPages st1.totalPages));
+  -- The read path (mmap decoder) reads the compacted file: the merge's point.
+  mapped ← mapRead path ids;
+  r16 ← expect r15 "the mmap read path reads the compacted image" (mappedAgrees after mapped ids);
+  -- A clean reopen, and the two meta slots still name two roots.
+  h2 ← openDbWith path indices 2;
+  s2 ← getDb h2;
+  roots ← retainedRoots h2;
+  r17 ← expect r16 "a reopen reads the compacted image"
+    (Bool.and (Nat.beq s2.gen.toNat before.gen.toNat) (sameContent s2 before ids));
+  r18 ← expect r17 "the swap kept the older root in the other meta slot" (Nat.beq (List.length roots) 2);
+  -- A commit past the compacted image is generation+1 and durable.
+  oNext ← putDb h2 (bumpCount (U64.ofNat 1) s2);
+  r19 ← expect r18 "a commit after compaction succeeds" (succeeded oNext);
+  s3 ← getDb h2;
+  r20 ← expect r19 "it is the next generation" (Nat.beq s3.gen.toNat (Nat.succ before.gen.toNat));
+  closeDb h2;
+  h3 ← openDbWith path indices 2;
+  s4 ← getDb h3;
+  r21 ← expect r20 "the post-compaction commit is durable"
+    (Bool.and (Nat.beq s4.gen.toNat s3.gen.toNat) (Nat.beq (countIn s4.root 1) 21));
+  closeDb h3;
+  closeDb h;
+  EIO.pure r21
+
+-- ## Retention: a lease keeps an old root's pages alive until released
+
+/-- Find a retained root by generation. -/
+def findRef (refs : List RootRef) (gen : Nat) : Option RootRef :=
+  List.find (fun e => UIntN.beq e.gen (U64.ofNat gen)) refs
+
+/-- The leased root is still registered and its pages still decode. -/
+def checkLeased (r : Nat) (fd : Fd) (pageCount : U64) (e : Option RootRef) : EIO Nat :=
+  match e with
+  | .none => expect r "the leased root survives compaction" .false
+  | .some x => do
+    recs ← readRef fd x pageCount;
+    match recs with
+    | .none => expect r "the leased root's pages still load" .false
+    | .some rs => expect r "the leased root's pages still load" (Nat.beq (List.length rs) 2)
+
+def retentionTest (dir : String) (r0 : Nat) : EIO Nat := do
+  let path := Path.join dir "retain.db";
+  let indices := [kindIndex, uniqueLabel];
+  h ← openDbWith path indices 1;
+  s0 ← getDb h;
+  oSeed ← putDb h (seedNodes s0);
+  r1 ← expect r0 "retain: seed commits" (succeeded oSeed);
+  s1 ← getDb h;
+  held ← leaseRoot h s1.gen;
+  r2 ← expect r1 "retain: lease the seed's root" held;
+  r3 ← bumpTimes h 6 r2;
+  roots ← retainedRoots h;
+  r4 ← expect r3 "retain: the lease keeps generation 1 under K = 1"
+    (match findRef roots 1 with | .none => .false | .some _ => .true);
+  st0 ← storeStats h;
+  r5 ← expect r4 "retain: both chains are live" (Nat.beq st0.livePages 2);
+  c1 ← compactStore h;
+  r6 ← expect r5 "retain: compaction keeps the leased chain and the newest"
+    (Nat.beq c1.after.livePages 2);
+  -- The leased root's pages are still there and still decode.
+  st ← EIO.lift (MVar.read h.state);
+  refs ← retainedRoots h;
+  r7 ← checkLeased r6 st.fd st.pageCount (findRef refs 1);
+  -- Release and compact again: the old chain is gone and the file is smaller.
+  releaseRoot h (U64.ofNat 1);
+  c2 ← compactStore h;
+  r8 ← expect r7 "retain: after release only the newest chain is live"
+    (Nat.beq c2.after.livePages 1);
+  r9 ← expect r8 "retain: and the file shrank again"
+    (Nat.lt c2.after.totalPages c1.after.totalPages);
+  oslow ← putDb h (bumpCount (U64.ofNat 1) s1);
+  r10 ← expect r9 "retain: a commit from an evicted base is expired" (isExpired oslow);
+  sNow ← getDb h;
+  oNow ← putDb h (bumpCount (U64.ofNat 1) sNow);
+  r11 ← expect r10 "retain: a commit from the current base still works" (succeeded oNow);
+  closeDb h;
+  EIO.pure r11
+
+-- ## Crash before the switch: a leftover image never changes the store
+
+def crashTest (dir : String) (r0 : Nat) : EIO Nat := do
+  let path := Path.join dir "crash.db";
+  let indices := [kindIndex, uniqueLabel];
+  h ← openDbWith path indices 2;
+  s0 ← getDb h;
+  oSeed ← putDb h (seedNodes s0);
+  r1 ← expect r0 "crash: seed commits" (succeeded oSeed);
+  r2 ← bumpTimes h 3 r1;
+  before ← getDb h;
+  -- State 1-3: build the image, abandon it.
+  p ← prepareCompaction h;
+  abandonCompaction p;
+  hOld ← openDbWith path indices 2;
+  sOld ← getDb hOld;
+  r3 ← expect r2 "crash: after an abandoned image the old file is unchanged"
+    (Bool.and (Nat.beq sOld.gen.toNat before.gen.toNat) (sameContent sOld before ids));
+  closeDb hOld;
+  -- A torn/garbage temp file is just as harmless (the temp is not the store).
+  p2 ← prepareCompaction h;
+  Fd.close p2.fd;
+  FS.writeBytes p2.temp (Bytes.ofUtf8 "not a store");
+  hOld2 ← openDbWith path indices 2;
+  sOld2 ← getDb hOld2;
+  r4 ← expect r3 "crash: a garbage temp file does not change the store"
+    (Bool.and (Nat.beq sOld2.gen.toNat before.gen.toNat) (sameContent sOld2 before ids));
+  closeDb hOld2;
+  FS.removeFile p2.temp;
+  closeDb h;
+  EIO.pure r4
+
+-- ## The tail a crashed commit leaves, and the empty store
+
+/-- Append two garbage pages with no meta naming them (crash states 2-3 of §4.2); open
+must trim them, and an empty store must compact to its two meta pages. -/
+def tailTest (dir : String) (r0 : Nat) : EIO Nat := do
+  let path := Path.join dir "tail.db";
+  let indices := [kindIndex, uniqueLabel];
+  h ← openDbWith path indices 2;
+  s0 ← getDb h;
+  oSeed ← putDb h (seedNodes s0);
+  r1 ← expect r0 "tail: seed commits" (succeeded oSeed);
+  size0 ← FS.stat path;
+  closeDb h;
+  -- Two pages appended, then nothing: a crash before the meta switch.
+  fd ← Fd.open path .readWrite OpenFlags.none;
+  at ← Fd.seek fd (.fromEnd 0);
+  Fd.write fd (Bytes.zeros pageSize);
+  Fd.write fd (Bytes.zeros pageSize);
+  Fd.close fd;
+  size1 ← FS.stat path;
+  r2 ← expect r1 "tail: the crash left two unreferenced pages"
+    (Nat.beq size1.size (Nat.add size0.size (Nat.mul 2 pageSize)));
+  h2 ← openDbWith path indices 2;
+  size2 ← FS.stat path;
+  r3 ← expect r2 "tail: open truncates a tail no meta names" (Nat.beq size2.size size0.size);
+  st ← storeStats h2;
+  r4 ← expect r3 "tail: no waste after the trim" (Nat.beq st.wastedPages 0);
+  s1 ← getDb h2;
+  r5 ← expect r4 "tail: the generation is unchanged" (Nat.beq s1.gen.toNat 1);
+  closeDb h2;
+  -- The empty store: compaction writes only the two meta pages.
+  let epath := Path.join dir "empty.db";
+  he ← openDbWith epath indices 2;
+  c ← compactStore he;
+  se ← getDb he;
+  r6 ← expect r5 "empty: compaction is the two meta pages and one registry page"
+    (Nat.beq c.after.totalPages 3);
+  r6b ← expect r6 "empty: the registry page is counted"
+    (Nat.beq c.after.registryPages 1);
+  r7 ← expect r6b "empty: and the generation is 0" (Nat.beq se.gen.toNat 0);
+  oE ← putDb he (seedNodes se);
+  r8 ← expect r7 "empty: a commit after compaction works" (succeeded oE);
+  closeDb he;
+  EIO.pure r8
+
+def main : IO Unit := EIO.toIO (do
+  dir ← FS.createTempDir;
+  EIO.lift (IO.println (String.append "compact: in " dir));
+  r1 ← compactTest dir 0;
+  EIO.lift (IO.println (String.append "compact: compaction ok ("
+    (String.append (Nat.toString r1) " checks)")));
+  r2 ← retentionTest dir r1;
+  EIO.lift (IO.println (String.append "compact: retention ok ("
+    (String.append (Nat.toString r2) " checks)")));
+  r3 ← crashTest dir r2;
+  EIO.lift (IO.println (String.append "compact: crash states ok ("
+    (String.append (Nat.toString r3) " checks)")));
+  r4 ← tailTest dir r3;
+  EIO.lift (IO.println (String.append "compact: tail and empty store ok ("
+    (String.append (Nat.toString r4) " checks)")));
+  FS.removeAll dir;
+  EIO.lift (IO.println (String.append "compact: all checks passed ("
+    (String.append (Nat.toString r4) ")"))))

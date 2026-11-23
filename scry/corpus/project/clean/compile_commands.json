@@ -1,0 +1,3 @@
+[
+  {"directory": ".", "file": "clean.c", "arguments": ["cc", "-I.", "-c", "clean.c", "-o", "clean.o"]}
+]

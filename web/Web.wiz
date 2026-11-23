@@ -15,7 +15,7 @@ import Infoview
 --
 -- The browser infoview page itself (`web/infoview.html`) no longer loads this module:
 -- it is the playground's JavaScript pane now (`web/playground-lsp.js`, `web/lsp-client.js`
--- and `web/goals.js`), so both pages and both transports share one implementation. The
+-- and the Wiz goals runtime), so both pages and both transports share one implementation. The
 -- `wiz_web_*` half below is kept because it is a self-contained Wiz language client
 -- (web/node_test.mjs runs it under Node against a real server) and because the
 -- documentation needs the module anyway; the page's rendering is `lib/Tagged.wiz` and

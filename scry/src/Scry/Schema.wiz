@@ -177,6 +177,8 @@ def Scry.EdgeId.eq (a b : Scry.EdgeId) : Bool := Nat.beq a.n b.n
 def Scry.nodeId (n : Nat) : Scry.NodeId := Scry.Id.mk n
 /-- The edge id for `n` (unchecked: the loader checks bounds). -/
 def Scry.edgeId (n : Nat) : Scry.EdgeId := Scry.Id.mk n
+/-- The relation id for `n` (unchecked: the loader checks bounds). -/
+def Scry.relId (n : Nat) : Scry.RelId := Scry.Id.mk n
 /-- `[0, 1, …, n-1]`, accumulated from `n - 1` down (`acc` is the list so far). -/
 def Scry.schemaRangeFrom : Nat → List Nat → List Nat
   | .zero, acc => acc

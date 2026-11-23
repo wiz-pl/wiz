@@ -77,26 +77,54 @@ function parseSexpr(text) {
 
 const isIdent = (t) => Array.isArray(t) && t.length >= 1 && t[0] === 'term.ident';
 
+// A printable form of a type expression, so a rejection names what the reader wrote
+// (`Float64`, `IO U32`, `Array Bool`) rather than "unsupported type expression".
+function renderType(t) {
+  if (isIdent(t)) return t[1];
+  if (Array.isArray(t) && t[0] === 'term.paren') return renderType(t[1]);
+  if (Array.isArray(t) && t[0] === 'term.app' && isIdent(t[1]))
+    return [t[1][1], ...(t[2] || []).map(renderType)].join(' ');
+  return 'this type expression';
+}
+
 function typeOfTerm(t, where) {
   if (isIdent(t)) {
     const name = t[1];
     if (name === 'Nat') return { kind: 'Nat' };
     if (name === 'U32') return { kind: 'U32' };
     if (name === 'Bool') return { kind: 'Bool' };
-    fail(`${where}: unsupported type ${name}`);
+    fail(`${where}: unsupported type ${name} (the WebGPU subset has only U32, Bool, Nat and Array U32)`);
   }
   if (Array.isArray(t) && t[0] === 'term.app' && isIdent(t[1]) && t[1][1] === 'Array') {
     const args = t[2] || [];
     if (args.length !== 1) fail(`${where}: Array needs one element type`);
-    const elem = typeOfTerm(args[0], where);
-    if (elem.kind !== 'U32') fail(`${where}: only Array U32 buffers are supported`);
+    if (!isIdent(args[0]) || args[0][1] !== 'U32')
+      fail(`${where}: only Array U32 buffers are supported (got Array ${renderType(args[0])})`);
     return { kind: 'Array', elem: 'U32' };
   }
-  fail(`${where}: unsupported type expression (only U32, Bool, Nat and Array U32 are in the subset)`);
+  fail(`${where}: unsupported type ${renderType(t)} (the WebGPU subset has only U32, Bool, Nat and Array U32)`);
+}
+
+// WGSL has one namespace and a fixed keyword list; a Wiz name that is a WGSL keyword
+// would either fail validation or, worse, name a different thing after renaming.
+const WGSL_RESERVED = new Set([
+  'alias', 'array', 'atomic', 'binding', 'bitcast', 'bool', 'break', 'builtin', 'case',
+  'const', 'continue', 'default', 'discard', 'else', 'f16', 'f32', 'false', 'fn', 'for',
+  'function', 'global_invocation_id', 'group', 'i32', 'if', 'in', 'let', 'location', 'loop',
+  'main', 'out', 'override', 'private', 'ptr', 'read', 'read_write', 'return', 'storage',
+  'struct', 'switch', 'true', 'u32', 'uniform', 'var', 'vec2', 'vec3', 'vec4', 'while',
+  'workgroup', 'write',
+]);
+function checkName(name, at) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+    fail(`${at}: '${name}' is not a WGSL identifier`);
+  if (WGSL_RESERVED.has(name))
+    fail(`${at}: '${name}' is a WGSL keyword or reserved name (rename it)`);
 }
 
 function flattenBinders(binders, where) {
   const params = [];
+  const seen = new Set();
   for (const b of binders) {
     if (!Array.isArray(b) || b[0] !== 'binder.explicit')
       fail(`${where}: implicit/instance binders are not in the subset`);
@@ -104,7 +132,12 @@ function flattenBinders(binders, where) {
     const types = b[3] || [];
     if (types.length !== 1) fail(`${where}: every parameter needs one type`);
     const ty = typeOfTerm(types[0], where);
-    for (const n of names) params.push({ name: n, type: ty });
+    for (const n of names) {
+      if (seen.has(n)) fail(`${where}: duplicate parameter '${n}'`);
+      seen.add(n);
+      checkName(n, where);
+      params.push({ name: n, type: ty });
+    }
   }
   return params;
 }
@@ -120,6 +153,7 @@ function defsOf(forms) {
     const name = rawName;
     if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
       fail(`${name}: kernel names must be plain identifiers (no namespaces or operators)`);
+    checkName(name, name);
     if (defs.has(name)) fail(`${name}: duplicate kernel definition`);
     // `wiz parse` prints the result types as a list (Wiz has multiple results); a kernel
     // has exactly one.
@@ -149,9 +183,11 @@ function lowerExpr(term, ctx) {
     const ty = ctx.env.get(name);
     if (!ty) fail(`${at}: '${name}' is not a parameter or local (a global/axiom is not in the subset)`);
     if (ty.kind === 'Array') fail(`${at}: a buffer may only be read with Array.getD (a buffer is not a value)`);
-    return { k: 'var', name, type: ty };
+    return { k: 'var', name: ctx.rename.get(name) ?? name, type: ty };
   }
   if (Array.isArray(term) && term[0] === 'term.paren') return lowerExpr(term[1], ctx);
+  if (Array.isArray(term) && term[0] === 'term.fun')
+    fail(`${at}: lambdas and closures are not in the subset (WGSL has no function values)`);
   if (Array.isArray(term) && term[0] === 'term.num')
     fail(`${at}: bare numerals are not in the subset; write U32.ofNat N`);
   if (Array.isArray(term) && term[0] === 'term.let') {
@@ -160,13 +196,24 @@ function lowerExpr(term, ctx) {
     if ((implicit && implicit.length) || (extra && extra.length))
       fail(`${at}: implicit let bindings are not in the subset`);
     if (!body) fail(`${at}: malformed let`);
-    const ty = typeOfTerm(tyTerm, at);
+    if (typeof name !== 'string') fail(`${at}: a let must bind a plain name (pattern lets are not in the subset)`);
+    checkName(name, at);
+    // The annotation is a list of result types; a kernel let binds exactly one value.
+    const types = Array.isArray(tyTerm) ? tyTerm : [tyTerm];
+    if (types.length !== 1) fail(`${at}: a let must bind one value (multiple results are not in the subset)`);
+    const ty = typeOfTerm(types[0], at);
     if (ty.kind === 'Array') fail(`${at}: a let-bound Array would be an allocation; buffers are parameters`);
     const v = lowerExpr(value, ctx);
     checkEq(v.type, ty, `${at}: let ${name}`);
     const inner = new Map(ctx.env);
+    // Alpha-rename the binding: WGSL has one flat scope per function and the emitter
+    // hoists every let, so a shadowing Wiz let must not reuse the outer name.
+    const local = freshLocal(name, ctx.taken);
     inner.set(name, ty);
-    return lowerExpr(body, { ...ctx, env: inner });
+    const renaming = new Map(ctx.rename);
+    renaming.set(name, local);
+    const lowered = lowerExpr(body, { ...ctx, env: inner, rename: renaming });
+    return { k: 'let', name: local, value: v, body: lowered, type: ty };
   }
   if (Array.isArray(term) && term[0] === 'term.match') {
     const scrutinees = term[1] || [];
@@ -194,8 +241,14 @@ function lowerExpr(term, ctx) {
   if (Array.isArray(term) && term[0] === 'term.app') {
     const callee = term[1];
     const args = term[2] || [];
-    if (!isIdent(callee))
+    if (!isIdent(callee)) {
+      if (Array.isArray(callee) && callee[0] === 'term.fun')
+        fail(`${at}: lambdas and closures are not in the subset (WGSL has no function values)`);
+      if (Array.isArray(callee) && callee[0] === 'term.paren' &&
+          Array.isArray(callee[1]) && callee[1][0] === 'term.fun')
+        fail(`${at}: lambdas and closures are not in the subset (WGSL has no function values)`);
       fail(`${at}: higher-order application is not in the subset (the callee must be a name)`);
+    }
     const name = callee[1];
     // `Array.getD` must see its first argument as a buffer name, not as a value, so it is
     // handled before the arguments are lowered.
@@ -225,6 +278,14 @@ function lowerExpr(term, ctx) {
       if (!Number.isInteger(v) || v < 0 || v >= 2 ** 32) fail(`${at}: ${n[1]} is not a u32 literal`);
       return { k: 'u32', value: v, type: { kind: 'U32' } };
     }
+    // Name-based rejections run before the arguments are lowered, so the diagnostic names
+    // the construct the reader wrote even when an argument is itself outside the subset.
+    if (name.startsWith('Array.'))
+      fail(`${at}: ${name} is not in the subset (a kernel cannot allocate or resize; only Array.getD buf i (U32.ofNat 0) reads a buffer)`);
+    if (name.startsWith('Nat.'))
+      fail(`${at}: Nat arithmetic is not in the subset (${name}: Nat is unbounded and a GPU has only 32-bit words)`);
+    if (name === 'UIntN.div' || name === 'UIntN.mod')
+      fail(`${at}: ${name} is not in the subset (Wiz defines a / 0 = 0; WGSL leaves a zero divisor unspecified)`);
     const lowered = args.map((a) => lowerExpr(a, ctx));
     switch (name) {
       case 'UIntN.add': case 'UIntN.sub': case 'UIntN.mul':
@@ -257,6 +318,41 @@ function lowerExpr(term, ctx) {
     }
   }
   fail(`${at}: unsupported term ${JSON.stringify(term).slice(0, 120)}`);
+}
+
+// WGSL lets are statements, and the subset has no control flow inside a kernel, so the
+// lowerer keeps let nodes and `flatten` emits them in evaluation order before the return.
+// Bindings are alpha-renamed (freshLocal) so hoisting them into one flat scope is sound.
+let localCounter = 0;
+function freshLocal(name, taken) {
+  let n;
+  do { n = `${name}_${localCounter++}`; } while (taken.has(n));
+  taken.add(n);
+  return n;
+}
+
+function flatten(e, decls) {
+  switch (e.k) {
+    case 'var':
+    case 'u32': return e;
+    case 'read': return { ...e, index: flatten(e.index, decls) };
+    case 'bin':
+    case 'cmp': return { ...e, left: flatten(e.left, decls), right: flatten(e.right, decls) };
+    case 'select': return {
+      ...e,
+      cond: flatten(e.cond, decls),
+      yes: flatten(e.yes, decls),
+      no: flatten(e.no, decls),
+    };
+    case 'call': return { ...e, args: e.args.map((a) => flatten(a, decls)) };
+    case 'let': {
+      // The value's own lets come first, then this binding, then the body.
+      const value = flatten(e.value, decls);
+      decls.push(`let ${e.name} : ${WGSL_TYPE[e.type.kind]} = ${emitExpr(value)};`);
+      return flatten(e.body, decls);
+    }
+    default: throw new Error(`internal: flatten ${e.k}`);
+  }
 }
 
 function checkEq(got, want, at) {
@@ -298,9 +394,18 @@ function lowerDef(def, defs, calls = null) {
     env.set(p.name, p.type);
     if (p.type.kind === 'Array') buffers.add(p.name);
   }
+  localCounter = 0;
   return lowerExpr(def.rawBody, {
-    env, buffers, defs, calls, stack: [def.name], where: def.name,
+    env, buffers, defs, calls, stack: [def.name], where: def.name, rename: new Map(),
+    taken: new Set(def.params.map((p) => p.name)),
   });
+}
+
+// A lowered def becomes `let …` declarations plus one return expression.
+function emitFunctionBody(e) {
+  const decls = [];
+  const body = flatten(e, decls);
+  return `${decls.map((d) => `  ${d}`).join('\n')}${decls.length ? '\n' : ''}  return ${emitExpr(body)};`;
 }
 
 function emitDef(def, defs) {
@@ -308,7 +413,7 @@ function emitDef(def, defs) {
   const ret = def.ret.kind === 'Bool' ? 'bool' : 'u32';
   const body = lowerDef(def, defs);
   const head = `fn ${def.name}(${scalarParams.map((p) => `${p.name} : ${WGSL_TYPE[p.type.kind]}`).join(', ')}) -> ${ret}`;
-  return `${head} {\n  return ${emitExpr(body)};\n}`;
+  return `${head} {\n${emitFunctionBody(body)}\n}`;
 }
 
 function emitModule({ sourceName, defs, entryName }) {
@@ -321,23 +426,48 @@ function emitModule({ sourceName, defs, entryName }) {
     if (b.type.kind !== 'Array') fail(`${entryName}: parameters after the index must be Array U32 buffers (got ${typeName(b.type)})`);
   }
   if (buffers.length === 0) fail(`${entryName}: the entry kernel needs at least one Array U32 buffer`);
-  if (buffers.some((b) => b.name === 'out')) fail(`${entryName}: a buffer may not be named 'out' (the result buffer)`);
+  for (const b of buffers) {
+    if (b.name === 'out') fail(`${entryName}: a buffer may not be named 'out' (the result buffer)`);
+    if (b.name === 'i' || b.name === 'gid')
+      fail(`${entryName}: a buffer may not be named '${b.name}' (the generated entry point uses it)`);
+  }
   // The result buffer is `array<u32>`; a Bool entry result would need a different ABI.
   // (Bool is still useful as a helper's return type, in a match condition.)
-  if (entry.ret.kind !== 'U32') fail(`${entryName}: an entry kernel returns U32 (Nat is an index type; Bool has no output ABI yet)`);
+  if (entry.ret.kind !== 'U32')
+    fail(`${entryName}: an entry kernel returns U32 (got ${typeName(entry.ret)}; Nat is an index type and Bool has no output ABI yet)`);
 
   // Acyclicity and reachability: lower from the entry, which walks call edges, rejects a
-  // name already on the stack, and tells us which defs to emit.
+  // name already on the stack (direct recursion), and tells us which defs to emit.
   const reachable = new Set([entryName]);
   const queue = [entryName];
+  const edges = new Map();
   while (queue.length) {
     const d = defs.get(queue.shift());
     const calls = new Set();
     lowerDef(d, defs, calls);
+    edges.set(d.name, calls);
     for (const c of calls) {
       if (!reachable.has(c)) { reachable.add(c); queue.push(c); }
     }
   }
+  // WGSL forbids recursion, including mutual recursion, which the per-def stack above
+  // cannot see.  A DFS of the reachable call graph finds every cycle.
+  const colour = new Map(); // 1 = on the path, 2 = done
+  const path = [];
+  const visit = (n) => {
+    const c = colour.get(n);
+    if (c === 1) {
+      const cycle = [...path.slice(path.indexOf(n)), n];
+      fail(`${entryName}: recursion is not in the subset (${cycle.join(' -> ')})`);
+    }
+    if (c === 2) return;
+    colour.set(n, 1);
+    path.push(n);
+    for (const m of edges.get(n) || []) visit(m);
+    path.pop();
+    colour.set(n, 2);
+  };
+  visit(entryName);
   // A helper's buffer parameters are names for module-scope bindings (a helper call may
   // not pass a buffer), so they must be the entry's buffers under the same names.
   const entryBuffers = new Set(buffers.map((b) => b.name));
@@ -357,7 +487,7 @@ function emitModule({ sourceName, defs, entryName }) {
     `@group(0) @binding(${i}) var<storage, read> ${b.name} : array<u32>;`).join('\n');
   const outBinding = `@group(0) @binding(${buffers.length}) var<storage, read_write> out : array<u32>;`;
   const helpers = [...reachable].filter((n) => n !== entryName).map((n) => emitDef(defs.get(n), defs));
-  const entryFn = `fn ${entryName}_at(i : u32) -> u32 {\n  return ${emitExpr(lowerDef(entry, defs))};\n}`;
+  const entryFn = `fn ${entryName}_at(${entry.params[0].name} : u32) -> u32 {\n${emitFunctionBody(lowerDef(entry, defs))}\n}`;
   const main = `@compute @workgroup_size(64)\nfn main(@builtin(global_invocation_id) gid : vec3<u32>) {\n  let i : u32 = gid.x;\n  // The one bounds check: every buffer is known to have the output's length.  WGSL's\n  // robust access rule returns 0 for an out-of-range read, which is the kernel's\n  // Array.getD default, so indices inside the guard are the only ones that matter.\n  if (i < arrayLength(&out)) {\n    out[i] = ${entryName}_at(i);\n  }\n}`;
   return `// Generated by webgpu/tools/wgsl.mjs from ${sourceName}: do not edit.\n` +
     `// entry: ${entryName}(i : Nat, ${buffers.map((b) => `${b.name} : Array U32`).join(', ')}) : ${typeName(entry.ret)}\n` +

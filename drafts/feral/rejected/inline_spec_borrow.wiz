@@ -1,0 +1,22 @@
+import FeralCore
+-- REJECTED (Rust E0499: two mutable borrows live at once), the lowering of
+-- rejected/surface/inline_spec_borrow.wiz. check.sh expects a type error.
+-- fn bad (n : U64) requires (Nat.lt n.val 10 = .true) ensures (True) : Vec U64
+--   := { let mut v := Vec.new; let r1 := &mut v; let r2 := &mut v;
+--        r1.push 1; r2.push 2; v }
+-- Inside r1's scope `v` is a `Lent` token, so `&mut v` borrows the token, not the
+-- vector: `r2.push` gets a `Uniq ρ2 (Lent ρ1 (Vec U64))`.
+def bad (n : U64) : Result (Vec U64) :=
+  let v := (Vec.new : Vec U64);
+  match Uniq.borrow Region.static v (fun ρ1 h1 v r1 =>      -- let r1 := &mut v
+    match Uniq.borrowIn ρ1 v r1 (fun ρ2 h2 v r1 r2 =>       -- let r2 := &mut v
+      match Vec.push r1 (U64.lit 1) with                     -- r1.push 1
+      | .ok u r1 =>
+        (match Vec.push r2 (U64.lit 2) with                  -- r2.push 2
+        | .ok u2 r2 => .ok () (r1, r2)
+        | .err e r2 => .err e (r1, r2))
+      | .err e r1 => .err e (r1, r2)) with
+    | .ok q r1 => let (u, v) := q; .ok () r1
+    | .err e r1 => .err e r1) with
+  | .ok p => let (u, v) := p; .ok v
+  | .err e => .err e

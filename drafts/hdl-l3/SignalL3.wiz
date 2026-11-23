@@ -1,0 +1,86 @@
+-- Lane L3 of wiz-notes/clash-hdl-plan.md: `Signal.fix` and the size-polymorphic
+-- `Hw`-style operator surface. TARGET CODE, NOT CHECKED (drafts/ is outside the build);
+-- every definition that needs a missing feature is marked `-- wishful: sized-signal-fix`.
+-- See README.md here and docs/stages/34-hdl-signals.md §34b.
+import Hdl.Signal
+import Hdl.Uart
+
+------------------------------------------------------------------------------------
+-- The fixed point
+
+/-- Feedback for a contractive stream function: `g` maps a signal at size `i` to one at
+`↑i`, so it can only use its argument *under a register* (`registerS`), never observe it.
+That is Clash's `cnt = register 0 (cnt + 1)` with the delay discipline made a type. -/
+def Signal.fix {d : ClockDomain} {A : Type}
+    (g : (i : Size) → (Signal d A)^i → (Signal d A)^(↑i)) : Signal d A :=
+  -- `scofix` with state `A i := (Signal d A)^i` (lane L2), which ties the knot at `∞`:
+  --   scofix (fun s rec i c => g i (rec i c)) ∞ () (loop at ∞)
+  -- The equation `g ∞ (fix g)` is what the sized rule derives; writing it as the body is
+  -- the Clash reading, not the totality argument.
+  g ∞ (Signal.fix g)                                             -- wishful: sized-signal-fix
+
+------------------------------------------------------------------------------------
+-- The operators at a size
+
+/-- `map` at the same size: the missing primitive behind every operator below. Needs
+L2's size-dependent `scofix` state (the state is the input at the recursive size). -/
+def Signal.mapS {d : ClockDomain} {A B : Type} {i : Size} (f : A → B) (s : (Signal d A)^i) : (Signal d B)^i
+  | .head => f s.head
+  | .tail => Signal.mapS f s.tail                                -- wishful: sized-signal-fix
+
+/-- `zipWith` at the same size. -/
+def Signal.zipWithS {d : ClockDomain} {A B C : Type} {i : Size} (f : A → B → C)
+    (a : (Signal d A)^i) (b : (Signal d B)^i) : (Signal d C)^i
+  | .head => f a.head b.head
+  | .tail => Signal.zipWithS f a.tail b.tail                     -- wishful: sized-signal-fix
+
+/-- `zipWith3` at the same size (`if` is a three-way mux). -/
+def Signal.zipWith3S {d : ClockDomain} {A B C D : Type} {i : Size} (f : A → B → C → D)
+    (a : (Signal d A)^i) (b : (Signal d B)^i) (c : (Signal d C)^i) : (Signal d D)^i
+  | .head => f a.head b.head c.head
+  | .tail => Signal.zipWith3S f a.tail b.tail c.tail             -- wishful: sized-signal-fix
+
+-- `Signal.pureS` and the numeral instance at a sized signal have *landed* in
+-- hdl/src/Hdl/Signal.wiz (numerals never observe, so they do not need L2). What is left is
+-- the observing operators.
+
+-- What `+` and `if` must resolve to at a sized signal. These are the instances the plan's
+-- "size-polymorphic `Hw`-style operators" means; each body is the pointwise operation
+-- above. (`OfNat` is in the library already.)
+instance {d : ClockDomain} {n : Nat} {i : Size} : Add ((Signal d (BitVec n))^i) :=
+  Add.mk (Signal.zipWithS BitVec.add)                            -- wishful: sized-signal-fix
+instance {d : ClockDomain} {n : Nat} {i : Size} : Sub ((Signal d (BitVec n))^i) :=
+  Sub.mk (Signal.zipWithS BitVec.sub)                            -- wishful: sized-signal-fix
+instance {d : ClockDomain} {t : HwTy} {i : Size} :
+    Mux ((Signal.Sig d HwTy.bit)^i) ((Signal.Sig d t)^i) :=
+  Mux.mk (Signal.zipWith3S (fun c x y => Hw.mux c x y))          -- wishful: sized-signal-fix
+
+------------------------------------------------------------------------------------
+-- Clash's two examples, in Clash's spelling
+
+/-- `counter = register 0 (counter + 1)` at an 8-bit width. -/
+def counter {d : ClockDomain} : Signal d (BitVec 8) :=
+  Signal.fix (fun (i : Size) (c : (Signal d (BitVec 8))^i) =>
+    Signal.registerS (BitVec.ofNat 8 0) (c + 1))                 -- wishful: sized-signal-fix
+
+/-- The baud generator: count `ce` cycles 0 … n-1, tick on the last, hold when `ce` is
+low. The output is the tick and the counter is the loop variable (wiz-rv's
+`Uart.baudStep`, as a fixed point instead of `Circuit.loop`). `ce` is at `∞` and the
+sized subtyping `∞ ≥ i` puts it at the loop's size, as the plan's port sketch does. -/
+def baud {d : ClockDomain} (w n : Nat) (ce : Signal d (BitVec 1)) : Signal d (BitVec 1) :=
+  let cnt := Signal.fix (fun (i : Size) (c : (Signal d (BitVec w))^i) =>
+    let last := Signal.zipWithS (fun (x y : BitVec w) => Bool.toBits (BitVec.beq x y)) c
+      (Signal.pureS (BitVec.ofNat w (n - 1)));
+    let tick := Signal.zipWithS BitVec.and ce last;
+    Signal.registerS (BitVec.ofNat w 0)
+      (if tick then 0 else if ce then c + 1 else c))             -- wishful: sized-signal-fix
+  Signal.zipWith BitVec.and ce
+    (Signal.zipWith (fun (x y : BitVec w) => Bool.toBits (BitVec.beq x y)) cnt
+      (Signal.pure (BitVec.ofNat w (n - 1))))
+
+def Sys : ClockDomain := ClockDomain.sys
+
+#eval Signal.sample 10 (Signal.map BitVec.toNat (counter : Signal Sys (BitVec 8)))
+-- expect: 0 1 2 3 4 5 6 7 8 9
+#eval Signal.sample 10 (Signal.map BitVec.toNat (baud 4 4 (Signal.pure (BitVec.ofNat 1 1))))
+-- expect: 0 0 0 1 0 0 0 1 0 0

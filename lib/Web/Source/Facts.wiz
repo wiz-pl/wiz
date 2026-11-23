@@ -1,0 +1,45 @@
+import Text
+import Web.Source.Model
+import Web.Source.Span
+
+/-!
+# Web.Source.Facts
+
+The per-file fact table: which rows sit at an offset, and which findings touch it.
+
+The shape is the relation shape `Scry.Store` uses (`lib/Scry/Store.wiz`: a relation is a
+name and tuples of node ids) restricted to what a reader needs: a kind, a node id, a
+UTF-16 span and named columns. `factsAt` is the only lookup the info view performs, so a
+new fact kind is a row in the bundle, not a new branch in the view.
+
+The loader that produced the spans (`Scry.Facts.ofText`) already rejects out-of-range
+positions; this module additionally ignores a row whose span misses the file, so a
+damaged hand-written bundle degrades to "no row" rather than a view that underlines past
+the end.
+-/
+/-- The fact rows of one file. -/
+def Source.factsInFile (facts : List Source.FactRow) (fileId : String) : List Source.FactRow :=
+  List.filter (fun r => String.eq r.fileId fileId) facts
+
+/-- The fact rows whose span contains `offset`, in bundle order. -/
+def Source.factsAt (facts : List Source.FactRow) (fileId : String) (offset : Nat) :
+    List Source.FactRow :=
+  List.filter (fun r => Bool.and (String.eq r.fileId fileId)
+    (Source.Span.contains r.span offset)) facts
+
+/-- The findings of a file whose span contains `offset`, in bundle order. -/
+def Source.findingsAt (findings : List Source.Finding) (fileId : String) (offset : Nat) :
+    List Source.Finding :=
+  List.filter (fun f => Bool.and (String.eq f.fileId fileId)
+    (Source.Span.contains f.span offset)) findings
+
+/-- The finding whose semantic id is `id`, if any. -/
+def Source.findingById (findings : List Source.Finding) (id : String) :
+    Option Source.Finding :=
+  List.find (fun f => String.eq f.id id) findings
+
+/-- The fact rows of a file that overlap a span (for a hover at a range). -/
+def Source.factsOverlapping (facts : List Source.FactRow) (fileId : String)
+    (span : Source.Span) : List Source.FactRow :=
+  List.filter (fun r => Bool.and (String.eq r.fileId fileId)
+    (Source.Span.overlaps r.span span)) facts

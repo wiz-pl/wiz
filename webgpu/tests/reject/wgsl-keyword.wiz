@@ -1,0 +1,2 @@
+-- expect: WGSL keyword
+def f (i : Nat) (a : Array U32) (loop : U32) : U32 := U32.ofNat 1

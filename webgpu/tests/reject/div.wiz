@@ -1,2 +1,3 @@
+-- expect: UIntN.div
 def f (i : Nat) (a : Array U32) : U32 :=
   UIntN.div (Array.getD a i (U32.ofNat 0)) (U32.ofNat 2)

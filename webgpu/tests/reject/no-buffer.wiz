@@ -1,0 +1,2 @@
+-- expect: at least one Array U32 buffer
+def f (i : Nat) : U32 := U32.ofNat 1

@@ -1,13 +1,18 @@
 // (11ab) The playground's Wasm module under Node: no page, no server. Calls the exported
 // `wiz_playground_eval` on a small program, reads the string back, and checks a
-// definition, one `#eval` (42, whose kernel normal form web/playground-values.js turns
+// definition, one `#eval` (42, whose kernel normal form web/framework/values.mjs turns
 // into `42`), a Bool and an error.
 //   usage: node web/playground_test.mjs OUT_DIR
-import { pathToFileURL } from "node:url";
-import { renderValue } from "./playground-values.js";
-import { findPreset, presets } from "./playground-presets.js";
-import { withPrelude } from "./playground-state.js";
-import { PositionIndex } from "./selfhost-lsp-shim.js";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { renderValue } from "./framework/values.mjs";
+import { findPreset, presets } from "./framework/examples.mjs";
+import { PositionIndex } from "./framework/index-oracle.mjs";
+
+// The page adds the embedded Prelude before the engine sees a source
+// (`Web.Draft.withPrelude`); the engine itself needs the import, so the test does the
+// same thing the page does.
+const withPrelude = (text) => (/^\s*import\b/m.test(text) ? text : "import Prelude\n\n" + text);
 
 const outDir = process.argv[2] || new URL("./out/", import.meta.url).pathname;
 const createModule = (await import(pathToFileURL(outDir + "/wiz-playground.mjs").href)).default;
@@ -27,6 +32,21 @@ let failed = 0;
 function check(name, got, want) {
   if (got === want) console.log(`ok: ${name}`);
   else { failed++; console.log(`FAIL: ${name}\n  want: ${JSON.stringify(want)}\n  got:  ${JSON.stringify(got)}`); }
+}
+
+// (tour depth) Firefox charges a Wasm call against its own (much smaller) native stack,
+// not the module's `-sSTACK_SIZE`; a long list freed by recursion therefore reported
+// "too much recursion" for the tour, which V8's default stack tolerated. A child Node
+// with `--stack-size` turns that into a local check. The tour's output is the long
+// list (a `String` is a character list), so this must stay below the old ~600 KB.
+if (process.env.WIZ_PLAYGROUND_TOUR_DEPTH === "1") {
+  const tour = findPreset("tour");
+  const lines = run(withPrelude(tour.code));
+  check("the tour under a reduced JS stack", lines.find((l) => l.startsWith("error:") || l.startsWith("parse error")), undefined);
+  check("the tour under a reduced JS stack has output", lines.length > 0, true);
+  if (failed) process.exit(1);
+  console.log("playground depth: all checks passed");
+  process.exit(0);
 }
 
 // (engine-trampoline) The clean-stop boundary is armed: the module exports its status and
@@ -139,6 +159,15 @@ function checkThat(name, condition, detail) {
     JSON.stringify({ start: { line: 0, character: 4 }, end: { line: 0, character: 9 } }));
   check("decls: an unknown name", index.declarationNamed("nope"), null);
   check("decls: the export is gone", typeof wasm._wiz_playground_names, "undefined");
+}
+
+{
+  const r = spawnSync(process.execPath, ["--stack-size=400", fileURLToPath(import.meta.url), outDir], {
+    env: { ...process.env, WIZ_PLAYGROUND_TOUR_DEPTH: "1" },
+    encoding: "utf8",
+  });
+  check("the tour runs with a reduced JS stack", r.status, 0);
+  if (r.status !== 0) console.log((r.stderr || "").split("\n").slice(0, 20).join("\n"));
 }
 
 if (failed) process.exit(1);

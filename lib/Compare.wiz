@@ -1,0 +1,61 @@
+import Nat
+import Word
+import Text
+/-!
+# Compare
+
+Keys with a total order (`import Compare`): `Compare.compare k k'` is `.lt`, `.eq` or
+`.gt`. `PMap`/`PSet` (lib/Data/PMap.wiz) are keyed by an instance, so any key type with
+one can be a map key.
+
+The class is here rather than in `Data.PMap` because the module that owns the key
+ordering must be importable by `Data.PMap` and `Text`, while `Data.PMap` imports `Nat`
+and `Word`; this module imports those two and `Text` (for `String.compare`), so there is
+no cycle. `Text` owns `BEq`/`DecidableEq` (lib/Text.wiz) and `Class.wiz` owns
+`LE`/`LT`/`Equiv`, one level below `Nat`; neither needs `Compare`.
+
+Instances are provided for `Nat` (through the native `Nat.lt`/`Nat.beq`), `U64`
+(unsigned) and `String` (lexicographic); any other key type gets one by defining its
+`Compare` instance.
+
+```
+import Compare
+
+#eval Compare.compare 2 3      -- Ordering.lt
+```
+-/
+
+/-- Keys with a total order. `compare a b` must be `.lt` exactly when `a < b`, `.eq`
+exactly when `a = b`, and `.gt` otherwise. -/
+class Compare (K : Type) where
+  compare : K → K → Ordering
+
+/-- Three-way comparison of natural numbers, through the native `Nat.lt` and `Nat.beq`
+(in compiled code these are builtins; `Nat.cmp` would recurse once per unary `succ`). -/
+def Nat.compare (a b : Nat) : Ordering := match Nat.lt a b with
+  | .true => .lt
+  | .false => match Nat.beq a b with
+    | .true => .eq
+    | .false => .gt
+/-- Natural numbers are compared by `Nat.compare`. -/
+instance : Compare Nat := Compare.mk Nat.compare
+
+/-- Three-way comparison of 64-bit words (unsigned). -/
+def U64.cmp (a b : U64) : Ordering := match UIntN.lt a b with
+  | .true => .lt
+  | .false => match UIntN.beq a b with
+    | .true => .eq
+    | .false => .gt
+/-- 64-bit words are compared unsigned, by `U64.cmp`. -/
+instance : Compare U64 := Compare.mk U64.cmp
+
+/-- Three-way comparison of strings, lexicographic by code point (a proper prefix is
+smaller). -/
+def String.compare (a b : String) : Ordering := match String.lt a b with
+  | .true => .lt
+  | .false => match String.eq a b with
+    | .true => .eq
+    | .false => .gt
+/-- Strings are compared lexicographically by `String.compare`, so `PMap String V` and
+`PSet String` need no hand-written instance. -/
+instance : Compare String := Compare.mk String.compare

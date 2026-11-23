@@ -1,0 +1,31 @@
+import Prelude
+/-!
+# Class
+
+The order relations every library shares (`import Class`): `LE`, `LT` and `Equiv`.
+
+They live in their own module because their users are below the modules that used to
+declare them: `Data.Order` sits under `Nat`, and `Nat` needs `LE`/`LT` for its own
+instances. A class declared by `Data.Order` cannot be used below it without a cycle, so
+the declarations are here (importing only the Prelude) and `Data.Order` adds the
+notation. The value and equality classes (`Inhabited`, `BEq`, `DecidableEq`, `Repr`)
+are in lib/Text.wiz, the lowest module that is above the Prelude and that every library
+imports; `Compare` is in lib/Compare.wiz, which needs `Ordering` (lib/Nat.wiz).
+
+```
+import Class
+
+def ex (n : Nat) : n ≤ n + 1 := Nat.le_add_right n 1
+```
+-/
+
+/-- `a ≤ b`: a (non-strict) order on `A`. -/
+class LE (A : Type) where
+  le : A → A → Prop
+/-- `a < b`: a strict order on `A`. -/
+class LT (A : Type) where
+  lt : A → A → Prop
+/-- `a ≈ b`: an equivalence on `A` that stands in for equality (a setoid), for types
+whose equality is coarser than `=`, such as unreduced fractions. -/
+class Equiv (A : Type) where
+  equiv : A → A → Prop

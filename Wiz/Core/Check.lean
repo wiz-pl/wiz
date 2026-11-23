@@ -12,7 +12,9 @@ Two mutually recursive judgments, each also producing a **usage vector**:
     Γ ⊢ t ⇐ A  ⊣ U      check : Ctx → Term → VTy → TCM (Usage R)
     Γ ⊢ t ⇒ A  ⊣ U      infer : Ctx → Term → TCM (VTy × Usage R)
 
-`U` says how many times `t` uses each variable of `Γ` (head = innermost).
+`U` says how many times `t` uses each variable of `Γ` (head = innermost). It is
+**sparse**: it stops after the last variable used, and the variables after the end are
+unused (`Usage.zeros n = []`).
 
 ## Rules (`n = |Γ|`, `0ₙ` = `Usage.zeros n`, `q·U` = `Usage.scale q U`)
 
@@ -37,6 +39,11 @@ Two mutually recursive judgments, each also producing a **usage vector**:
     Γ ⊢ f ⇒ (x :q A) → B ⊣ U₁     Γ ⊢ a ⇐ A ⊣ U₂
     ──────────────────────────────── app
     Γ ⊢ f a ⇒ B[a/x] ⊣ U₁ + q·U₂
+    (the second summand is `U₂` instead when `a` is a saturated call of the fixpoint
+    being checked, it consumes a `1`-quantity argument, and its result type `A` contains
+    neither that argument nor its type: the linear fixpoint rule, `fixCallSafe`. The same
+    relaxation applies where a term is scaled by its context — `let`, `pair`, `split`,
+    `scase` — via `scaleUsage`.)
 
     Γ ⊢ T type   Γ ⊢ v ⇐ T ⊣ U₁   Γ, x :q T := v ⊢ b ⇐ A ⊣ (u :: U₂)   le u q
     ──────────────────────────────── let     (and the ⇒ version)
@@ -226,14 +233,21 @@ def kernelRejectedCode : TypeError → String
 
 abbrev TCM := Except TypeError
 
-/-- The typing context. All the lists are aligned: index 0 is the innermost binder. -/
+/-- The typing context. `names`, `qtys` and `types` are indexed **by level** (index 0
+is the outermost binder) and extended with `Array.push`; a de Bruijn index is read with
+`ctx.lvl - 1 - ix` (`Ctx.nameAt?`, `Ctx.qtyAt?`, `Ctx.typeAt?`). `env` is the
+evaluator's environment, indexed by de Bruijn index (index 0 is the innermost binder),
+because `Eval` and the closures it builds consume it that way. -/
 structure Ctx (R : Type) where
   globals : Globals R
-  /-- values of locals, for evaluating types that mention them -/
+  /-- values of locals, for evaluating types that mention them (innermost first) -/
   env   : Env R := []
-  names : List Name := []
-  qtys  : List (QPoly R) := []
-  types : List (VTy R) := []
+  /-- the names, by level (outermost first) -/
+  names : Array Name := #[]
+  /-- the declared quantities, by level -/
+  qtys  : Array (QPoly R) := #[]
+  /-- the types, by level -/
+  types : Array (VTy R) := #[]
   /-- number of locals in scope = the next fresh de Bruijn level -/
   lvl   : Lvl := 0
   /-- checking an erased position (a type, or an argument to a `0` binder)? There,
@@ -250,6 +264,18 @@ structure Ctx (R : Type) where
   /-- (the elaborator's sorts pass, `Wiz/Elab/Mark.lean`; not read by the kernel) fill
   the holes in the `Π`/`Σ`/`ULift` sorts only, placing no proof markers -/
   sortsOnly : Bool := false
+  /-- checking a partial definition's **witness** (`addPartialDecl`), which is evidence
+  that the type is inhabited and is never run. Its usages are not enforced: the witness
+  may ignore a linear parameter, which is what the witness search writes (`fun c => 0`).
+  Nothing runs unchecked: a partial definition's *body* is checked strictly
+  (`addPartialImpl`), and it, not the witness, is the compiled code. -/
+  witness : Bool := false
+  /-- the partial definition whose body is being checked (`addPartialImpl`): its recursive
+  calls are the **linear fixpoint**. A call that consumes a `1`-quantity parameter may
+  have its result used `ω` times when the result type contains neither that argument nor
+  its type ("consumed but not contained"): the call runs once, and a result with no
+  linear content can be duplicated. See `fixCallSafe`. -/
+  fixpoint : Option Name := none
 
 namespace Ctx
 
@@ -259,19 +285,34 @@ variable [QRig R] [DecidableEq R] [QuantitySyntax R]
 def bind (ctx : Ctx R) (x : Name) (q : QPoly R) (ty : VTy R) : Ctx R :=
   { ctx with
     env := Val.var ctx.lvl :: ctx.env
-    names := x :: ctx.names
-    qtys := q :: ctx.qtys
-    types := ty :: ctx.types
+    names := ctx.names.push x
+    qtys := ctx.qtys.push q
+    types := ctx.types.push ty
     lvl := ctx.lvl + 1 }
 
 /-- Go under a `let`: the new variable has a known value. -/
 def define (ctx : Ctx R) (x : Name) (q : QPoly R) (ty : VTy R) (val : Val R) : Ctx R :=
   { ctx with
     env := val :: ctx.env
-    names := x :: ctx.names
-    qtys := q :: ctx.qtys
-    types := ty :: ctx.types
+    names := ctx.names.push x
+    qtys := ctx.qtys.push q
+    types := ctx.types.push ty
     lvl := ctx.lvl + 1 }
+
+/-- The name at de Bruijn index `ix` (0 is the innermost binder). -/
+def nameAt? (ctx : Ctx R) (ix : Nat) : Option Name :=
+  if ix < ctx.lvl then ctx.names[ctx.lvl - 1 - ix]? else none
+
+/-- The quantity at de Bruijn index `ix`. -/
+def qtyAt? (ctx : Ctx R) (ix : Nat) : Option (QPoly R) :=
+  if ix < ctx.lvl then ctx.qtys[ctx.lvl - 1 - ix]? else none
+
+/-- The type at de Bruijn index `ix`. -/
+def typeAt? (ctx : Ctx R) (ix : Nat) : Option (VTy R) :=
+  if ix < ctx.lvl then ctx.types[ctx.lvl - 1 - ix]? else none
+
+/-- The names, innermost first, as `Term.pretty` wants them. -/
+def prettyNames (ctx : Ctx R) : List Name := ctx.names.toList.reverse
 
 def eval (ctx : Ctx R) (t : Term R) : Val R := Wiz.eval ctx.globals ctx.env t
 
@@ -286,16 +327,16 @@ def instArg (ctx : Ctx R) (c : Closure R) (a : Term R) : Val R :=
   | .mk env body => Wiz.eval ctx.globals ((if body.hasVar 0 then ctx.eval a else default) :: env) body
 
 /-- The types of the locals indexed by level, as `conv` wants them. -/
-def tys (ctx : Ctx R) : Array (VTy R) := ctx.types.reverse.toArray
+def tys (ctx : Ctx R) : Array (VTy R) := ctx.types
 
 variable [QuantitySyntax R] [DecidableEq R]
 
 /-- Render a value for error messages. (P2: without evaluating a suspended proof, which
 reads back as `()`; so no path of the kernel, accepting or rejecting, runs a proof.) -/
 def showVal (ctx : Ctx R) (v : Val R) : String :=
-  elideLong ((quote { ctx.globals with quoteErasesProofs := true } ctx.lvl v).pretty ctx.names (some ctx.globals))
+  elideLong ((quote { ctx.globals with quoteErasesProofs := true } ctx.lvl v).pretty ctx.prettyNames (some ctx.globals))
 
-def showTerm (ctx : Ctx R) (t : Term R) : String := elideLong (t.pretty ctx.names (some ctx.globals))
+def showTerm (ctx : Ctx R) (t : Term R) : String := elideLong (t.pretty ctx.prettyNames (some ctx.globals))
 
 end Ctx
 
@@ -310,13 +351,20 @@ def qtyPoly (ctx : Ctx R) (q : Val R) : TCM (QPoly R) :=
 
 /-- **Exercise 1.5.** Leave the scope of a binder `x` declared at quantity `q`:
 pop the binder's own usage off the head of the vector and check it is compatible
-with `q` (using `QPoly.le`), returning the rest. Throw `quantityMismatch` otherwise. -/
+with `q` (using `QPoly.le`), returning the rest. Throw `quantityMismatch` otherwise.
+
+The vector is sparse, so it may already have stopped before this binder. The missing
+entry is `0`, and it must still be checked: a linear binder (`q = 1`) used zero times is
+a quantity error (`0 ≤ 1` is false), while an erased (`q = 0`) or unrestricted binder
+allows it. -/
 def popUsage (x : Name) (q : QPoly R) : Usage R → TCM (Usage R)
   --<sol
   | used :: rest =>
     if QPoly.le used q then pure rest
     else throw (.quantityMismatch x (toString q) (toString used))
-  | [] => throw (.other "internal error: usage vector underflow")
+  | [] =>
+    if QPoly.le (QPoly.const 0) q then pure []
+    else throw (.quantityMismatch x (toString q) "0")
   --|ex
   --| | u => sorry
   --sol>
@@ -345,9 +393,90 @@ def methodUsage (ctx : Ctx R) (u : Usage R) : TCM (Usage R) :=
   match QRig.many? (R := R) with
   | some m => pure (QPoly.const m • u)
   | none =>
-    match (u.zip ctx.names).find? fun (p, _) => !QPoly.le p (QPoly.const 0) with
-    | some (p, x) => throw (.other s!"a method may run any number of times, so it can't use {x} ({p} times): the rig has no unrestricted quantity")
+    match u.zipIdx.find? fun (p, _) => !QPoly.le p (QPoly.const 0) with
+    | some (p, ix) =>
+      match ctx.nameAt? ix with
+      | some x => throw (.other s!"a method may run any number of times, so it can't use {x} ({p} times): the rig has no unrestricted quantity")
+      | none => throw (.other "internal error: usage beyond the context")
     | none => pure u
+
+/-- Does the term `t` contain `target` as a syntactic subterm? `target` is a term at the
+top level and `t` is under `depth` binders, so the target is lifted past them. Types are
+erased, so this is a *syntactic* containment test: it never unfolds a definition. -/
+partial def termContains {R : Type} [BEq R] (target : Term R) (depth : Nat) (t : Term R) : Bool :=
+  t == target.lift depth ||
+    (t.forChildren (m := StateM Bool) (fun _ => pure ())
+      (fun k c => modify (fun b => b || termContains target (depth + k) c)) |>.run false).2
+
+/-- The result of peeling a call's arguments off the fixpoint's `Π` type: the arguments
+given to its `1`-quantity parameters, the (instantiated) types of those parameters, and
+the remaining type. -/
+structure FixCall (R : Type) where
+  /-- arguments applied to `1`-quantity parameters -/
+  args : List (Term R)
+  /-- their instantiated parameter types -/
+  tys : List (Term R)
+  /-- the remaining type (the call's result type when the call is saturated) -/
+  rest : Term R
+
+/-- Peel `args` off `ty`, collecting the arguments at `1`-quantity binders. `none` on an
+over-applied or malformed spine. -/
+partial def peelFix {R : Type} [BEq R] [One R] :
+    Term R → List (Term R) → List (Term R) → List (Term R) → Option (FixCall R)
+  | .pi _ _ (.qlit r) dom cod _, a :: rest, args, tys =>
+    if r == (1 : R) then peelFix (cod.instantiateAt 0 a) rest (a :: args) (dom :: tys)
+    else peelFix (cod.instantiateAt 0 a) rest args tys
+  | .pi _ _ _ dom cod _, a :: rest, args, tys =>
+    peelFix (cod.instantiateAt 0 a) rest args tys
+  | ty, [], args, tys => some ⟨args.reverse, tys.reverse, ty⟩
+  | _, _, _, _ => none
+
+/-- If `t` is a call of the fixpoint whose body is being checked (`Ctx.fixpoint`), peel
+its arguments and report the `1`-parameter positions. -/
+def fixCall? (ctx : Ctx R) (t : Term R) : Option (FixCall R) :=
+  match ctx.fixpoint with
+  | none => none
+  | some fn =>
+    let t := match t with | .ann inner _ => inner | t => t
+    let (head, args) := t.spine
+    match head with
+    | .const n us =>
+      if n != fn then none else
+      match ctx.globals.find? n with
+      | none => none
+      | some d => peelFix (d.type.instLevels d.levelParams us) args [] []
+    | _ => none
+
+/-- **The linear fixpoint rule ("consumed but not contained").** A recursive call that
+consumes a linear parameter may have its result used at `ω` when the result type contains
+neither the linear argument's value nor its type: the call runs once (so the linear value
+is consumed exactly once), and a result with no linear content may be copied or dropped.
+A partially applied call is refused (its closure may capture the linear value), and so is
+a result type that mentions the argument or its type. The test is syntactic (it never
+unfolds a definition): a type alias is not seen through, and a type that merely *could*
+hold the linear value through a definition the search does not chase (the body of a
+function type, say) is approximated by the type as written. -/
+def fixCallSafe (ctx : Ctx R) (t : Term R) (ty : VTy R) : Bool :=
+  match fixCall? ctx t with
+  | none => false
+  | some fc =>
+    if fc.args.isEmpty then false else
+    -- a partially applied recursive call returns a function value (a closure), which
+    -- may capture the linear argument: only a saturated call has a result we can copy
+    match whnf ty with
+    | .pi .. => false
+    | _ =>
+      let res := quote ctx.globals ctx.lvl ty
+      let targets := fc.args.map (fun a => quote ctx.globals ctx.lvl (ctx.eval a))
+        ++ fc.tys.map (fun A => quote ctx.globals ctx.lvl (ctx.eval A))
+      !(targets.any fun target => termContains target 0 res)
+
+/-- Scale a checked term's usage by `q`, except that a linear fixpoint call whose result
+type is "consumed but not contained" is charged once when `q` allows more than one use:
+the call is evaluated once even when its result is copied. `q = 0` still scales to 0, so
+a dropped call is rejected as before. -/
+def scaleUsage (ctx : Ctx R) (q : QPoly R) (t : Term R) (ty : VTy R) (u : Usage R) : Usage R :=
+  if QPoly.le (QPoly.const ((1 : R) + (1 : R))) q && fixCallSafe ctx t ty then u else q • u
 
 /-- For error messages only: is this `Σ` (a suffix of) a structure, i.e. does its chain
 of second parts end in a structure's marker tail (`structTailName`)? -/
@@ -382,14 +511,21 @@ def projUsage (ctx : Ctx R) (t : Term R) (ty : Val R) (field : String) (u : Usag
   | some m =>
     let u' := QPoly.const m • u
     -- (a variable `t` doesn't use is not this rule's business: 0 ≤ 1 is false)
-    match ((u'.zip ctx.qtys).zip ctx.names).find? fun ((p, q), _) => !QPoly.le p (QPoly.const 0) && !QPoly.le p q with
-    | some ((_, q), x) => fail x (toString q)
+    match u'.zipIdx.find? fun (p, ix) =>
+        !QPoly.le p (QPoly.const 0) && !QPoly.le p ((ctx.qtyAt? ix).getD []) with
+    | some (_, ix) =>
+      match ctx.nameAt? ix, ctx.qtyAt? ix with
+      | some x, some q => fail x (toString q)
+      | _, _ => throw (.other "internal error: usage beyond the context")
     | none => pure u'
   | none =>
     -- a rig without an unrestricted quantity (exact counting): only pairs that use no
     -- local variable at all can be projected
-    match ((u.zip ctx.qtys).zip ctx.names).find? fun ((p, _), _) => !QPoly.le p (QPoly.const 0) with
-    | some ((_, q), x) => fail x (toString q)
+    match u.zipIdx.find? fun (p, _) => !QPoly.le p (QPoly.const 0) with
+    | some (_, ix) =>
+      match ctx.nameAt? ix, ctx.qtyAt? ix with
+      | some x, some q => fail x (toString q)
+      | _, _ => throw (.other "internal error: usage beyond the context")
     | none => pure u
 
 /-- A position whose usage is scaled by `q`: when `q` is the constant 0 it is erased (the
@@ -461,10 +597,16 @@ whose type is a proposition takes any usage. Its variable is a proof, erased and
 run (CoreSpec §6), so a linear proof that is used zero times or several times consumes
 nothing (prf-review L1: `(1 h : True) → True`, `let 1 (a, h) := p` at `(1 x : A) × P x`). -/
 def Ctx.popUsageAt (ctx : Ctx R) (x : Name) (q : QPoly R) (ty : VTy R) (u : Usage R) : TCM (Usage R) :=
-  if ctx.isPropTy ty then
+  -- (a partial definition's witness never runs: it is evidence that the type is
+  -- inhabited, not a program, so its usages are not checked at all — see `Ctx.witness`)
+  if ctx.witness then
     match u with
     | _ :: rest => pure rest
-    | [] => throw (.other "internal error: usage vector underflow")
+    | [] => pure []
+  else if ctx.isPropTy ty then
+    match u with
+    | _ :: rest => pure rest
+    | [] => pure []
   else popUsage x q u
 
 /-- Is this type a proposition (its sort is computed, and is `0`)? -/
@@ -613,12 +755,12 @@ partial def checkCore (ctx : Ctx R) (t : Term R) (ty : VTy R) : TCM (Usage R) :=
     let uv ← check (ctx.erasedAt q) val vty
     let ub ← check (ctx.define x q vty (ctx.evalAt val vty)) body ty
     let ub ← ctx.popUsageAt x q vty ub
-    pure (q • uv + ub)
+    pure (scaleUsage ctx q val vty uv + ub)
   | .pair a b, .sigma _ q A B _ => do
     let q ← qtyPoly ctx q
     let ua ← check (ctx.erasedAt q) a A
     let ub ← check ctx b (ctx.instArgAt A B a)
-    pure (q • ua + ub)
+    pure (scaleUsage ctx q a A ua + ub)
   | .tt, .unit _ => pure (Usage.zeros ctx.lvl)
   | .letUnit u b, _ => do
     let uu ← checkUnit ctx u
@@ -707,10 +849,10 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
   | .mvar m => throw (.other s!"the kernel does not accept metavariables (?m{m})")
   | .natLit _ =>
     -- a numeral means `succ (… zero)`, so it needs both constructors, as definitions
-    let defined (k : Name) := match (ctx.globals.builtins.lookup k).bind ctx.globals.find? with
+    let defined (k : Name) := match (ctx.globals.builtinOf? k).bind ctx.globals.find? with
       | some { value := some _, .. } => true
       | _ => false
-    match ctx.globals.builtins.lookup "nat" with
+    match ctx.globals.builtinOf? "nat" with
     | some N =>
       if defined "nat.zero" && defined "nat.succ" then pure (ctx.eval (.const N []), Usage.zeros ctx.lvl)
       else throw (.other "numerals need `builtin nat.zero := …` and `builtin nat.succ := …`")
@@ -732,7 +874,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
   --<sol
   -- (an index beyond the context is an error: `[ix]!` would panic and go on with the
   -- default value `Sort 0`, as the variable's type and as its value: a term `Prop : Prop`)
-  | .var ix => match ctx.types[ix]? with
+  | .var ix => match ctx.typeAt? ix with
     | some ty => pure (ty, Usage.single ctx.lvl ix)
     | none => throw (.other s!"variable #{ix} is out of scope ({ctx.lvl} in scope)")
   | .const n us => match ctx.globals.find? n with
@@ -771,7 +913,9 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
       -- argument with it: the argument is checked as in relevant mode)
       let actx := if ctx.proof && !ctx.isProofTy fty then { ctx with proof := false } else ctx
       let ua ← check (actx.erasedAt q) a dom
-      pure (ctx.instArgAt dom cod a, uf + q • ua)
+      -- (the linear fixpoint rule: a recursive call whose result type contains no linear
+      -- content is charged once even when its result is copied)
+      pure (ctx.instArgAt dom cod a, uf + scaleUsage ctx q a dom ua)
     | _ => throw (.notAFunction (ctx.showTerm f) (ctx.showVal fty))
   | .letE x q tty val body => do
     let q ← checkQty ctx q
@@ -784,12 +928,12 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
       let (bty, ub) ← infer (ctx.define x q vty (suspend ctx.globals ctx.env val)) body
       let uv ← check ((if ctx.isProofTy bty then ctx else { ctx with proof := false }).erasedAt q) val vty
       let ub ← ctx.popUsageAt x q vty ub
-      pure (bty, q • uv + ub)
+      pure (bty, scaleUsage ctx q val vty uv + ub)
     else
     let uv ← check (ctx.erasedAt q) val vty
     let (bty, ub) ← infer (ctx.define x q vty (ctx.eval val)) body
     let ub ← ctx.popUsageAt x q vty ub
-    pure (bty, q • uv + ub)
+    pure (bty, scaleUsage ctx q val vty uv + ub)
   | .ann tm tty => do
     let _ ← checkType ctx tty
     let vty := ctx.eval tty
@@ -842,7 +986,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
       let ub ← check ctx₂ b (Closure.inst ctx.globals mc (.pair vx vy))
       let ub ← (ctx.bind x (q * p) A).popUsageAt y q (Closure.inst ctx.globals B vx) ub
       let ub ← ctx.popUsageAt x (q * p) A ub
-      pure (Closure.inst ctx.globals mc (ctx.evalAt s sty), q • us + ub)
+      pure (Closure.inst ctx.globals mc (ctx.evalAt s sty), scaleUsage ctx q s sty us + ub)
     | _ => throw (.other s!"not a pair: {ctx.showTerm s}\n  has type: {ctx.showVal sty}")
   | .unit l => pure (.sort l, Usage.zeros ctx.lvl)
   | .empty l => pure (.sort l, Usage.zeros ctx.lvl)
@@ -937,8 +1081,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
       match ub with
       | none => ub := some u
       | some u' =>
-        let joined := (u.zip u').mapM fun (p, p') => QPoly.join? p p'
-        let some j := joined | throw (.other "the branches of a case use variables incompatibly")
+        let some j := Usage.join? u u' | throw (.other "the branches of a case use variables incompatibly")
         ub := some j
     pure (Closure.inst ctx.globals mc (ctx.eval s), us + ub.getD (Usage.zeros ctx.lvl))
   | .desc l I => do
@@ -1025,12 +1168,12 @@ stores data), so its eliminator can only target Prop")
     let _ ← check ctx D (.desc l vI)
     let vD := ctx.eval D
     let w := QuantitySyntax.explicitDefault
-    let _ ← check ctx A (coitStateTy l vI w)
+    let _ ← check ctx A (scofixStateTy l vI w)
     let vA := ctx.eval A
     let uf ← check ctx f (scofixFunTy ctx.globals l vI vD vA w)
     let _ ← check { ctx with erased := true } s .size
     let _ ← check ctx i vI
-    let ua ← check ctx a (vApp ctx.globals vA (ctx.eval i))
+    let ua ← check ctx a (vApp ctx.globals (vApp ctx.globals vA (ctx.eval s)) (ctx.eval i))
     pure (.nu l vI vD (ctx.eval i) (ctx.eval s) none, ← methodUsage ctx (uf + ua))
   | .scase l q I D v P m s i x => do
     -- (K1) the case at quantity `q`: the method runs once (unscaled) and receives the
@@ -1047,8 +1190,9 @@ stores data), so its eliminator can only target Prop")
     let vs := ctx.eval s
     let um ← check ctx m (scaseMethodTy ctx.globals l v vI vD vP vs (ctx.eval q))
     let _ ← check ctx i vI
-    let ux ← check (ctx.erasedAt qp) x (.mu l vI vD (ctx.eval i) vs none false)
-    pure (vApp ctx.globals (vApp ctx.globals vP (ctx.eval i)) (ctx.eval x), um + qp • ux)
+    let xt := .mu l vI vD (ctx.eval i) vs none false
+    let ux ← check (ctx.erasedAt qp) x xt
+    pure (vApp ctx.globals (vApp ctx.globals vP (ctx.eval i)) (ctx.eval x), um + scaleUsage ctx qp x xt ux)
   | .cocon _ => throw (.cannotInfer (ctx.showTerm t))
   | .coit l I D S st i s => do
     checkIndexLevel ctx l I
@@ -1642,8 +1786,10 @@ def setImpl (g : Globals R) (name : Name) (impl : Term R) : TCM (Globals R) := d
 /-- A partial definition's signature (stage 13): `f : T` is opaque to the kernel, like an
 axiom, so the bodies of its group can call it. It must come with a **witness** `w : T`,
 which the kernel checks here: then `f` proves nothing `w` doesn't, whatever the bodies do.
-The witness is checked erased (quantity 0): it is only evidence that `T` is inhabited,
-never run, so it may ignore a linear argument. -/
+The witness is checked erased (quantity 0) and with usages unenforced (`Ctx.witness`): it
+is only evidence that `T` is inhabited, never run, so it may ignore a linear argument.
+The body that runs is checked strictly (`addPartialImpl`), so a linear parameter is still
+consumed exactly once by the code. -/
 def addPartialDecl (g : Globals R) (d : Decl R) : TCM (Globals R) := do
   -- constants are identified by name: a second declaration of one would change what
   -- everything checked against the first means
@@ -1652,7 +1798,7 @@ def addPartialDecl (g : Globals R) (d : Decl R) : TCM (Globals R) := do
     | throw (.other s!"partial definition {d.name} needs a witness, a term of its type")
   if d.value.isSome then throw (.other s!"partial definition {d.name} can't have a value")
   checkHeader g d
-  let ctx : Ctx R := { globals := g, erased := true }
+  let ctx : Ctx R := { globals := g, erased := true, witness := true }
   let _ ← check ctx w (ctx.eval d.type)
   pure (g.insert d)
 
@@ -1663,7 +1809,9 @@ def addPartialImpl (g : Globals R) (name : Name) (impl : Term R) : TCM (Globals 
   let some d := g.find? name | throw (.other s!"unknown declaration '{name}'")
   unless d.witness.isSome && d.value.isNone do
     throw (.other s!"{name} is not a partial definition")
-  let ctx : Ctx R := { globals := g }
+  -- (`fixpoint` turns a recursive call to `name` that consumes a linear parameter into
+  -- the linear fixpoint: its result may be used at ω when it contains no linear content)
+  let ctx : Ctx R := { globals := g, fixpoint := some name }
   let _ ← check ctx impl (ctx.eval d.type)
   pure (g.insert { d with impl := some impl })
 
@@ -1698,7 +1846,7 @@ partial def Globals.axiomsOf (g : Globals R) (n : Name) : List String := Id.run 
   let mut todo : List (Name × Bool) := [(n, false)]
   let mut out : Array String := #[]
   let mut reprs : List Name := []
-  let numeral := ["nat", "nat.zero", "nat.succ"].filterMap (List.lookup · g.builtins)
+  let numeral := ["nat", "nat.zero", "nat.succ"].filterMap g.builtinOf?
   while true do
     match todo with
     | [] => break

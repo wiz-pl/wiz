@@ -1,0 +1,6 @@
+import FeralCore
+-- REJECTED (R2: a scope's result may not quantify over its fresh region). check.sh
+-- expects `failed to synthesize an instance of RegionFree`.
+-- A block's region is fresh too: `Region.scope`'s `B` may not package it.
+def esc : Result ((0 r : Region) × Unit) :=
+  Region.scope Region.static (fun ρ h => .ok (ρ, ()))

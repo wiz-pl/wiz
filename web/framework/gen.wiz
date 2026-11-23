@@ -35,7 +35,7 @@ def Item.view (i : Item) : Loom.VNode Msg :=
       [Loom.on "click" (Msg.toggle i.id)
         (Loom.el "span" List.nil [Loom.text i.name])])
 
-def view (s : Model) : Loom.VNode Msg :=
+def counterView (s : Model) : Loom.VNode Msg :=
   Loom.el "div" [Loom.class "app"]
     [ Loom.el "p" List.nil
         [Loom.text "count ", Loom.text (Nat.toString s.count)]
@@ -55,7 +55,7 @@ def app : Loom.App Model Msg := Loom.App.mk
         (Loom.map (fun (i : Item) => match Nat.beq id i.id with
           | .true => Lens.over (Item.doneL i) (fun b => match b with | .true => .false | .false => .true) i
           | .false => i)) s)
-  view
+  counterView
 
 def item (n : Nat) (name : String) : Item := Item.mk n name .false
 
@@ -82,6 +82,11 @@ def escaping : Loom.VNode Msg :=
   Loom.el "p" [Loom.attr "title" "a\"b<c>d&e'f"]
     [Loom.text "<script>alert('x')</script>"]
 
+/-- A handler that decides its own default action (`Loom.onPrevent`): the rendered
+element carries both the handler attribute and the marker the driver reads. -/
+def guarded : Loom.VNode Msg :=
+  Loom.onPrevent "keydown" Msg.inc (Loom.el "input" [Loom.attr "id" "guarded"] List.nil)
+
 def jstr (s : String) : Json := Json.mkStr s
 def jbool (b : Bool) : Json := Json.mkBool b
 
@@ -103,6 +108,7 @@ def fields : List (String × Json) :=
   , Json.field "tagPatches" (jstr (Loom.App.patches tagApp t0 t1))
   , Json.field "hidden" (jstr (Loom.App.html app hidden))
   , Json.field "escape" (jstr (Loom.toHtml escaping))
+  , Json.field "guard" (jstr (Loom.toHtml guarded))
   , Json.field "handlers" (Json.ofNat (List.length (Loom.App.render app m0).handlers))
   , Json.field "deterministic" (jbool (String.eq (Loom.App.html app m0) (Loom.App.html app m0)))
   ]

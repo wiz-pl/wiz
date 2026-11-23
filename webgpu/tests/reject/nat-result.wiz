@@ -1,0 +1,2 @@
+-- expect: Nat
+def f (i : Nat) (a : Array U32) : Nat := i

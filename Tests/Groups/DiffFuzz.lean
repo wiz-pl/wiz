@@ -30,7 +30,7 @@ def runCampaign (extra : List String) : IO (Option (UInt32 × String)) := do
   let root ← repoRoot
   let wiz := root / ".lake" / "build" / "bin" / "wiz"
   unless ← wiz.pathExists do
-    skip "no .lake/build/bin/wiz"
+    skipMissing "no .lake/build/bin/wiz"
     return none
   let tc ← toolchain
   -- (`--wiz-arg=VALUE`: a separate argument would be read as an option)
@@ -40,15 +40,15 @@ def runCampaign (extra : List String) : IO (Option (UInt32 × String)) := do
   let out ← try
     IO.Process.output { cmd := "timeout", args, cwd := some root }
   catch e =>
-    skip s!"cannot run python3: {e}"
+    skipMissing s!"cannot run python3: {e}"
     return none
   if out.exitCode == 2 && (out.stderr.splitOn "diff-fuzz: wiz not found").length > 1 then
-    skip "diff-fuzz: no wiz binary"
+    skipMissing "diff-fuzz: no wiz binary"
     return none
   if out.exitCode == 3 then
     -- (a skipped pipeline is not a pass: the group shows as skipped, not green)
     IO.print (out.stdout ++ out.stderr)
-    skip "diff-fuzz skipped a pipeline (no C toolchain)"
+    skipMissing "diff-fuzz skipped a pipeline (no C toolchain)"
     return none
   return some (out.exitCode, out.stdout ++ out.stderr)
 

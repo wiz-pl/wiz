@@ -18,14 +18,16 @@ SITE=$OUT/site
 WEB=$OUT/web
 mkdir -p "$WEB"
 for f in docs/index.html docs/api.html docs/api.json docs/search.js docs/scroll.css \
-         playground/index.html playground/playground.js playground/playground.css \
-         playground/playground-values.js playground/wiz-playground.mjs \
+         playground/index.html playground/playground.js playground/playground.css playground/overlays.css \
+         playground/wiz-playground.mjs \
          playground/wiz-playground.wasm; do
   mkdir -p "$SITE/$(dirname "$f")"
   : > "$SITE/$f"
 done
 : > "$WEB/wiz-playground.mjs"
 : > "$WEB/wiz-playground.wasm"
+: > "$WEB/wiz-playground-ui.mjs"
+: > "$WEB/wiz-playground-ui.wasm"
 
 sh "$ROOT/web/build-site.sh" "$SITE" "$WEB" >/dev/null
 sh "$ROOT/web/check-site.sh" "$SITE"

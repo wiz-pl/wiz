@@ -9,9 +9,9 @@
   # of nixpkgs (which must be the version in `lean-toolchain`), and wrapped with this
   # toolchain as flags; `wiz-nvim`, the Neovim plugin, and `nvim-wiz`, Neovim with it
   # and wiz (`nix run .#nvim-wiz`); `reference`, the standard library's reference
-  # manual, generated with that wiz (never committed); `wiz-web` and `wiz-playground`,
-  # the two Wasm page modules (`web/build.sh`, `web/build-playground.sh`) built by a
-  # derivation instead of in each CI job. CI pushes them to the Cachix cache
+  # manual, generated with that wiz (never committed); `wiz-web`, `wiz-playground`,
+  # `wiz-playground-ui` and `wiz-source-ui`, the Wasm page modules (`web/build*.sh`)
+  # built by a derivation instead of in each CI job. CI pushes them to the Cachix cache
   # `badlydrawnwizards`; see docs/building.md for `nix run`.
   description = "Wiz: a didactic dependently typed language";
 
@@ -22,6 +22,22 @@
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
+      # (R2, wiz-notes/sota-numerics.md §5.2) The bignum the kernel's `Nat` computes
+      # with, pinned by version *and* source hash. Lean admits GMP into the kernel TCB
+      # and requires >= 6.3.0. The two build paths carry the same upstream release in
+      # different archives: nixpkgs builds GMP from the `.tar.bz2`, the release bundles
+      # the `.tar.xz` (scripts/bundle-cc.sources); both hashes are recorded in
+      # `docs/release/gmp-pin.json`, and the assert below names the actual and pinned
+      # nix hashes (and both archives) when nixpkgs picks a different GMP. Changing the
+      # bignum is a deliberate attestation update, never a flake-update side effect.
+      gmpPin = {
+        version = "6.3.0";
+        nixSrcHash = "sha256-rCghGnz7YJuuLiyNYFjWbI/pZDT3QM9v4uR7AA0cIMs=";
+        releaseSrcHash = "sha256-a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898";
+      };
+      gmpSrcHash = pkgs: let src = pkgs.gmp.src; in
+        src.outputHash or (src.drvAttrs.outputHash or "unknown");
+
       # The toolchain `wiz build` and grail use: where GMP and Boehm GC live, and `llc`.
       toolchain = pkgs: {
         cflags = "-I${pkgs.gmp.dev}/include";
@@ -31,7 +47,33 @@
         gc-ldflags = "-L${pkgs.boehmgc}/lib -Wl,-rpath,${pkgs.boehmgc}/lib -lgc -lpthread";
       };
 
-      packagesFor = pkgs:
+      # The empty seed `withLakeCache` starts from: a real store path, so the function's
+      # argument is never nullable and the producer is an ordinary derivation whose cold
+      # compile the sandbox enforces (no cache, no dev shell, no network).
+      #
+      # `.lake/build/.keep` is load-bearing: nixpkgs' fixupPhase prunes empty
+      # directories, so an empty `.lake/build` disappears and the seed becomes an
+      # empty store path. `lake-cache.sh build` then refuses it (`$seed/.lake is
+      # missing`) and `withLakeCache` asserts the same. The file is what keeps the
+      # directory, and it costs nothing in the build.
+      emptyLake = pkgs:
+        pkgs.runCommand "empty-lake" { } ''
+          mkdir -p $out/.lake/build
+          : > $out/.lake/build/.keep
+          install -Dm644 ${./lean-toolchain} $out/toolchain
+        '';
+
+      packagesFor = pkgs: packagesWith pkgs null;
+
+      # The same packages, built from a prebuilt `.lake` (`lakeCache`): a *different*
+      # derivation from the pure build (the seed is an input, so the hash differs).
+      # Applied to `empty-lake` it is the trusted producer (a cold build inside the
+      # sandbox); applied to a restored seed it is a pull request's warm build. The
+      # `unwrapped` derivation also has a `lake` output: the seed the producer saves.
+      # A flake output cannot be a function in `packages`, but `lib` may hold one.
+      withLakeCache = pkgs: lakeCache: packagesWith pkgs lakeCache;
+
+      packagesWith = pkgs: lakeCache:
         let
           lib = pkgs.lib;
           fs = lib.fileset;
@@ -39,24 +81,31 @@
           pinned = lib.removePrefix "leanprover/lean4:v" (lib.trim (builtins.readFile ./lean-toolchain));
           tc = toolchain pkgs;
 
-          # wiz and grail as Lake builds them (unwrapped), from only the files the build
-          # reads: a change elsewhere (README, tests, Wiz programs) doesn't rebuild them.
-          unwrapped =
+          # every file the build reads: a change elsewhere (README, tests, Wiz programs)
+          # doesn't rebuild the compiler.
+          buildSrc = fs.toSource {
+            root = ./.;
+            fileset = fs.unions [
+              ./lakefile.lean ./lake-manifest.json ./lean-toolchain
+              ./Main.lean ./Wiz.lean ./Wiz ./WizMeta.lean ./WizMeta ./Grail.lean ./Grail
+              ./STC.lean ./STC # the metatheory library the STC bridge test imports
+              ./Tests # the test driver (`packages.tests`)
+              ./runtime # the C runtime (wiz_rt.h, rt_*.inc) and WizRuntime.lean, which embeds it (include_str)
+              ./c # linked into the executables (moreLinkObjs)
+            ];
+          };
+
+          # wiz and grail as Lake builds them (unwrapped) — the release path.
+          pureUnwrapped =
             assert lib.assertMsg (lean.version == pinned)
               "flake.nix: nixpkgs has Lean ${lean.version} but lean-toolchain says ${pinned}: update the nixpkgs input (nix flake update) or lean-toolchain";
+            # (R2) the release's GMP identity: the actual and pinned hashes are named
+            assert lib.assertMsg (pkgs.gmp.version == gmpPin.version && gmpSrcHash pkgs == gmpPin.nixSrcHash)
+              "flake.nix: GMP is ${pkgs.gmp.version} with nix source ${gmpSrcHash pkgs}, but the pin is GMP ${gmpPin.version} with nix source ${gmpPin.nixSrcHash} (release archive ${gmpPin.releaseSrcHash}); see docs/release/gmp-pin.json. Update the pin and the attestation deliberately, or the release's bignum identity has changed";
             pkgs.stdenv.mkDerivation {
               pname = "wiz-unwrapped";
               version = "0.1.0";
-              src = fs.toSource {
-                root = ./.;
-                fileset = fs.unions [
-                  ./lakefile.lean ./lake-manifest.json ./lean-toolchain
-                  ./Main.lean ./Wiz.lean ./Wiz ./WizMeta.lean ./WizMeta ./Grail.lean ./Grail
-                  ./Tests # the test driver (`packages.tests`)
-                  ./runtime # the C runtime (wiz_rt.h, rt_*.inc) and WizRuntime.lean, which embeds it (include_str)
-                  ./c # linked into the executables (moreLinkObjs)
-                ];
-              };
+              src = buildSrc;
               nativeBuildInputs = [ lean ];
               buildPhase = ''
                 runHook preBuild
@@ -74,6 +123,64 @@
               '';
             };
 
+          # The same three binaries from `lakeCache`'s compiled modules. Lake keys an
+          # olean on its inputs' content hashes, so it recompiles exactly what the tree
+          # changed and links the rest; the `toolchain` stamp refuses a seed built for
+          # another lean-toolchain. This derivation has two outputs:
+          #   `out`   the binaries, exactly as the pure build has them (a build from
+          #           `empty-lake` is the same compile, so its bytes are identical);
+          #   `lake`  what Lake wrote, for the next build: `.lake/build/lib` (oleans,
+          #           `.ilean`, traces), `.lake/build/ir`, `.lake/config`, and the
+          #           `toolchain` stamp. `build/bin` is left out (the consumer relinks
+          #           in seconds) and `.lake/cache` never exists here (the build phase
+          #           puts `LAKE_CACHE_DIR` in `$TMPDIR`).
+          cachedUnwrapped =
+            assert lib.assertMsg (lakeCache != null)
+              "flake.nix withLakeCache: no lakeCache seed";
+            assert lib.assertMsg (builtins.pathExists (lakeCache + "/toolchain"))
+              "flake.nix withLakeCache: ${toString lakeCache} has no toolchain stamp (a seed is a withLakeCache `lake` output or `empty-lake`)";
+            assert lib.assertMsg
+              ((builtins.readFile (lakeCache + "/toolchain")) == (builtins.readFile ./lean-toolchain))
+              "flake.nix withLakeCache: ${toString lakeCache} was built for another lean-toolchain; refusing a stale .lake";
+            pkgs.stdenv.mkDerivation {
+              pname = "wiz-unwrapped-lake-cache";
+              version = "0.1.0";
+              src = buildSrc;
+              nativeBuildInputs = [ lean ];
+              outputs = [ "out" "lake" ];
+              buildPhase = ''
+                runHook preBuild
+                export HOME=$TMPDIR LAKE_CACHE_DIR=$TMPDIR/lake-cache
+                if [ ! -d ${lakeCache}/.lake ]; then
+                  echo "withLakeCache: ${lakeCache}/.lake is missing" >&2
+                  exit 1
+                fi
+                cp -a ${lakeCache}/.lake .lake
+                chmod -R u+w .lake
+                lake build wiz grail tests
+                runHook postBuild
+              '';
+              installPhase = ''
+                runHook preInstall
+                # the binaries, as the pure derivation installs them
+                mkdir -p $out/bin
+                install -m755 .lake/build/bin/wiz .lake/build/bin/grail .lake/build/bin/tests $out/bin/
+                if [ ! -d .lake/build/lib ]; then
+                  echo "withLakeCache: lake build wrote no .lake/build/lib" >&2
+                  exit 1
+                fi
+                # the next build's seed, without the linked binaries
+                mkdir -p $lake/.lake/build
+                cp -a .lake/build/lib $lake/.lake/build/lib
+                if [ -d .lake/build/ir ]; then cp -a .lake/build/ir $lake/.lake/build/ir; fi
+                if [ -d .lake/config ]; then cp -a .lake/config $lake/.lake/config; fi
+                install -Dm644 ${./lean-toolchain} $lake/toolchain
+                runHook postInstall
+              '';
+            };
+
+          unwrapped = if lakeCache == null then pureUnwrapped else cachedUnwrapped;
+
           # The toolchain as flags (stage 23a: nothing reads the environment). Flags on
           # the command line come later and win.
           tcFlags = [
@@ -86,6 +193,25 @@
           # below); `addFlags` is for `--add-flags`, which takes one escaped string.
           addArgs = flags: lib.concatMapStringsSep " " lib.escapeShellArg flags;
 
+          # The site's own files `wiz doc` copies into OUT: the plain page's scripts and
+          # the `--serve` client.
+          # They are installed at `share/wiz/web`, which is where `wiz doc` looks beside
+          # the toolchain's `lib/` (`Main.webDir`), and a fileset so only these files
+          # enter the store: `scripts/check-release-web-assets.py` checks this list
+          # covers everything `Wiz.Doc.run` copies, and a name without a file is a nix
+          # evaluation error.
+          # (The Wasm module and the infoview page come from `wiz-web`, which needs
+          # `wiz`: a release gets them from `web/build.sh`; see scripts/release-tarball.sh.)
+          docSiteAssets = [
+            "scroll.css" "scroll.js" "scroll-search.js" "highlight.css"
+            "lsp-client.js" "doc-live.js" "doc-live.css"
+            "framework/mount.js" "framework/driver.js" "framework/runtime.js"
+          ];
+          docSiteSource = fs.toSource {
+            root = ./web;
+            fileset = fs.unions (map (f: ./web + "/${f}") docSiteAssets);
+          };
+
           # $out/share/wiz is laid out like a checkout (lib/ next to .lake/build/bin/),
           # which is where grail looks for the standard library.
           wiz = pkgs.stdenv.mkDerivation {
@@ -95,8 +221,14 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
             installPhase = ''
               share=$out/share/wiz
-              mkdir -p $share/.lake/build/bin $out/bin
+              mkdir -p $share/.lake/build/bin $out/bin $share/web
               cp -r ${fs.toSource { root = ./lib; fileset = ./lib; }} $share/lib
+              # the site assets `wiz doc` reads (the release half of the asset lookup;
+              # a checkout's `web/` is the other, and `--web` wins over both)
+              cp -r ${docSiteSource}/. $share/web/
+              # (F12) the Wasm backend's JS host, beside lib/ where `wiz run` looks for it
+              mkdir -p $share/web
+              install -m644 ${./web/wasm-host.mjs} $share/web/wasm-host.mjs
               # the marker editors look for (editors/nvim: a library file is served by its toolchain's wiz)
               echo 'A Wiz toolchain: lib/ is its standard library, .lake/build/bin/ its binaries, ../../bin/ its commands (editors use this file to find them).' > $share/TOOLCHAIN
               cp ${unwrapped}/bin/wiz ${unwrapped}/bin/grail $share/.lake/build/bin/
@@ -178,11 +310,12 @@ EOF
               makeWrapper $share/.lake/build/bin/wiz $out/bin/wiz \
                 --prefix PATH : ${lib.makeBinPath [ pkgs.coreutils ]} \
                 --add-flags ${addFlags (tcFlags ++ [ "-I" "${placeholder "out"}/share/wiz/lib"
-                  "--cache-ro" "${placeholder "out"}/share/wiz/cache" ])}
+                  "--cache-ro" "${placeholder "out"}/share/wiz/cache" "--cache-ro-unsigned" ])}
               # grail: git fetches dependencies (stage 23h)
               makeWrapper $share/.lake/build/bin/grail $out/bin/grail \
                 --prefix PATH : ${lib.makeBinPath [ pkgs.coreutils pkgs.git ]} \
-                --add-flags ${addFlags (tcFlags ++ [ "--cache-ro" "${placeholder "out"}/share/wiz/cache" ])}
+                --add-flags ${addFlags (tcFlags ++ [ "--cache-ro" "${placeholder "out"}/share/wiz/cache"
+                  "--cache-ro-unsigned" ])}
             '';
             meta = {
               description = "Wiz, a didactic dependently typed language, and grail, its build tool";
@@ -241,15 +374,16 @@ EOF
               platforms = systems;
             };
           };
-          # The two Wiz→wasm page modules (stages 11n/11ab) as derivations, so that Cachix
-          # serves them: CI's `web` job used to run both Emscripten builds inside its
+          # The Wiz→wasm page modules (stages 11n/11ab/11w) as derivations, so that Cachix
+          # serves them: CI's `web` job used to run every Emscripten build inside its
           # single test step (95 % of it, ~10 min and an 8–10 GiB `wasm-opt -O2` tail),
-          # and the `docs` job ran them again on every push. Each derivation runs the same
-          # script a developer runs, with the packaged wiz, `emcc` on PATH (so the script
-          # does not `nix shell`) and mini-gmp from `--gmp-src` (so it does not
+          # and the `docs` job ran two of them again on every push. Each derivation runs the
+          # same script a developer runs, with the packaged wiz, `emcc` on PATH (so the
+          # script does not `nix shell`) and mini-gmp from `--gmp-src` (so it does not
           # `nix build`): no network at build time. `$out` is the script's OUT directory
           # — the module pair plus the page files it copies beside them — and the scripts
-          # can copy it with `--from` (`WIZ_WEB_FROM`, `WIZ_PLAYGROUND_FROM`).
+          # can copy it with `--from` (`WIZ_WEB_FROM`, `WIZ_PLAYGROUND_FROM`,
+          # `WIZ_PLAYGROUND_UI_FROM`).
           #
           # The `src` filesets list exactly what each script reads: a change to a test or
           # a page it does not touch leaves the module in the cache. A script that starts
@@ -264,8 +398,16 @@ EOF
                 # the program it compiles (`link_c "js.c"` is resolved beside Web.wiz)
                 ./web/build.sh ./web/Web.wiz ./web/js.c
                 # the page files the script copies into OUT
-                ./web/infoview.html ./web/infoview.js ./web/tagged.js ./web/scroll.js
-                ./web/scroll-search.js ./web/scroll.css
+                ./web/infoview.html ./web/infoview.js ./web/playground-lsp.js
+                ./web/lsp-client.js ./web/widgets.js ./web/widgets.css
+                ./web/hover.js ./web/squiggles.js ./web/completions.js
+                ./web/scroll.js ./web/scroll-search.js ./web/scroll.css ./web/highlight.css
+                ./web/overlays.css
+                ./web/doc-live.js ./web/doc-live.css
+                ./web/framework/mount.js ./web/framework/driver.js ./web/framework/runtime.js
+                ./web/framework/editor-text.js
+                ./web/infoview-ui.wiz ./web/docs-ui.wiz ./web/doc-live-ui.wiz
+                ./web/build-infoview-ui.sh ./web/build-docs-ui.sh ./web/build-doc-live-ui.sh
               ];
             };
             nativeBuildInputs = [ wiz pkgs.emscripten ];
@@ -299,10 +441,23 @@ EOF
                 ./selfhost/CParse.wiz ./selfhost/CGlue.wiz ./selfhost/Frontend.wiz
                 ./selfhost/Tables.wiz
                 # the page files the script copies into OUT
-                ./web/playground.html ./web/playground.js ./web/playground-values.js
-                ./web/playground.css ./web/lsp-client.js ./web/goals.js
-                ./web/playground-lsp.js ./web/tagged.js ./web/selfhost-lsp-shim.js
+                ./web/playground.html ./web/playground.js
+                ./web/playground.css ./web/overlays.css ./web/widgets.css
+                ./web/lsp-client.js ./web/widgets.js
+                ./web/playground-lsp.js ./web/selfhost-lsp-shim.js
                 ./web/playground-engine.js
+                # the entry point's mount contract (mount imports driver, which imports
+                # runtime.js): build-playground.sh copies all three beside the page
+                ./web/framework/mount.js ./web/framework/driver.js
+                ./web/framework/runtime.js ./web/framework/editor-text.js
+                # the page's runtime (web/build-playground-ui.sh, built below): its Wiz
+                # app, the FFI it links and the library modules it imports. The rest of
+                # lib/ resolves from the packaged toolchain's own library.
+                ./web/build-playground-ui.sh ./web/playground-ui.wiz ./web/js.c
+                ./lib/Web/Loom.wiz ./lib/Web/Editor.wiz ./lib/Web/EditorModel.wiz
+                ./lib/Web/Playground.wiz ./lib/Web/Examples.wiz
+                ./lib/Web/Goals.wiz ./lib/Web/Hover.wiz
+                ./web/squiggles.js ./web/completions.js ./web/hover.js
               ];
             };
             nativeBuildInputs = [ wiz pkgs.emscripten ];
@@ -315,6 +470,9 @@ EOF
               # a module 47 % larger (11.4 MB against 7.75 MB). The script still defaults
               # to the compiler's -O2, so a local build is unchanged.
               sh web/build-playground.sh out --gmp-src ${pkgs.gmp.src} --opt 1
+              # the page's runtime (the whole page as one Loom app), beside the engine:
+              # the site requires it, so one store path carries both modules.
+              sh web/build-playground-ui.sh out --gmp-src ${pkgs.gmp.src}
               runHook postBuild
             '';
             installPhase = ''
@@ -323,7 +481,74 @@ EOF
               runHook postInstall
             '';
             meta = {
-              description = "The playground's Wasm engine (wiz-playground.mjs/.wasm, web/build-playground.sh)";
+              description = "The playground's Wasm modules (the engine and the Loom page, web/build-playground*.sh)";
+              platforms = systems;
+            };
+          };
+          # The playground page's Loom UI module (`?ui=loom`, stage 11w's page as one Loom
+          # app): small, but built by `web/test.sh` and the web job only through this, so a
+          # `web` job still needs no Emscripten. `lib/` is its `-I` root (the module is
+          # `web/playground-ui.wiz` and imports Web.{Loom,Playground,Editor} and their
+          # dependencies), so any library change rebuilds it — correct, and cheap.
+          wiz-playground-ui = pkgs.stdenv.mkDerivation {
+            pname = "wiz-playground-ui";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [
+                ./web/build-playground-ui.sh ./web/playground-ui.wiz ./web/js.c
+                ./web/framework/driver.js ./web/framework/runtime.js
+                ./web/framework/mount.js
+                ./lib
+              ];
+            };
+            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              sh web/build-playground-ui.sh out --gmp-src ${pkgs.gmp.src}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -r out $out
+              runHook postInstall
+            '';
+            meta = {
+              description = "The playground's Loom UI module (wiz-playground-ui.mjs, web/build-playground-ui.sh)";
+              platforms = systems;
+            };
+          };
+          # The source reader's Loom UI (`web/source-ui.wiz`: Web.Source.View as a
+          # LiveApp). `scry web --ui` copies the module into a bundle and
+          # `web/source-static.js` mounts it; the site's `/source/` page is the same
+          # bytes. Built here for the same reason as `wiz-playground-ui`: one Cachix
+          # entry, and neither the scry nor the docs job runs Emscripten. `lib/` is the
+          # `-I` root, so a library change rebuilds it — correct, and small.
+          wiz-source-ui = pkgs.stdenv.mkDerivation {
+            pname = "wiz-source-ui";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [
+                ./web/build-source-ui.sh ./web/source-ui.wiz ./web/js.c
+                ./lib
+              ];
+            };
+            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              sh web/build-source-ui.sh out --gmp-src ${pkgs.gmp.src}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -r out $out
+              runHook postInstall
+            '';
+            meta = {
+              description = "The source reader's Loom UI module (wiz-source-ui.mjs, web/build-source-ui.sh)";
               platforms = systems;
             };
           };
@@ -388,6 +613,26 @@ EOF
               platforms = systems;
             };
           };
+
+          # A deterministic source tarball with a manifest and a CycloneDX SBOM
+          # (scripts/source-tarball.py, docs/building.md "Reproducible source tarball"):
+          # sorted entries, epoch mtimes, uid/gid 0, normalised modes, no
+          # .git/caches/build outputs. The epoch is the flake's commit time (0 for a
+          # source archive) and the revision the commit, so two builds of one commit are
+          # byte-identical. `source-tarball` is the same derivation under the name the
+          # docs use.
+          release-tarball =
+            let
+              revision = self.rev or self.dirtyRev or "unknown";
+              epoch = toString self.lastModified;
+            in
+            pkgs.runCommand "wiz-release-tarball" {
+              nativeBuildInputs = [ pkgs.python3 ];
+            } ''
+              mkdir -p $out
+              python3 ${./scripts}/source-tarball.py --root ${./.} --mode tree \
+                --out $out --revision ${lib.escapeShellArg revision} --epoch ${epoch}
+            '';
 
           # The Neovim plugin (editors/nvim, docs/stages/11-tooling.md 11p), without its tests.
           wiz-nvim = pkgs.vimUtils.buildVimPlugin {
@@ -543,7 +788,9 @@ EOF
           };
         in {
           inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native
-                   wiz-web wiz-playground; default = wiz;
+                   wiz-web wiz-playground wiz-playground-ui wiz-source-ui release-tarball;
+          source-tarball = release-tarball;
+          default = wiz;
           wizc = bootstrapChain.wizc;
           wizc-seed = bootstrapChain.seed;
           wizc-release = bootstrapChain.release { };
@@ -553,6 +800,17 @@ EOF
       # (packages without the function set, which is not a derivation)
       packages = forAll (pkgs: builtins.removeAttrs (packagesFor pkgs) [ "bootstrapChain" ]);
       legacyPackages = forAll (pkgs: { inherit (packagesFor pkgs) bootstrapChain; });
+
+      # The function set (a flake output cannot be a function, so `packages` cannot hold
+      # `withLakeCache`). CI's producer and consumer both call it through
+      # scripts/lake-cache.sh:
+      #   nix build --impure --expr \
+      #     'let f = builtins.getFlake "/path/to/checkout"; in
+      #      (f.lib."x86_64-linux".withLakeCache f.lib."x86_64-linux"."empty-lake").unwrapped.lake'
+      lib = forAll (pkgs: {
+        withLakeCache = lakeCache: packagesWith pkgs lakeCache;
+        empty-lake = emptyLake pkgs;
+      });
 
       apps = forAll (pkgs:
         let
@@ -578,7 +836,18 @@ EOF
           # (the `hdl` group and the HDL protocol hooks), so CI runs them instead of
           # skipping; nodejs: the WebAssembly backend's modules run under Node with
           # web/wasm-host.mjs (stage 8f) and skip without it
-          packages = [ pkgs.elan pkgs.gmp pkgs.boehmgc pkgs.llvm pkgs.python3 pkgs.git pkgs.neovim pkgs.z3 pkgs.cadical pkgs.yosys pkgs.nodejs ];
+          packages = [
+            # the Lean toolchain and the C/LLVM backend's libraries
+            pkgs.elan pkgs.gmp pkgs.boehmgc pkgs.llvm
+            # the test suite's tools (each one had a `skipMissing` before CI's image
+            # happened to provide it: node, yosys, iverilog/vvp, z3/cadical, ssh-keygen)
+            pkgs.python3 pkgs.git pkgs.neovim pkgs.nodejs
+            pkgs.z3 pkgs.cadical pkgs.yosys pkgs.iverilog pkgs.openssh
+            # the scripts' tools (release/tarball, fetch/vendor, docs, patches)
+            pkgs.curl pkgs.jq pkgs.rsync pkgs.gnumake pkgs.tree-sitter
+            pkgs.coreutils pkgs.diffutils pkgs.patch pkgs.which pkgs.file
+            pkgs.gnutar pkgs.gzip pkgs.xz pkgs.zip pkgs.unzip pkgs.time
+          ];
           # `wiz` and `grail` take the toolchain as flags (stage 23a); grail and the test
           # driver read this machine's paths from the uncommitted grail.local.wiz written
           # here (when run from the repository root). Nothing reads the environment.

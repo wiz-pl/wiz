@@ -1,0 +1,8 @@
+import Optic
+
+-- A read-only `Getter`/`Fold` is not a profunctor transformer: a transformer must be
+-- valid at every `P`, and to *read* an `A` out of an `S` it would need an `A → S` for
+-- the return leg. A getter only has `S → A`, so `lmap` leaves the result at `P S A`.
+def getterToOptic {S A : Type} (get : S → A) {P : Type → Type → Type} [d : Profunctor P]
+    (x : P A A) : P S S :=
+  Profunctor.lmap get x

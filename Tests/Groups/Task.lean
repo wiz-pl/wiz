@@ -88,7 +88,11 @@ def taskGroup : Group where
         noThreadsFails (taskProg ++ "def main : IO Unit := IO.println (Nat.toString two.1)")
           "wiz: Task.both: threads are not available in this build (WIZ_NO_THREADS)"
         noThreadsFails (taskProg ++ "def main : IO Unit := IO.println (Nat.toString raced)")
-          "wiz: Task.race: threads are not available in this build (WIZ_NO_THREADS)" },
+          "wiz: Task.race: threads are not available in this build (WIZ_NO_THREADS)"
+        -- `par` and `parMap` are lists of spawns, so they stop at the first one
+        noThreadsFails (taskProg ++
+          "def main : IO Unit := IO.println (Nat.toString (total (Task.parMap work (reps 7 3))))")
+          "wiz: Task.spawn: threads are not available in this build (WIZ_NO_THREADS)" },
     { name := "a task is opaque: its value is read only by Task.get", run := fun _ =>
         failsLibs "import Task\ndef peek (t : Task Nat) : Nat := t.value" "private to module Task" },
     { name := "scopes: the model runs each task at once, and the kernel computes it", run := fun _ =>
@@ -103,6 +107,13 @@ def taskGroup : Group where
     { name := "scopes, WIZ_NO_THREADS: spawning stops at the thread it needs", run := fun _ =>
         noThreadsFails (scopeProg ++ "def main : IO Unit := IO.bind prog (fun n => IO.println (Nat.toString n))")
           "wiz: Chan.fork: threads are not available in this build (WIZ_NO_THREADS)" },
+    { name := "scopes, WIZ_NO_THREADS: a scope with nothing to spawn needs no thread", run := fun _ => do
+        match ← cRunLibsFlags ("import IO\nimport Scope\ndef main : IO Unit :=\n" ++
+            "  IO.bind (Scope.with (fun ρ s => IO.bind (Scope.close s) (fun d => IO.pure (42, d))))\n" ++
+            "    (fun n => IO.println (Nat.toString n))\n") ["-DWIZ_NO_THREADS"] with
+        | some (.ok out) => checkEq "42\n" out
+        | some (.error e) => throw (IO.userError e.message)
+        | none => pure () },
     { name := "a task's handle can't escape its scope (the region trick)", run := fun _ => do
         failsLibs ("import Scope\ndef escape : IO (Join Region.static Nat) :=\n" ++
           "  Scope.with (fun ρ s => Scope.spawn s (IO.pure 1) (fun s j =>\n" ++

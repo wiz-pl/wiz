@@ -235,7 +235,8 @@ typing:
   `Uniq.zoom`, `Region.scope`) takes a body polymorphic in a fresh region, whose result
   type is chosen outside it (as `runST`), so no handle of the scope's region can leave
   it: returning a borrow of a local (E0515) or keeping one past its lender's scope
-  (E0597) is a type mismatch.
+  (E0597) is a type mismatch. The result type must also be `RegionFree` (below), so `B`
+  cannot itself be a closed type that quantifies over the region.
 * Inside a mutable borrow, the lender's name is rebound to a `Lent` token, which nothing
   accepts: using the lender, or borrowing it again, while the borrow lives (E0499,
   E0502) is a type mismatch.
@@ -249,26 +250,30 @@ typing:
   needs `'a : 'b` for the first (`drafts/feral/lowered/12_pick.wiz`).
 
 Scopes run their body at the enclosing region (regions are erased, so this is sound);
-the separation comes from parametricity alone. `drafts/feral/rejected/` has the classic
+the separation comes from the rank-2 result type **and** the `RegionFree B` side
+condition, not from parametricity alone. `drafts/feral/rejected/` has the classic
 errors, lowered, each rejected (`sh drafts/feral/check.sh`); test group `regions`.
 The constructors of the handles are private to the module ([13b](13-language.md)), so
 hand-written Wiz can't forge a handle either.
 
-**Known gaps** (test group `regions`, the case marked KNOWN GAP, which checks that they
-are *accepted* today; wishful: linear-case). Regions are enforced by the type checker;
-*aliasing* is not. The handles are ω values, so a scope's body can use one twice
-(`swap r r`: Rust's E0499), and the `Lent` token only shadows the lender's name, so a
-body that names the token differently reads the lender while it is borrowed (E0502).
-A handle can also leave its scope packed with its region (`B := (0 r : Region) × Shr r A`
-is a closed type) and still be used. All three are rejected only because the lowering
-(`drafts/feral/LOWERING.md`, L20) always rebinds the lender's name, uses each handle
-once and never packs a region. Making the handles linear would
-reject them in the kernel, but a linear variable can't be used inside a `match`
-alternative today (`match` is built on `ind`, whose methods are scaled by ω) and
-`Result`'s payload is ω, so it needs a case whose alternatives run once (R9a, a kernel
-change). Linearity would still not be uniqueness: in-place updates stay with RC.
-(Since cohesion M4, below, the handles are linear and gaps 1 and 3 are type errors; gap 2
-stays, pinned in `regions`.)
+**Known gaps** (test group `regions`; wishful: linear-case). Regions are enforced by the
+type checker; since cohesion M4 the mutable handles are linear, so using one twice
+(`swap r r`: Rust's E0499) and keeping one past its scope are type errors. Two things
+remain:
+
+* **Gap 2 (E0502), aliasing.** The lender enters a mutable scope at ω and comes back as a
+  new `S`; `Lent` only renames it in the lowering, so a body that names the token
+  differently reads the lender while it is borrowed. Closing it needs linear lenders and
+  a `Copy` notion for reading `*x` out of a linear value (K3), R4.
+* **The result type may not quantify over a region (closed by R2).** Every scope asks for
+  `[RegionFree B]`; `Region` has no instance and neither has a dependent Σ/Π over it, so
+  `B := (0 r : Region) × Shr r A` is rejected at the scope boundary. This is an instance
+  side condition, not a theorem: an `instance : RegionFree T` is an explicit trust
+  declaration, like an axiom.
+Linearity is still not uniqueness: in-place updates stay with RC (`rc == 1` at run time).
+22i measures what a linear scope costs (3 → 4 → 6 objects for direct → scoped → nested;
+the note's older 3 → 15 → 29 is the pre-inlining history), so "linear ⇒ unique ⇒
+in-place" is not a claim this layer makes.
 
 **Linear handles (cohesion M4a, on linear-case stage 2).** `Uniq1 ρ A` is `&'a mut A`
 used at quantity 1. It is a one-constructor inductive with a private constructor, because a
@@ -287,15 +292,39 @@ the ω `Uniq`, `Mut` and `MutOpt` are gone, and `Uniq1`, `Mut1`, `MutOpt1` are r
 `Uniq`, `Mut`, `MutOpt` (`Result1` and `Borrowed` keep their names).
 
 Linearity closes the escape for `Uniq` (the body has one handle and must hand it back,
-so it can't also pack it) but not for `Shr`, which is a copy. The scope is already rank-2
-(`(0 ρ : Region) → … → Result B`, `B` bound outside); what's missing is that `B` may
-still *quantify* over regions. Two ways to forbid that: put regions in a universe a
-scope's `B : Type` can't quantify over (`Region : Type 1`; that needs phantom
-parameters to count for a parameter whose phantom would raise the universe, which they
-don't today, 22e), or give each scope an erased `[RegionFree B]` instance, derived
-structurally and with no instance for `Σ (r : Region)` or `Π (r : Region)`. Either way
-the lowering only has to state each scope's result type (it does: the variables that
-live on after the borrow), and with the second it also has to request the instance.
+so it can't also pack it). `Shr` is a copy, so for the *shared* case the rank-2 scope
+alone did not close the hole: `B` could still be a closed type that quantifies over the
+scope's region. **R2 closed it**: `RegionFree B` is a class in `lib/Region.wiz` with
+structural instances for the ordinary type formers (`Unit`, `Nat`, `Bool`, `String`,
+`List`, `Option`, `×`, `→`, `Result`, `ResultQ`, the handle and result types, …) and
+deliberately no instance for `Region`; a dependent `Σ`/`Π` over `Region` therefore has
+none (other dependent `Σ`/`Π`, and user types without an instance, are also rejected:
+scope results are ordinary first-order data):
+
+```wiz no-check
+-- accepted before R2: the closed result type carries the fresh region and its handle
+def esc (v : List Nat) : Result ((0 r : Region) × Shr r (List Nat)) :=
+  Shr.borrow Region.static v (fun ρ h x => .ok (ρ, x))   -- now: no RegionFree instance
+```
+
+Every scope carries the instance argument (a one-method class, which 22i unboxes; it
+is an ordinary instance-implicit parameter, not a runtime resource), the lowering names
+`S`, `B` (and `H`) at each scope so the problem is posed at the result type, and Feral emits one
+structural instance per user `struct`/`enum` (its types have no region parameters to
+quantify over). The same escape at `Shr.borrow`, `Region.scope` and `Uniq.share` is a
+rejection in group `regions`.
+
+The universe bump (`Region : Type 1`) is still the cleaner fix in principle but remains
+blocked: a phantom parameter whose phantom would raise the type's universe gets none
+(22e), so the region would be forgotten and `Shr ρ A` would be `Shr ρ' A`.
+
+The lowering's residual obligations — the properties the kernel does **not** prove about
+the Rust source — are the checked list in
+[`drafts/feral/OBLIGATIONS.md`](../../drafts/feral/OBLIGATIONS.md): E0502 (front end and
+lowering), the packed region (now kernel types), one use per handle (kernel types), and
+the per-scope `RegionFree` instance, each with the negative test that pins it. The
+related E0515/E0597/E0499/E0506 errors are in the same ledger; E0506 is covered by the
+Feral front-end case *"the lender is unusable while a named borrow of it lives"*.
 
 ## 22h: one bit-vector family
 
@@ -334,15 +363,19 @@ def w (x : U32) : BitVec 32 := BitVec.add x (BitVec.ofNat 32 1)   -- no conversi
 ## 22i: unboxed newtypes and `attribute [inline]`
 
 ```wiz no-check
-structure Uniq (ρ : Region) (A : Type) where
-  val : A                                  -- at run time, a Uniq ρ A is its A
-attribute [inline] Uniq.borrow             -- compiled code runs the scope's body in place
-def push (xs : List Nat) := Uniq.borrow Region.static xs (fun ρ h v r => push1 r)
-#ir push                                   -- no pap, no ap, no handle allocated
+structure Shr (ρ : Region) (A : Type) where
+  val : A                                  -- at run time, a Shr ρ A is its A
+attribute [inline] Shr.borrow              -- compiled code runs the body in place
+def length (xs : List Nat) := Shr.borrow Region.static xs (fun ρ h x => .ok (List.length x.val))
+#ir length                                 -- no pap, no ap, no handle allocated
 ```
 
 The region discipline of 22g used to cost at run time: every handle was a cell
-(`⟨val, ◾⟩`) and every scope a closure called through `ap`. Both are gone:
+(`⟨val, ◾⟩`) and every scope a closure called through `ap`. With `--unbox-structs` and
+inlining, a *structure* handle (`Shr`, `Lent`) is its field and a shared-borrow scope is
+its body run in place. A linear `Uniq`/`Mut` is a one-constructor inductive, which
+`--unbox-structs` does not unbox, so it keeps a cell: the measured scope costs are
+3 → 4 → 6 (the 22i and R5 cases). "Linear" therefore does not mean "free" or "in place".
 
 * **The last field of a structure can be unboxed: `--unbox-structs`, off by default.** A
   structure with fields ends in its phantom tail (22e) followed by a marker,
@@ -353,9 +386,10 @@ The region discipline of 22g used to cost at run time: every handle was a cell
   erasure (`unboxedSigma`) represents a Σ whose second component is such an erased
   function into `Unit` by its first component: `S.mk a` is `a`, `.1` is the identity, `.2`
   is `◾`, and `#eval`/`#run`/`wiz run` read the value back the same way. So a one-field
-  structure (a newtype: `Shr`, `Uniq`, `Lent`, `Mut`) is its field, and an `n`-field
-  structure is `n − 1` pairs instead of `n`. Without it, every pair is a pair
-  (`⟨a ◾⟩`).
+  structure (a newtype: `Shr`, `Lent`) is its field, and an `n`-field structure is
+  `n − 1` pairs instead of `n`. (The linear handles `Uniq`, `Mut` and `MutOpt` are
+  inductives, not structures: they are not unboxed, 22g.) Without the option, every pair
+  is a pair (`⟨a ◾⟩`).
 * **Why it is off.** A representation must be a function of the type *up to conversion*,
   and the same for generic code and its callers (*stable under substitution*). The test
   is by shape (quantities and the final `Unit`, which conversion compares), not by the
@@ -384,6 +418,14 @@ The region discipline of 22g used to cost at run time: every handle was a cell
   scope around `push1` went from 15 objects and 8 lifted functions to 4 objects and none,
   and two nested scopes from 29 and 23 to 6 and none (no scope: 3). What remains is the
   handle's cell: `Uniq` is an inductive, which `--unbox-structs` doesn't unbox.
+
+  **These are measurements, not a typing claim.** Exact 1 is a *use* discipline: it
+  guarantees protocol safety (no leak, no double release, no use after release through
+  the API), not uniqueness — an ω value can be passed to a 1 binder — and it does not
+  imply in-place reuse. The measured 3 → 4 → 6 is what pins the cost; the older 3 → 15
+  → 29 in `wiz-notes/linear-scope-cost.md` is the pre-inlining history. A regression is a
+  test change in group `regions` (case *"R5: linearity is not uniqueness: a &mut scope's
+  allocation cost is measured"*).
 
 Objects allocated on `#run`'s checked heap (`tests --allocs FILE ENTRY…`, a measuring
 mode of the test driver), before → after (the "unbox" columns are with `--unbox-structs`;
@@ -526,10 +568,12 @@ loops, `?`, `U64`, and functions that return borrows.
   `Result U64`); a method call on a variable (`r.push`) is one identifier, so it shows the
   receiver.
 
-Specifications: a `spec f requires (P) ensures (Q)` item states `f.Spec`, a Wiz
+Specifications: a function's clauses are written inline (`fn f … requires (P) ensures (Q) : R := e`)
+or in a `spec f requires (P) ensures (Q)` item; either states `f.Spec`, a Wiz
 proposition over the arguments' values, `result`, `old x` and `final x` (an `&mut`
 argument's value when the borrow ends), with total correctness (`Result.Holds`), proved
-in Wiz. With linear handles a `&mut` argument enters as its value and the call runs
+in Wiz. `final(x)`/`old(x)` are the same as `final x`/`old x`. With linear handles a
+`&mut` argument enters as its value and the call runs
 inside the borrow scopes a caller would open, so the clauses are stated on the values the
 scopes hand back; see [Resources in Wiz](../resources.md).
 

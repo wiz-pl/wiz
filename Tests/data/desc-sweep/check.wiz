@@ -1,0 +1,3 @@
+-- test: check
+import Prelude
+def answer : Nat := 6 * 7

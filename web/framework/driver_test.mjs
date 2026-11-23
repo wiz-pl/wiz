@@ -35,6 +35,7 @@ function stubModule(html) {
     stringToNewUTF8: (s) => put(s),
     UTF8ToString: (p) => strings.get(Number(p)) || "",
     _free: (p) => { strings.delete(Number(p)); },
+    strings,
   };
 }
 
@@ -58,7 +59,17 @@ ok(payloadOf("change", { target: target("<x>") }) === "<x>", "change: the live v
 ok(payloadOf("input", { target: target(undefined, { value: "attr" }) }) === "attr",
   "input: the value attribute when there is no property");
 ok(payloadOf("keydown", { key: "Enter" }) === "Enter", "keydown: the key");
+ok(payloadOf("keydown", { key: "Enter", ctrlKey: true }) === "Enter\nc",
+  "keydown: Ctrl is carried after the key");
+ok(payloadOf("keydown", { key: "s", metaKey: true }) === "s\nm",
+  "keydown: ⌘ is carried after the key");
+ok(payloadOf("keydown", { key: "Enter", ctrlKey: true, shiftKey: true }) === "Enter\ncs",
+  "keydown: every modifier, in a fixed order");
 ok(payloadOf("keyup", { key: "⌘" }) === "⌘", "keyup: the key");
+ok(payloadOf("keydown", { key: "Tab", target: { selectionStart: 1, selectionEnd: 3 } }) === "Tab\n\n@1@3",
+  "keydown: a text field's selection follows the key");
+ok(payloadOf("keydown", { key: "Enter", ctrlKey: true, target: { selectionStart: 2, selectionEnd: 2 } })
+  === "Enter\nc\n@2@2", "keydown: modifiers and selection together");
 ok(payloadOf("click", { target: target("x") }) === "", "click: no payload");
 
 // ## The event strings (the DOM path too: the delegated listeners on `root`)
@@ -85,6 +96,28 @@ ok(steps[0].state === 7 && steps[2].state === 9, "each step gets the previous st
 ok(seen.length === 3 && seen[0].payload === "a\nb" && seen[0].event === "input" && seen[0].index === 0,
   "onStep reports event, index and payload", JSON.stringify(seen[0]));
 ok(seen[2].state === 10, "onStep gets the state after the step", JSON.stringify(seen[2]));
+
+// ## `Loom.onPrevent`: the runtime decides whether a marked handler consumes the key
+const guardedSSR = '<div><textarea data-wiz-on-keydown="0" data-wiz-prevent-keydown="1"></textarea></div>';
+const guarded = stubModule(guardedSSR);
+const asks = [];
+guarded._wiz_loom_consume = (_state, p) => {
+  const ev = guarded.strings.get(Number(p)) || "";
+  asks.push(ev);
+  return /^keydown\n0\nEnter/.test(ev) ? 1 : 0;   // the runtime consumes Ctrl+Enter
+};
+const guardedRoot = parse("");
+const mainPatch = globalThis.wizPatch;   // the main tree's applier (the guard test has its own)
+start(guarded, guardedRoot, { parse, events: ["keydown"] });
+globalThis.wizPatch = mainPatch;
+const area = guardedRoot.childNodes[0].childNodes[0];
+const key = (e) => { area.dispatchEvent(e); return !!e.defaultPrevented; };
+ok(key({ type: "keydown", key: "a" }) === false,
+  "an unconsumed key still types (the runtime did not prevent)");
+ok(key({ type: "keydown", key: "Enter", ctrlKey: true }) === true,
+  "a consumed key is prevented");
+ok(asks.length === 2 && asks[0] === "keydown\n0\na" && asks[1] === "keydown\n0\nEnter\nc",
+  "the consume query gets the same event string the step did", JSON.stringify(asks));
 
 // ## js_patch is wired to the patch applier
 globalThis.wizPatch(JSON.stringify([{ op: "text", path: "0.0", text: "patched" }]));

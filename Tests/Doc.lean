@@ -74,6 +74,30 @@ def pkgFiles : List (String × String) :=
   [("grail.wiz", "import Grail\ndef package : Package := Package.new \"shapes\" |> Package.lib \"shapes\" \"src\"\n"),
    ("src/Shapes/Basic.wiz", basicSrc), ("src/Shapes/Use.wiz", useSrc)]
 
+/-- A doc comment with a tagged `wiz` fence and an untagged one, for the highlighting
+tests. -/
+def hlSrc : String := "import Prelude
+
+/-- Highlighted and plain code in one comment.
+
+```wiz
+def answer : Nat := 42 -- the answer
+def greeting : String := \"hi\"
+```
+
+An untagged block stays plain:
+
+```
+a < b & c <script>alert(1)</script>
+```
+-/
+def highlighted : Nat := 1
+"
+
+def hlPkgFiles : List (String × String) :=
+  [("grail.wiz", "import Grail\ndef package : Package := Package.new \"hl\" |> Package.lib \"hl\" \"src\"\n"),
+   ("src/Highlight/A.wiz", hlSrc)]
+
 /-- A package for the reference manual: an implicit argument, a class with two
 instances, an infix operator of its own, markup in a doc comment, and a module without
 any doc comments. -/
@@ -338,7 +362,9 @@ def httpGet (port : UInt16) (path : String) : IO String := do
   let (r, w) ← Wiz.Socket.tcpConnect Wiz.Socket.loopback port
   httpReq r w path
 
-/-- Connect to `port`, retrying while the server starts (about 10 s in all). -/
+/-- Connect to `port`, retrying while the server starts (about 30 s in all: `wiz doc`
+elaborates the module and copies the site before it binds, and on a shared build node
+that has been measured at ~16 s). -/
 def connectSoon (port : UInt16) : IO (Option (IO.FS.Handle × IO.FS.Handle)) := do
   let rec go : Nat → IO (Option (IO.FS.Handle × IO.FS.Handle))
     | 0 => pure none
@@ -346,7 +372,7 @@ def connectSoon (port : UInt16) : IO (Option (IO.FS.Handle × IO.FS.Handle)) := 
       match ← (try some <$> Wiz.Socket.tcpConnect Wiz.Socket.loopback port catch _ => pure none) with
       | some c => pure (some c)
       | none => IO.sleep 25; go n
-  go 400
+  go 1200
 
 /-- `wiz doc` on the package's source directory, plain (no Wasm). -/
 def makeSite (dir : System.FilePath) : IO System.FilePath := do
@@ -528,7 +554,41 @@ def docGroup : Group where
         checkEq "<p>a <em>b</em> <strong>c</strong> <a href=\"M.html#f\"><code>f</code></a> <code>g</code></p>\n" (r "a *b* **c** `f` `g`")
         checkEq "<ul><li>x</li><li>y z</li></ul>\n" (r "* x\n* y\n  z")
         checkEq "<pre><code>a &lt; b\n</code></pre>\n".length (r "```\na < b\n\n```").length
+        -- (a `wiz` fence is tokenised by the parser's own reader; an untagged fence and
+        -- an unknown language stay plain)
+        checkEq "<pre><code class=\"language-wiz\"><span class=\"hl-kw\">def</span> x : Nat := <span class=\"hl-num\">1</span></code></pre>\n"
+          (r "```wiz\ndef x : Nat := 1\n```")
+        -- (a fence directive after the language word does not change the language)
+        checkEq "<pre><code class=\"language-wiz\"><span class=\"hl-kw\">def</span> x : Nat := <span class=\"hl-num\">1</span></code></pre>\n"
+          (r "```wiz no-check\ndef x : Nat := 1\n```")
+        checkEq "<pre><code class=\"language-unknown\">x</code></pre>\n" (r "```nope\nx\n```")
         checkEq "<p>&lt;script&gt; <a href=\"https://e.org\">l</a> j</p>\n" (r "<script> [l](https://e.org) [j](javascript:x)") },
+    { name := "wiz doc: a ```wiz fence is highlighted with the parser's lexer; an untagged fence is plain", run := fun _ => do
+        let dir ← mkTree hlPkgFiles
+        let out ← makeSite dir
+        let html ← IO.FS.readFile (out / "Highlight.A.html")
+        -- (the real lexer: `def` is a keyword, 42 a number, the comment a comment, the
+        -- string a string; nothing is re-tokenised in the browser)
+        checkHas html "<pre><code class=\"language-wiz\"><span class=\"hl-kw\">def</span> answer : Nat := <span class=\"hl-num\">42</span> <span class=\"hl-com\">-- the answer"
+        checkHas html "<span class=\"hl-str\">&quot;hi&quot;</span>"
+        -- (an untagged block is exactly the pre-highlighting renderer, escaped)
+        checkHas html "<pre><code>a &lt; b &amp; c &lt;script&gt;alert(1)&lt;/script&gt;</code></pre>"
+        -- (the page carries the spans for the hover runtime: the P0 data hook)
+        checkHas html "\"wizHighlight\":{\"blocks\""
+        checkHas html "\"schema\":\"wiz.highlight/1\""
+        checkHas html "\"language\":\"wiz\""
+        checkHas html "\"spans\":[[0,3,\"hl-kw\"]"
+        -- (--no-highlight is the old renderer: no spans, no sheet, no data)
+        let outPlain := dir / "site-plain"
+        discard <| runOut (← wiz) ["doc", (dir / "src").toString, "-o", outPlain.toString,
+          "--source-url", "https://example.org/blob/abc/src/", "--web", (dir / "no-web").toString,
+          "--no-highlight"]
+        let plain ← IO.FS.readFile (outPlain / "Highlight.A.html")
+        check (!has plain "class=\"hl-") "--no-highlight emitted a span"
+        check (!has plain "highlight.css") "--no-highlight linked the sheet"
+        check (!has plain "wiz.highlight/1") "--no-highlight emitted the highlight data"
+        checkHas plain "<pre><code class=\"language-wiz\">def answer : Nat := 42 -- the answer"
+        check (!has html "<script>alert") "raw script markup in a fence" },
     { name := "wiz doc: a page per module, kinds, docs as HTML, source links, instances, index", run := fun _ => do
         let dir ← mkTree pkgFiles
         let out ← makeSite dir
@@ -649,8 +709,8 @@ def docGroup : Group where
         let tc ← toolchain
         let o ← IO.Process.output { cmd := ← wiz, args := (tc.toFlags ++ ["run", (dir / "page.wiz").toString]).toArray }
         if o.exitCode != 0 then
-          if ["gmp.h", "No such file"].any (has o.stderr ·) then skip "no toolchain" else
-          throw (IO.userError s!"wiz run: {o.stdout}\n{o.stderr}")
+          if ["gmp.h", "No such file"].any (has o.stderr ·) then skipMissing "no toolchain"; return
+          else throw (IO.userError s!"wiz run: {o.stdout}\n{o.stderr}")
         let lines := o.stdout.splitOn "\n"
         -- rendered as tagged text, every subterm a span
         check ((lines.headD "").startsWith "sig-0: <span class=\"tt k-pi\" data-ref=\"") (lines.headD "")
@@ -671,43 +731,59 @@ def docGroup : Group where
         check (!has basic "doc-live.js") "a plain page carries the live client"
         check (!has basic "wiz-doc-serve") "a plain page carries the live data"
         check (!has basic "data-doc-line") "a plain page carries live positions"
-        -- (a served site: the page presents the client, and the server answers)
-        let port ← freePort
+        -- (a served site: the page presents the client, and the server answers.
+        -- `freePort` reserves a port and closes it, so the server can lose the race to
+        -- another process in between; retry with a fresh port rather than `skip`. An
+        -- unexplained skip fails CI's skip gate, and three failed binds are a real
+        -- failure, not a missing capability.)
         let out := dir / "live"
-        let child ← IO.Process.spawn
-          { cmd := ← wiz, args := #["doc", (dir / "src").toString, "-o", out.toString,
-              "--serve", "--port", toString port, "--lsp", "8765"], stdout := .null, stderr := .piped }
-        try
-          let some (r, w) ← connectSoon port | do
+        let attempt (port : UInt16) : IO Bool := do
+          let child ← IO.Process.spawn
+            { cmd := ← wiz, args := #["doc", (dir / "src").toString, "-o", out.toString,
+                "--serve", "--port", toString port, "--lsp", "8765"], stdout := .null, stderr := .piped }
+          try
+            match ← connectSoon port with
+            | .none => do
+              try child.kill catch _ => pure ()
+              let err ← child.stderr.readToEnd
+              unless err.trimAscii.isEmpty do IO.eprintln err
+              pure false
+            | .some (r, w) => do
+              let index ← httpReq r w "/index.html"
+              check (has index "200 OK") s!"GET /index.html: {index.take 200}"
+              check (has index "<title>") index
+              let page ← httpGet port "/Shapes.Basic.html"
+              check (has page "200 OK") s!"GET /Shapes.Basic.html: {page.take 200}"
+              checkHas page "<script type=\"module\" src=\"doc-live.js\"></script>"
+              checkHas page "id=\"wiz-doc-serve\""
+              checkHas page "\"lsp\":\"ws://127.0.0.1:8765\""
+              checkHas page "data-doc-line="
+              -- (the scripts the page imports are in the served tree: the live client,
+              -- the transport, and the mount contract — the goals/hover markup is
+              -- Web.{Goals,Hover} in the runtime now, not goals.js. The runtime module
+              -- itself is built by web/build-doc-live-ui.sh, not by `wiz doc`.)
+              checkHas (← httpGet port "/doc-live.js") "wiz-doc-serve"
+              checkHas (← httpGet port "/lsp-client.js") "export class LspClient"
+              checkHas (← httpGet port "/framework/mount.js") "export async function mount"
+              checkHas (← httpGet port "/framework/runtime.js") "export function applyPatches"
+              -- (the module's source, for the client to open in the server)
+              let src ← httpGet port "/sources/Shapes.Basic.wiz"
+              check (has src "200 OK") s!"GET /sources: {src.take 200}"
+              checkHas src "structure Point"
+              -- (the landing and API pages stay static even when served)
+              check (!has (← httpGet port "/index.html") "doc-live.js") "the index carries the live client"
+              check (!has (← httpGet port "/api.html") "doc-live.js") "the API index carries the live client"
+              -- (no path escapes the generated tree)
+              check (has (← httpGet port "/../etc/passwd") "404") "a path above the site is served"
+              pure true
+          finally
             try child.kill catch _ => pure ()
-            let err ← child.stderr.readToEnd
-            IO.eprintln err
-            skip "the documentation server could not bind its port"
-            return
-          let index ← httpReq r w "/index.html"
-          check (has index "200 OK") s!"GET /index.html: {index.take 200}"
-          check (has index "<title>") index
-          let page ← httpGet port "/Shapes.Basic.html"
-          check (has page "200 OK") s!"GET /Shapes.Basic.html: {page.take 200}"
-          checkHas page "<script type=\"module\" src=\"doc-live.js\"></script>"
-          checkHas page "id=\"wiz-doc-serve\""
-          checkHas page "\"lsp\":\"ws://127.0.0.1:8765\""
-          checkHas page "data-doc-line="
-          -- (the scripts the page imports are in the served tree)
-          checkHas (← httpGet port "/doc-live.js") "readGoalState"
-          checkHas (← httpGet port "/lsp-client.js") "export class LspClient"
-          checkHas (← httpGet port "/goals.js") "export function renderGoalResult"
-          -- (the module's source, for the client to open in the server)
-          let src ← httpGet port "/sources/Shapes.Basic.wiz"
-          check (has src "200 OK") s!"GET /sources: {src.take 200}"
-          checkHas src "structure Point"
-          -- (the landing and API pages stay static even when served)
-          check (!has (← httpGet port "/index.html") "doc-live.js") "the index carries the live client"
-          check (!has (← httpGet port "/api.html") "doc-live.js") "the API index carries the live client"
-          -- (no path escapes the generated tree)
-          check (has (← httpGet port "/../etc/passwd") "404") "a path above the site is served"
-        finally
-          try child.kill catch _ => pure () },
+        let rec go : Nat → IO Unit
+          | 0 => throw (IO.userError "wiz doc --serve: the server did not bind a port in three attempts")
+          | n + 1 => do
+            let port ← freePort
+            if ← attempt port then pure () else go n
+        go 3 },
     { name := "wiz doc --serve: --port and --lsp need --serve", run := fun _ => do
         let o ← IO.Process.output { cmd := ← wiz, args := #["doc", "lib/Prelude.wiz", "-o", "/tmp/wiz-doc-noserve", "--lsp", "8765"] }
         check (o.exitCode == 2) s!"exit {o.exitCode}"
@@ -781,6 +857,34 @@ def docGroup : Group where
           checkHas md s!"<a id=\"{n}\"></a>"
         checkHas md "```text\nNat → Nat\n```"
         check (!has md "Nat.succ") "a declaration's body is in the manual" },
+    { name := "wiz doc --languages: an external wiz.doc.languages/1 spec renders hdl fences; duplicates and `wiz` are refused", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        IO.FS.createDirAll (dir / "src")
+        let reg := "{\"schema\":\"wiz.doc.languages/1\",\"languages\":[{\"name\":\"hdl\",\"lineComment\":[\"//\"],\"keywords\":[\"module\",\"endmodule\",\"assign\",\"wire\"],\"classes\":[\"kw\",\"com\",\"num\"]}]}"
+        IO.FS.writeFile (dir / "languages.json") reg
+        IO.FS.writeFile (dir / "src" / "Ext.wiz")
+          "import Prelude\n/-- A block.\n```hdl\nmodule m; // a comment\nassign x = 1;\nendmodule\n```\n-/\ndef n : Nat := 0\n"
+        let out := dir / "site"
+        discard <| runOut (← wiz) ["doc", (dir / "src").toString, "-o", out.toString,
+          "--web", (dir / "no-web").toString, "--languages", (dir / "languages.json").toString]
+        let html ← IO.FS.readFile (out / "Ext.html")
+        -- (the spec's classes: a keyword and a line comment; no core patch)
+        checkHas html "<span class=\"hl-kw\">module</span>"
+        checkHas html "<span class=\"hl-com\">// a comment</span>"
+        -- (a duplicate name is refused with the file and the entry, not a partial page)
+        IO.FS.writeFile (dir / "dup.json") reg
+        let p ← IO.Process.output { cmd := ← wiz, args := #["doc", (dir / "src").toString,
+          "-o", (dir / "site2").toString, "--web", (dir / "no-web").toString,
+          "--languages", (dir / "languages.json").toString, "--languages", (dir / "dup.json").toString] }
+        check (p.exitCode != 0) "--languages accepted a duplicate language"
+        checkHas p.stderr "already exists"
+        -- (`wiz` is reserved)
+        IO.FS.writeFile (dir / "wiz.json") "{\"schema\":\"wiz.doc.languages/1\",\"languages\":[{\"name\":\"wiz\",\"override\":true}]}"
+        let q ← IO.Process.output { cmd := ← wiz, args := #["doc", (dir / "src").toString,
+          "-o", (dir / "site3").toString, "--web", (dir / "no-web").toString,
+          "--languages", (dir / "wiz.json").toString] }
+        check (q.exitCode != 0) "--languages replaced the reserved wiz language"
+        checkHas q.stderr "reserved" },
     libDocCase
   ]
 

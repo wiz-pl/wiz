@@ -1,0 +1,4 @@
+-- test: skip needs --trust-native
+import Prelude
+def triple (n : Nat) : Nat := n + n + n
+def t : triple 14 = 42 := native_refl

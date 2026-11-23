@@ -1,0 +1,110 @@
+-- test: skip the `hdl` and `bus-crc` test group runs it
+-- The CRC-8 line service (`Crc.protoC`, `import Hdl.Crc`): the `proto` design of the
+-- iCEstick project with its UART removed, so the protocol/CRC mechanism is reusable
+-- behind any byte transport.
+--
+-- The contract is request/response and AXI4-Lite-shaped: one line outstanding, no
+-- bursts. A line is bytes (never 10) followed by the newline 10; the service answers
+-- the line's CRC as two upper-case hex digits and a newline, one byte per `txIdle`
+-- cycle. `ready` is low from the accepted newline until the reply ends, and input
+-- bytes offered while it is low are dropped, not queued.
+--
+-- The checks: the reply stream equals `Crc.replies` (the host model) for real lines, a
+-- newline offered during the reply does not start a second line, `ready` is low exactly
+-- in the reply cycles, the line counter counts accepted lines, and value simulation =
+-- `Netlist.simulate` (hash-consed and naive) = `Circuit.simFast`. Run by the `bus-crc`
+-- and `hdl` test groups.
+import Hdl.Core
+import Hdl.Sim
+import Hdl.Crc
+import IO
+
+def yes (b : Bool) : String := match b with
+  | .true => "yes"
+  | .false => "NO"
+
+def shows : List Nat → String
+  | .nil => ""
+  | .cons x xs => match xs with
+    | .nil => Hdl.show x
+    | .cons _ _ => Hdl.show x <+> " " <+> shows xs
+
+def allTrue : List Bool → Bool
+  | .nil => .true
+  | .cons b bs => Bool.and b (allTrue bs)
+
+def eqNatList (xs ys : List Nat) : Bool := BEq.beq xs ys
+
+def agree {ω i o : HwTy} (c : Circuit i o) (ins : List (HwTy.El i)) : Bool :=
+  let ω v := Circuit.runLeaves c ins;
+  Bool.and (BEq.beq v (Circuit.simFast c ins))
+    (Bool.and (BEq.beq v (Circuit.simLeaves .true c ins)) (BEq.beq v (Circuit.simLeaves .false c ins)))
+
+def inByte (valid b : Nat) : HwTy.El Crc.ProtoIn.code :=
+  Bundle.toEl Crc.ProtoIn.bundle
+    (Crc.ProtoIn.mk (BitVec.ofNat 1 valid) (BitVec.ofNat 8 b) (BitVec.ofNat 1 1))
+
+def idleIn : HwTy.El Crc.ProtoIn.code := inByte 0 0
+
+def idleN : Nat → List (HwTy.El Crc.ProtoIn.code)
+  | .zero => .nil
+  | .succ k => .cons idleIn (idleN k)
+
+-- a line, its newline, and the cycles the reply needs
+def lineIns : List Nat → List (HwTy.El Crc.ProtoIn.code)
+  | .nil => .cons (inByte 1 10) (idleN 4)
+  | .cons b bs => .cons (inByte 1 b) (lineIns bs)
+
+def linesIns (ls : List (List Nat)) : List (HwTy.El Crc.ProtoIn.code) :=
+  match ls with
+  | .nil => .nil
+  | .cons l rest => List.append (lineIns l) (linesIns rest)
+
+-- a newline in the middle of the first reply: it must be ignored. (`lineIns` already
+-- has four idle cycles after the newline, so this one is built without the tail.)
+def lineHead : List Nat → List (HwTy.El Crc.ProtoIn.code)
+  | .nil => .cons (inByte 1 10) .nil
+  | .cons b bs => .cons (inByte 1 b) (lineHead bs)
+
+def earlyNewline : List (HwTy.El Crc.ProtoIn.code) :=
+  List.append (lineHead Crc.checkDigits)
+    (List.append (.cons (inByte 1 10) (idleN 6))
+      (linesIns (.cons (.cons 104 (.cons 105 .nil)) .nil)))
+
+def outs (xs : List (HwTy.El Crc.ProtoIn.code)) : List (Crc.ProtoOut HwTy.El) :=
+  Hdl.map (fun (p : HwTy.El Crc.ProtoOut.code) => Crc.ProtoOut.unpack p) (Circuit.run Crc.protoC xs)
+
+def sent (os : List (Crc.ProtoOut HwTy.El)) : List Nat :=
+  match os with
+  | .nil => .nil
+  | .cons o rest => if BitVec.isTrue o.valid then .cons (BitVec.toNat o.data) (sent rest) else sent rest
+
+-- ready is low exactly while a reply byte is offered (txIdle is always high here)
+def readyOk (os : List (Crc.ProtoOut HwTy.El)) : Bool :=
+  allTrue (Hdl.map (fun (o : Crc.ProtoOut HwTy.El) =>
+    Bool.or (Bool.and (BitVec.isTrue o.ready) (Bool.not (BitVec.isTrue o.valid)))
+      (Bool.and (Bool.not (BitVec.isTrue o.ready)) (BitVec.isTrue o.valid))) os)
+
+def lastLines (os : List (Crc.ProtoOut HwTy.El)) : Nat :=
+  match os with
+  | .nil => 0
+  | .cons o rest => match rest with
+    | .nil => BitVec.toNat o.lines
+    | .cons _ _ => lastLines rest
+
+def linesUsed : List (List Nat) :=
+  .cons Crc.checkDigits (.cons (.cons 104 (.cons 105 .nil)) .nil)
+
+def replyStream : List Nat := sent (outs (linesIns linesUsed))
+
+def earlyStream : List Nat := sent (outs earlyNewline)
+
+def main : IO Unit := do
+  IO.println ("replies " <+> shows replyStream
+    <+> ", host model " <+> yes (eqNatList replyStream (Crc.replies linesUsed))
+    <+> ", lines " <+> Hdl.show (lastLines (outs (linesIns linesUsed))));
+  IO.println ("early newline dropped " <+> yes (eqNatList earlyStream (Crc.replies linesUsed))
+    <+> ", lines " <+> Hdl.show (lastLines (outs earlyNewline)));
+  IO.println ("ready = not valid " <+> yes (readyOk (outs (linesIns linesUsed))));
+  IO.println ("value = simulate = simFast " <+> yes (agree Crc.protoC (linesIns linesUsed)));
+  IO.println ("well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "crcproto" Crc.protoC)))

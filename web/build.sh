@@ -52,7 +52,11 @@ if ! command -v emcc >/dev/null; then
 fi
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
 # (after the compiler's own -O2, so emcc's last -O wins)
-CFLAGS="-I$OUT/gmp -DWIZ_NO_THREADS"
+# `-ffile-prefix-map`: the module is built in a checkout and written to an output
+# directory whose absolute paths would otherwise be recorded in the Wasm (the release
+# scan caught `/home/runner/work/wiz/wiz/web-out`). Map both to `.`; without `-g` the
+# flags still rewrite `__FILE__`/the generated C's path.
+CFLAGS="-I$OUT/gmp -DWIZ_NO_THREADS -ffile-prefix-map=$ROOT=. -ffile-prefix-map=$OUT=."
 [ -z "$OPT" ] || CFLAGS="$CFLAGS -O$OPT"
 
 # 1. mini-gmp from GMP's source tarball, behind a <gmp.h>
@@ -77,6 +81,16 @@ fi
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build web/Web.wiz -o "$OUT/wiz-infoview.mjs" --no-main)
 cp "$ROOT/web/infoview.html" "$ROOT/web/infoview.js" "$ROOT/web/playground-lsp.js" \
-  "$ROOT/web/lsp-client.js" "$ROOT/web/goals.js" "$ROOT/web/tagged.js" "$ROOT/web/scroll.js" \
-  "$ROOT/web/scroll-search.js" "$ROOT/web/scroll.css" "$OUT/"
+  "$ROOT/web/lsp-client.js" "$ROOT/web/widgets.js" "$ROOT/web/widgets.css" \
+  "$ROOT/web/hover.js" "$ROOT/web/squiggles.js" \
+  "$ROOT/web/completions.js" "$ROOT/web/scroll.js" "$ROOT/web/scroll-search.js" \
+  "$ROOT/web/scroll.css" "$ROOT/web/highlight.css" "$ROOT/web/overlays.css" \
+  "$ROOT/web/doc-live.js" "$ROOT/web/doc-live.css" "$OUT/"
+mkdir -p "$OUT/framework"
+cp "$ROOT/web/framework/mount.js" "$ROOT/web/framework/driver.js" \
+  "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/editor-text.js" "$OUT/framework/"
+# 3. The standalone infoview's runtime (`web/infoview.js` mounts it, stage 5).
+sh "$ROOT/web/build-infoview-ui.sh" "$OUT"
+sh "$ROOT/web/build-docs-ui.sh" "$OUT"
+sh "$ROOT/web/build-doc-live-ui.sh" "$OUT"
 echo "built $OUT/wiz-infoview.mjs"

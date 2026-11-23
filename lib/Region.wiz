@@ -13,8 +13,9 @@ types, and `ρ` is inferred from a handle's type. Nothing of it reaches run time
 
 Borrow checking is typing: a borrow scope (`Shr.borrow`, `Uniq.borrow`,
 `Uniq.reborrow`, `Uniq.share`, `Uniq.zoom`, `Region.scope`) takes a body that is
-polymorphic in a fresh region `ρ`, and its result type `B` is chosen outside, so no
-handle at `ρ` can leave the scope (as `runST`). Inside a mutable borrow the lender's
+polymorphic in a fresh region `ρ`, and its result type `B` is chosen outside and must be
+`RegionFree` (below), so no handle at `ρ` can leave the scope, and `B` cannot itself
+quantify over `ρ` (as `runST`). Inside a mutable borrow the lender's
 name is rebound to a `Lent ρ S` token that has no operations, so using the lender while
 it is borrowed is a type mismatch. Mutable borrows (`Uniq`, `Mut`, `MutOpt`) are used
 at quantity 1: the kernel rejects passing one twice and keeping one past its scope. A
@@ -38,6 +39,22 @@ axiom Outlives.trans : (0 ρ₁ : Region) → (0 ρ₂ : Region) → (0 ρ₃ : 
 /-- `'static` outlives every region. -/
 axiom Outlives.static : (0 ρ : Region) → Outlives Region.static ρ
 
+/-- `B` does not quantify over a region. A scope's result value type `B` is chosen
+outside the scope's fresh region, but `B` itself may be a *closed* type that quantifies
+over one (`(0 r : Region) × Shr r A`), which would let a handle leave the scope together
+with its region. Every scope therefore asks for this side condition at every result type
+(`RegionFree B`); the instances below are structural and there is deliberately **no**
+instance for `Region`, so a dependent Σ/Π over `Region` has none either. (Other
+dependent Σ/Π, and user types, also have no structural instance: a scope's result is
+ordinary first-order data, or its type declares one.)
+
+The condition is checked by instance resolution, not proved: an `instance : RegionFree T`
+declared outside this module is an explicit trust declaration, like an axiom, and should
+be read as "this type is known not to package a region". A type built from the
+constructors below (the ordinary data types) needs no declaration. -/
+class RegionFree (A : Type) where
+  regionFree : Unit
+
 /-- `&'a A`: a shared borrow carries the value (shared, rc + 1; nothing mutates it while
 the borrow lives). Read it with `.val`. -/
 structure Shr (ρ : Region) (A : Type) where
@@ -58,18 +75,20 @@ structure Lent (ρ : Region) (S : Type) where
 -- ## Scopes: fresh regions
 
 /-- a region nested in `σ` (a block) -/
-def Region.scope {B : Type} (0 σ : Region)
+def Region.scope {B : Type} [RegionFree B] (0 σ : Region)
     (body : (0 ρ : Region) → (0 h : Outlives σ ρ) → Result B) : Result B :=
   body σ (Outlives.refl σ)
 
 /-- `let r := &s` until the borrow's last use (NLL): inside, `s` is rebound to the
 borrow too (reads go through `.val`, moves and mutations don't type-check) -/
-def Shr.borrow {S B : Type} (0 σ : Region) (s : S)
+def Shr.borrow {S B : Type} [RegionFree B] (0 σ : Region) (s : S)
     (body : (0 ρ : Region) → (0 h : Outlives σ ρ) → Shr ρ S → Result B) : Result B :=
   body σ (Outlives.refl σ) (Shr.mk s)
 
--- (the scopes are inlined in compiled code, 22i: with the handles unboxed, a scope is its
--- body run in place, with no closure and no handle allocated)
+-- (the scopes are inlined in compiled code, 22i: with `Shr` unboxed, a shared-borrow
+-- scope is its body run in place, with no closure and no handle allocated. A `Uniq`
+-- handle is an inductive and keeps its cell: 3 → 4 → 6 objects for direct → scoped →
+-- nested, a measured cost, not a typing promise; see `wiz-notes/linear-scope-cost.md`.)
 attribute [inline] Region.scope
 attribute [inline] Shr.borrow
 
@@ -196,7 +215,7 @@ def Uniq.end {0 ρ : Region} {S R : Type} (1 r : Uniq ρ S) (1 k : (v : S) → R
 
 /-- `let r := &mut s` until its last use: the lender comes back with the final value (the
 error path drops it: a panic unwinds) -/
-def Uniq.borrow {S B : Type} (0 σ : Region) (s : S)
+def Uniq.borrow {S B : Type} [RegionFree B] (0 σ : Region) (s : S)
     (1 body : (0 ρ : Region) → (0 h : Outlives σ ρ) → (0 l : Lent ρ S) → (1 r : Uniq ρ S) → Result1 B (Uniq ρ S)) :
     Result (B × S) :=
   ResultH.elim (fun b (1 r) => Uniq.end r (fun v => .ok (b, v)))
@@ -204,7 +223,7 @@ def Uniq.borrow {S B : Type} (0 σ : Region) (s : S)
     (body σ (Outlives.refl σ) (Lent.mk ()) (Uniq.mk s))
 /-- the same inside a scope that holds other handles `H` (a call borrowing two locals: the
 outer handle is threaded through the inner scope and handed back with the result) -/
-def Uniq.borrowIn {S B H : Type} (0 σ : Region) (s : S) (1 outer : H)
+def Uniq.borrowIn {S B H : Type} [RegionFree B] (0 σ : Region) (s : S) (1 outer : H)
     (1 body : (0 ρ : Region) → (0 h : Outlives σ ρ) → (0 l : Lent ρ S) → (1 o : H) → (1 r : Uniq ρ S) →
       Result1 B ((1 _ : H) × Uniq ρ S)) :
     Result1 (B × S) H :=
@@ -213,14 +232,14 @@ def Uniq.borrowIn {S B H : Type} (0 σ : Region) (s : S) (1 outer : H)
     (fun e (1 q) => let 1 (o, r) := q; Uniq.end r (fun v => .err e o))
     (body σ (Outlives.refl σ) (Lent.mk ()) outer (Uniq.mk s))
 /-- `&mut *r` at a shorter region -/
-def Uniq.reborrow {0 ρ : Region} {S B : Type} (1 r : Uniq ρ S)
+def Uniq.reborrow {0 ρ : Region} {S B : Type} [RegionFree B] (1 r : Uniq ρ S)
     (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (0 l : Lent ρ' S) → (1 r : Uniq ρ' S) → Result1 B (Uniq ρ' S)) :
     Result1 B (Uniq ρ S) :=
   Uniq.end r (fun v =>
     ResultH.mapHandle (fun (1 r') => Uniq.end r' (fun w => Uniq.mk w))
       (body ρ (Outlives.refl ρ) (Lent.mk ()) (Uniq.mk v)))
 /-- the same inside a scope that holds other handles `H`, threaded through and back -/
-def Uniq.reborrowIn {0 ρ : Region} {S B H : Type} (1 r : Uniq ρ S) (1 outer : H)
+def Uniq.reborrowIn {0 ρ : Region} {S B H : Type} [RegionFree B] (1 r : Uniq ρ S) (1 outer : H)
     (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (0 l : Lent ρ' S) → (1 o : H) → (1 r : Uniq ρ' S) →
       Result1 B ((1 _ : H) × Uniq ρ' S)) :
     Result1 B ((1 _ : H) × Uniq ρ S) :=
@@ -229,11 +248,11 @@ def Uniq.reborrowIn {0 ρ : Region} {S B H : Type} (1 r : Uniq ρ S) (1 outer : 
       (fun (1 q) => let 1 (o, r') := q; Uniq.end r' (fun w => (o, Uniq.mk w)))
       (body ρ (Outlives.refl ρ) (Lent.mk ()) outer (Uniq.mk v)))
 /-- `&*r`, a shared reborrow of a mutable one -/
-def Uniq.share {0 ρ : Region} {S B : Type} (1 r : Uniq ρ S)
+def Uniq.share {0 ρ : Region} {S B : Type} [RegionFree B] (1 r : Uniq ρ S)
     (body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → Shr ρ' S → Result B) : Result1 B (Uniq ρ S) :=
   Uniq.end r (fun v => ResultH.ofResult (Uniq.mk v) (body ρ (Outlives.refl ρ) (Shr.mk v)))
 /-- the same inside a scope that holds handles `H`, threaded through and back -/
-def Uniq.shareIn {0 ρ : Region} {S B H : Type} (1 r : Uniq ρ S) (1 outer : H)
+def Uniq.shareIn {0 ρ : Region} {S B H : Type} [RegionFree B] (1 r : Uniq ρ S) (1 outer : H)
     (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (1 o : H) → Shr ρ' S → Result1 B H) :
     Result1 B ((1 _ : H) × Uniq ρ S) :=
   Uniq.end r (fun v =>
@@ -241,19 +260,31 @@ def Uniq.shareIn {0 ρ : Region} {S B H : Type} (1 r : Uniq ρ S) (1 outer : H)
       (body ρ (Outlives.refl ρ) outer (Shr.mk v)))
 /-- `let r := &s` inside a scope that holds handles `H` (linear mode): they are threaded
 through the shared borrow's body and come back with its result -/
-def Shr.borrowIn {S B H : Type} (0 σ : Region) (s : S) (1 outer : H)
+def Shr.borrowIn {S B H : Type} [RegionFree B] (0 σ : Region) (s : S) (1 outer : H)
     (1 body : (0 ρ : Region) → (0 h : Outlives σ ρ) → (1 o : H) → Shr ρ S → Result1 B H) : Result1 B H :=
   body σ (Outlives.refl σ) outer (Shr.mk s)
-/-- `&mut r.p` for a place with a lens -/
-def Uniq.zoom {0 ρ : Region} {S X B : Type} (l : Lens S X) (1 r : Uniq ρ S)
+/-- `&mut r.p` for a place with a *pure* optic (`LensP`): the store is recovered with
+`LensP.toLens` before the body runs, so the borrow is the same `Store` the store-lens
+form builds. -/
+def Uniq.zoomP {0 ρ : Region} {S : Type} {ω X : Type} {B : Type} [RegionFree B] (l : LensP S S X X) (1 r : Uniq ρ S)
+    (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (0 t : Lent ρ' S) → (1 x : Uniq ρ' X) → Result1 B (Uniq ρ' X)) :
+    Result1 B (Uniq ρ S) :=
+  Uniq.end r (fun v =>
+    let st := LensP.toLens l v;
+    ResultH.mapHandle (fun (1 x) => Uniq.end x (fun w => Uniq.mk (st.2 w)))
+      (body ρ (Outlives.refl ρ) (Lent.mk ()) (Uniq.mk st.1)))
+/-- `&mut r.p` for a place with a lens (the store form the lowering emits; `Uniq.zoomP`
+is the profunctor form). -/
+def Uniq.zoom {0 ρ : Region} {S X B : Type} [RegionFree B] (l : Lens S X) (1 r : Uniq ρ S)
     (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (0 t : Lent ρ' S) → (1 x : Uniq ρ' X) → Result1 B (Uniq ρ' X)) :
     Result1 B (Uniq ρ S) :=
   Uniq.end r (fun v =>
     let st := l v;
     ResultH.mapHandle (fun (1 x) => Uniq.end x (fun w => Uniq.mk (st.2 w)))
       (body ρ (Outlives.refl ρ) (Lent.mk ()) (Uniq.mk st.1)))
+
 /-- the same inside a scope that holds other handles `H`, threaded through and back -/
-def Uniq.zoomIn {0 ρ : Region} {S X B H : Type} (l : Lens S X) (1 r : Uniq ρ S) (1 outer : H)
+def Uniq.zoomIn {0 ρ : Region} {S X B H : Type} [RegionFree B] (l : Lens S X) (1 r : Uniq ρ S) (1 outer : H)
     (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (0 t : Lent ρ' S) → (1 o : H) → (1 x : Uniq ρ' X) →
       Result1 B ((1 _ : H) × Uniq ρ' X)) :
     Result1 B ((1 _ : H) × Uniq ρ S) :=
@@ -263,7 +294,7 @@ def Uniq.zoomIn {0 ρ : Region} {S X B H : Type} (l : Lens S X) (1 r : Uniq ρ S
       (fun (1 q) => let 1 (o, x) := q; Uniq.end x (fun w => (o, Uniq.mk (st.2 w))))
       (body ρ (Outlives.refl ρ) (Lent.mk ()) outer (Uniq.mk st.1)))
 /-- a borrow of a pair is two borrows, live at once; they come back as a linear pair -/
-def Uniq.both {0 ρ : Region} {A B C : Type} (1 p : Uniq ρ (A × B))
+def Uniq.both {0 ρ : Region} {A B C : Type} [RegionFree C] (1 p : Uniq ρ (A × B))
     (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (1 a : Uniq ρ' A) → (1 b : Uniq ρ' B) →
       Result1 C ((1 _ : Uniq ρ' A) × Uniq ρ' B)) :
     Result1 C (Uniq ρ (A × B)) :=
@@ -284,6 +315,7 @@ attribute [inline] Uniq.share
 attribute [inline] Uniq.shareIn
 attribute [inline] Shr.borrowIn
 attribute [inline] Uniq.zoom
+attribute [inline] Uniq.zoomP
 attribute [inline] Uniq.zoomIn
 attribute [inline] Uniq.both
 
@@ -310,6 +342,15 @@ inductive Borrowed (M H : Type) where
 def Mut.ofLens {0 ρ : Region} {S A : Type} (1 r : Uniq ρ S) (l : Lens S A) : Mut ρ A S :=
   match r with
   | .mk v => Mut.mk (l v)
+/-- `&mut r.p` for a place with a *pure* optic (`LensP`): the class has no lender, so
+the store is recovered from `view`/`set` (`LensP.toLens`). This is the one place the
+profunctor layer reaches the borrow API; `Mut` still stores a `Store` (a `LensP` is
+`Type 1` and cannot be the field). `Mut.ofPLens` stays on `PLens` because its `.err`
+branch hands the lender back; `MutOpt.ofAffine` keeps the `Affine`-valued form, and
+`MutOpt.ofTraversal`/`ofPrism` are its profunctor paths. -/
+def Mut.ofLensP {0 ρ : Region} {S : Type} {ω A : Type} (1 r : Uniq ρ S) (l : LensP S S A A) : Mut ρ A S :=
+  match r with
+  | .mk v => Mut.mk (LensP.toLens l v)
 /-- (a partial place's result as a borrow, or the lender `v` back) -/
 def Mut.ofR {0 ρ : Region} {S A : Type} (v : S) : Result (Store A S) → Borrowed (Mut ρ A S) (Uniq ρ S)
   | .ok st => .ok (Mut.mk st)
@@ -365,6 +406,25 @@ def MutOpt.ofAffine {0 ρ : Region} {A S : Type} (1 r : Uniq ρ S) (l : S → Af
   | .mk v => (match l v with
     | .some a k => .some (Mut.mk (a, k))
     | .none s => .none (Uniq.mk s))
+/-- `Option (&mut A)` from a zero-or-one-focus profunctor optic (`PrismP`). This is the
+profunctor form of the affine case: `preview` decides the branch and `set` rebuilds the
+lender for the backward function. (The `Affine` type stays because `ALens` adds a
+`Result` error on top of the absence; `PrismP` has no error payload.) -/
+def MutOpt.ofPrism {0 ρ : Region} {ω A : Type} {S : Type} (1 r : Uniq ρ S) (p : PrismP S S A A) : MutOpt ρ A S :=
+  match r with
+  | .mk v => (match preview p v with
+    | .some a => .some (Mut.mk (a, fun a' => overP (S := S) (T := S) (A := A) (B := A) p (fun _ => a') v))
+    | .none => .none (Uniq.mk v))
+/-- `Option (&mut A)` from a zero-or-one-focus `TraversalP` (an *affine* traversal): the
+general profunctor form of `Affine`, including a focus inside a context (which a
+`PrismP` cannot rebuild: its `build : B → T` has no lender). The caller guarantees the
+optic has at most one focus. -/
+def MutOpt.ofTraversal {0 ρ : Region} {ω A : Type} {S : Type} (1 r : Uniq ρ S)
+    (t : TraversalP S S A A) : MutOpt ρ A S :=
+  match r with
+  | .mk v => (match toListOf t v with
+    | .cons a .nil => .some (Mut.mk (a, fun a' => overT t (fun _ => a') v))
+    | _ => .none (Uniq.mk v))
 /-- `if let .some x := o then *x := f *x`: the lender, updated or not -/
 def MutOpt.over {0 ρ : Region} {A S : Type} (f : A → A) (1 o : MutOpt ρ A S) : Uniq ρ S :=
   match o with
@@ -384,6 +444,39 @@ def MutOpt.release {0 ρ : Region} {A S : Type} (1 o : MutOpt ρ A S) : Uniq ρ 
   match o with
   | .some m => Mut.release m
   | .none r => r
+
+-- ## Region-free result types: the structural instances
+--
+-- These are the type formers a scope's result `B` may be built from. `Region` itself
+-- has none, and there is no instance for a dependent Σ/Π over `Region`; a user type
+-- (a Feral `struct`, say) gets one from its lowering, where its fields are known.
+
+instance : RegionFree Unit := RegionFree.mk ()
+instance : RegionFree Nat := RegionFree.mk ()
+instance : RegionFree Bool := RegionFree.mk ()
+instance : RegionFree Char := RegionFree.mk ()
+instance : RegionFree String := RegionFree.mk ()
+instance : RegionFree Error := RegionFree.mk ()
+instance {A : Type} [RegionFree A] : RegionFree (List A) := RegionFree.mk ()
+instance {A : Type} [RegionFree A] : RegionFree (Option A) := RegionFree.mk ()
+instance {E A : Type} [RegionFree E] [RegionFree A] : RegionFree (Except E A) := RegionFree.mk ()
+instance {A B : Type} [RegionFree A] [RegionFree B] : RegionFree (A × B) := RegionFree.mk ()
+instance {A B : Type} [RegionFree A] [RegionFree B] : RegionFree (A → B) := RegionFree.mk ()
+instance {A : Type} [RegionFree A] : RegionFree (Result A) := RegionFree.mk ()
+instance {0 q : Qty} {A : Type} [RegionFree A] : RegionFree (ResultQ q A) := RegionFree.mk ()
+instance {A B : Type} [RegionFree A] [RegionFree B] : RegionFree (Result1 A B) := RegionFree.mk ()
+instance {0 q : Qty} {A B : Type} [RegionFree A] [RegionFree B] : RegionFree (ResultH q A B) :=
+  RegionFree.mk ()
+instance {M H : Type} [RegionFree M] [RegionFree H] : RegionFree (Borrowed M H) := RegionFree.mk ()
+instance {0 ρ : Region} {A : Type} [RegionFree A] : RegionFree (Shr ρ A) := RegionFree.mk ()
+instance {0 ρ : Region} {S : Type} [RegionFree S] : RegionFree (Lent ρ S) := RegionFree.mk ()
+instance {0 ρ : Region} {A : Type} [RegionFree A] : RegionFree (Uniq ρ A) := RegionFree.mk ()
+instance {0 ρ : Region} {A S : Type} [RegionFree A] [RegionFree S] : RegionFree (Mut ρ A S) :=
+  RegionFree.mk ()
+instance {0 ρ : Region} {A S : Type} [RegionFree A] [RegionFree S] : RegionFree (MutOpt ρ A S) :=
+  RegionFree.mk ()
+instance {A S : Type} [RegionFree A] [RegionFree S] : RegionFree (Store A S) := RegionFree.mk ()
+instance {A B : Type} [RegionFree A] [RegionFree B] : RegionFree (Pair2 A B) := RegionFree.mk ()
 
 -- ## Reading handles in specs and proofs
 --

@@ -99,6 +99,10 @@ structure PState where
   /-- the token after each offset (where it starts, after whitespace), since alternatives
   look at the same tokens again and again -/
   toks : Std.HashMap Nat (Nat × Except String TokInfo) := {}
+  /-- the column of an offset, once computed: a `colGt`/`colGe` check continues from the
+  last offset whose column is known instead of walking back to the start of the line
+  (`colOf` in `Wiz.Parser.Interp`) -/
+  cols : Std.HashMap Nat Nat := {}
 
 inductive PResult (α : Type) where
   | ok (a : α) (s : PState)

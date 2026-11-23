@@ -1,0 +1,18 @@
+import FeralCore
+import Feral
+-- REJECTED (Rust E0499: two mutable borrows live at once). A contract is a proof
+-- obligation, not a licence: the body still borrows `v` twice.
+-- expect: E0499 at 13
+feral
+  fn bad (n : U64)
+    requires (Nat.lt n.val 10 = .true)
+    ensures (True)
+  : Vec U64 := {
+    let mut v := Vec.new;
+    let r1 := &mut v;
+    let r2 := &mut v;
+    r1.push 1;
+    r2.push 2;
+    v
+  }
+end

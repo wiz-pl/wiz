@@ -1,5 +1,6 @@
 import Text
 import Functor
+import Std
 import WordArray
 import IO
 import Scry.Wil
@@ -353,6 +354,14 @@ structure Scry.LState where
   contTo : Option Nat
   /-- Diagnostics, newest first, each with the statement that caused it. -/
   warnings : List Scry.Warning
+  /-- C# nullability facts (`Scry.Cs.NullFact`), accumulated across the file's
+  functions: the annotation EDB (`nullable(var)`/`nonnull(var)`) the C# frontend
+  publishes. The C lowering leaves this empty. -/
+  nullFacts : List (String × Nat × Nat)
+  /-- C# nullness point facts (`node, var, kind`): the receiver of a dereference, a
+  value that is maybe-null, or an asserted value. `kind` is `Scry.Cs.pointMayNull`,
+  `pointDeref` or `pointAssert`. -/
+  nullPoints : List (String × Nat × Nat × Nat)
   /-- The model pack the lowering consults for allocation/free calls. -/
   models : Scry.ModelPack
 
@@ -1169,6 +1178,15 @@ partial def Scry.constInt (c : Scry.Cst) (n : Nat) : Option Nat :=
         | .some a => match String.eq (Scry.tokenF c n "operator") "+" with
           | .true => Scry.constInt c a
           | .false => .none
+
+/-- Is the expression a null constant? A C23 `null` literal (`nullptr`), or an integer
+literal `0` (possibly parenthesised or unary `+`). C compares a pointer against either
+form as a null test, not as a comparison of two differently typed values. -/
+def Scry.isNullConst (c : Scry.Cst) (n : Nat) : Bool :=
+  Bool.or (String.eq (c.kindOf n) "null")
+    (match Scry.constInt c n with
+      | .some k => Nat.beq k 0
+      | .none => .false)
 
 /-- The declared length of an array declarator (`0` when the size is not a constant the
 lowering folds). -/
@@ -2282,6 +2300,15 @@ def Scry.directCall (c : Scry.Cst) (n : Nat) (name : String) (argNodes : List Na
         Scry.emitAt c n (Wil.call (.some r) qname args);
         Scry.lret r
 
+/-- A comparison of two lowered operands with equal Wil types; a mixed comparison is a
+lowering boundary (the lowering has no implicit conversions). -/
+def Scry.lowerCmp (c : Scry.Cst) (n : Nat) (op : Wil.Op) (a b : Wil.Var) : Scry.LM Wil.Cond :=
+  match Scry.tyEq a.ty b.ty with
+  | .false => do
+    Scry.warnAt c n ("comparison of " ++ Scry.tyShow a.ty ++ " and " ++ Scry.tyShow b.ty);
+    Scry.lret (.const .false)
+  | .true => Scry.lret (.cmp op a b)
+
 /-- A condition: a comparison is a `Wil.Cond` (no register), `&&`/`||` combine
 conditions, and anything else becomes `v != 0`. `&&`/`||` operands are lowered eagerly:
 Wil's `Cond.and`/`or` short-circuit evaluation, but any *side effect* in an operand has
@@ -2303,11 +2330,21 @@ def Scry.lowerCond (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Cond :=
           | .some ln, .some rn => do
             a ← Scry.lowerExpr c ln;
             b ← Scry.lowerExpr c rn;
-            match Scry.tyEq a.ty b.ty with
-            | .false => do
-              Scry.warnAt c n ("comparison of " ++ Scry.tyShow a.ty ++ " and " ++ Scry.tyShow b.ty);
-              Scry.lret (.const .false)
-            | .true => Scry.lret (.cmp op a b)
+            -- A pointer compared with `0` or a null literal is a null test. Lower the
+            -- constant as a pointer zero of the pointer's own type, so the two sides
+            -- have one Wil type and the nullness pass sees an isNull/notNull guard.
+            match a.ty, b.ty with
+            | .ptr _, _ => match Scry.isNullConst c rn with
+              | .true => do
+                z ← Scry.zeroAt c n a.ty;
+                Scry.lret (.cmp op a z)
+              | .false => Scry.lowerCmp c n op a b
+            | _, .ptr _ => match Scry.isNullConst c ln with
+              | .true => do
+                z ← Scry.zeroAt c n b.ty;
+                Scry.lret (.cmp op z b)
+              | .false => Scry.lowerCmp c n op a b
+            | _, _ => Scry.lowerCmp c n op a b
           | _, _ => Scry.condValue c n
         | .none => Scry.condValue c n
   | .unary => do
@@ -2350,7 +2387,7 @@ end
 /-- The state a translation unit's lowering starts from. -/
 def Scry.emptyState : Scry.LState :=
   Scry.LState.mk 0 0 0 .nil .true .nil .nil .nil .nil .nil .nil .nil .nil .nil
-    "" Wil.i32 Wil.noSpan .none .none .nil Scry.defaultModels
+    "" Wil.i32 Wil.noSpan .none .none .nil .nil .nil Scry.defaultModels
 
 /-- Give each parameter a register and bind its name (an unnamed parameter still gets a
 register, so the arity matches). -/
@@ -2370,11 +2407,22 @@ def Scry.blockAtDone (done : List (Nat × Wil.Block)) (i : Nat) : Option Wil.Blo
   | .some p => .some p.2
   | .none => .none
 
-/-- The function's blocks in id order. -/
+/-- `n` placeholders, so a block id can be stored at its index. -/
+def Scry.blockSlots : Nat → Wil.Block → Array Wil.Block
+  | .zero, _ => Array.empty
+  | .succ k, b => Array.push (Scry.blockSlots k b) b
+
+/-- The function's blocks in id order. Blocks are kept in an `Array` by id while
+assembling, so a function with `b` blocks costs `O(b)` instead of the `O(b²)` of
+`blockAtDone`'s `List.find` over `done` for every id (the last lowering polynomial,
+see `scry/bench/scale.md`, "What remains"). Ids not in `done` are `unreachable`. -/
 def Scry.assemble (n : Nat) (done : List (Nat × Wil.Block)) : List Wil.Block :=
-  List.map (fun i => match Scry.blockAtDone done i with
-    | .some b => b
-    | .none => Wil.Block.mk .nil (.unreachable Wil.noSpan)) (Scry.schemaRange n)
+  let placeholder := Wil.Block.mk .nil (.unreachable Wil.noSpan);
+  -- `done` is newest first; `foldr` writes the oldest first, so a duplicated id (not
+  -- produced by the lowering) keeps the newest block, as `blockAtDone` did.
+  let slots := List.foldr (fun (p : Nat × Wil.Block) (a : Array Wil.Block) =>
+    Array.set a p.1 p.2) (Scry.blockSlots n placeholder) done;
+  List.map (fun i => Array.getD slots i placeholder) (Scry.schemaRange n)
 
 /-- The implicit fallthrough: `main` returns 0 (C's rule), any other function is
 `ret none` with a warning (its value is undefined in C). -/
@@ -2467,11 +2515,13 @@ def Scry.calleesOf (fn : Wil.Func) : List String :=
       | .call _ (.direct name) _ _ => .cons name .nil
       | _ => .nil) b.stmts)) fn.blocks))
 
-/-- Deduplicate a list of strings, keeping first occurrences. -/
+/-- Deduplicate a list of strings, keeping first occurrences. (The accumulator is
+reversed and reversed once at the end: appending each new element to the end copied the
+whole accumulator and made a function with many distinct callees quadratic.) -/
 def Scry.dedup (l : List String) : List String :=
-  List.foldl (fun acc x => match List.any (String.eq x) acc with
+  List.reverse (List.foldl (fun acc x => match List.any (String.eq x) acc with
     | .true => acc
-    | .false => List.append acc (.cons x .nil)) .nil l
+    | .false => .cons x acc) .nil l)
 
 /-- `f` over `l`, dropping the `none`s (the list library has no `filterMap`). -/
 def Scry.filterMapOpt {A B : Type} (f : A → Option B) : List A → List B
@@ -2522,17 +2572,20 @@ def Scry.lowerTU (path : String) (c : Scry.Cst) : Scry.TU :=
 
 -- ## The CFG
 
-/-- Deduplicate naturals, keeping first occurrences. -/
+/-- Deduplicate naturals, keeping first occurrences (reversed accumulator, as `dedup`). -/
 def Scry.dedupNat (l : List Nat) : List Nat :=
-  List.foldl (fun acc x => match List.any (Nat.beq x) acc with
+  List.reverse (List.foldl (fun acc x => match List.any (Nat.beq x) acc with
     | .true => acc
-    | .false => List.append acc (.cons x .nil)) .nil l
+    | .false => .cons x acc) .nil l)
 
-/-- `(index, value)` pairs for a list. -/
-partial def Scry.zipIdx {A : Type} (l : List A) : Nat → List (Nat × A)
-  | _ => match l with
-    | .nil => .nil
-    | .cons x rest => .cons (0, x) (List.map (fun p => (Nat.succ p.1, p.2)) (Scry.zipIdx rest 0))
+/-- `(index, value)` pairs for a list, counting from 0. The index argument is kept for
+the existing call sites (`zipIdx l 0`) and is not read, as before. -/
+def Scry.zipIdxGo {A : Type} : Nat → List A → List (Nat × A)
+  | _, .nil => .nil
+  | i, .cons x rest => .cons (i, x) (Scry.zipIdxGo (Nat.succ i) rest)
+
+def Scry.zipIdx {A : Type} (l : List A) : Nat → List (Nat × A) :=
+  fun _ => Scry.zipIdxGo 0 l
 
 /-- The CFG edges of a function, `(block index, successor index)` for the facts EDB. The
 definition is `Wil.Func.cfg`; this is its numeric view. -/

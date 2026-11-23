@@ -156,6 +156,46 @@ def checkHas (out t : String) : IO Unit := check (contains out t) s!"expected {t
 def readFile? (f : System.FilePath) : IO String := do
   if ← f.pathExists then IO.FS.readFile f else pure ""
 
+/-- A release directory for `tag`: `RELEASES/tag/wiz-ARCH-linux.tar.gz` made from a
+toolchain tree (`bin/wiz` and `bin/grail` print their arguments) that ships
+`share/wiz/cache` and a glibc sysroot with the release's safe relative symlinks
+(`ld-linux-x86-64.so.2 -> ld-2.27.so`, and a `libc.so -> libc.so.6 -> libc-2.27.so`
+chain), and its `.sha256` (mandatory for tags and snapshots since 51db234c1). -/
+def releaseWithCache (rel : System.FilePath) (tag a : String) : IO Unit := do
+  let sys := s!"share/wiz/cc/sysroot/lib/x86_64-linux-gnu"
+  let root ← mkTree [
+    (s!"wiz-{a}-linux/bin/wiz", "#!/bin/sh\necho release wiz \"$@\"\n"),
+    (s!"wiz-{a}-linux/bin/grail", "#!/bin/sh\necho release grail \"$@\"\n"),
+    (s!"wiz-{a}-linux/share/wiz/.lake/build/bin/wiz", "#!/bin/sh\necho release wiz \"$@\"\n"),
+    (s!"wiz-{a}-linux/share/wiz/.lake/build/bin/grail", "#!/bin/sh\necho release grail \"$@\"\n"),
+    (s!"wiz-{a}-linux/share/wiz/lib/Prelude.wiz", ""),
+    (s!"wiz-{a}-linux/share/wiz/cache/README", "a warm cache\n"),
+    (s!"wiz-{a}-linux/{sys}/ld-2.27.so", ""), (s!"wiz-{a}-linux/{sys}/libc-2.27.so", "")]
+  for b in ["bin/wiz", "bin/grail", "share/wiz/.lake/build/bin/wiz", "share/wiz/.lake/build/bin/grail"] do
+    makeExecutable (root / s!"wiz-{a}-linux" / b)
+  -- the sysroot's relative symlinks, as the release's glibc 2.27 bundle has them
+  for (link, target) in [("ld-linux-x86-64.so.2", "ld-2.27.so"), ("libc.so.6", "libc-2.27.so"),
+                         ("libc.so", "libc.so.6")] do
+    let _ ← runOut "ln" ["-s", target, (root / s!"wiz-{a}-linux" / sys / link).toString]
+  IO.FS.createDirAll (rel / tag)
+  let tb := rel / tag / tarballName a
+  let _ ← runOut "tar" ["-czf", tb.toString, "-C", root.toString, s!"wiz-{a}-linux"]
+  -- every release (tag or snapshot) is installed only with its checksum (51db234c1)
+  let sumOut ← runOut "sha256sum" [tb.toString]
+  IO.FS.writeFile (tb.toString ++ ".sha256") ((sumOut.splitOn " ").headD "" ++ "\n")
+
+/-- A release tarball at `rel/tag/wiz-ARCH-linux.tar.gz`, built at test time by `tar` with
+`args` (after `-czf TB`), and its mandatory `.sha256`. A caller gives `tar` a
+`--transform` or `-P` to put a member in it that should never be extracted; nothing
+hostile is stored in the repository. -/
+def releaseTar (rel : System.FilePath) (tag a : String) (args : List String) : IO System.FilePath := do
+  IO.FS.createDirAll (rel / tag)
+  let tb := rel / tag / tarballName a
+  let _ ← runOut "tar" (["-czf", tb.toString] ++ args)
+  let sumOut ← runOut "sha256sum" [tb.toString]
+  IO.FS.writeFile (tb.toString ++ ".sha256") ((sumOut.splitOn " ").headD "" ++ "\n")
+  pure tb
+
 /-- `tower show` in a directory: the toolchain and why (`none` when it fails). -/
 def showIn (e : Env) (dir : System.FilePath) : IO (Option (String × String)) := do
   let (r, out, _) ← towerOut e ["show"] dir
@@ -244,9 +284,11 @@ def cases (impl : IO Impl) : List Case := [
         -- tower probes `lake` in the directory it clones into (no `lean-toolchain` of
         -- ours): without an elan default toolchain that probe fails, so the install and
         -- the nightly auto-install after it cannot run. The Nix CI has none (only this
-        -- checkout's toolchain: docs/ci-runner.md), so skip rather than fail.
+        -- checkout's toolchain: docs/ci-runner.md), so this is `Tests.skipMissing`: a
+        -- failure by default, a reported skip in the `library` shard, whose
+        -- "allow-missing-deps" entry and allow-list entry name exactly this case.
         unless ← lakeForSource? do
-          skip "no source toolchain: `lake` has no toolchain outside a checkout (elan has no default)"
+          skipMissing "no source toolchain: `lake` has no toolchain outside a checkout (elan has no default)"
           return
         let (bare, work) ← upstream
         let e ← mkEnv (← impl)
@@ -315,6 +357,9 @@ def cases (impl : IO Impl) : List Case := [
         let x ← IO.FS.createTempDir
         let _ ← runOut "tar" ["-xzf", (rel / "v1" / tarballName a).toString, "-C", x.toString]
         checkHas (← runOut (x / s!"wiz-{a}-linux/bin/wiz").toString ["check"]) s!"wiz-{a}-linux/share/wiz/lib check"
+        -- (F12) the toolchain's Wasm host is beside lib/, where `wiz run --target wasm` looks
+        unless ← (x / s!"wiz-{a}-linux/share/wiz/web/wasm-host.mjs").pathExists do
+          throw (IO.userError "the release tarball has no share/wiz/web/wasm-host.mjs")
         let e ← mkEnv (← impl)
         tower e ["set", "git", bare.toString]
         tower e ["set", "releases", rel.toString]
@@ -334,6 +379,208 @@ def cases (impl : IO Impl) : List Case := [
         checkHas (← runOut (e.binDir / "wiz").toString ["+mine", "x"]) "release wiz -I"
         tower e ["default", "mine"]
         checkHas (← runOut (e.binDir / "grail").toString ["y"] (← IO.FS.createTempDir)) "release grail y" },
+    { name := "a tag release's checksum is mandatory, and the wrapper's read-only cache", run := fun _ => do
+        let (bare, _) ← upstream
+        let a ← arch
+        let rel ← IO.FS.createTempDir
+        releaseWithCache rel "v1" a
+        let e ← mkEnv (← impl)
+        tower e ["set", "git", bare.toString]
+        tower e ["set", "releases", rel.toString]
+        tower e ["set", "source", "release"]
+        -- a tag has its own release, and since 51db234c1 it is installed only with its
+        -- `.sha256` (the snapshot case below covers the snapshot path)
+        tower e ["toolchain", "install", "v1"]
+        let tc := e.tcDir "v1"
+        checkHas (← readFile? (tc / "tower.info")) "source release"
+        -- the toolchain ships `share/wiz/cache`: both wrappers pass it, as the Nix wrapper does
+        let out ← runOut (tc / "bin/wiz").toString ["check"]
+        checkHas out s!"--cache-ro {tc / "share/wiz/cache"}"
+        checkHas out s!"-I {tc / "share/wiz/lib"}"
+        checkHas (← runOut (tc / "bin/grail").toString ["build"]) s!"--cache-ro {tc / "share/wiz/cache"}"
+        -- without its checksum the tag release is refused, not installed unverified
+        IO.FS.removeFile (rel / "v1" / (tarballName a ++ ".sha256"))
+        let m ← towerFails e ["toolchain", "install", "v1", "--source", "release", "--force"]
+        checkHas m "sha256" },
+    { name := "F16: a release tarball with escaping or linked members is refused, and a good one installs", run := fun _ => do
+        let (bare, _) ← upstream
+        let a ← arch
+        let e ← mkEnv (← impl)
+        tower e ["set", "git", bare.toString]
+        -- every hostile fixture also carries a complete toolchain layout, so an install
+        -- that succeeds would be evidence the member scan did not run
+        let layout : List (String × String) := [
+          (s!"wiz-{a}-linux/bin/wiz", "#!/bin/sh\necho hostile wiz \"$@\"\n"),
+          (s!"wiz-{a}-linux/bin/grail", "#!/bin/sh\necho hostile grail \"$@\"\n"),
+          (s!"wiz-{a}-linux/share/wiz/.lake/build/bin/wiz", "#!/bin/sh\necho hostile wiz \"$@\"\n"),
+          (s!"wiz-{a}-linux/share/wiz/.lake/build/bin/grail", "#!/bin/sh\necho hostile grail \"$@\"\n"),
+          (s!"wiz-{a}-linux/share/wiz/lib/Prelude.wiz", "")]
+        let staging ← mkTree (layout ++ [("payload/escape", "x\n")])
+        -- (1) a member above the extraction root
+        let rel1 ← IO.FS.createTempDir
+        let tb1 ← releaseTar rel1 "v1" a
+          ["--transform", "s,^payload/escape$,../escape,", "-C", staging.toString, s!"wiz-{a}-linux", "payload/escape"]
+        check (contains (← runOut "tar" ["-tzf", tb1.toString]) "../escape")
+          "the fixture archive has no ../escape member"
+        tower e ["set", "releases", rel1.toString]
+        let m ← towerFails e ["toolchain", "install", "v1", "--source", "release"]
+        checkHas m "refusing to unpack"
+        checkHas m "../escape"
+        checkHas m "would be written outside"
+        check (!contains m "tar -xzf") s!"the tarball was extracted before it was refused: {m}"
+        check (!(← (e.tcDir "v1").pathExists)) "a refused tarball left a toolchain"
+        -- (2) an absolute member (tar would strip the `/` on extraction, and still write
+        -- it below the extraction root; the scan refuses it, and the target never exists)
+        let outside ← IO.FS.createTempDir
+        let target := outside / "escaped.txt"
+        let rel2 ← IO.FS.createTempDir
+        let tb2 ← releaseTar rel2 "v1" a
+          ["-P", "--transform", "s,^payload/escape$," ++ target.toString ++ ",", "-C", staging.toString,
+           s!"wiz-{a}-linux", "payload/escape"]
+        check (contains (← runOut "tar" ["-tzf", tb2.toString]) target.toString)
+          "the fixture archive has no absolute member"
+        tower e ["set", "releases", rel2.toString]
+        let m ← towerFails e ["toolchain", "install", "v1", "--source", "release"]
+        checkHas m "refusing to unpack"
+        checkHas m target.toString
+        checkHas m "would be written outside"
+        check (!(← target.pathExists)) "an absolute member was written outside the extraction root"
+        -- (3) an escaping symlink in the release's own shape: the glibc sysroot's
+        -- `libpthread.so.0`, pointing eight levels up from a seven-deep directory (the
+        -- target, not the link type, is what is refused)
+        let sysroot := "share/wiz/cc/sysroot/lib/x86_64-linux-gnu"
+        let glibc := s!"wiz-{a}-linux/" ++ sysroot
+        let tree3 ← mkTree (layout ++ [(glibc ++ "/libpthread-2.27.so", "")])
+        let _ ← runOut "ln" ["-s", "../../../../../../../../outside/libpthread.so.0",
+                             (tree3 / glibc / "libpthread.so.0").toString]
+        let rel3 ← IO.FS.createTempDir
+        let tb3 ← releaseTar rel3 "v1" a ["-C", tree3.toString, s!"wiz-{a}-linux"]
+        check (contains (← runOut "tar" ["-tvzf", tb3.toString]) "libpthread.so.0 ->")
+          "the fixture archive has no escaping symlink"
+        tower e ["set", "releases", rel3.toString]
+        let m ← towerFails e ["toolchain", "install", "v1", "--source", "release"]
+        checkHas m "refusing to unpack"
+        checkHas m "escaping symlink"
+        checkHas m "libpthread.so.0"
+        check (!(← (e.tcDir "v1").pathExists)) "a refused tarball left a toolchain"
+        -- (3b) a chain whose first link is lexically inside but whose second is not: the
+        -- escaping link is itself a member, so the whole archive is refused (which is why
+        -- a per-link lexical check is enough: every accepted link is checked from its own
+        -- directory, so composing accepted links cannot leave the root)
+        let tree3b ← mkTree (layout ++ [(glibc ++ "/libc-2.27.so", "")])
+        let _ ← runOut "ln" ["-s", "libc.so.6", (tree3b / glibc / "libc.so").toString]
+        let _ ← runOut "ln" ["-s", "../../../../../../../../outside/libc.so.6",
+                             (tree3b / glibc / "libc.so.6").toString]
+        let rel3b ← IO.FS.createTempDir
+        let tb3b ← releaseTar rel3b "v1" a ["-C", tree3b.toString, s!"wiz-{a}-linux"]
+        check (contains (← runOut "tar" ["-tvzf", tb3b.toString]) "libc.so ->")
+          "the fixture archive has no symlink chain"
+        tower e ["set", "releases", rel3b.toString]
+        let m ← towerFails e ["toolchain", "install", "v1", "--source", "release"]
+        checkHas m "refusing to unpack"
+        checkHas m "libc.so.6"
+        checkHas m "escaping symlink"
+        check (!(← (e.tcDir "v1").pathExists)) "a chained escaping symlink left a toolchain"
+        -- (4) a good archive still installs, and its safe sysroot links resolve: the
+        -- release's `ld-linux-x86-64.so.2 -> ld-2.27.so` and the
+        -- `libc.so -> libc.so.6 -> libc-2.27.so` chain
+        let rel4 ← IO.FS.createTempDir
+        releaseWithCache rel4 "v1" a
+        tower e ["set", "releases", rel4.toString]
+        tower e ["toolchain", "install", "v1", "--source", "release"]
+        checkHas (← readFile? (e.tcDir "v1" / "tower.info")) "source release"
+        checkHas (← runOut (e.tcDir "v1" / "bin/wiz").toString ["check"]) "release wiz"
+        let installed := e.tcDir "v1" / sysroot
+        checkEq "ld-2.27.so" (← runOut "readlink" [(installed / "ld-linux-x86-64.so.2").toString])
+        checkHas (← runOut "readlink" ["-f", (installed / "libc.so").toString]) "libc-2.27.so" },
+    { name := "error paths: an external command, run of a missing command, link of a missing path, a dangling link", run := fun _ => do
+        let (bare, _) ← upstream
+        let a ← arch
+        let rel ← IO.FS.createTempDir
+        IO.FS.createDirAll (rel / "v1")
+        let tb := rel / "v1" / tarballName a
+        IO.FS.writeFile tb "not a tarball\n"
+        let sumOut ← runOut "sha256sum" [tb.toString]
+        IO.FS.writeFile (tb.toString ++ ".sha256") ((sumOut.splitOn " ").headD "" ++ "\n")
+        let e ← mkEnv (← impl)
+        tower e ["set", "git", bare.toString]
+        tower e ["set", "releases", rel.toString]
+        -- a failing external command (here `tar`'s listing pass, which runs before the
+        -- extraction) says `exit N`, as the Lean reference did
+        let m ← towerFails e ["toolchain", "install", "v1", "--source", "release"]
+        checkHas m "tar -tzf"
+        checkHas m ": exit 2"
+        check (!contains m "exit code") s!"external command text: {m}"
+        -- a linked toolchain, for `run`
+        let tools ← IO.FS.realPath (← mkTree [
+          ("bin/wiz", "#!/bin/sh\necho linked wiz \"$@\"\n"), ("bin/grail", "#!/bin/sh\necho linked grail\n")])
+        for b in ["bin/wiz", "bin/grail"] do makeExecutable (tools / b)
+        tower e ["toolchain", "link", "x", tools.toString]
+        -- `run` of a command that does not exist: tower's prefix, exit 1
+        let (r, _, err) ← towerOut e ["run", "x", "--", "/nonexistent"]
+        check (r == 1) s!"run of a missing command: exit {r}"
+        checkEq "tower: /nonexistent: No such file or directory" err.trimAscii.toString
+        -- `link` of a missing path: `<path>: <errno text>`, exit 1
+        let (r, _, err) ← towerOut e ["toolchain", "link", "y", "/nope"]
+        check (r == 1) s!"link of a missing path: exit {r}"
+        checkEq "tower: /nope: No such file or directory" err.trimAscii.toString
+        -- uninstall of a dangling symlink removes it (Wiz's `present` is `lstat`)
+        let link := e.toolchains / "dangling"
+        IO.FS.createDirAll e.toolchains
+        let _ ← runOut "ln" ["-s", "/nope", link.toString]
+        checkEq "/nope" (← runOut "readlink" [link.toString])
+        let (r, _, err) ← towerOut e ["toolchain", "uninstall", "dangling"]
+        check (r == 0) s!"uninstall of a dangling link: exit {r}"
+        checkEq "tower: removed dangling" err.trimAscii.toString
+        let gone ← IO.Process.output { cmd := "readlink", args := #[link.toString] }
+        check (gone.exitCode != 0) "the dangling link is still there" },
+    { name := "the toolchain settings, including the cache and search-path keys, reach the wrappers", run := fun _ => do
+        let e ← mkEnv (← impl)
+        let root ← IO.FS.realPath (← mkTree [
+          ("co/.lake/build/bin/wiz", "#!/bin/sh\necho co wiz \"$@\"\n"),
+          ("co/.lake/build/bin/grail", "#!/bin/sh\necho co grail \"$@\"\n"),
+          ("co/lib/Prelude.wiz", ""), ("co/share/wiz/cache/README", "warm\n")])
+        for b in ["co/.lake/build/bin/wiz", "co/.lake/build/bin/grail"] do makeExecutable (root / b)
+        tower e ["set", "gmp", "mini-gmp.c"]
+        tower e ["set", "cache", "/tmp/wiz-cache"]
+        tower e ["set", "cache-ro", "/a cache"]
+        tower e ["set", "cache-ro", "/b"]
+        tower e ["set", "cache-verify", "strict"]
+        tower e ["set", "region-cache", "true"]
+        tower e ["set", "root", "/r one"]
+        tower e ["set", "root", "/r2"]
+        tower e ["set", "native-fuel", "100"]
+        let (_, text, _) ← towerOut e ["settings"]
+        checkHas text "gmp mini-gmp.c\n"
+        checkHas text "cache-ro /a cache\ncache-ro /b\n"
+        -- a path in `wiz-toolchain.local` is linked with the settings' flags (a plain
+        -- `toolchain link` takes only its own `--…` flags, as the Lean tower did)
+        let proj := root / "proj"
+        IO.FS.createDirAll proj
+        IO.FS.writeFile (proj / "wiz-toolchain.local") "../co\n"
+        tower e ["self", "shims"]
+        let out ← runOut (e.binDir / "wiz").toString ["check"] proj
+        checkHas out "--gmp mini-gmp.c"
+        checkHas out "--cache /tmp/wiz-cache"
+        checkHas out "--cache-ro /a cache"
+        checkHas out "--cache-ro /b"
+        checkHas out "--cache-verify strict"
+        checkHas out "--region-cache"
+        checkHas out "-I /r one"
+        checkHas out "-I /r2"
+        checkHas out "--native-fuel 100"
+        checkHas out s!"--cache-ro {root / "co/share/wiz/cache"}"
+        -- a setting that would do nothing is refused, not silently stored
+        checkHas (← towerFails e ["set", "native-fuel", "many"]) "expected a number"
+        checkHas (← towerFails e ["set", "region-cache", "maybe"]) "expected true or false"
+        checkHas (← towerFails e ["set", "cache-verify", "sometimes"]) "expected off, warn or strict"
+        -- `root` and `cache-ro` accumulate; no value clears them
+        tower e ["set", "root"]
+        tower e ["set", "cache-ro"]
+        tower e ["toolchain", "uninstall", (root / "co").toString]
+        let out ← runOut (e.binDir / "wiz").toString ["check"] proj
+        check (!contains out "-I /r") "a cleared root is still in the wrapper"
+        check (!contains out "--cache-ro /a") "a cleared cache-ro is still in the wrapper" },
     { name := "release snapshots: per-commit tarballs, nightly by its tag, pruned commits", run := fun _ => do
         let (bare, work) ← upstream
         let a ← arch
@@ -390,7 +637,7 @@ def cases (impl : IO Impl) : List Case := [
         let m ← towerFails e ["toolchain", "install", s!"main@{(c3.take 8)}"]
         checkHas m "no snapshot"; checkHas m "keep/demo" },
     { name := "from Nix: a flake's package, linked as a GC root", run := fun _ => do
-        unless ← have? "nix" do skip "no nix"; return
+        unless ← have? "nix" do skipMissing "no nix"; return
         let (bare, _) ← upstream
         let flake ← mkTree [
           ("flake.nix", "{ outputs = { self }: let p = builtins.path { path = ./tc; name = \"fake-wiz\"; }; in\n" ++

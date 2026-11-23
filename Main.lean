@@ -1,26 +1,55 @@
 import Wiz
+import Wiz.Attest
 import Wiz.Version
 import Wiz.Doc.Build
 import Wiz.Doc.Serve
+import Lean.Data.Json
 
 open Wiz
 
 def usage : String := "usage:
   wiz --version           print the version (and, for a release, its commit)
   wiz parse FILE          print the syntax tree of every command
+  wiz parse --imports FILE  print the header's imports, one per line (no elaboration)
   wiz check [-I DIR] FILE elaborate and type check (quantities: 0, 1, ω); -I DIR: another
                           module root (a package's src/), before or after FILE
-  wiz build FILE -o OUT [--target c|llvm|wasm]  compile the definition `main` to an
-                                   executable (C or LLVM) or a WebAssembly module (stage
-                                   8f: no IO, Nat/Int, closures, arrays; run it with
-                                   web/wasm-host.mjs). `--llvm` and `--wasm` still work.
+  wiz lint [-I DIR] FILE|- [--json] [--deny] [--rule Wxxx]...
+                          [--public-roots DIR]... [--package-lint FILE]... [--set NAME]...
+                          [--lint-baseline FILE | --lint-baseline-write FILE]
+                          post-elaboration lint warnings (`W101`, `W102`, `W103`, `W301`,
+                          `W302`); a package lint module adds its own `W5xx` rules when
+                          the consumer enables the set with `--set`; exit 0 on warnings
+                          unless --deny; --json carries the stable `W` code; `-` reads
+                          standard input; --lint-baseline reports (and fails on) only
+                          findings whose path/rule/anchor key is not in FILE, and
+                          --lint-baseline-write records this run as that file
+  wiz build FILE -o OUT [--target c|llvm|wasm|bpf|js|ebpf]  compile the definition
+                                   `main` to an executable (C or LLVM) or a WebAssembly
+                                   module (stage 8f: no IO, Nat/Int, closures, arrays;
+                                   run it with web/wasm-host.mjs). `--llvm` and
+                                   `--wasm` still work. `--target bpf` (alias `ebpf`)
+                                   takes a manifest (`bpf.toml`) and its `bpf-core/1`
+                                   typed core, and writes freestanding C plus
+                                   `bpf_rt.h`; a tracepoint/uprobe program also writes
+                                   `OUT.probe.json` (`wiz-probe/1`). Run
+                                   `clang -target bpf` yourself. `--target js` writes
+                                   a self-contained ES module (`OUT.mjs`, the runtime
+                                   pasted in) that Node runs and a browser can import
+                                   (`export function main`).
+  wiz build FILE -o OUT [--attest [FILE]]  … and write a build attestation (default
+                                   OUT.attest.json: an unsigned in-toto statement, see
+                                   stage 11ae and docs/building.md); c and llvm only
+  wiz verify [--attest FILE] [--artifact-only] ARTIFACT
+                                   check an attestation against ARTIFACT (default FILE:
+                                   ARTIFACT.attest.json); non-zero on a mismatch;
+                                   --artifact-only skips re-hashing the inputs
   wiz build FILE -o OUT [--split N]  compile the program as N C units in parallel
                                    (default 1: one unit; a split build is faster but the
                                    generated program runs somewhat slower, stage 15k)
   wiz build FILE -o OUT --lib      … or the exported functions to an object file, with OUT.h
   wiz build FILE -o OUT --no-main  … or the exported functions, linked without a `main`
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
-  wiz run FILE [--target c|llvm|wasm]  build and run `main`, printing its value
+  wiz run FILE [--target c|llvm|wasm|js]  build and run `main`, printing its value
                                    (`--llvm` and `--wasm` are aliases)
   wiz repl [--llvm] [--prelude M] [--script FILE] [--init CMD]
                                    read one command per line, keeping definitions (`:help`;
@@ -31,6 +60,7 @@ def usage : String := "usage:
                                    run the test driver (`.lake/build/bin/tests`, or PATH)
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
                                   [--serve [--port N] [--lsp PORT]] [--jobs N] [-v|-q]
+                                  [--no-highlight] [--languages FILE]
                                    documentation: a static site (one page per module,
                                    index, search, reference); --lib: the toolchain's library;
                                    source links are URL + path in its root + #L<line>;
@@ -38,7 +68,10 @@ def usage : String := "usage:
                                    8000); --lsp PORT: the pages ask `wiz lsp --ws PORT`
                                    for live types and docs in a panel; --jobs N: elaborate
                                    and render N modules at once (0: auto); -v: a progress
-                                   log on stderr (-vv: every declaration), -q: quiet
+                                   log on stderr (-vv: every declaration), -q: quiet;
+                                   --no-highlight: plain fences, the pre-highlighting bytes;
+                                   --languages FILE: merge a `wiz.doc.languages/1` registry
+                                   after the built-ins (repeatable; `wiz` reserved)
   wiz doc … --reference DIR [--check]
                                    also the reference manual (full signatures, doc comments,
                                    class instances, notation table) into DIR/index.md;
@@ -52,7 +85,9 @@ def usage : String := "usage:
                                     N days (default 30) from the write cache; a pruned file is
                                     just a miss, and --cache-ro layers are never touched
   wiz cache verify [--strict]        check every cache entry against its output manifest
-                                    (a full scan); exit 1 on a mismatch or missing file
+                                    (a full scan; integrity, not authenticity); exit 1 on a
+                                    mismatch or missing file, and --strict also fails on an
+                                    unmanifested keyed file
   wiz cache manifest                 rebuild the write cache's manifest.sexpr generation
                                     index from its per-module manifests
   wiz lsp                          a language server on stdin/stdout
@@ -68,7 +103,9 @@ def usage : String := "usage:
                                    (default: share/wiz/web, or web/out in a checkout)
 options: --cache DIR (the elaboration cache, default ~/.cache/wiz; shared, since it is
 content-addressed), --cache-ro DIR (repeatable: a read-only cache, searched in order
-after the write cache and never written, as in a Nix package's share/wiz/cache),
+after the write cache and never written, as in a Nix package's share/wiz/cache; its
+manifests are self-signed, so the layer is refused unless --cache-ro-unsigned),
+--cache-ro-unsigned (serve a read-only layer although it is unauthenticated),
 --no-cache (both), -I DIR (another module root, after lib/),
 --cache-prune DAYS (before the run: from the write cache only, remove keyed
   .wizc/.wizm/.wizr files older than DAYS days; a pruned entry is just a miss, and
@@ -77,8 +114,10 @@ after the write cache and never written, as in a Nix package's share/wiz/cache),
   read from the same caches and written to the write cache), --region-stats (print what
   the regions served, with --region-cache)
 --cache-verify off|warn|strict (default warn: check an entry's bytes against its output
-  manifest before using it; strict: only manifested entries; --cache-verify=strict works
-  too), --cache-verify-stats (print what the manifests verified)
+  manifest before using it; strict: an unlisted entry is a mismatch too. Neither is an
+  authenticity check: a manifest is a self-signed digest; a read-only layer needs
+  --cache-ro-unsigned or --cache-verify off; --cache-verify=strict works too),
+--cache-verify-stats (print what the manifests verified)
 trust: --trust-native (27a: `def X : a = b := native_refl` is decided by running a and b;
 the kernel does not check it, `#print axioms` lists it), --native-fuel N (its step limit)
 experimental kernel options (D1, they turn the cache off): --regularity off|full (full:
@@ -105,6 +144,18 @@ def parseCmd (path : String) : IO UInt32 := do
   for m in r.messages do
     IO.eprintln s!"{path}:{m.render input}"
   pure (if r.messages.isEmpty then 0 else 1)
+
+/-- `wiz parse --imports FILE`: the file's dependency fact. The imports are the fixed
+header, so this parses only the header (no elaboration, no module lookup, and it does not
+parse the rest of the file): one module name per line, in source order. -/
+def importsCmd (path : String) : IO UInt32 := do
+  let input ← IO.FS.readFile path
+  let (imports, messages) := parseImports input
+  for m in imports do
+    IO.println m
+  for m in messages do
+    IO.eprintln s!"{path}:{m.render input}"
+  pure (if messages.isEmpty then 0 else 1)
 
 /-- The module roots: the toolchain's library (`Module.toolchainLib`, the binary's own,
 whatever the current directory; `./lib` only when there is none), then the `-I`
@@ -257,6 +308,25 @@ def takeSplitOpt : List String → Except String (Option Nat × List String)
     return (k, a :: rest)
   | [] => return (none, [])
 
+/-- Take `--attest [FILE]` out of the arguments: `some FILE` when a file is given,
+`some ""` for the bare flag (the default path, `OUT.attest.json`), `none` without it.
+`--attest` also takes no file when the next word is another flag. -/
+partial def takeAttestOpt : List String → Except String (Option String × List String)
+  | "--attest" :: rest =>
+    match rest with
+    | f :: more =>
+      if f.startsWith "-" then do
+        let (o, a) ← takeAttestOpt rest
+        return (o.orElse (fun _ => some ""), a)
+      else do
+        let (_, a) ← takeAttestOpt more
+        return (some f, a)
+    | [] => return (some "", [])
+  | a :: rest => do
+    let (o, r) ← takeAttestOpt rest
+    return (o, a :: r)
+  | [] => return (none, [])
+
 /-- Take `--inert MODE` out of the arguments. -/
 def takeInertOpt : List String → Except String (Option InertReg × List String)
   | "--inert" :: m :: rest => do
@@ -270,13 +340,25 @@ def takeInertOpt : List String → Except String (Option InertReg × List String
     return (r, a :: rest)
   | [] => return (none, [])
 
+/-- The lint driver's options (`wiz lint`); the default is off, so `wiz check`, `wiz
+build` and the language server run no lint rules. -/
+structure LintOptions where
+  enabled : Bool := false
+  path : String := ""
+  publicRoots : List String := ["lib"]
+  rules : List String := []
+  /-- (P1) package lint modules to load (`--package-lint FILE`) -/
+  packageLints : List String := []
+  /-- (P1) package set names the consumer enabled (`--set NAME`); empty: none -/
+  sets : List String := []
+
 /-- The state every elaboration starts from: the kernel and printing options, the
 `builtin` registrations trusted (the toolchain's own modules), and the hooks the pure
 frontend needs (the loader, the C headers, the `link_c` files, `include_str`). -/
 def initStateOf (tc : Toolchain) (lib : Std.HashMap Name String) (headers : Std.HashMap String String)
     (cSources : Option (String → String → Option String))
     (includes : Option (String → String → Except String String)) (own : List Name)
-    (messages : Array Msg := #[]) : IO (CommandState ZeroOneMany) := do
+    (messages : Array Msg := #[]) (lint : LintOptions := {}) : IO (CommandState ZeroOneMany) := do
   let (regularity, predicativeProp) ← kernelOpts.get
   let lazyProofs ← lazyProofsOpt.get
   let inertReg ← inertOpt.get
@@ -288,13 +370,16 @@ def initStateOf (tc : Toolchain) (lib : Std.HashMap Name String) (headers : Std.
       globals := { regularity, predicativeProp, lazyProofs, inertReg, unboxStructs, proofSteps, traceProofSteps,
                    strictPrivacy := ← strictPrivacyOpt.get, pp := { useNotation := !(← ppAllOpt.get) } },
       trustedModule := own.contains, trustNative := tc.trustNative,
-      nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
+      nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve,
+      lintEnabled := lint.enabled, lintPath := lint.path,
+      lintPublicRoots := lint.publicRoots, lintRules := lint.rules,
+      lintSets := lint.sets }
   pure init
 
 /-- The initial state the frontend runs from: the module loader (every module the file can
 reach, `import A.B` is `A/B.wiz` under a root, read up front: the frontend is pure), the
 C headers, `link_c` sources and `include_str` files, and the kernel/printing options. -/
-def initState (tc : Toolchain) (path : String) (input : String) :
+def initState (tc : Toolchain) (path : String) (input : String) (lint : LintOptions := {}) :
     IO (CommandState ZeroOneMany × Std.HashMap String String) := do
   let roots ← moduleRoots tc
   let closure ← Module.loadClosure roots input
@@ -313,14 +398,18 @@ def initState (tc : Toolchain) (path : String) (input : String) :
     ({ info := {}, severity := .warning,
        text := s!"{p} is ignored: module {n} is the toolchain's own ({roots.head!}), which a module root cannot replace" } : Msg)
   let init ← initStateOf tc lib headers (some (Module.cSourceResolver sources))
-    (some (Module.includeResolver includes)) own shadow.toArray
+    (some (Module.includeResolver includes)) own shadow.toArray lint
   pure (init, headers)
 
 /-- Elaborate a file, through the toolchain's cache (if any); the number is the cache hits
-(one per command replayed from the cache), for `wiz doc -v`. -/
-def elaborateHits (tc : Toolchain) (path : String) (input : String) :
+(one per command replayed from the cache), for `wiz doc -v`. `sets` are the already
+loaded package lint sets; `fresh` keeps a lint set module out of the cache (the cache
+does not replay its `lint`/`lint-set` commands). -/
+def elaborateHitsCore (tc : Toolchain) (path : String) (input : String)
+    (lint : LintOptions := {}) (sets : Array LintPackageSet := #[]) (fresh : Bool := false) :
     IO (CommandState ZeroOneMany × Nat) := do
-  let (init, headers) ← initState tc path input
+  let (init, headers) ← initState tc path input lint
+  let init := { init with lintPackageSets := sets, lintSets := lint.sets }
   let (regularity, predicativeProp) ← kernelOpts.get
   let lazyProofs ← lazyProofsOpt.get
   let inertReg ← inertOpt.get
@@ -329,7 +418,7 @@ def elaborateHits (tc : Toolchain) (path : String) (input : String) :
   -- the cache doesn't know the experimental options
   let cacheOn := regularity == .off && !predicativeProp && lazyProofs && inertReg == .conv && !unboxStructs &&
       proofSteps == Budget.defaultSteps && !traceProofSteps && !(← strictPrivacyOpt.get) && !(← ppAllOpt.get) &&
-      !(← traceGuessesRef.get)
+      !(← traceGuessesRef.get) && !lint.enabled && !fresh
   if cacheOn && (tc.cacheDir.isSome || !tc.readCaches.isEmpty) then
     -- the key starts from the headers the file sees; modules enter it by their own keys
     let key₀ := hash (toString (headers.toList.map (·.2)))
@@ -344,13 +433,38 @@ def elaborateHits (tc : Toolchain) (path : String) (input : String) :
       (verify := verify) (rig := RigTag.tag (R := ZeroOneMany))
       (stats := if verify == .off then none else some verifyStats)
       (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := key₀Tag)
-      (rootPath := path))
+      (rootPath := path) (roUnsigned := tc.cacheRoUnsigned))
   else
     pure ((← Cache.elaborateUncached input init), 0)
 
-/-- Elaborate a file, through the toolchain's cache (if any). -/
-def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandState ZeroOneMany) :=
-  return (← elaborateHits tc path input).1
+/-- Load and check package lint modules: each is elaborated fresh (its `lint-set` and
+`lint` commands are state, not cache effects), then the registry checks the code block,
+the capability declarations and the runner's closure. A bad set is a hard error, never a
+rule that quietly does nothing. -/
+def loadLintSets (tc : Toolchain) (files : List String) : IO (Array LintPackageSet) := do
+  let mut states : Array (CommandState ZeroOneMany) := #[]
+  for f in files do
+    let input ← IO.FS.readFile f
+    let (s, _) ← elaborateHitsCore tc f input {} #[] (fresh := true)
+    let errs := s.messages.filter (·.severity == .error)
+    unless errs.isEmpty do
+      throw (IO.userError s!"package lint set {f}: {String.intercalate "; " (errs.toList.map (·.text))}")
+    states := states.push s
+  match Wiz.Lint.loadPackageSets states with
+  | Except.ok sets => pure sets
+  | Except.error e => throw (IO.userError e)
+
+/-- Elaborate a file, through the toolchain's cache (if any; a lint run is fresh, so a
+changed rule set is never replayed from a stale entry). -/
+def elaborateHits (tc : Toolchain) (path : String) (input : String) (lint : LintOptions := {}) :
+    IO (CommandState ZeroOneMany × Nat) := do
+  let sets ← loadLintSets tc lint.packageLints
+  elaborateHitsCore tc path input lint sets
+
+/-- Elaborate a file with the lint options (and any package lint sets they name). -/
+def elaborate (tc : Toolchain) (path : String) (input : String) (lint : LintOptions := {}) :
+    IO (CommandState ZeroOneMany) :=
+  return (← elaborateHits tc path input lint).1
 /-- (27a) `--trust-native` and `--native-fuel N`. -/
 def nativeOpts (tc : Toolchain) : Bool × Nat := (tc.trustNative, tc.nativeFuel.getD NativeRun.defaultFuel)
 
@@ -372,6 +486,10 @@ structure DocArgs where
   lsp : Option Nat := none
   reference : Option String := none
   check : Bool := false
+  /-- `--no-highlight`: the pages are byte-identical to the pre-highlighting output -/
+  highlight : Bool := true
+  /-- `--languages FILE` (repeatable): external `wiz.doc.languages/1` registries -/
+  languages : List String := []
   inputs : List String := []
 
 def docArgs (a : DocArgs) : List String → Except String DocArgs
@@ -402,6 +520,8 @@ def docArgs (a : DocArgs) : List String → Except String DocArgs
     docArgs { a with lsp := some p } rest
   | "--reference" :: d :: rest => docArgs { a with reference := some d } rest
   | "--check" :: rest => docArgs { a with check := true } rest
+  | "--no-highlight" :: rest => docArgs { a with highlight := false } rest
+  | "--languages" :: f :: rest => docArgs { a with languages := a.languages ++ [f] } rest
   | x :: rest => if x.startsWith "-" then throw s!"wiz doc: unknown option {x}" else docArgs { a with inputs := x :: a.inputs } rest
 
 /-- The path of `p` relative to `root` (`p` itself if it isn't under it). -/
@@ -487,12 +607,15 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let web ← match a.web with
     | some w => pure (some (System.FilePath.mk w))
     | none => do pure ((← webDir).map System.FilePath.mk)
-  -- the site's own files: beside the Wasm module (a release), or web/ of the checkout
+  -- the site's own files: `--web` wins, then web/ of the checkout the command runs in,
+  -- then share/wiz/web of a release (beside the toolchain's lib). The checkout directory
+  -- has to be a candidate in its own right: with a packaged `wiz`, `toolchainLib` points
+  -- into the store, and deriving "the checkout" from it never finds the working tree.
   let base := lib.parent.getD "."
   let assets : List System.FilePath :=
-    (web.toList ++ [base / "web", base / "share" / "wiz" / "web"]).eraseDups
+    (web.toList ++ [System.FilePath.mk "web", base / "web"]).eraseDups -- complexity: ok (at most three candidate directories)
   -- (the site keeps its title with --reference; the manual has its own)
-  let o : Doc.Options := { out := out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation", web := web, assets := assets, serve := a.serve, lsp := a.lsp, reference := a.reference.map System.FilePath.mk, check := a.check, referenceTitle := a.title.getD "Wiz standard library reference", verbose := a.verbose, jobs := jobs }
+  let o : Doc.Options := { out := out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation", web := web, assets := assets, serve := a.serve, lsp := a.lsp, reference := a.reference.map System.FilePath.mk, check := a.check, referenceTitle := a.title.getD "Wiz standard library reference", verbose := a.verbose, jobs := jobs, highlight := a.highlight, languages := a.languages.map System.FilePath.mk }
   let r ← Doc.run (fun m => elaborateHits tc "<doc>" s!"import {m}\n") mods o
   IO.println s!"wiz doc: {r.pages} modules, {out}/index.html"
   for f in r.written do IO.println s!"wiz doc: wrote {f}"
@@ -592,9 +715,15 @@ def cachePruneCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
 
 /-- `wiz cache verify`: check every manifest in each cache layer against the bytes beside
 it (a full scan; normal runs verify only what they read). Exit 1 on a mismatch or a missing
-file, and in `strict`/`--strict` also on an unmanifested keyed file. -/
+file, and in `strict`/`--strict` also on an unmanifested keyed file. A `--cache-ro` layer
+is always scanned as if `--strict` (a manifest, never an unverified file, is its only
+integrity claim). This is an integrity scan: a manifest is a self-signed digest, so it does
+not show that a writer and a builder are the same party. -/
 def cacheVerifyCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
-  let strict := tc.cacheVerify == "strict" || args.contains "--strict" || !tc.readCaches.isEmpty
+  -- (A read-only layer is scanned as if `strict`: "has a manifest" is all it claims, and
+  -- that is integrity, not authenticity. The name `strict` is about manifest presence
+  -- only; it is not a signature check.)
+  let requireManifest := tc.cacheVerify == "strict" || args.contains "--strict" || !tc.readCaches.isEmpty
   for a in args do
     unless a == "--strict" do
       IO.eprintln s!"cache verify: unknown argument {a}"
@@ -606,9 +735,12 @@ def cacheVerifyCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let mut bad := 0
   for dir in dirs do
     let c ← Cache.verifyLayer dir
+    let note := if tc.readCaches.any (·.toString == dir.toString) then
+      " (read-only: a manifest is integrity, not authenticity)"
+    else ""
     IO.println (s!"cache verify: {dir}: {c.modules} modules, {c.entries} entries, {c.regions} regions, " ++
-      s!"{c.mismatches} mismatched, {c.missing} missing, {c.expired} expired, {c.unmanifested} unmanifested")
-    if c.mismatches + c.missing + c.expired > 0 || (strict && c.unmanifested > 0) then bad := bad + 1
+      s!"{c.mismatches} mismatched, {c.missing} missing, {c.expired} expired, {c.unmanifested} unmanifested" ++ note)
+    if c.mismatches + c.missing + c.expired > 0 || (requireManifest && c.unmanifested > 0) then bad := bad + 1
   pure (if bad == 0 then 0 else 1)
 
 /-- `wiz cache manifest`: rebuild (or, for a read-only layer, report) the generation index
@@ -638,8 +770,17 @@ def cacheManifestCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
     IO.println s!"cache manifest: {dir}: {mods} modules, {entries} entries ({what})"
   pure 0
 
+/-- Read the file a command names. A missing one is one diagnostic at `1:1` (the
+`no-such-file` code, D6), as the self-hosted driver reports it, not an uncaught
+`IO.FS.readFile` exception. -/
+def readSourceDiag (path : String) : IO (Option String) := do
+  if ← System.FilePath.pathExists path then pure (some (← IO.FS.readFile path))
+  else
+    IO.eprintln s!"{path}:1:1: error: no such file"
+    pure none
+
 def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
-  let input ← IO.FS.readFile path
+  let some input ← readSourceDiag path | pure 1
   let s ← elaborate tc path input
   for m in s.messages do
     let line := s!"{path}:{m.render input}"
@@ -653,24 +794,178 @@ def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
       s!"{c.mismatches} mismatches, {c.unverified} unverified")
   pure (if s.messages.any (·.severity == .error) then 1 else 0)
 
+/-- `wiz lint`'s options. -/
+structure LintArgs where
+  file : Option String := none
+  json : Bool := false
+  deny : Bool := false
+  rules : List String := []
+  publicRoots : List String := ["lib"]
+  packageLints : List String := []
+  sets : List String := []
+  /-- (P2) compare with a baseline and report only findings it does not name -/
+  baseline : Option String := none
+  /-- (P2) write this run's findings as a baseline -/
+  baselineWrite : Option String := none
+
+def parseLintArgs : List String → Except String LintArgs
+  | [] => pure {}
+  | "--json" :: rest => do
+      pure { (← parseLintArgs rest) with json := true }
+  | "--deny" :: rest => do
+      pure { (← parseLintArgs rest) with deny := true }
+  | "--rule" :: r :: rest => do
+      let a ← parseLintArgs rest
+      pure { a with rules := r :: a.rules }
+  | "--public-roots" :: r :: rest => do
+      let a ← parseLintArgs rest
+      pure { a with publicRoots := r :: a.publicRoots }
+  | "--package-lint" :: f :: rest => do
+      let a ← parseLintArgs rest
+      pure { a with packageLints := f :: a.packageLints }
+  | "--set" :: n :: rest => do
+      let a ← parseLintArgs rest
+      pure { a with sets := n :: a.sets }
+  | "--lint-baseline" :: f :: rest => do
+      let a ← parseLintArgs rest
+      pure { a with baseline := some f }
+  | "--lint-baseline" :: [] => throw "wiz lint: --lint-baseline needs a file"
+  | "--lint-baseline-write" :: f :: rest => do
+      let a ← parseLintArgs rest
+      pure { a with baselineWrite := some f }
+  | "--lint-baseline-write" :: [] => throw "wiz lint: --lint-baseline-write needs a file"
+  | a :: rest =>
+    if a.startsWith "-" && a != "-" then throw s!"wiz lint: unknown option {a}" else do
+      let args ← parseLintArgs rest
+      match args.file with
+      | none => pure { args with file := some a }
+      | some _ => throw "wiz lint: one file (or - for standard input)"
+
+def lintSeverity (s : Severity) : String :=
+  match s with | .error => "error" | .warning => "warning" | .info => "info"
+
+def lintMsgJson (input : String) (m : Msg) : Lean.Json :=
+  let (l, c) := lineCol input m.info.start
+  let (l₂, c₂) := lineCol input (max m.info.stop (m.info.start + 1))
+  Lean.Json.mkObj [
+    ("severity", Lean.Json.str (lintSeverity m.severity)),
+    ("code", Lean.Json.str m.code),
+    ("message", Lean.Json.str m.text),
+    ("line", Lean.Json.num (Lean.JsonNumber.fromNat (l + 1))),
+    ("column", Lean.Json.num (Lean.JsonNumber.fromNat (c + 1))),
+    ("endLine", Lean.Json.num (Lean.JsonNumber.fromNat (l₂ + 1))),
+    ("endColumn", Lean.Json.num (Lean.JsonNumber.fromNat (c₂ + 1)))]
+
+/-- `wiz lint FILE|-`: elaborate the target fresh with the lint pass on, and print the
+messages. A warning does not fail the run unless `--deny`; an elaboration error does.
+`--json` carries each message's stable code (`W101`, …). -/
+def lintCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let a ← match parseLintArgs args with
+    | .ok a => pure a
+    | .error e => do IO.eprintln e; return 2
+  let some file := a.file
+    | IO.eprintln "wiz lint: no file (or - for standard input)"; return 2
+  let (path, input) ←
+    if file == "-" then
+      pure ("<stdin>", ← (← IO.getStdin).readToEnd)
+    else do
+      let some text ← readSourceDiag file | return 1
+      pure (file, text)
+  -- a bad package set is a registration error: report it, do not crash with the
+  -- runtime's "uncaught exception" text
+  let s? ← try
+      pure (some (← elaborate tc (if file == "-" then "<stdin>" else file) input
+        { enabled := true, path := (if file == "-" then "<stdin>" else file),
+          publicRoots := a.publicRoots.reverse, rules := a.rules.reverse,
+          packageLints := a.packageLints.reverse, sets := a.sets.reverse }))
+    catch e =>
+      IO.eprintln s!"wiz lint: {e}"
+      pure none
+  let some s := s? | return 1
+  let lintMsgs := s.messages.filter fun m => m.code.startsWith "W"
+  let errors := s.messages.filter (fun m => m.severity == .error)
+  -- (P2) write mode: a baseline records a finished run, never one with errors
+  if let some baselineFile := a.baselineWrite then
+    if !errors.isEmpty then
+      IO.eprintln s!"wiz lint: not writing {baselineFile}: the run has {errors.size} error(s)"
+      return 1
+    let fpath : System.FilePath := baselineFile
+    IO.FS.createDirAll (fpath.parent.getD ".")
+    IO.FS.writeFile fpath (Wiz.Lint.baselineText path lintMsgs)
+    IO.eprintln s!"wiz lint: wrote {lintMsgs.size} finding(s) to {baselineFile}"
+    return 0
+  -- (P2) diff mode: a finding whose stable key the baseline does not name is new
+  let mut fresh : Array Msg := #[]
+  let mut baselineError := false
+  if let some baselineFile := a.baseline then
+    let bpath : System.FilePath := baselineFile
+    if !(← bpath.pathExists) then
+      IO.eprintln s!"wiz lint: cannot read the baseline {baselineFile} (write one with --lint-baseline-write)"
+      baselineError := true
+    else
+      let text ← IO.FS.readFile bpath
+      fresh := Wiz.Lint.newFindings (Wiz.Lint.parseBaseline text) path lintMsgs
+      if fresh.isEmpty then
+        IO.eprintln s!"wiz lint: no new findings against {baselineFile}"
+      else
+        IO.eprintln s!"wiz lint: {fresh.size} new finding(s) not in {baselineFile}"
+  let shown := if a.baseline.isSome then fresh else lintMsgs
+  if a.json then
+    IO.println (Lean.Json.mkObj [
+      ("file", Lean.Json.str path),
+      ("diagnostics", Lean.Json.arr (shown.map (lintMsgJson input))),
+      ("warnings", Lean.Json.num (Lean.JsonNumber.fromNat (shown.filter (fun m => m.severity == .warning)).size)),
+      ("errors", Lean.Json.num (Lean.JsonNumber.fromNat errors.size))]).compress
+  else do
+    let freshKeys := (fresh.map (Wiz.Lint.findingKey path)).toList
+    for m in s.messages do
+      -- a baselined finding is not reported in diff mode (only a new one is)
+      if a.baseline.isSome && m.code.startsWith "W" &&
+          !freshKeys.contains (Wiz.Lint.findingKey path m) then continue
+      let line := s!"{path}:{m.render input}"
+      let line := if m.code.isEmpty then line else line ++ s!" [{m.code}]"
+      if m.severity == .error then IO.eprintln line else IO.println line
+  if baselineError then pure 3
+  else if !errors.isEmpty then pure 1
+  else if a.deny && !shown.isEmpty then pure 1
+  else if a.baseline.isSome && !fresh.isEmpty then pure 1
+  else pure 0
+
 def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOneMany)) := do
-  let input ← IO.FS.readFile path
+  let some input ← readSourceDiag path | pure none
   let s ← elaborate tc path input
   for m in s.messages do
     if m.severity == .error then IO.eprintln s!"{path}:{m.render input}"
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
-/-- The backend names `wiz build --target` accepts. -/
-def targets : List String := ["c", "llvm", "wasm"]
+/-- The backend names `wiz build --target` accepts. `ebpf` is the tracing-flavoured
+alias of the tree spelling `bpf`; both resolve to `Wiz.Compiler.Bpf`. -/
+def targets : List String := ["c", "llvm", "wasm", "bpf", "js", "ebpf"]
+
+/-- `wiz verify [--attest FILE] [--artifact-only] ARTIFACT`. -/
+def verifyCmd (tc : Toolchain) (attest : Option String) (args : List String) : IO UInt32 := do
+  let artifactOnly := args.contains "--artifact-only"
+  let args := args.filter (· != "--artifact-only")
+  match args with
+  | [artifact] =>
+    let file := match attest with
+      | some f => if f.isEmpty then artifact ++ ".attest.json" else f
+      | none => artifact ++ ".attest.json"
+    match ← Attest.verify (System.FilePath.mk file) (System.FilePath.mk artifact) (!artifactOnly) tc with
+    | .ok v => IO.println v; pure 0
+    | .error e => IO.eprintln s!"verify: {e}"; pure 1
+  | _ =>
+    IO.eprintln "usage: wiz verify [--attest FILE] [--artifact-only] ARTIFACT"
+    pure 2
 
 /-- Take `--target NAME`, `--llvm` and `--wasm` out of the arguments; return the selected
 backend and the rest. A flag and a conflicting `--target` are an error, as is two
 different targets. -/
 def takeTarget : List String → Except String (Option String × List String)
   | [] => pure (none, [])
-  | "--target" :: [] => throw "--target needs c, llvm or wasm"
+  | "--target" :: [] => throw "--target needs c, llvm, wasm, bpf, js or ebpf"
   | "--target" :: t :: rest => do
-    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm or wasm)"
+    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm, wasm, bpf, js or ebpf)"
     let (other, rest) ← takeTarget rest
     match other with
     | some u => if u != t then throw s!"two targets: {t} and {u}" else pure (some t, rest)
@@ -690,25 +985,72 @@ def takeTarget : List String → Except String (Option String × List String)
     pure (t, a :: rest)
 
 def buildCmd (tc : Toolchain) (path out : String) (target : String) (lib : Bool := false)
-    (noMain : Bool := false) (split : Nat := 0) : IO UInt32 := do
-  let some s ← elabFile tc path | pure 1
-  match ← Build.build tc s "main" out (target == "llvm") lib noMain split (target == "wasm") with
-  | .error e => IO.eprintln e; pure 1
-  | .ok _ => pure 0
+    (noMain : Bool := false) (split : Nat := 0) (attest : Option String := none) : IO UInt32 := do
+  -- `bpf` (and its `ebpf` alias) is the one target whose input is not the untyped IR: it
+  -- consumes the typed core (`bpf.toml` + `bpf-core/1`) and emits C for
+  -- `clang -target bpf` (§1.2, §3.2). A tracepoint/uprobe program also writes the
+  -- `wiz-probe/1` descriptor.
+  if target == "bpf" || target == "ebpf" then
+    if attest.isSome then
+      IO.eprintln "wiz build --attest: the bpf target does not emit a build attestation"
+      pure 2
+    else
+      Wiz.Compiler.Bpf.buildCmd path out lib noMain split
+  else if target == "js" then
+    if attest.isSome then
+      IO.eprintln "wiz build --attest: the js target does not emit a build attestation"
+      pure 2
+    else if lib || noMain || split != 0 then
+      IO.eprintln "wiz build --target js: one ES module with a `main`; `--lib`, `--no-main` and `--split` do not apply"
+      pure 2
+    else do
+      let some s ← elabFile tc path | pure 1
+      match ← Build.buildJs s "main" (System.FilePath.mk out) with
+      | .error e => IO.eprintln e; pure 1
+      | .ok _ => pure 0
+  else if target == "wasm" && attest.isSome then
+    IO.eprintln "wiz build --attest: the wasm target does not emit a build attestation"
+    pure 2
+  else do
+    let some s ← elabFile tc path | pure 1
+    match ← Build.build tc s "main" out (target == "llvm") lib noMain split (target == "wasm") with
+    | .error e => IO.eprintln e; pure 1
+    | .ok _ =>
+      match attest with
+      | none => pure 0
+      | some file =>
+        let file : System.FilePath := System.FilePath.mk (if file.isEmpty then out ++ ".attest.json" else file)
+        match ← Attest.emit tc path (System.FilePath.mk out) (target == "llvm") lib noMain split file with
+        | .error e => IO.eprintln s!"attest: {e}"; pure 1
+        | .ok () => IO.eprintln s!"wiz: attestation written to {file}"; pure 0
 
 def runCmd (tc : Toolchain) (path : String) (target : String) (split : Nat := 0) : IO UInt32 := do
-  let some s ← elabFile tc path | pure 1
-  let dir ← IO.FS.createTempDir
-  let print (v : String) : IO UInt32 := do
-    IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
-  if target == "wasm" then
-    match ← Build.runWasmGlobal s "main" dir with
-    | .error e => IO.eprintln e; pure 1
-    | .ok v => print v
-  else
-    match ← Build.runGlobal tc s "main" dir (target == "llvm") (split := split) with
-    | .error e => IO.eprintln e.message; pure 1
-    | .ok v => print v
+  if target == "bpf" || target == "ebpf" then do
+    IO.eprintln "wiz run --target bpf: the bpf backend builds an object; the ubpf/hosted \
+oracle is not wired in P0 (it needs the ELF reader and the helper harness)"
+    pure 2
+  else do
+    let some s ← elabFile tc path | pure 1
+    let dir ← IO.FS.createTempDir
+    -- (F11) the build's scratch directory is removed on every path: the run's output and
+    -- exit status are the same either way, and a failed cleanup is not the program's error
+    try
+      let print (v : String) : IO UInt32 := do
+        IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
+      if target == "wasm" then
+        match ← Build.runWasmGlobal s "main" dir with
+        | .error e => IO.eprintln e; pure 1
+        | .ok v => print v
+      else if target == "js" then
+        match ← Build.runJsGlobal s "main" dir with
+        | .error e => IO.eprintln e; pure 1
+        | .ok v => print v
+      else
+        match ← Build.runGlobal tc s "main" dir (target == "llvm") (split := split) with
+        | .error e => IO.eprintln e.message; pure 1
+        | .ok v => print v
+    finally
+      try IO.FS.removeDirAll dir catch _ => pure ()
 
 /-- The modules the REPL can import, and the hooks the frontend needs: every module under
 the roots (so a `:reset` need not read them again), its C headers and `link_c` files. -/
@@ -824,9 +1166,13 @@ def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := [])
           match c.splitOn " " with
           | [":run", name] =>
             let dir ← IO.FS.createTempDir
-            match ← Build.runGlobal tc state name dir llvm with
-            | .error e => stderr.putStrLn e.message
-            | .ok v => stdout.putStr (if v.endsWith "\n" then v else v ++ "\n")
+            -- (F11) remove the scratch directory on success and failure alike
+            try
+              match ← Build.runGlobal tc state name dir llvm with
+              | .error e => stderr.putStrLn e.message
+              | .ok v => stdout.putStr (if v.endsWith "\n" then v else v ++ "\n")
+            finally
+              try IO.FS.removeDirAll dir catch _ => pure ()
             stdout.flush
             return some state
           | _ => stderr.putStrLn s!"unknown command {c} (`:help`)"; return some state
@@ -953,7 +1299,7 @@ def kernelOpt : List String → Except String (Regularity × Bool × List String
     return (r, p, a :: rest)
   | [] => return (.off, false, [])
 
-def main (args : List String) : IO UInt32 := do
+def mainImpl (args : List String) : IO UInt32 := do
   -- (after the toolchain flags: the tarball's and tower's wrappers put `-I LIB` and
   -- their flags before the user's arguments)
   if ((({} : Toolchain).parseFlags args).2) == ["--version"] then
@@ -995,6 +1341,10 @@ def main (args : List String) : IO UInt32 := do
       if let some k := k then splitOpt.set k
       pure a
     | .error e => do IO.eprintln e; return 1
+  let args ← match takeAttestOpt args with
+    | .ok (o, a) => pure (a, o)
+    | .error e => do IO.eprintln e; return 1
+  let (args, attest) := args
   let args ← match kernelOpt args with
     | .ok (r, p, a) => do kernelOpts.set (r, p); pure a
     | .error e => do IO.eprintln e; return 1
@@ -1016,15 +1366,18 @@ def main (args : List String) : IO UInt32 := do
     | .error e => do IO.eprintln e; return 1
   let target := target?.getD "c"
   match args with
+  | ["parse", "--imports", path] => importsCmd path
   | ["parse", path] => parseCmd path
   | "cache" :: "prune" :: rest => cachePruneCmd tc rest
   | "cache" :: "verify" :: rest => cacheVerifyCmd tc rest
   | "cache" :: "manifest" :: rest => cacheManifestCmd tc rest
   | ["check", path] => checkCmd tc path
-  | ["build", path, "-o", out] => buildCmd tc path out target (split := split)
-  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out target true (split := split)
+  | "lint" :: rest => lintCmd tc rest
+  | ["build", path, "-o", out] => buildCmd tc path out target (split := split) (attest := attest)
+  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out target true (split := split) (attest := attest)
   | ["build", path, "-o", out, "--no-main"] =>
-    buildCmd tc path out target (noMain := true) (split := split)
+    buildCmd tc path out target (noMain := true) (split := split) (attest := attest)
+  | "verify" :: rest => verifyCmd tc attest rest
   | "doc" :: rest => docCmd tc rest
   | "fmt" :: rest => fmtCmd tc rest
   | ["run", path] => runCmd tc path target (split := split)
@@ -1032,7 +1385,13 @@ def main (args : List String) : IO UInt32 := do
   -- when the selected target is; there is no wasm REPL (no `:run` through that backend)
   | "repl" :: rest => do
     if target == "wasm" then
-      IO.eprintln "wiz repl: targets are c and llvm (not wasm)"
+      IO.eprintln "wiz repl: targets are c, llvm and bpf (no wasm REPL)"
+      pure 2
+    else if target == "js" then
+      IO.eprintln "wiz repl: targets are c, llvm and bpf (no js REPL)"
+      pure 2
+    else if target == "bpf" || target == "ebpf" then
+      IO.eprintln "wiz repl: the bpf backend has no REPL (a kernel program has no world)"
       pure 2
     else match takePrelude rest with
       | .error e => IO.eprintln e; pure 2
@@ -1075,3 +1434,11 @@ def main (args : List String) : IO UInt32 := do
     | none => IO.eprintln s!"unknown command: {" ".intercalate args}"
     IO.eprintln usage
     pure 2
+
+/-- The executable: read `WIZ_STATS` before the run and print the core counters at exit
+(`wiz` is one process per file, so this is the whole check). -/
+def main (args : List String) : IO UInt32 := do
+  Wiz.Stats.fromEnv
+  let rc ← mainImpl args
+  Wiz.Stats.report
+  return rc

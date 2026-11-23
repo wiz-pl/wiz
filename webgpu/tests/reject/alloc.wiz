@@ -1,2 +1,3 @@
+-- expect: Array.size
 def f (i : Nat) (a : Array U32) : U32 :=
   UIntN.add (Array.getD a i (U32.ofNat 0)) (Array.size a)

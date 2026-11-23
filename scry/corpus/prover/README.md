@@ -21,6 +21,9 @@ edges; a vacuous claim is never reported as proved.
 | `p4-process-unsafe.sh` | `cwe78-process-unsafe.cs` | the P1 claim on the unsafe twin | **refuted**, `src(9,9) -> flow(9,10,9) -> … -> sink(10,1,9)` |
 | `p5-helper-safe.sh` | `helper/Files.cs` (`SafeWrite`) | no header value reaches the file write | `proved`, invariant 3 rows |
 | `p5b-helper-unsafe.sh` | `helper/Files.cs` (`UnsafeWrite`) | the same claim on the unsafe twin | **refuted**, `src(6,7) -> flow(6,8,7) -> … -> sink(8,0,7)` |
+| `p7-memcpy-safe.sh` | `c/memcpy-safe.c` (`main`) | every write is preceded by a check (the `memcpy` length `n` is guarded by `n <= 16` and the destination is 32 cells) | `proved (every write is preceded by a check)`; 1 guard row, 1 write use |
+| `p8-memcpy-weak.sh` | `c/memcpy-weak.c` | the same cut, but the guard allows 64 into a 32-cell destination | **refuted**; the witness names `guard(...)`, the copy `use(...)` and the bound/capacity mismatch |
+| `p9-memcpy-unguarded.sh` | `c/memcpy-unguarded.c` | the same cut with no check | **refuted**; the witness names the use and says there is no guard on the length register |
 
 The `synthetic/` fixtures are written for this corpus. They keep the shape each proof
 exercises and are pure ASCII; no private source is checked in. `p2` runs with
@@ -30,10 +33,23 @@ sources (`src`, `retsrc`), while `param` flows are allowed. That is the logical 
 source is derived only from constants and parameters. The claim is about the safety
 consequence, not the syntactic shape of the string.
 
+The `c/` fixtures are the guards/bounds slice: the driver lowers them with the C
+frontend, analyses `main`, adds the `guard`/`use`/`before` rows derived from
+`Scry.Bounds`, and checks a `cut` claim. `p7` is the safe copy; `p8` weakens the guard
+bound (64 into 32 cells, with the same source length so a spill generated for one
+matches the other); `p9` removes the guard. The C spills are checked in when available;
+`check.sh` regenerates a missing one with `scry-cst` (`SCRY_CST=/path/to/scry-cst`).
+The proofs need neither tree-sitter nor .NET once the spills are present.
+
+`--cut` uses every guard point in the EDB as the certificate; `--guards 2,3` selects a
+subset, and the checker refuses a point with no guard row. A `cut` verdict is separate
+from a no-flow verdict: "every write is preceded by a check" says nothing about which
+values reach a sink.
+
 ## Build and run
 
-The driver reads a `.cs` and its checked-in `.cst` spill, so the proofs need neither
-tree-sitter nor .NET at run time:
+The driver reads a `.cs`/`.c` file and its checked-in `.cst` spill, so the proofs need
+neither tree-sitter nor .NET at run time:
 
 ```sh
 scry/corpus/prover/build.sh          # builds scry/build/prover (needs the Wiz toolchain)

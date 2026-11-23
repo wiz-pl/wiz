@@ -5,7 +5,49 @@
 // and where it is defined, clicking a constant goes to its definition, clicking anything
 // else selects it (arrows then move the selection, as in the infoview).
 "use strict";
-import { loadWasm, stepper, delegate } from "./tagged.js";
+// The Wasm module's loader and stepper (the documentation's pages are the one place a
+// page still drives `wiz_doc_*` directly; the goals/live panels are Loom runtimes).
+const big = (x) => (typeof x === "bigint" ? x : BigInt(x));
+async function loadWasm(url = "./wiz-infoview.mjs") {
+  const createModule = (await import(url)).default;
+  return createModule({ print: (s) => console.log(s), printErr: (s) => console.warn(s) });
+}
+function stepper(wasm, init, step) {
+  let state = wasm[init]();
+  return (ev) => {
+    const p = wasm.stringToNewUTF8(ev);
+    state = wasm[step](state, big(p));
+    wasm._free(p);
+  };
+}
+// Tagged text under `root`: the innermost tag under the mouse is highlighted and
+// `hover` called, `click` on a click, `key` for the arrows and Escape.
+function delegate(root, { click, hover, leave, key } = {}) {
+  let last = null;
+  root.addEventListener("mouseover", (e) => {
+    const t = e.target.closest(".tt");
+    if (t === last) return;
+    for (const h of root.querySelectorAll(".tt.hover")) h.classList.remove("hover");
+    last = t;
+    if (t) { t.classList.add("hover"); if (hover) hover(t); }
+    else if (leave) leave();
+  });
+  root.addEventListener("mouseleave", () => {
+    for (const h of root.querySelectorAll(".tt.hover")) h.classList.remove("hover");
+    last = null;
+    if (leave) leave();
+  });
+  root.addEventListener("click", (e) => {
+    const t = e.target.closest(".tt");
+    if (t && click) { e.preventDefault(); click(t); }
+  });
+  root.addEventListener("keydown", (e) => {
+    if (key && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Escape"].includes(e.key)) {
+      e.preventDefault();
+      key(e.key);
+    }
+  });
+}
 
 const data = JSON.parse(document.getElementById("wiz-doc-data").textContent);
 const byId = new Map(data.decls.map((d) => [d.id, d]));

@@ -1,0 +1,2 @@
+-- expect: String
+def f (s : String) : String := s

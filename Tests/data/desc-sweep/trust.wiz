@@ -1,0 +1,4 @@
+-- test: check
+import Prelude
+def twice (n : Nat) : Nat := Nat.add n n
+def t : twice 21 = 42 := native_refl

@@ -54,7 +54,7 @@ def and_right : (a b : Bool) → Bool.and a b = .true → b = .true
   | .false, b, h => absurd h.1
 "
 
-/-- The shape of `Hw` (lib/Hdl/Core.wiz) that `Hw.cat (Hw.lit 1 1) d` needs. -/
+/-- The shape of `Hw` (hdl/src/Hdl/Core.wiz) that `Hw.cat (Hw.lit 1 1) d` needs. -/
 def hwSrc : String := "import Prelude
 inductive HwTy where
   | bits (n : Nat)
@@ -537,7 +537,7 @@ def group : Group where
         -- arguments; the arguments after them are distinct, so this is Miller's pattern
         -- (`?p := (→)`), not a repeat. Before, `?p` had to be named by hand at every use.
         okLib ("import Prelude\n" ++
-          "def apply {A B : Type} (f : {p : Type → Type → Type} → p A B → Nat) (x : A → B) : Nat := f x\n") },
+          "def holeApply {A B : Type} (f : {p : Type → Type → Type} → p A B → Nat) (x : A → B) : Nat := f x\n") },
     { name := "… and the optics-shaped `set` needs no `(p := …)` annotation", run := fun _ =>
         -- the blocker in wiz-notes/reviews/2026-11-18-optics-profunctor.md §2.5:
         -- `l (fun _ => b) s` against `?p A B =?= ?dom → B` (a Π) solves `p := (→)`
@@ -561,7 +561,7 @@ def group : Group where
         -- the two *arguments* are the same variable: a solution is a guess (which
         -- occurrence would it mean?), so the error is the one it was before
         failsLib ("import Prelude\n" ++
-          "def apply {A : Type} (f : {p : Type → Type → Type} → p A A → Nat) (x : A → A) : Nat := f x\n")
+          "def holeApply {A : Type} (f : {p : Type → Type → Type} → p A A → Nat) (x : A → A) : Nat := f x\n")
           "a variable escapes the scope of the hole being solved"
         -- nor is a non-variable argument a pattern
         failsLib ("import Prelude\n" ++
@@ -598,8 +598,10 @@ def group : Group where
         -- `Eq.congrArg f e`/`fstEq e` with `e : f y = (y, y)`: the expected `?p = ?q` computes
         -- to `(?p.1 = ?q.1) × …` and `?q.1 =?= y` is solved by η (`?q := (?a, ?b)`); a cast
         -- computed while the second component's type was a hole is dropped once its two
-        -- types are the same (it would compute away)
-        okLibs "import Logic\ndef fstEq {A B : Type} {p q : (_ : A) × B} (e : p = q) : p.1 = q.1 := Eq.congrArg (fun (r : (_ : A) × B) => r.1) e\ndef t1 (f : Nat → (_ : Nat) × Nat) (h : (x : Nat) → f x = (x, x)) (y : Nat) : (f y).1 = y := fstEq (h y)\ndef t2 (f : Nat → (_ : Nat) × Nat) (y : Nat) (h : f y = (y, y)) : (f y).1 = y := fstEq h\ndef t3 (f : Nat → (_ : Nat) × Nat) (h : (x : Nat) → f x = (x, x)) (y : Nat) : (f y).1 = y :=\n  Eq.congrArg (fun (r : (_ : Nat) × Nat) => r.1) (h y)\n" },
+        -- types are the same (it would compute away). The level is named at the call site:
+        -- the carrier is a product, so `?u` occurs only in an implicit argument's type
+        -- (`wiz-notes/wishful/level-from-implicit-type.md`).
+        okLibs "import Logic\ndef fstEq {A B : Type} {p q : (_ : A) × B} (e : p = q) : p.1 = q.1 := Eq.congrArg.{0, 0} (fun (r : (_ : A) × B) => r.1) e\ndef t1 (f : Nat → (_ : Nat) × Nat) (h : (x : Nat) → f x = (x, x)) (y : Nat) : (f y).1 = y := fstEq (h y)\ndef t2 (f : Nat → (_ : Nat) × Nat) (y : Nat) (h : f y = (y, y)) : (f y).1 = y := fstEq h\ndef t3 (f : Nat → (_ : Nat) × Nat) (h : (x : Nat) → f x = (x, x)) (y : Nat) : (f y).1 = y :=\n  Eq.congrArg.{0, 0} (fun (r : (_ : Nat) × Nat) => r.1) (h y)\n" },
     { name := "pruning: a `let` of an inferred `match` (icestick-cpu C6)", run := fun _ =>
         -- the match's type `?T n` meets `List (?A n x✝)` from a branch, where `x✝` (the
         -- scrutinee) is in scope: `?A` can't depend on `x✝`, so it is pruned to `?A' n`

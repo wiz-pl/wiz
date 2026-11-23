@@ -25,6 +25,7 @@
 "use strict";
 import { createEngine, failureLines, isExitStatus, EngineFailure } from "./playground-engine.js";
 import { SelfhostServer } from "./selfhost-lsp-shim.js";
+import { index as indexOracle } from "./framework/index-oracle.mjs";
 
 let failed = 0;
 function check(name, got, want) {
@@ -193,7 +194,7 @@ check("no check export: null", await old.check("x"), null);
 
 // the in-page language server (?lsp=selfhost) on the same engine: an exit is a
 // diagnostic with the runtime's message, and the next change runs on the same module
-const server = new SelfhostServer({ evaluate: engine.evaluate, check: engine.check });
+const server = new SelfhostServer({ evaluate: engine.evaluate, check: engine.check, index: indexOracle });
 const open = (text, version) => server.handle(JSON.stringify({
   jsonrpc: "2.0", method: version === 1 ? "textDocument/didOpen" : "textDocument/didChange",
   params: version === 1

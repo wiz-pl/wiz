@@ -1,0 +1,35 @@
+; The typed core of the `execve` probe (bpf-core/1, the P0 fixture format).
+;
+; slots: x0 = TraceCtx, x1 = Option (UserStr 80), x2 = UserStr 80 (the `some` binder),
+;        x3 = the emit result (Bool), x4 = the lost-counter update (Bool).
+;
+; `argv-slot 80` is the bounded argv walk: `bpf_probe_read_user` reads argv[2], then
+; `bpf_probe_read_user_str` reads the string with the literal cap. The payload is slot 2
+; (the `sh -c` command); a filename probe uses `read-user-str 80` on args[0] and slot 0.
+; `ppid` is 0 in this slice: the `ppids` map is filled by `sched_process_fork` and
+; joined host-side.
+(bpf-core/1
+  (ret unit)
+  (decl "execve" ((ctx tracepoint)) unit
+    (at "Tests/fixtures/bpf/execve.bpfcore" 14 5
+      (ret
+        (let (option (userstr 80)) 1
+          (argv-slot 80
+            (var (ctx tracepoint) 0)
+            (ctx-arg 1 (var (ctx tracepoint) 0))
+            2)
+          (switch-option unit
+            (var (option (userstr 80)) 1)
+            (lit unit 0)
+            2
+            (let bool 3
+              (probe-emit bool "events" execve 2
+                (var (ctx tracepoint) 0)
+                (ctx-pid (var (ctx tracepoint) 0))
+                (ctx-tgid (var (ctx tracepoint) 0))
+                (lit u32 0)
+                (ctx-now (var (ctx tracepoint) 0))
+                (var (userstr 80) 2))
+              (let bool 4
+                (map-update bool "lost" (lit u32 0) (lit u64 1))
+                (lit unit 0)))))))))

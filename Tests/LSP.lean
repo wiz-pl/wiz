@@ -1,4 +1,5 @@
 import Wiz
+import Wiz.Lint
 import Tests.Harness
 
 open Wiz
@@ -66,6 +67,37 @@ where
     (j.getObjVal? "result").toOption.getD ((j.getObjVal? "error").toOption.getD Lean.Json.null)
 
 def has (j : Lean.Json) (s : String) : Bool := (j.compress.splitOn s).length > 1
+
+/-- The next framed message on `h`; a failure if the stream ended or its framing is broken. -/
+def nextMessage (h : IO.FS.Stream) : IO Lean.Json := do
+  match ← LSP.readMessage h with
+  | .ok (some j) => pure j
+  | .ok none => throw (IO.userError "the stream ended")
+  | .error why => throw (IO.userError why)
+
+/-- A read-only stream over `data` that returns at most `chunk` bytes per `read`: a pipe
+or a socket may return fewer bytes than asked, even when more are coming. `getLine` reads
+through the same cursor one byte at a time, so it is chunk-capped too. -/
+def chunkedStream (data : ByteArray) (chunk : Nat) : IO IO.FS.Stream := do
+  let pos ← IO.mkRef 0
+  let nxt (n : Nat) : IO ByteArray := do
+    let p ← pos.get
+    let k := min n (min (max chunk 1) (data.size - p))
+    pos.set (p + k)
+    pure (data.extract p (p + k))
+  let getLine : IO String := do
+    let mut bs := ByteArray.empty
+    let mut done := false
+    while !done do
+      let b ← nxt 1
+      if b.isEmpty then done := true
+      else
+        let c := b.get! 0
+        bs := bs.push c
+        if c == 0x0a then done := true
+    pure ((String.fromUTF8? bs).getD "")
+  pure ({ flush := pure (), read := fun n => nxt n.toNat, write := fun _ => pure ()
+          getLine, putStr := fun _ => pure (), isTty := pure false } : IO.FS.Stream)
 
 /-- Open `src` as the document `uri` (one with a real path, for `include_str`). -/
 def openAt (srv : LSP.Server) (uri src : String) : IO (LSP.Server × Array Lean.Json) :=
@@ -284,6 +316,33 @@ def group : Group where
         checkEq ["\"bye\\n\""] (infosIn out) }
   ]
 
+/-- The text `wiz fmt` makes of `src` (the Prelude the server has). -/
+def fmtText (src : String) : IO String := do
+  let p ← prelude
+  let init : St := { loader := fun m => if m == "Prelude" then some p else none, trustedModule := Tests.libModule }
+  pure (Fmt.run init src {}).text
+
+/-- A `textDocument/formatting` request's `TextEdit` array (or, with a range,
+`textDocument/rangeFormatting`), at `file:///t.wiz`. An error reply gives no edits. -/
+def formatEdits (srv : LSP.Server) (src : String) (range? : Option (Nat × Nat) := none)
+    (insertSpaces : Bool := true) : IO (LSP.Server × Array Lean.Json) := do
+  let options := s!"\{\"tabSize\":2,\"insertSpaces\":{if insertSpaces then "true" else "false"}}"
+  let (method, rangeJson) := match range? with
+    | some (a, b) => ("textDocument/rangeFormatting",
+        s!"\"range\":\{\"start\":{posJson src a},\"end\":{posJson src b}},")
+    | none => ("textDocument/formatting", "")
+  let (srv, out) ← LSP.handle srv (req s!"\{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"{method}\",\"params\":\{\"textDocument\":\{\"uri\":\"file:///t.wiz\"},{rangeJson}\"options\":{options}}}")
+  match (out[0]!.getObjVal? "result").toOption with
+  | some (.arr es) => pure (srv, es)
+  | _ => pure (srv, #[])
+
+/-- Apply a `TextEdit` array to `src` (the edits' positions are into `src`). -/
+def applyTextEdits (src : String) (es : Array Lean.Json) : String :=
+  let atPos (e : Lean.Json) (k : String) : Nat :=
+    LSP.ofPos src (LSP.getNat e ["range", k, "line"]) (LSP.getNat e ["range", k, "character"])
+  Actions.apply src (es.map fun e =>
+    { start := atPos e "start", stop := atPos e "end", text := LSP.getStr e ["newText"] })
+
 /-- Apply a `WorkspaceEdit` (for `file:///t.wiz`) to `src`. -/
 def applyEdit (src : String) (edit : Lean.Json) : String :=
   let edits := match LSP.get? edit ["changes", "file:///t.wiz"] with
@@ -346,9 +405,7 @@ def socketCase : IO Unit := do
         let (ed, edW) := (IO.FS.Stream.ofHandle edIn, IO.FS.Stream.ofHandle edOut)
         let done ← IO.asTask (prio := .dedicated)
           (LSP.serveInfoview (← server).libs (IO.FS.Stream.ofHandle srvIn) (IO.FS.Stream.ofHandle srvOut) sock ["Prelude"])
-        let next (h : IO.FS.Stream) : IO Lean.Json := do
-          let some j ← LSP.readMessage h | throw (IO.userError "the stream ended")
-          pure j
+        let next := nextMessage
         let src := "import Prelude\ndef k : Nat → Bool → Nat := by\n  intro n\n  intro b\n  exact n\n"
         LSP.writeMessage edW (req "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{}}")
         check (has (← next ed) "documentHighlightProvider") "documentHighlight not asked for"
@@ -360,6 +417,9 @@ def socketCase : IO Unit := do
           | 0 => Socket.connect sock
           | n + 1 => do try Socket.connect sock catch _ => do IO.sleep 50; conn n
         let (ivIn, ivOut) ← conn 100
+        -- the socket is owner-only: the infoview is a local capability, and the default
+        -- umask (022) would otherwise make it 0755 and connectable by any local user
+        checkEq 0o600 (← Socket.mode sock)
         let (iv, ivW) := (IO.FS.Stream.ofHandle ivIn, IO.FS.Stream.ofHandle ivOut)
         let c ← next iv
         checkEq "wiz/infoview/cursor" (LSP.getStr c ["method"])
@@ -402,7 +462,9 @@ def socketCase : IO Unit := do
         | .ok () => pure ()
         | .error e => throw e
         check (!(← System.FilePath.pathExists sock)) "the socket file is still there"
-        check ((← LSP.readMessage iv).isNone) "the infoview's connection is still open"
+        match ← LSP.readMessage iv with
+        | .ok none => pure ()
+        | _ => throw (IO.userError "the infoview's connection is still open")
 
 
 /-- The body of the WebSocket case: an editor on stdio (a socket pair), and two
@@ -419,9 +481,7 @@ def wsCase : IO Unit := do
         let some token := token | throw (IO.userError "no token without --ws-insecure")
         check (token.length == 32) s!"token: {token}"
         let path := s!"/?token={token}"
-        let next (h : IO.FS.Stream) : IO Lean.Json := do
-          let some j ← LSP.readMessage h | throw (IO.userError "the stream ended")
-          pure j
+        let next := nextMessage
         let tcp : IO (IO.FS.Stream × IO.FS.Stream) := do
           let (r, w) ← Socket.tcpConnect Socket.loopback port
           pure (IO.FS.Stream.ofHandle r, IO.FS.Stream.ofHandle w)
@@ -559,6 +619,51 @@ def serverGroup : Group where
         let (_, out) ← LSP.handle (← server) (req "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
         for m in ["wiz/plainGoal", "wiz/interactiveGoals", "wiz/subtermInfo", "codeActionProvider", "experimental"] do
           check (has out[0]! m) s!"no {m}" },
+    { name := "textDocument/formatting: wiz fmt's text, one edit, idempotent, range-only", run := fun _ => do
+        -- the capability
+        let (_, caps) ← LSP.handle (← server) (req "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
+        check (has caps[0]! "documentFormattingProvider") "no documentFormattingProvider"
+        check (has caps[0]! "documentRangeFormattingProvider") "no documentRangeFormattingProvider"
+        -- badly spaced source
+        let src := "import Prelude\ndef  f :Nat:=1\ndef g (n:Nat):Nat :=  n+1\n"
+        let expected ← fmtText src
+        check (expected != src) "the fixture is already formatted"
+        let (srv, _) ← openDoc src
+        let (srv, es) ← formatEdits srv src
+        checkEq 1 es.size
+        checkEq expected (applyTextEdits src es)
+        -- the one edit is a well-formed LSP range of the original text
+        let e := es[0]!
+        let atPos (k : String) : Nat :=
+          LSP.ofPos src (LSP.getNat e ["range", k, "line"]) (LSP.getNat e ["range", k, "character"])
+        check (atPos "start" ≤ atPos "end" && atPos "end" ≤ src.length) s!"range {atPos "start"}..{atPos "end"} of {src.length}"
+        -- idempotence: the reprint is a fixed point
+        let (srv, _) ← openDoc expected (srv? := some srv)
+        let (_, es2) ← formatEdits srv expected
+        checkEq 0 es2.size
+        -- a range request formats only the command inside it
+        let src2 := "import Prelude\ndef  f :Nat:=1\ndef  g :Nat:=2\n"
+        let rlo := (src2.splitOn "def  g").headD "" |>.length
+        let rhi := rlo + "def  g :Nat:=2".length
+        let (srv2, _) ← openDoc src2 (srv? := some srv)
+        let (_, es3) ← formatEdits srv2 src2 (some (rlo, rhi))
+        checkEq 1 es3.size
+        let out := applyTextEdits src2 es3
+        -- The range's second command must be exactly what a whole-file format makes of it;
+        -- the first command must be byte-identical. (The formatter's reprint is the
+        -- oracle: `def g :Nat:= 2`, not the source style `def g : Nat := 2`.)
+        let expected2 ← fmtText src2
+        let expectedLines := expected2.splitOn "\n"
+        let outLines := out.splitOn "\n"
+        let some expectedG := expectedLines[2]? | throw (IO.userError s!"no third line in\n{expected2}")
+        let some outG := outLines[2]? | throw (IO.userError s!"no third line in\n{out}")
+        checkEq expectedG outG
+        check (expectedG != "def  g :Nat:=2") s!"the fixture's second command is already formatted: {expectedG}"
+        check (outLines[1]? == some "def  f :Nat:=1") s!"the first command changed: {out}"
+        -- `insertSpaces: false` is refused, not silently ignored
+        let (_, out4) ← LSP.handle srv2 (req "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"textDocument/formatting\",\"params\":{\"textDocument\":{\"uri\":\"file:///t.wiz\"},\"options\":{\"tabSize\":2,\"insertSpaces\":false}}}")
+        check (has out4[0]! "insertSpaces") s!"no error: {out4[0]!.compress}"
+        checkEq "-32602" ((LSP.get? out4[0]! ["error", "code"]).getD Lean.Json.null).compress },
     { name := "wiz/plainGoal and wiz/plainTermGoal", run := fun _ => do
         let src := tacticSrc ++ "def f (n : Nat) : Nat := Nat.add n _\n"
         let (srv, _) ← openDoc src
@@ -764,8 +869,12 @@ def serverGroup : Group where
           if l.startsWith "| `" then some ((((l.drop 3).toString.splitOn "`").headD "")) else none
         for c in ErrorCode.all do
           check (rows.contains c) s!"docs/error-codes.md has no row for {c}"
+        -- Lint rules are user-visible codes too and live in their own registry, not in
+        -- `ErrorCode.all`; the docs table is the union (WizLint checks the other direction).
+        let lintIds := (Lint.registry Nat).map (fun r => r.id)
         for c in rows do
-          check (ErrorCode.all.contains c) s!"docs/error-codes.md lists {c}, which is not in ErrorCode.all" },
+          check (ErrorCode.all.contains c || lintIds.contains c)
+            s!"docs/error-codes.md lists {c}, which is in neither ErrorCode.all nor the lint registry" },
     { name := "code action: did you mean (fields, namespace, constructors)", run := fun _ => do
         let pre := "import Prelude\nstructure P where\n  count : Nat\n  total : Nat\ninductive Box where\n  | mk (n : Nat)\ndef Box.double : Box → Nat\n  | .mk n => n + n\ninductive Color where\n  | red\n  | green\n"
         for (body, needle, title, fixed) in [
@@ -945,6 +1054,32 @@ def serverGroup : Group where
         let (_, r) ← ask srv "wiz/interactiveInfo" src (offAfter src "2 *" (-1))
         checkEq ["HMul Nat Nat Nat"] ((item r "instance").map fun i => flatten (LSP.get? i ["type"]).get!)
         check ((item r "syntax").length == 1 && (item r "expansion").length == 1) s!"syntax items: {r.compress}" },
+    { name := "#plot: a message becomes a widget item carrying the WIZ_WIDGET: display value", run := fun _ => do
+        let mut libs := (← server).libs
+        for (m, p) in [("Logic", "lib/Logic.wiz"), ("Class", "lib/Class.wiz"),
+                       ("Data.Order", "lib/Data/Order.wiz"),
+                       ("Text", "lib/Text.wiz"), ("Json", "lib/Json.wiz"), ("Nat", "lib/Nat.wiz"),
+                       ("Ring", "lib/Ring.wiz"), ("Int", "lib/Int.wiz"), ("IntRing", "lib/IntRing.wiz"),
+                       ("IntOrder", "lib/IntOrder.wiz"), ("Rat", "lib/Rat.wiz"), ("Plot", "lib/Plot.wiz")] do
+          libs := libs.insert m (p, ← IO.FS.readFile p)
+        let srv : LSP.Server := { (← server) with libs := libs }
+        let (srv, _) ← LSP.handle srv (req "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{}}")
+        let src := "import Plot\ndef chart : Plot.Chart := Plot.chart \"W\" (Plot.frame [" ++
+          "Plot.line \"a\" [Plot.ptNat 0 1, Plot.ptNat 1 2]])\n#plot chart\n"
+        let (srv, out) ← LSP.handle srv (Lean.Json.mkObj [("jsonrpc", "2.0"), ("method", "textDocument/didOpen"),
+          ("params", Lean.Json.mkObj [("textDocument", Lean.Json.mkObj [("uri", "file:///t.wiz"), ("version", (1 : Nat)), ("text", src)])])])
+        check (!has (Lean.Json.arr out) "\"severity\":1") s!"errors: {(Lean.Json.arr out).compress}"
+        let item (r : Lean.Json) (kind : String) : List Lean.Json := match LSP.get? r ["items"] with
+          | some (.arr is) => is.toList.filter (LSP.getStr · ["kind"] == kind)
+          | _ => []
+        let (_, r) ← ask srv "wiz/interactiveInfo" src (offAfter src "#plot" (-2))
+        check ((item r "message").length == 0) s!"a widget was left as a message: {r.compress}"
+        let ws := item r "widget"
+        check (ws.length == 1) s!"widget items: {r.compress}"
+        let w := ws[0]!
+        check ((LSP.getStr w ["text"]).startsWith "WIZ_WIDGET:") s!"not the display value: {w.compress}"
+        check (has w "image/svg+xml") s!"no SVG mime type: {w.compress}"
+        check (has w "<svg") s!"no SVG document: {w.compress}" },
     { name := "inlay hints: the types of fun and let binders written without one", run := fun _ => do
         let src := "import Prelude\ndef f : Nat → Nat := fun x => Nat.succ x\ndef g : Nat := let n := 2\n  Nat.add n n\n" ++
           "def h : Nat → Bool → Nat := fun a b => a\ndef k : Nat → Nat := fun (y : Nat) => y\n"
@@ -1247,9 +1382,12 @@ def serverGroup : Group where
           (String.join ((WebSocket.sha1 "The quick brown fox jumps over the lazy dog".toUTF8).toList.map fun b =>
             let h := Nat.toDigits 16 b.toNat; String.ofList (if h.length < 2 then '0' :: h else h)))
         checkEq "Zm9vYmE=" (WebSocket.base64 "fooba".toUTF8)
-        for o in ["null", "http://localhost:8766", "http://127.0.0.1", "vscode-webview://abc"] do
+        for o in ["http://localhost:8766", "http://127.0.0.1", "vscode-webview://abc"] do
           check (WebSocket.localOrigin o) s!"{o} refused"
-        for o in ["https://example.com", "http://localhost.example.com", "http://127.0.0.1.nip.io:80"] do
+        -- an opaque origin (a sandboxed iframe, a `data:`/`file:` page) is what any site can
+        -- create, so `null` is refused along with foreign pages and lookalike hosts
+        for o in ["null", "https://example.com", "http://localhost.example.com", "http://127.0.0.1.nip.io:80",
+                  "data:", "file:///tmp/x.html"] do
           check (!WebSocket.localOrigin o) s!"{o} let in"
         -- frames of each length class, masked and not, read back
         let ((r, w), (r', w')) ← Socket.pair
@@ -1263,12 +1401,65 @@ def serverGroup : Group where
         -- an unmasked frame from a client breaks the protocol
         WebSocket.sendText w "x"
         checkEq none (← WebSocket.recvText r' w') },
+    { name := "framing: a short read, a bad or oversized Content-Length, invalid UTF-8", run := fun _ => do
+        let read (data : ByteArray) (chunk : Nat := 1) : IO (Except String (Option Lean.Json)) := do
+          LSP.readMessage (← chunkedStream data chunk)
+        let describe (r : Except String (Option Lean.Json)) : String :=
+          match r with
+          | .ok none => "end of stream"
+          | .ok (some j) => s!"a message: {j.compress}"
+          | .error e => s!"an error: {e}"
+        let mentions (s e : String) : Bool := (e.splitOn s).length > 1
+        let frame (body : String) : String := s!"Content-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+        -- the body arrives one byte per `read`: a reader that trusted a single short read
+        -- would parse a truncated body (old code turned that into `Json.null`)
+        let body := "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}"
+        match ← read (frame body).toUTF8 1 with
+        | .ok (some j) => checkEq "exit" (LSP.getStr j ["method"])
+        | r => throw (IO.userError s!"a short read: {describe r}")
+        -- a clean end of stream is `ok none`, not an error
+        match ← read .empty 8 with
+        | .ok none => pure ()
+        | r => throw (IO.userError s!"end of stream: {describe r}")
+        -- a non-numeric Content-Length is reported, not a panic
+        match ← read "Content-Length: abc\r\n\r\n{}".toUTF8 8 with
+        | .error e => check (mentions "Content-Length" e) e
+        | r => throw (IO.userError s!"a bad Content-Length was accepted: {describe r}")
+        -- an unbounded length is refused before any body is read ...
+        match ← read (s!"Content-Length: {LSP.maxContentLength + 1}\r\n\r\n").toUTF8 8 with
+        | .error e => check (mentions "limit" e) e
+        | r => throw (IO.userError s!"an oversized Content-Length was accepted: {describe r}")
+        -- ... and the limit itself is allowed (the body is missing here, so it ends short)
+        match ← read (s!"Content-Length: {LSP.maxContentLength}\r\n\r\n").toUTF8 8 with
+        | .error e => check (mentions "short" e) e
+        | r => throw (IO.userError s!"a body at the limit: {describe r}")
+        -- invalid UTF-8 in the body
+        match ← read (("Content-Length: 2\r\n\r\n".toUTF8) ++ ByteArray.mk #[0xff, 0xfe]) 8 with
+        | .error e => check (mentions "UTF-8" e) e
+        | r => throw (IO.userError s!"invalid UTF-8 was accepted: {describe r}")
+        -- a body cut short (Content-Length 10, 7 bytes, then EOF)
+        match ← read "Content-Length: 10\r\n\r\n{\"a\":1}".toUTF8 4 with
+        | .error e => check (mentions "short" e) e
+        | r => throw (IO.userError s!"a truncated body was accepted: {describe r}")
+        -- valid framing, bad JSON
+        match ← read (frame "{oops").toUTF8 4 with
+        | .error e => check (mentions "JSON" e) e
+        | r => throw (IO.userError s!"bad JSON was accepted: {describe r}")
+        -- EOF in the middle of a head is an error, not a silent end
+        match ← read "Content-Length: 2\r\n".toUTF8 4 with
+        | .error e => check (mentions "head" e) e
+        | r => throw (IO.userError s!"a truncated head: {describe r}")
+        -- no Content-Length at all
+        match ← read "X: y\r\n\r\n{}".toUTF8 8 with
+        | .error e => check (mentions "Content-Length" e) e
+        | r => throw (IO.userError s!"no Content-Length: {describe r}") },
     { name := "inside a feral block: hovers, go to definition and errors at the Feral source", run := fun _ => do
         -- the server's library: Prelude, Feral and the runtime of lowered code
         let mut libs := (← server).libs
         -- plus whatever Optic/FeralCore import on this tree (Result, Logic, OpticDerive and
         -- Deriving arrive with the cohesion stack); a module whose file is absent is skipped
-        for (m, p) in [("Optic", "lib/Optic.wiz"), ("Region", "lib/Region.wiz"), ("Text", "lib/Text.wiz"),
+        for (m, p) in [("Optic", "lib/Optic.wiz"), ("Functor", "lib/Functor.wiz"),
+                       ("Region", "lib/Region.wiz"), ("Text", "lib/Text.wiz"),
                        ("Feral", "lib/Feral.wiz"), ("FeralCore", "drafts/feral/lib/FeralCore.wiz"),
                        ("Data.Result", "lib/Data/Result.wiz"), ("Logic", "lib/Logic.wiz"),
                        ("OpticDerive", "lib/OpticDerive.wiz"), ("Deriving", "lib/Deriving.wiz")] do
@@ -1332,6 +1523,10 @@ def serverGroup : Group where
           check ((out.splitOn "404").length > 1) s!"{path}: {out}"
         let (_, out) ← ask "GET /infoview.html HTTP/1.1\r\nOrigin: https://example.com\r\n\r\n"
         check ((out.splitOn "403").length > 1) s!"foreign origin: {out}"
+        -- an opaque origin (`Origin: null`: a sandboxed iframe, or a `data:`/`file:` page)
+        -- is not a page on this machine, so it is refused for the files too
+        let (_, out) ← ask "GET /infoview.html HTTP/1.1\r\nOrigin: null\r\n\r\n"
+        check ((out.splitOn "403").length > 1) s!"opaque origin: {out}"
         -- without the directory (plain `--ws`): no files at all
         let (_, out) ← ask "GET /infoview.html HTTP/1.1\r\n\r\n" none
         check ((out.splitOn "426").length > 1) s!"no web directory: {out}"
@@ -1355,6 +1550,9 @@ def serverGroup : Group where
             ("bearer", "/", "Authorization: Bearer s3cr3t\r\n")] do
           let (ok, out) ← ask (upgrade target extra)
           check (ok && (out.splitOn "101 Switching Protocols").length > 1) s!"{what}: {out}"
+        -- an opaque origin is refused even with the right token (the origin is checked first)
+        let (ok, out) ← ask (upgrade "/?token=s3cr3t" "Origin: null\r\n")
+        check (!ok && (out.splitOn "403").length > 1 && (out.splitOn "101").length == 1) s!"opaque origin: {out}"
         -- `--ws-insecure` (no token): any local client
         let (ok, _) ← ask (upgrade "/") (token := none)
         check ok "insecure: refused"
@@ -1380,7 +1578,7 @@ def nvimGroup : Group where
     -- a test result). Both fail this case; the `harness:` lines say which happened.
     { name := "wiz.nvim: abbreviations, and the infoview against wiz lsp (editors/nvim/tests/run.sh)", run := fun _ => do
         let out ← IO.Process.output { cmd := "sh", args := #["editors/nvim/tests/run.sh"] }
-        if out.stdout.startsWith "skipped" then skip ((out.stdout.replace "skipped: " "").trimAscii.toString)
+        if out.stdout.startsWith "skipped" then skipMissing ((out.stdout.replace "skipped: " "").trimAscii.toString)
         else unless out.exitCode == 0 do
           throw (IO.userError s!"editors/nvim/tests/run.sh failed:\n{out.stdout}{out.stderr}") },
     -- The harness's own reporting: fixture output, so it needs neither nvim nor a build.

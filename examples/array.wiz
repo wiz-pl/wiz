@@ -1,3 +1,4 @@
+-- test: run
 import Std
 -- Functional arrays (lib/Std.wiz): random updates, the same under the interpreter (the
 -- model: the interpreter's immutable array) and compiled (the natives: C arrays updated

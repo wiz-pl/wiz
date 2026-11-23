@@ -1,0 +1,18 @@
+import Scry.Native
+/-!
+# Scry.NativeLink: the C sources behind `Scry.Native`
+
+`Scry.Native` declares the tree-sitter shim's externs; this module supplies their C
+implementation (`link_c`). A program that only *lowers* or analyses a checked-in
+`scry-cst` store does not need them, so it can import `Scry.Native` (through
+`Scry.TaintCmd`, say) without pulling in the native grammar. An executable that actually
+parses (`scry`, `scry-cst`, `cs-cover`) imports this module.
+
+The paths are relative to this file, in the same directory as `Scry/Native.wiz`.
+-/
+
+link_c "../../native/ts_shim.c"
+link_c "../../native/tree-sitter/lib/src/lib.c"
+link_c "../../native/tree-sitter-c/src/parser.c"
+link_c "../../native/tree-sitter-c-sharp/src/parser.c"
+link_c "../../native/tree-sitter-c-sharp/src/scanner.c"

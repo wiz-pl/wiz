@@ -1,5 +1,6 @@
 import Nat
 import Word
+import Compare
 /-!
 # PMap
 
@@ -11,11 +12,11 @@ rebalancing rotations).
 
 The representation is a size-balanced binary search tree (a weight-balanced tree, after
 Adams; the same scheme as Haskell's `Data.Map`), with the subtree size stored in each
-node. Keys are ordered by a `Compare` instance: `compare k k'` is `.lt`, `.eq` or `.gt`.
-Instances are provided for `Nat` (through the builtin `Nat.lt`/`Nat.beq`) and `U64`
-(unsigned); any other key type gets one by defining its `Compare` instance. (`U64Map` in lib/WordMap.wiz is the specialised, in-place when unique
-map with a native hash-table backend; `PMap` is the pure model a future `U64Map` can be
-defined against, see `wiz-notes/persistent-data.md`.)
+node. Keys are ordered by a `Compare` instance: `compare k k'` is `.lt`, `.eq` or `.gt`
+(lib/Compare.wiz, which also has the `Nat`, `U64` and `String` instances). Any other key
+type gets one by defining its `Compare` instance. (`U64Map` in lib/WordMap.wiz is the
+specialised, in-place when unique map with a native hash-table backend; `PMap` is the
+pure model `U64Map` is defined against, see `wiz-notes/persistent-data.md`.)
 
 ```
 import Data.PMap
@@ -42,31 +43,8 @@ Laws (`find_empty`, `size_empty`) are proved on the definitions. The other expec
 rotations; they are checked by the tests (group `persistent`) rather than proved here.
 -/
 
--- (`Ordering` is lib/Nat.wiz's three-way comparison type.)
-
-/-- Keys with a total order. `compare a b` must be `.lt` exactly when `a < b`, `.eq`
-exactly when `a = b`, and `.gt` otherwise. -/
-class Compare (K : Type) where
-  compare : K → K → Ordering
-
-/-- Three-way comparison of natural numbers, through the native `Nat.lt` and `Nat.beq`
-(in compiled code these are builtins; `Nat.cmp` would recurse once per unary `succ`). -/
-def Nat.compare (a b : Nat) : Ordering := match Nat.lt a b with
-  | .true => .lt
-  | .false => match Nat.beq a b with
-    | .true => .eq
-    | .false => .gt
-/-- Natural numbers are compared by `Nat.compare`. -/
-instance : Compare Nat := Compare.mk Nat.compare
-
-/-- Three-way comparison of 64-bit words (unsigned). -/
-def U64.cmp (a b : U64) : Ordering := match UIntN.lt a b with
-  | .true => .lt
-  | .false => match UIntN.beq a b with
-    | .true => .eq
-    | .false => .gt
-/-- 64-bit words are compared unsigned, by `U64.cmp`. -/
-instance : Compare U64 := Compare.mk U64.cmp
+-- (`Ordering` is lib/Nat.wiz's three-way comparison type; the `Compare` class and its
+-- instances are lib/Compare.wiz's, so `String` can have one without this module.)
 
 -- ## The tree
 

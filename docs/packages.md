@@ -164,7 +164,7 @@ content hash (accident detection, not cryptographic); registry entries are the s
 path (`docs/stages/23-grail.md`, "Trust: fetch is not build", and its "What is verified"
 list).
 
-The public `wiz-pl/grail-index` is **not in this tree**: stage 23m lists the real index,
+The public `wiz-pl/fate-index` is **not in this tree**: stage 23m lists the real index,
 its CI naming rules and the first packages as deferred, and describes the intended
 layout (`index/NAME.sexpr`, deterministic archives, `index.wiz`) in
 [index-repository.md](stages/23-grail/index-repository.md). What is implemented and

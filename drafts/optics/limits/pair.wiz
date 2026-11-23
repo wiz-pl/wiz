@@ -1,0 +1,10 @@
+import Optic
+
+-- `Lens.pair` cannot be built from two `LensP`s. `Strong` adds a context to a `P`
+-- (`first' : P A B → P (A × C) (B × C)`); it has no eliminator that decomposes an
+-- arbitrary `S` into two places. The natural term is a type error: `m x : P S S`, but
+-- `l` wants `P A A`.
+def pairP {S A B : Type} (l : LensP S S A A) (m : LensP S S B B) :
+    LensP S S (A × B) (A × B) :=
+  fun {P : Type → Type → Type} [pf : Profunctor P] [st : Strong P] (x : P (A × B) (A × B)) =>
+    l (P := P) (m (P := P) x)
