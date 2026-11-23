@@ -1426,10 +1426,12 @@ def ManifestStore.bump (m : ManifestStore) (f : VerifyCounts → VerifyCounts) :
 def ManifestStore.inWrite (m : ManifestStore) (dir : System.FilePath) : Bool :=
   some dir.toString == m.write.map (·.toString)
 
-/-- Index the region entry a layer just wrote, replacing that layer's previous entry for
-the key. A rewritten region may differ byte-for-byte from the old one (the image is not
-canonical), so keeping the old entry first would read the new file against the old
-digest, drop it, and lose the repair. -/
+/-- (K1) Index the region entry a layer just wrote, replacing that layer's previous entry
+for the key. A rewritten region may differ byte-for-byte from the old one (the image is not
+canonical), so keeping the old entry first would read the new file against the old digest,
+drop it, and lose the repair. Read-layer entries for the key are kept: they may answer
+another layer, and they are tried before or after this one without changing the artifact
+the key selects. -/
 def ManifestStore.setRegion (m : ManifestStore) (id : String) (e : ManifestEntry)
     (dir : System.FilePath) : IO Unit :=
   m.regions.modify fun mp =>
@@ -2068,6 +2070,13 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
             { a with binary := binary, textSalt := salt, rig := opts.rig }
           for ent in e.toList do
             let id := Key.id key
+            -- (K1) replace the write layer's entries for this id: the failed old entry
+            -- and the fresh one name the same file, and the post-pass `getRegion` walks
+            -- the list old-first. Read-layer entries are kept (they may answer other
+            -- layers), but the write layer must not leave its own stale entry ahead of
+            -- the bytes it just wrote. `setRegion` (this side of the merge) is that
+            -- repair, factored: it drops the write layer's entry for the key and adds
+            -- the fresh one, so neither the old digest nor a deleted repair survives.
             ms.setRegion id ent dir
           pure e
         catch _ => pure none

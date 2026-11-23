@@ -11,7 +11,7 @@
         "AGENTS.md",
         ".github/**"
       ],
-      "sha256": "0374eaf60cf656d499ff987648a4dacca3deb0c868dbd812988dbd9a95e9b7ff"
+      "sha256": "c9eda0821c3d192637a4adde46381b3a1258d3af9b86e3f5edc75146d69be90d"
     },
     "lean": {
       "files": 165,
@@ -27,7 +27,7 @@
         "lake-manifest.json",
         "lean-toolchain"
       ],
-      "sha256": "9f2db66ec5d6bbf38bf1fad7bcde5e9b0734c4e7f20eca340accb9098e6a09fe"
+      "sha256": "9a774fb52bc567441ddda3a0a71defe8d862da62fa96583bb6aeccf026f7dd98"
     },
     "packages": {
       "files": 927,
@@ -47,12 +47,12 @@
       "sha256": "936432c49522ea723f3c57dbe0a6492fdb5d41f7cdc03acf07a90aec8e85fa60"
     },
     "tests": {
-      "files": 396,
+      "files": 397,
       "paths": [
         "Tests/**",
         "web/**"
       ],
-      "sha256": "c1aa82fe9965a33a6cc58eb01acf33d2d890e4fd991b9db15c8f40996ccce4d6"
+      "sha256": "702a0e2db5c93522048ce91cb9ff29c333d31c1649cca1cae4e713118369a41a"
     },
     "wizlib": {
       "files": 110,

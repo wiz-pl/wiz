@@ -122,6 +122,14 @@
       "owner": "selfhost CLI parity (Tests/Groups/SelfhostCliDiff.lean, selfhost/Cli.wiz)",
       "expires": "2027-05-19",
       "why": "The host's `run` takes flags only and rejects trailing arguments (exit 2); the self-hosted driver passes them to the program. That is a documented host caveat, not a regression, and it needs a host-side `run FILE ARG...` before the entry can go."
+    },
+    {
+      "group": "cache-invariants",
+      "case": "per-layer --cache-ro-unsigned: a later layer is still refused (pending task 11)",
+      "reason": "pending task 11: --cache-ro-unsigned is global",
+      "owner": "cache-invariants lane (task 11: per-layer opt-in, K3)",
+      "expires": "2027-06-01",
+      "why": "The current Toolchain flag is one global Bool, so an opt-in for one --cache-ro also serves a later layer. The case asserts the per-layer contract when the warning names the later layer; until the K3 fix it reports a skip with this reason. Do not delete it; task 11 makes it pass un-pended."
     }
   ]
 }
