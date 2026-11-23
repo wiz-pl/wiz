@@ -545,14 +545,20 @@ def concGroup : Group where
             | _ => none
           | throw (IO.userError s!"`--list-cases =conc` has no case named {target}")
         let args := #["--run", "conc", toString i, "--cc", "/nonexistent/wiz-test-cc"]
+        -- The shard that runs this case may itself be `--allow-missing-deps` (the library
+        -- shard is, for iverilog) and exports WIZ_ALLOW_MISSING_DEPS for its children.
+        -- Drop it for both halves, so the default-failure half tests the default even
+        -- there and the opt-in half tests the flag alone.
+        let noAllowEnv : Array (String × Option String) := #[("WIZ_ALLOW_MISSING_DEPS", none)]
         -- without the flag: exit 1, and the failure names the dependency and the flag
-        let r ← IO.Process.output { cmd := self.toString, args }
+        let r ← IO.Process.output { cmd := self.toString, args, env := noAllowEnv }
         check (r.exitCode == 1) s!"exit {r.exitCode}, not 1 (a failure):\n{r.stdout}{r.stderr}"
         check ((r.stdout.splitOn "missing dependency: no toolchain").length > 1) r.stdout
         check ((r.stdout.splitOn "--allow-missing-deps").length > 1) r.stdout
         check ((r.stdout.splitOn "FAILED").length > 1) r.stdout
         -- with the flag: a reported skip (exit 3)
-        let r ← IO.Process.output { cmd := self.toString, args := args.push "--allow-missing-deps" }
+        let r ← IO.Process.output { cmd := self.toString, args := args.push "--allow-missing-deps",
+                                     env := noAllowEnv }
         check (r.exitCode == 3) s!"exit {r.exitCode}, not 3 (a skip):\n{r.stdout}{r.stderr}"
         check ((r.stdout.splitOn "⊘").length > 1) r.stdout
         check ((r.stdout.splitOn "SKIPPED (no toolchain)").length > 1) r.stdout },

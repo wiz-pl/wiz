@@ -131,11 +131,13 @@ async function noScriptDom(url) {
 async function connect(chrome) {
   const port = 9300 + Math.floor(Math.random() * 500);
   const profile = mkdtempSync(join(tmpdir(), "wiz-source-chrome-"));
+  let stderr = "";
   const proc = spawn(chrome, [
     "--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
     `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
     "--window-size=1280,900", "about:blank",
-  ], { stdio: "ignore" });
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+  proc.stderr.on("data", (d) => { stderr += d.toString(); });
   let target = null;
   for (let i = 0; i < 100 && !target; i++) {
     await sleep(150);
@@ -146,7 +148,8 @@ async function connect(chrome) {
   }
   if (!target) {
     proc.kill("SIGKILL");
-    throw new Error("Chromium did not open a DevTools target");
+    throw new Error("Chromium did not open a DevTools target" +
+      (stderr.trim() ? ": " + stderr.trim().slice(0, 2000) : ""));
   }
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((r, j) => {

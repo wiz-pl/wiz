@@ -67,7 +67,7 @@
   },
   {
     "name": "library",
-    "split": 8,
+    "split": 12,
     "jobs": 4,
     "allow-missing-deps": true,
     "select": [

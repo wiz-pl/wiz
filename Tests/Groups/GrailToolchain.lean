@@ -44,10 +44,23 @@ def toolchainGroup : Group where
   parallel := true
   cases := [
     { name := "wiz, grail and the test driver read no environment variables", run := fun _ => do
+        -- Every input to `wiz`/`grail` is a flag (Stage 23a): the compiler reads no WIZ_*
+        -- variable, so a build's result cannot change with the shell it runs in. The test
+        -- driver is the one exception, and it is the harness's explicit opt-out rather
+        -- than a compiler input: `WIZ_ALLOW_MISSING_DEPS` is `--allow-missing-deps` by
+        -- another name (the shard driver sets it), and only turns a missing dependency
+        -- from a failure into a reported skip. The driver's own cases check both forms
+        -- (`=testrunner`), and the flag is the form to prefer.
         let files := (← leanFiles "Wiz") ++ (← leanFiles "Grail") ++ #[System.FilePath.mk "Main.lean", "Tests/Main.lean"]
         for f in files do
           let text ← IO.FS.readFile f
-          check ((text.splitOn "getEnv \"WIZ").length == 1) s!"{f} reads a WIZ_ variable" },
+          -- (`getEnv "WIZ…"`: the variable's name up to the closing quote)
+          let reads := (text.splitOn "getEnv \"WIZ").drop 1 |>.map fun s =>
+            match s.splitOn "\"" with
+            | v :: _ => "WIZ" ++ v
+            | [] => "WIZ?"
+          let allowed := if f.toString == "Tests/Main.lean" then ["WIZ_ALLOW_MISSING_DEPS"] else []
+          checkEq allowed reads },
     { name := "wiz: an unknown flag or command is an error (exit 2), the usage alone is not", run := fun _ => do
         let wiz := ".lake/build/bin/wiz"
         let run (args : Array String) := IO.Process.output { cmd := wiz, args }
@@ -105,7 +118,24 @@ def toolchainGroup : Group where
         checkEq (repr roOnly).pretty (repr back).pretty
         -- render: one line per read cache, in order, then the write cache
         check ((full.render.splitOn "cache-ro /a\ncache-ro /b\ncache /w\n").length > 1) full.render
-        check ((roOnly.render.splitOn "cache-ro /a\ncache-ro /b\ncache (off)\n").length > 1) roOnly.render },
+        check ((roOnly.render.splitOn "cache-ro /a\ncache-ro /b\ncache (off)\n").length > 1) roOnly.render
+        -- (the opt-in names the layer immediately before it, as the Nix wrapper writes
+        -- `--cache-ro STORE --cache-ro-unsigned`: it must not trust a later `--cache-ro`,
+        -- and --no-cache clears it with the layers)
+        let (layerTc, _) := parse ["--cache-ro", "/a", "--cache-ro-unsigned",
+                                  "--cache-ro", "/b", "check", "x.wiz"]
+        checkEq ["/a"] (layerTc.unsignedReads.map toString)
+        check (layerTc.isUnsignedRead "/a") "the layer before the opt-in is not unsigned"
+        check (!layerTc.isUnsignedRead "/b") "the opt-in covered a later layer"
+        let (cleared, _) := parse ["--cache-ro", "/a", "--cache-ro-unsigned", "--no-cache",
+                                   "--cache-ro", "/c", "check", "x.wiz"]
+        check cleared.unsignedReads.isEmpty "an opt-in survived --no-cache"
+        -- (the flag follows its layer, so toFlags and render round-trip the scope)
+        let u : Toolchain := { readCaches := ["/a", "/b"], unsignedReads := ["/a"] }
+        let (ub, rest) := parse u.toFlags
+        checkEq [] rest
+        checkEq (repr u).pretty (repr ub).pretty
+        check ((u.render.splitOn "cache-ro /a\ncache-ro-unsigned\ncache-ro /b\n").length > 1) u.render },
     { name := "--cache-verify off|warn|strict round-trips and is not in the toolchain id", run := fun _ => do
         let parse (args : List String) := ({} : Toolchain).parseFlags args
         let (tc, rest) := parse ["--cache-verify", "strict", "check", "x.wiz"]
@@ -380,7 +410,7 @@ def toolchainGroup : Group where
         -- (the explicit opt-in really does serve it: this is what the default refuses, not a
         -- fixture that happens to miss)
         let (s1, _) ← Cache.elaborateCached none [pkg] "import M\n" init 0 (verify := .warn)
-          (rig := rig) (roUnsigned := true)
+          (rig := rig) (unsignedReads := [pkg])
         check (s1.globals.contains "forgedFalse") "the opt-in did not serve the forged entry"
         check (match s1.globals.find? "forgedFalse" with
           | some d => (match d.type with | .const "False" _ => true | _ => false)

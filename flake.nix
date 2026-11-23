@@ -567,62 +567,71 @@ EOF
           # links GMP (the flags below), so the closure grows by GMP and glibc only.
           # Wrapped with the programs it runs (git, tar, curl; `nix` and `lake` are the
           # user's), and told its own path for the shims it writes.
-          tower-unwrapped = pkgs.stdenv.mkDerivation {
-            pname = "tower-unwrapped";
-            inherit (unwrapped) version;
-            src = fs.toSource {
-              root = ./.;
-              fileset = fs.unions [ ./tower ./scripts/build-tower-wiz.sh ];
+          #
+          # `towerFor wizPkg` builds it with a particular `wiz`: the pure `.#tower` is
+          # `towerFor wiz`, and `lib.towerWith <store path>` is CI's seeded build. The
+          # seeded path is a store input, not the `wiz` derivation, so Nix substitutes it
+          # and never starts `wiz-unwrapped` (the cold compile the old job fell into).
+          towerFor = wizPkg:
+            let
+              tower-unwrapped = pkgs.stdenv.mkDerivation {
+                pname = "tower-unwrapped";
+                inherit (unwrapped) version;
+                src = fs.toSource {
+                  root = ./.;
+                  fileset = fs.unions [ ./tower ./scripts/build-tower-wiz.sh ];
+                };
+                nativeBuildInputs = [ wizPkg ];
+                buildPhase = ''
+                  runHook preBuild
+                  export HOME=$TMPDIR
+                  # only what tower uses: the C compiler, and GMP's headers and library (the
+                  # generated C links no Boehm collector, so the closure stays GMP + glibc)
+                  sh scripts/build-tower-wiz.sh tower-bin grail ${lib.escapeShellArgs [
+                    "--cc" "${pkgs.stdenv.cc}/bin/cc" "--cflags" tc.cflags "--ldflags" tc.ldflags ]}
+                  runHook postBuild
+                '';
+                installPhase = ''
+                  runHook preInstall
+                  install -Dm755 tower-bin $out/bin/tower
+                  runHook postInstall
+                '';
+              };
+            in
+            pkgs.stdenv.mkDerivation {
+              pname = "tower";
+              inherit (unwrapped) version;
+              dontUnpack = true;
+              nativeBuildInputs = [ pkgs.makeWrapper ];
+              installPhase = ''
+                makeWrapper ${tower-unwrapped}/bin/tower $out/bin/tower \
+                  --suffix PATH : ${lib.makeBinPath [ pkgs.coreutils pkgs.git pkgs.gnutar pkgs.gzip pkgs.curl ]} \
+                  --add-flags ${addFlags [ "--self" "${placeholder "out"}/bin/tower" ]}
+                # The `wiz` and `grail` shims, so installing the package puts them on PATH. They
+                # call the `tower` on PATH (the user's), falling back to this package's own, and
+                # use tower's default home, ~/.tower, where the toolchains live.
+                for t in wiz grail; do
+                  cat > $out/bin/$t <<EOF
+              #!/bin/sh
+              # tower shim: runs \`$t\` of the toolchain for this directory (\`tower show\`).
+              # It asks the \`tower\` on PATH (the user's), else this package's own.
+              tower=\$(command -v tower) || tower='$out/bin/tower'
+              case "\$1" in
+                +*) tc=\$("\$tower" resolve "\$1") || exit; shift ;;
+                *) tc=\$("\$tower" resolve) || exit ;;
+              esac
+              exec "\$tc/bin/$t" "\$@"
+              EOF
+                  chmod +x $out/bin/$t
+                done
+              '';
+              meta = {
+                description = "tower, the Wiz toolchain manager, with the wiz and grail shims: installs toolchains, and the shims run the one a project asks for";
+                mainProgram = "tower";
+                platforms = systems;
+              };
             };
-            nativeBuildInputs = [ wiz ];
-            buildPhase = ''
-              runHook preBuild
-              export HOME=$TMPDIR
-              # only what tower uses: the C compiler, and GMP's headers and library (the
-              # generated C links no Boehm collector, so the closure stays GMP + glibc)
-              sh scripts/build-tower-wiz.sh tower-bin grail ${lib.escapeShellArgs [
-                "--cc" "${pkgs.stdenv.cc}/bin/cc" "--cflags" tc.cflags "--ldflags" tc.ldflags ]}
-              runHook postBuild
-            '';
-            installPhase = ''
-              runHook preInstall
-              install -Dm755 tower-bin $out/bin/tower
-              runHook postInstall
-            '';
-          };
-          tower = pkgs.stdenv.mkDerivation {
-            pname = "tower";
-            inherit (unwrapped) version;
-            dontUnpack = true;
-            nativeBuildInputs = [ pkgs.makeWrapper ];
-            installPhase = ''
-              makeWrapper ${tower-unwrapped}/bin/tower $out/bin/tower \
-                --suffix PATH : ${lib.makeBinPath [ pkgs.coreutils pkgs.git pkgs.gnutar pkgs.gzip pkgs.curl ]} \
-                --add-flags ${addFlags [ "--self" "${placeholder "out"}/bin/tower" ]}
-              # The `wiz` and `grail` shims, so installing the package puts them on PATH. They
-              # call the `tower` on PATH (the user's), falling back to this package's own, and
-              # use tower's default home, ~/.tower, where the toolchains live.
-              for t in wiz grail; do
-                cat > $out/bin/$t <<EOF
-            #!/bin/sh
-            # tower shim: runs \`$t\` of the toolchain for this directory (\`tower show\`).
-            # It asks the \`tower\` on PATH (the user's), else this package's own.
-            tower=\$(command -v tower) || tower='$out/bin/tower'
-            case "\$1" in
-              +*) tc=\$("\$tower" resolve "\$1") || exit; shift ;;
-              *) tc=\$("\$tower" resolve) || exit ;;
-            esac
-            exec "\$tc/bin/$t" "\$@"
-            EOF
-                chmod +x $out/bin/$t
-              done
-            '';
-            meta = {
-              description = "tower, the Wiz toolchain manager, with the wiz and grail shims: installs toolchains, and the shims run the one a project asks for";
-              mainProgram = "tower";
-              platforms = systems;
-            };
-          };
+          tower = towerFor wiz;
 
           # ---- the remaining CI-built artifacts as Nix outputs ---------------------
           #
@@ -1006,15 +1015,27 @@ EOF
               cp ${release-unwrapped}/bin/wiz ${release-unwrapped}/bin/grail bin/
               cp ${release-tower}/bin/tower bin/
               chmod u+w bin/wiz bin/grail bin/tower
+              # Lean's executable link does not take the static-runtime flags, so
+              # bundle the matching C++ runtime from the GCC that releaseCC wraps
+              # and give it (and the commands) a relative RUNPATH. This keeps the
+              # tarball dependent on glibc alone without patching Lean's linker.
+              mkdir -p release-libs
+              cp -L ${pkgs.stdenv.cc.cc.lib}/lib/libstdc++.so.6 release-libs/
+              cp -L ${pkgs.stdenv.cc.cc.lib}/lib/libgcc_s.so.1 release-libs/
+              chmod u+w release-libs/libstdc++.so.6 release-libs/libgcc_s.so.1
+              patchelf --set-rpath '$ORIGIN' release-libs/libstdc++.so.6 release-libs/libgcc_s.so.1
+              strip --strip-unneeded release-libs/libstdc++.so.6 release-libs/libgcc_s.so.1
+              python3 ${./scripts}/scrub-store-paths.py release-libs/libstdc++.so.6 release-libs/libgcc_s.so.1
               # ------------------------------------------------------------------
               # LEAF ONLY. This deliberately breaks Nix convention: a normal store
               # path keeps its interpreter, RUNPATH and references, and Nix tracks
               # them. The final tarball leaves the store and must run on a machine
               # with only glibc, so here (and nowhere else) the ELF interpreter is
-              # the conventional one, the build RUNPATH is removed, debug data is
-              # dropped, and the build's absolute store paths are overwritten. The
-              # binaries were linked statically against every non-glibc library
-              # above; nothing outside this derivation is patched or stripped.
+              # the conventional one, the build RUNPATH is replaced by the bundled
+              # C++ runtime's relative one later, debug data is dropped, and the
+              # build's absolute store paths are overwritten. The binaries were
+              # linked statically against GMP/libuv/OpenSSL; the C++ runtime is in
+              # lib/, so nothing outside this derivation is patched or stripped.
               # ------------------------------------------------------------------
               for b in bin/wiz bin/grail bin/tower; do
                 patchelf --set-interpreter ${releaseInterp} "$b"
@@ -1028,14 +1049,31 @@ EOF
               RELEASE_SOURCE_DATE_EPOCH=${epoch} SOURCE_DATE_EPOCH=${epoch} \
                 sh ${./scripts}/release-tarball.sh \
                   "package/wiz-${releaseArch}-linux.tar.gz" bin "${revision}" "" \
-                  ${wiz-web} ${releaseSrc}
+                  ${wiz-web} ${releaseSrc} "$PWD/release-libs"
+              # GPLv3 Corresponding Source for the bundled GCC runtime: the
+              # upstream tarball, the nixpkgs patches and expression, and the
+              # revision, beside the tarball in the same Nix output.
+              mkdir -p gcc-source
+              cp ${pkgs.gcc.cc.src} gcc-source/
+              for p in ${lib.concatStringsSep " " pkgs.gcc.cc.patches}; do
+                cp "$p" gcc-source/
+              done
+              cp -R ${nixpkgs}/pkgs/development/compilers/gcc gcc-source/nixpkgs-gcc
+              echo ${nixpkgs.rev} > gcc-source/NIXPKGS_REVISION
+              tar --sort=name --mtime=@${epoch} --owner=0 --group=0 \
+                --numeric-owner -cf - -C gcc-source . | gzip -n \
+                > package/gcc-16.2.0-nixpkgs-source.tar.gz
+              ( cd package && sha256sum gcc-16.2.0-nixpkgs-source.tar.gz \
+                  > gcc-16.2.0-nixpkgs-source.tar.gz.sha256 )
               runHook postBuild
             '';
             installPhase = ''
               runHook preInstall
               mkdir -p $out
               cp package/wiz-${releaseArch}-linux.tar.gz \
-                 package/wiz-${releaseArch}-linux.tar.gz.sha256 $out/
+                 package/wiz-${releaseArch}-linux.tar.gz.sha256 \
+                 package/gcc-16.2.0-nixpkgs-source.tar.gz \
+                 package/gcc-16.2.0-nixpkgs-source.tar.gz.sha256 $out/
               runHook postInstall
             '';
             doCheck = true;
@@ -1052,17 +1090,32 @@ EOF
                   LC_ALL=C TZ=UTC SOURCE_DATE_EPOCH=1111111111 \
                   RELEASE_SOURCE_DATE_EPOCH=${epoch} \
                   sh ${./scripts}/release-tarball.sh repro/a/out/$name.tar.gz \
-                    repro/a/bin "${revision}" "" ${wiz-web} ${releaseSrc} )
+                    repro/a/bin "${revision}" "" ${wiz-web} ${releaseSrc} "$PWD/release-libs" )
               ( umask 077; HOME=$PWD/repro/b/home TMPDIR=$PWD/repro/b/tmp \
                   LC_ALL=C.UTF-8 TZ=Asia/Tokyo SOURCE_DATE_EPOCH=1700000000 \
                   RELEASE_SOURCE_DATE_EPOCH=${epoch} \
                   sh ${./scripts}/release-tarball.sh repro/b/out/$name.tar.gz \
-                    repro/b/bin "${revision}" "" ${wiz-web} ${releaseSrc} )
+                    repro/b/bin "${revision}" "" ${wiz-web} ${releaseSrc} "$PWD/release-libs" )
               cmp repro/a/out/$name.tar.gz repro/b/out/$name.tar.gz
               cmp repro/a/out/$name.tar.gz.sha256 repro/b/out/$name.tar.gz.sha256
               cmp package/$name.tar.gz repro/a/out/$name.tar.gz
+              # The source archive is part of the release: build it again and
+              # compare, with the same deterministic tar/gzip -n inputs.
+              mkdir -p repro/gcc-source
+              cp ${pkgs.gcc.cc.src} repro/gcc-source/
+              for p in ${lib.concatStringsSep " " pkgs.gcc.cc.patches}; do
+                cp "$p" repro/gcc-source/
+              done
+              cp -R ${nixpkgs}/pkgs/development/compilers/gcc repro/gcc-source/nixpkgs-gcc
+              echo ${nixpkgs.rev} > repro/gcc-source/NIXPKGS_REVISION
+              tar --sort=name --mtime=@${epoch} --owner=0 --group=0 \
+                --numeric-owner -cf - -C repro/gcc-source . | gzip -n \
+                > repro/gcc-source.tar.gz
+              cmp package/gcc-16.2.0-nixpkgs-source.tar.gz repro/gcc-source.tar.gz
+              [ "$(cut -d' ' -f1 package/gcc-16.2.0-nixpkgs-source.tar.gz.sha256)" = \
+                "$(cd repro && sha256sum gcc-source.tar.gz | cut -d' ' -f1)" ]
               sh ${./scripts}/test-release-portability.sh \
-                "package/$name.tar.gz" --glibc ${pkgs.glibc}
+                "package/$name.tar.gz" --glibc ${pkgs.glibc} --max-glibc 2.43
               runHook postCheck
             '';
             passthru.subset = "release leaf: lib/ + editors/ + scripts/release-licenses + LICENSE + COPYING.RUNTIME + web/wasm-host.mjs, composed with release-unwrapped + release-tower + wiz-web";
@@ -1245,6 +1298,9 @@ EOF
                    wiz-web wiz-playground wiz-playground-ui wiz-source-ui release-tarball
                    wasm-fixtures web-bundle docs-site pages release-bin
                    release-unwrapped release-tower;
+          # a function, not a package: `tower` is `towerFor wiz`, and `lib.towerWith`
+          # is CI's seeded build. `packages` removes it (see below).
+          inherit towerFor;
           # The trusted Lake seed as a package: `withLakeCache empty-lake`'s `lake`
           # output (the compiled `.lake` directory without the linked binaries). A master
           # push builds this and publishes the store path to the trusted Cachix; a pull
@@ -1261,8 +1317,8 @@ EOF
         };
     in {
       # (packages without the function set, which is not a derivation)
-      packages = forAll (pkgs: builtins.removeAttrs (packagesFor pkgs) [ "bootstrapChain" ]);
-      legacyPackages = forAll (pkgs: { inherit (packagesFor pkgs) bootstrapChain; });
+      packages = forAll (pkgs: builtins.removeAttrs (packagesFor pkgs) [ "bootstrapChain" "towerFor" ]);
+      legacyPackages = forAll (pkgs: { inherit (packagesFor pkgs) bootstrapChain towerFor; });
 
       # The function set (a flake output cannot be a function, so `packages` cannot hold
       # `withLakeCache`). CI's producer and consumer both call it through
@@ -1273,6 +1329,10 @@ EOF
       lib = forAll (pkgs: {
         withLakeCache = lakeCache: packagesWith pkgs lakeCache;
         empty-lake = emptyLake pkgs;
+        # `lib.towerWith wizPkg` is `.#tower` built with that `wiz` package. CI passes
+        # the lean job's store path through `builtins.storePath`, so the seeded compiler
+        # is a build input and `wiz-unwrapped` is never instantiated.
+        towerWith = wizPkg: (packagesWith pkgs null).towerFor wizPkg;
       });
 
       apps = forAll (pkgs:

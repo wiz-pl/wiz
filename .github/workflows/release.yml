@@ -310,7 +310,7 @@ jobs:
           # the sixth argument is the checkout at this commit: lib/, editors/ and the
           # licences are read from the commit, not from the working tree
           .release-tools/scripts/release-tarball.sh dist/wiz-x86_64-linux.tar.gz \
-            .lake/build/bin "$(git rev-parse HEAD)" $cc $web "$GITHUB_WORKSPACE"
+            .lake/build/bin "$(git rev-parse HEAD)" "$cc" "$web" "$GITHUB_WORKSPACE"
           ls -l dist
       - name: The binary tarball is reproducible (two roots, different environments)
         # The same commit, packaged twice in two independent roots with a different

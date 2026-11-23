@@ -161,8 +161,9 @@ global: no axiom, no new kernel rule, no change to the trust ledger.
 * **The table.** Keyed by the class **name** (as `CommandState.derivers` is, not by the
   class's method shape: the host's `Lens` is a `def`, not a class). `attribute [deriver
   C] f` checks that `f` is declared with one argument (the host unifies its type with
-  `Deriver`; this frontend checks the Π arity, since `Deriver`/`MacroM` are not in its
-  prelude) and records `(C, f)`. A built-in deriver's name needs no declaration, so a
+  `Deriver`; this frontend checks the Π arity of the written type, so a `def d :
+  Deriver` alias is rejected where the expanded `String → MacroM (List Syntax)` is
+  accepted) and records `(C, f)`. A built-in deriver's name needs no declaration, so a
   look-alike class can reuse one: `attribute [deriver Eq2] deriveDecidableEq`. A
   registered name that is not one of the five is accepted and reported as unrunnable
   when `deriving C` uses it: *the deriver f cannot be run (this frontend has no
@@ -239,14 +240,15 @@ What a **user deriver** still needs: (1) a way to run Wiz code at elaboration ti
 interpreter over the kernel's terms, or compiling with `Backend.wiz` and loading the
 result), which is also what macros and tactics need; (2) quotations in terms and the
 `Syntax` constructors (`Syntax.mkApp`/`mkVar`/`mkStr`), since the elaborator's `SyntaxF`
-is not visible to a Wiz program; (3) the `Deriver`/`MacroM`/`Syntax` types and the
-`Derive.*` toolkit of `lib/Deriving.wiz` in the self-hosted prelude; (4)
-`MacroM.getInductive`/`getType` requests over the globals (the `IndInfo` change here is
-the data, the request loop is what is missing); (5) `T.rec` as a global (this frontend's
-equations compile to it internally, but a deriver written in Wiz would want to apply it
-by name). Until then the table registers a user's function but cannot call it, and a
-deriver that produces several definitions and laws (`Lens`, `Bundle`) stays out of
-reach.
+is not visible to a Wiz program; (3) the `Derive.*` toolkit of `lib/Deriving.wiz` and
+the rest of the `Syntax` constructors (`mkApp`/`mkVar`/`mkStr`; `Syntax.mkNode`,
+`MacroM`, `Deriver` and `MacroM.getInductive` are in the embedded prelude); (4)
+`MacroM.getType` over the globals and a way to run the Wiz deriver that asks (the
+runner answers `getInductive`; the `IndInfo` change here is the data); (5) `T.rec` as
+a global (this frontend's equations compile to it internally, but a deriver written in
+Wiz would want to apply it by name). Until then the table registers a user's function
+but cannot call it, and a deriver that produces several definitions and laws (`Lens`,
+`Bundle`) stays out of reach.
 
 `lib/*.wiz` has `deriving` clauses for six names; this milestone implements the five
 that `lib/Deriving.wiz` registers. `Lens` (`lib/OpticDerive.wiz`) and `Bundle`/`BitPack`

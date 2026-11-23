@@ -66,11 +66,19 @@ Each item says what must be true and how to check it.
    the generated files.
 
 The Nix form of the binary tarball is `nix build .#release-bin` (`.sha256` beside it).
-It links every non-glibc library statically and needs only glibc; its `doCheck` runs
-`scripts/test-release-portability.sh` and rebuilds the archive in a second environment.
-It has no `share/wiz/cc`, so the bundled-compiler checks in
+It needs only glibc, with libstdc++/libgcc bundled in `lib/` under a relative
+`$ORIGIN` RUNPATH; its `doCheck` runs `scripts/test-release-portability.sh`, asserts
+the 2.43 glibc floor and rebuilds the archive in a second environment. It has no
+`share/wiz/cc`, so the bundled-compiler checks in
 `scripts/test-release-install.sh` apply to the release.yml artifact, not to this one
-([building.md](building.md), "Nix artifacts for CI and releases").
+([building.md](building.md), "Nix artifacts for CI and releases"). It is not the
+GitHub `release.yml` tarball: the contents, C++ runtime and glibc floor (2.43 versus
+2.27) differ, so do not publish the two under the same name.
+
+The Nix output has four files and all four must be published together: the
+tarball, its `.sha256`, `gcc-16.2.0-nixpkgs-source.tar.gz` and its `.sha256`.
+The source archive is the GPLv3 §6(d) Corresponding Source for the bundled
+libstdc++/libgcc.
 
 ## The tagging commit
 

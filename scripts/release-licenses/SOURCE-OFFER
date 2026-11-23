@@ -1,0 +1,47 @@
+Source offer for the bundled GCC runtime
+========================================
+
+Nix `.#release-bin` (the artifact that ships lib/libstdc++.so.6 and
+lib/libgcc_s.so.1): the Corresponding Source is
+`gcc-16.2.0-nixpkgs-source.tar.gz`, published beside this tarball in the
+same Nix output. It contains the upstream GCC 16.2.0 tarball and the patches
+nixpkgs applies.
+
+Exact source coordinates:
+
+  nixpkgs revision: 02c087f3fe673c9e317f206a627cb6b910336dbe
+  gcc expression and patches:
+    https://github.com/NixOS/nixpkgs/tree/02c087f3fe673c9e317f206a627cb6b910336dbe/pkgs/development/compilers/gcc
+  upstream tarball:
+    https://ftp.gnu.org/gnu/gcc/gcc-16.2.0/gcc-16.2.0.tar.xz
+
+`gcc.cc.src` is only the upstream tarball; the six patches are applied
+separately and are in the nixpkgs tree above (and in the archive beside this
+file, with the nixpkgs gcc expression). The Nix output also carries
+`gcc-16.2.0-nixpkgs-source.tar.gz.sha256`, so the source and the tarball are
+tied together. The Nix output is therefore the complete Corresponding Source
+under GPLv3 section 6(d), at no charge from the same place.
+
+The GitHub `release.yml` artifact is a different binary: its wiz/grail link
+Lean's static libc++ (Apache-2.0 WITH LLVM-exception), while its bundled
+`cc/` directory ships libgcc_s.so.1 and libatomic.so.1 under the GCC RLE
+and libz.so.1 under the zlib licence. Their sources:
+
+  Lean 4.35.0: https://github.com/leanprover/lean4/releases/tag/v4.35.0
+  cc/ libgcc_s and libatomic: GCC 7.3.0 from Lean 4.35.0's Nix toolchain
+    (glibc 2.26-131), not the nixpkgs 16.2.0 build above. The Lean tarball
+    does not contain the GCC 7.3.0 source or patches. Publishing the GitHub
+    artifact with cc/ requires adding that source to the release (the
+    bundle-inputs release is the natural place); the Nix `.#release-bin`
+    artifact does not ship cc/ and its source archive above is complete.
+  zlib: https://zlib.net/
+
+The GitHub tarball's cc/ source is not covered by the Nix archive above;
+  it needs the GCC 7.3.0 provenance from Lean's toolchain build.
+
+The Wiz packaging scripts (scripts/release-tarball.sh,
+scripts/scrub-store-paths.py) and the Wiz source are at
+https://github.com/wiz-pl/wiz.
+
+This file is the source offer; it ships as share/wiz/SOURCE-OFFER next to
+the licence texts.

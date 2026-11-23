@@ -12,7 +12,7 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 `scripts/trust-counts.py --write` and checked by `scripts/trust-counts.py --check` (the
 `native` group runs the check), so this file cannot drift from the ledger.
 
-<!-- trust-counts: rows=837 partial=247 axiom_rows=260 builtin_rows=254 native_rows=76 implemented_by=71 repr=5 extern_declarations=226 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=550 shared_reasons=287 legacy=0 expired=0 -->
+<!-- trust-counts: rows=841 partial=251 axiom_rows=260 builtin_rows=254 native_rows=76 implemented_by=71 repr=5 extern_declarations=226 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=551 shared_reasons=290 legacy=0 expired=0 -->
 
 ## [Unreleased]
 
@@ -122,6 +122,10 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   `--cache-ro-unsigned` (or `--cache-verify off`); write caches need one cold pass to
   acquire manifests. A regression fixture plants a forged `.wizc` + `.wizmf` (a claim of
   `False` and a forged `builtin`) and shows it is refused under the defaults.
+  `--cache-ro-unsigned` names the `--cache-ro` layer immediately before it, not every
+  read-only layer in the process, and `--no-cache` clears it with the caches: the Nix
+  wrappers' opt-in for their store cache no longer also trusts a user's later
+  `--cache-ro` (`=toolchain` runs the refusal against the wrapped binary in CI).
 * release: a deterministic source tarball (`nix build .#release-tarball`, or
   `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
   SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes

@@ -670,9 +670,11 @@ jobs:
   # here too. It runs only when `scry/`, `hdl/` or `tower/` changed.
   #
   # It substitutes the lean job's `wiz`/`grail` (a pull request's seeded path from the
-  # PR cache; anything else from the trusted cache), so the package builds use exactly
-  # the compiler this commit publishes. On a fork, or with no PR cache, the fallback
-  # builds the pure `.#wiz`, as every other substituting job does.
+  # PR cache; anything else from the trusted cache) with
+  # `nix build --option max-jobs 0`, so the package builds use exactly the compiler this
+  # commit publishes and the substitution never falls back to a cold `wiz-unwrapped`.
+  # Tower is built with `lib.towerWith (builtins.storePath <seeded wiz>)` and guarded by
+  # `scripts/check-seeded-wiz.py`; Hdl and Scry keep their in-job `$wiz`/`grail` path.
   packages:
     name: packages (hdl, scry, tower)
     needs: [changes, lean]
@@ -683,7 +685,8 @@ jobs:
       needs.lean.result == 'success'
     runs-on: ubuntu-latest
     # 60 min: scry's `grail build scry` (~12 min measured in scry.yml), the Hdl
-    # standalone build plus its 32 goldens, tower's Nix build and the package smokes.
+    # standalone build plus its 32 goldens (the slow temporal case has its own
+    # --test-timeout), tower's Nix build and the package smokes.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -715,16 +718,23 @@ jobs:
           path: scry/.grail
           key: ${{ steps.subset-key.outputs.key }}
           restore-keys: ${{ steps.subset-key.outputs.prefix }}
-      - name: nix build (wiz and grail, from the lean job or Cachix)
+      - name: wiz (the lean job's seeded compiler, substituted from Cachix)
+        # The seeded compiler is a store path: `nix build --option max-jobs 0` is
+        # substitution only (the configured trusted/PR caches; no local build jobs), so
+        # a cache miss fails here instead of falling back to the pure `.#wiz` and
+        # cold-building `wiz-unwrapped`.
         id: nix
         run: |
-          # The lean job's compiler (a PR's seeded build); a store path substitutes
-          # directly, and a miss falls back to the pure derivation the trusted cache
-          # carries. `grail` is installed beside `wiz` in the same store path.
           wiz='${{ needs.lean.outputs.wiz }}'
-          if [ -z "$wiz" ] || ! nix build --no-link "$wiz"; then
-            wiz=$(nix build .#wiz --no-link --print-out-paths)
+          if [ -z "$wiz" ]; then
+            echo "::error title=packages::the lean job produced no wiz store path"
+            exit 1
           fi
+          if ! nix build --no-link "$wiz" --option max-jobs 0; then
+            echo "::error title=packages::the seeded wiz $wiz is not substitutable from the PR or trusted cache; refusing a cold wiz-unwrapped build"
+            exit 1
+          fi
+          echo "wiz: substituted $wiz"
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           du -sh "$wiz"
           mkdir -p .lake/build/bin
@@ -749,8 +759,25 @@ jobs:
           cd scry
           cp ../grail.local.wiz .
           "$GRAIL" build scry
-      - name: tower is the third package build
-        run: nix build .#tower --no-link -L
+      - name: "tower is the third package build (seeded with the lean job's wiz)"
+        # `lib.towerWith (builtins.storePath <seeded wiz>)` makes the seeded compiler an
+        # input source of tower-unwrapped, so Nix substitutes it and never starts
+        # `wiz-unwrapped`. The guard asserts that on the derivation graph before the
+        # build; it is what the old `nix build .#tower` lacked.
+        id: tower
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}
+        run: |
+          set -eu
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          expr="let f = builtins.getFlake \"$PWD\"; in f.lib.\"$sys\".towerWith (builtins.storePath \"$WIZ\")"
+          drv=$(nix eval --impure --raw --expr "($expr).drvPath")
+          nix derivation show "$drv" > "$RUNNER_TEMP/tower.json"
+          python3 scripts/check-seeded-wiz.py --self-test
+          python3 scripts/check-seeded-wiz.py "$RUNNER_TEMP/tower.json" "$WIZ" --through tower-unwrapped
+          out=$(nix build --impure --no-link --print-out-paths --expr "$expr")
+          "$out/bin/tower" --help > /dev/null
+          du -sh "$out"
       - name: The example index validates offline
         # stage 23m: entries, archive SHA-256s, semver ranges, module-prefix conflicts and
         # index.wiz; no network (the sources are relative paths).
@@ -1025,7 +1052,9 @@ jobs:
     # (it would run untrusted code on that machine) and uses GitHub's runner instead.
     # Unset (the default): every shard on ubuntu-latest, as before.
     runs-on: ${{ matrix.shard.heavy && vars.WIZ_RUNNER_HEAVY != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.WIZ_RUNNER_HEAVY || 'ubuntu-latest' }}
-    timeout-minutes: 90 # the selfhost group is split into parts (test-shards.json) to keep each one short
+    # the groups are split into parts (test-shards.json) to keep each one short: library
+    # into 12, since the measured shards were 55-85 min (one passed 90) at 8 parts
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.lean.outputs.matrix) }}
@@ -1163,7 +1192,7 @@ jobs:
           jobs=()
           if [ -n "$JOBS" ]; then jobs=(--jobs "$JOBS"); fi
           jobs_s="${jobs[*]-}"
-          echo "tests -- --cache ~/.cache/wiz --cache-ro ${ro[1]} ${jobs_s:+$jobs_s }${allow[*]-}${allow:+ }${sel[*]}"
+          echo "tests -- --cache ~/.cache/wiz --cache-ro <wiz>/share/wiz/cache ${jobs_s:+$jobs_s }${allow[*]-}${allow:+ }${sel[*]}"
           # the Nix-built driver, exactly as `lake test -- …` would run it; every case's
           # time as JSON lines (scripts/ci.py summary and baseline read them)
           "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${ro[@]}" "${allow[@]}" "${jobs[@]}" \
@@ -1580,10 +1609,9 @@ jobs:
         # the artifact deploy-docs will publish. The test serves it and loads it twice
         # (JavaScript off: the SSR; on: mount, hover, #/f/<id>).
         run: |
-          chrome=$(command -v chromium || command -v chromium-browser || command -v google-chrome || true)
-          if [ -z "$chrome" ]; then
-            chrome=$(nix shell --inputs-from . nixpkgs#chromium -c sh -c 'command -v chromium')
-          fi
+          # Use the pinned nixpkgs chromium: the runner's system chromium is often a
+          # snap stub that never opens a DevTools target.
+          chrome=$(nix shell --inputs-from . nixpkgs#chromium -c sh -c 'command -v chromium')
           node web/source_chrome_test.mjs "$chrome" doc-site/source
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

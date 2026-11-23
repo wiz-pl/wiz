@@ -22,7 +22,8 @@ Nix package ships one in `$out/share/wiz/cache`; a run with only read caches
 (`--no-cache --cache-ro DIR`, since the default write cache is on) still replays modules
 and computes the binary's id on every run. A read-only layer is in someone else's trust
 domain, and a manifest is only a self-signed digest, so by default the layer is
-**refused**; `--cache-ro-unsigned` is the explicit opt-in to unauthenticated data.
+**refused**; `--cache-ro-unsigned` on that layer is the explicit opt-in to unauthenticated
+data (it does not apply to a later `--cache-ro`).
 
 Commands that change the grammar or the macros (`syntax`, `macro_rules`, `notation`,
 attributes, `import`, user-defined commands) aren't cached; they are cheap to rerun.
@@ -874,7 +875,8 @@ binds a key to that digest. There is no signature yet: a manifest catches corrup
 truncated/rewritten file and a mirror that swaps one entry for another; it does not stop a
 writer who controls the manifest too (that needs P3's signatures and, eventually, the
 append-only log). A read-only layer's manifests are not a trust root either, so such a
-layer is refused unless `--cache-ro-unsigned` (or `--cache-verify off`) says otherwise.
+layer is refused unless `--cache-ro-unsigned` on that layer (or `--cache-verify off`)
+says otherwise.
 
 The layout is deliberately the note's **P2** (per-module manifests) with a **P1**
 per-layer generation index:
@@ -1336,10 +1338,10 @@ structure ManifestStore where
   toolchain : String
   rig : String
   mode : VerifyMode
-  /-- serve a read-only layer even though its manifests are not authenticated
-  (`--cache-ro-unsigned`). Off by default: a manifest is a self-signed digest, so a
-  foreign layer is refused rather than trusted. -/
-  roUnsigned : Bool := false
+  /-- the read-only layers served although their manifests are not authenticated
+  (`--cache-ro-unsigned` on that layer). Empty by default: a manifest is a self-signed
+  digest, so a foreign layer is refused rather than trusted. -/
+  unsignedReads : List System.FilePath := []
   /-- `Key.id`s whose manifests have been loaded -/
   loaded : IO.Ref (Std.HashSet String)
   /-- `Key.id` → (entry, layer), in layer order -/
@@ -1362,8 +1364,9 @@ structure ManifestStore where
 
 def ManifestStore.create (write : Option System.FilePath) (reads : List System.FilePath)
     (binary : UInt64) (toolchain rig : String) (mode : VerifyMode)
-    (stats : Option (IO.Ref VerifyCounts) := none) (roUnsigned : Bool := false) : IO ManifestStore := do
-  pure { write, reads, binary, toolchain, rig, mode, roUnsigned,
+    (stats : Option (IO.Ref VerifyCounts) := none)
+    (unsignedReads : List System.FilePath := []) : IO ManifestStore := do
+  pure { write, reads, binary, toolchain, rig, mode, unsignedReads,
          loaded := ← IO.mkRef ({} : Std.HashSet String),
          entries := ← IO.mkRef ({} : Std.HashMap String (Array (ManifestEntry × System.FilePath))),
          regions := ← IO.mkRef ({} : Std.HashMap String (Array (ManifestEntry × System.FilePath))),
@@ -1379,6 +1382,11 @@ def ManifestStore.dirs (m : ManifestStore) : List System.FilePath := m.write.toL
 /-- Is `dir` one of the read-only layers (`--cache-ro`)? -/
 def ManifestStore.isRead (m : ManifestStore) (dir : System.FilePath) : Bool :=
   m.reads.any (·.toString == dir.toString)
+
+/-- Is `dir` one of the read-only layers the caller opted into serving unsigned
+(`--cache-ro-unsigned` on that layer)? -/
+def ManifestStore.isUnsigned (m : ManifestStore) (dir : System.FilePath) : Bool :=
+  m.unsignedReads.any (·.toString == dir.toString)
 
 /-- A layer's generation expiry (Unix seconds, `0` for none), read once. -/
 def ManifestStore.expiryOf (m : ManifestStore) (dir : System.FilePath) : IO Nat := do
@@ -1416,6 +1424,16 @@ def ManifestStore.bump (m : ManifestStore) (f : VerifyCounts → VerifyCounts) :
 def ManifestStore.inWrite (m : ManifestStore) (dir : System.FilePath) : Bool :=
   some dir.toString == m.write.map (·.toString)
 
+/-- Index the region entry a layer just wrote, replacing that layer's previous entry for
+the key. A rewritten region may differ byte-for-byte from the old one (the image is not
+canonical), so keeping the old entry first would read the new file against the old
+digest, drop it, and lose the repair. -/
+def ManifestStore.setRegion (m : ManifestStore) (id : String) (e : ManifestEntry)
+    (dir : System.FilePath) : IO Unit :=
+  m.regions.modify fun mp =>
+    let kept := ((mp[id]?).getD #[]).filter fun (_, d) => d.toString != dir.toString
+    mp.insert id (kept.push (e, dir))
+
 /-- Does `dir` have anything for module `key` (a manifest, a seen marker or a region)? The
 marker is named by the module key; the `.wizc` entries are named by command keys. -/
 def ManifestStore.hasModule (m : ManifestStore) (dir : System.FilePath) (key : Key) :
@@ -1434,7 +1452,7 @@ def ManifestStore.hasModule (m : ManifestStore) (dir : System.FilePath) (key : K
 /-- Load (once) every layer's manifest for module key `key` and index its entries. A layer
 whose manifest exists but does not validate poisons the keys it names; it is never
 silently treated as authoritative. A read-only layer is skipped unless
-`--cache-ro-unsigned` was given: its manifest is a self-signed digest, so it cannot
+`--cache-ro-unsigned` on that layer: its manifest is a self-signed digest, so it cannot
 authenticate the writer (a signer policy is the missing piece, P3). -/
 def ManifestStore.load (m : ManifestStore) (key : Key) : IO Unit := do
   let id := Key.id key
@@ -1442,11 +1460,11 @@ def ManifestStore.load (m : ManifestStore) (key : Key) : IO Unit := do
   m.loaded.modify (·.insert id)
   let now ← unixNow
   for dir in m.dirs do
-    if m.isRead dir && !m.roUnsigned then
+    if m.isRead dir && !m.isUnsigned dir then
       -- (warn only when this module was elaborated in the layer: an empty layer, or one
       -- that simply lacks the module, is not something to refuse loudly)
       if ← m.hasModule dir key then m.warnRefusedRo dir
-  for dir in m.dirs.filter fun dir => !m.isRead dir || m.roUnsigned do
+  for dir in m.dirs.filter fun dir => !m.isRead dir || m.isUnsigned dir do
     let f := manifestFile dir m.binary key
     if ← f.pathExists then
       m.present.modify (·.insert id)
@@ -1556,7 +1574,7 @@ def ManifestStore.writeManifest (m : ManifestStore) (key : Key) (module : Name)
     let eid := Key.id { fast := e.key, strong := e.keySha }
     m.entries.modify fun mp => mp.insert eid (((mp[eid]?).getD #[]).push (e, dir))
   if let some e := m0.region then do
-    m.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (e, dir))
+    m.setRegion id e dir
 
 /-- Verify the keyed files of one layer against its manifests (the full-scan tool). This
 is what `wiz cache verify` reports; normal runs verify only what they read. -/
@@ -1952,10 +1970,11 @@ def Store.layeredCore (write : Option System.FilePath) (reads : List System.File
 /-- A layered store with the verification policy `verify` (default off: the old store). -/
 def Store.layered (write : Option System.FilePath) (reads : List System.FilePath)
     (binary : UInt64) (verify : VerifyMode := .off) (rig : String := "")
-    (stats : Option (IO.Ref VerifyCounts) := none) (roUnsigned : Bool := false) : IO (Store R) := do
+    (stats : Option (IO.Ref VerifyCounts) := none)
+    (unsignedReads : List System.FilePath := []) : IO (Store R) := do
   let manifests ← if verify == .off then pure none else
     pure (some (← ManifestStore.create write reads binary (← toolchainTag write) rig verify stats
-      roUnsigned))
+      unsignedReads))
   Store.layeredCore write reads binary manifests
 
 /-- The store in directory `dir`, for the binary `binary` (`binaryId`): a layered store
@@ -2047,7 +2066,7 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
             { a with binary := binary, textSalt := salt, rig := opts.rig }
           for ent in e.toList do
             let id := Key.id key
-            ms.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (ent, dir))
+            ms.setRegion id ent dir
           pure e
         catch _ => pure none
       | _, _ => pure none
@@ -2058,10 +2077,11 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
 regions are searched in the same layer order, with one shared manifest index. -/
 def Store.layeredRegion (write : Option System.FilePath) (reads : List System.FilePath)
     (binary : UInt64) (opts : RegionOptions) (verify : VerifyMode := .off) (rig : String := "")
-    (stats : Option (IO.Ref VerifyCounts) := none) (roUnsigned : Bool := false) : IO (Store R) := do
+    (stats : Option (IO.Ref VerifyCounts) := none)
+    (unsignedReads : List System.FilePath := []) : IO (Store R) := do
   let manifests ← if verify == .off then pure none else
     pure (some (← ManifestStore.create write reads binary (← toolchainTag write) rig verify stats
-      roUnsigned))
+      unsignedReads))
   let store ← Store.layeredCore write reads binary manifests
   let region ← RegionStore.layered write reads binary opts manifests
   pure { store with region := some region }
@@ -2493,22 +2513,22 @@ are written to the write cache and checked on load (`rig` is the rig's tag).
 `Toolchain.targetTag`); `rootTag` is a strong version of `key₀` (the root file's headers),
 so a root manifest is bound to its actual inputs too. `rootPath` is the root file's path,
 used only for the manifest pointer an edit follows to keep its unchanged prefix warm.
-`roUnsigned` (`--cache-ro-unsigned`) serves a read-only layer although its manifests are
-not authenticated; it is off by default. -/
+`unsignedReads` (`--cache-ro-unsigned` on that layer) serves the named read-only layers
+although their manifests are not authenticated; it is empty by default. -/
 def elaborateCached (write : Option System.FilePath) (reads : List System.FilePath)
     (input : String) (init : CommandState R) (key₀ : UInt64)
     (toolchain : UInt64 := 0) (binary : Option UInt64 := none)
     (region : Option RegionOptions := none) (verify : VerifyMode := .off) (rig : String := "")
     (stats : Option (IO.Ref VerifyCounts) := none)
     (strongToolchain : String := "") (targetTag : String := "") (rootTag : String := "")
-    (rootPath : String := "") (roUnsigned : Bool := false) :
+    (rootPath : String := "") (unsignedReads : List System.FilePath := []) :
     IO (CommandState R × Nat) := do
   let binary ← match binary with | some b => pure b | none => binaryId write
   let binaryTag ← if region.isSome || verify != .off then toolchainTag write else pure ""
   -- (13b) `--trace-guess-fallback` reports from the elaborator: nothing may come from a cache
   let store ← if ← traceGuessesRef.get then Store.memory else match region with
-    | some opts => Store.layeredRegion write reads binary opts verify rig stats roUnsigned
-    | none => Store.layered write reads binary verify rig stats roUnsigned
+    | some opts => Store.layeredRegion write reads binary opts verify rig stats unsignedReads
+    | none => Store.layered write reads binary verify rig stats unsignedReads
   -- (the layer's `manifest.sexpr` is not refreshed here: rebuilding it reads and
   -- re-validates every manifest in the layer, which is O(cache) per run — about a minute
   -- on a shared cache of thousands of manifests. Nothing a run does reads its module

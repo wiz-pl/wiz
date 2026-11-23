@@ -35,5 +35,7 @@ cd "$pkg"
 echo "hdl standalone: $pkg"
 echo "grail: $("$grail" --version 2>/dev/null | head -n 1)"
 "$grail" build
-"$grail" test
+# The temporal UART example is a slow simulation; the 300 s grail default is too
+# tight (it timed out at exactly 300 s in CI).
+"$grail" test --test-timeout 900
 echo "hdl standalone: ok ($pkg: build + test)"

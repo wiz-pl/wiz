@@ -899,19 +899,24 @@ the commit in their source links, not a build time.
 is deliberately unlike a Nix package: the release has to leave the store, so that one
 step points each ELF interpreter at `/lib64/ld-linux-x86-64.so.2` (or the aarch64 path),
 removes the build RUNPATH, strips debug data and scrubs the remaining store-path strings
-(`scripts/scrub-store-paths.py`). The binaries are linked before that step with every
-non-glibc library static — GMP, libuv, OpenSSL, libstdc++ and libgcc — so the archive
-needs only glibc; `scripts/test-release-portability.sh` checks the NEEDED lists, the
-interpreter, the absence of `/nix/store`, and runs `wiz`, `grail` and `tower` under
-`env -i` with only a glibc output. **Do not copy the leaf scrub into an intermediate
+(`scripts/scrub-store-paths.py`). The binaries are linked before that step with GMP, libuv and OpenSSL static;
+libstdc++ and libgcc are bundled in `lib/` with a relative `$ORIGIN` RUNPATH
+(Lean's executable link does not take the static-runtime flags), so the archive
+needs only glibc; `scripts/test-release-portability.sh` checks the NEEDED lists,
+the interpreter, the absence of `/nix/store`, the glibc floor and runs `wiz`,
+`grail` and `tower` under `env -i` with only a glibc output. The Nix artifact is
+built against nixpkgs glibc 2.44 and requires glibc 2.43 (`free_sized`); this is
+not the 2.27-floor GitHub tarball, and the check fails above
+`--max-glibc 2.43`. **Do not copy the leaf scrub into an intermediate
 derivation**: a normal store path must keep its references, and only the tarball is
 allowed to break that rule.
 
 The linkage audit behind that: after the leaf step `readelf -d` names only
 `libc.so.6`, `libm.so.6`, `libdl.so.2`, `libpthread.so.0`, `librt.so.1` and the loader.
-GMP, libuv and OpenSSL are static archives in the link; libstdc++ and libgcc are the
-release compiler's explicit `-Wl,-Bstatic` tail (the wrapper removes the driver's
-dynamic `-lstdc++`/`-lgcc_s` and appends the archives after every object). Boehm GC,
+GMP, libuv and OpenSSL are static archives in the link. libstdc++ and libgcc are
+bundled as `lib/libstdc++.so.6` and `lib/libgcc_s.so.1` with a relative `$ORIGIN`
+RUNPATH; the release wrapper's `-Wl,-Bstatic` tail does not reach Lean's executable
+link, which is why the bundle is the effective guarantee. Boehm GC,
 zlib and ncurses are not linked by `wiz`, `grail` or `tower` at all: the GC is only in
 `gc-ldflags`, which a self-hosted program passes to its generated C, and neither zlib
 nor ncurses is an input. The bundled C toolchain (`scripts/bundle-cc.sh`, which this
@@ -1475,10 +1480,13 @@ the generated reference manual (`result/index.md`, and `result/site`).
     in grail's namespace would add another ~4,100 entries and ~50 MB for about 3
     minutes of build time, which is not worth it for the uncommon imports.
   Flags parse left to right: a later `--no-cache` turns both the packaged cache and the
-  write cache off, and a user's `--cache-ro DIR` appends another read-only layer
-  (`--cache-ro` is repeatable and searched in the order given). A layer passed this way
-  is refused unless `--cache-ro-unsigned` (or `--cache-verify off`) is also given: its
-  manifests are self-signed, so they are integrity, not authenticity. The entries are keyed
+  write cache off (and clears the packaged layer's opt-in), and a user's `--cache-ro DIR`
+  appends another read-only layer (`--cache-ro` is repeatable and searched in the order
+  given). A layer passed this way is refused unless `--cache-ro-unsigned` **immediately
+  after that layer** (or `--cache-verify off`) is also given: its manifests are
+  self-signed, so they are integrity, not authenticity. The opt-in names one layer, so the
+  wrappers' opt-in for the packaged cache does not also trust a user's later
+  `--cache-ro`. The entries are keyed
   by the packaged binary's hash (its bytes) and by `lib`'s text and module names, so
   the Nix build invalidates them automatically; there is no manual invalidation and a
   stale store path is never reused (a new build gets new keys). The cache is
@@ -1492,8 +1500,8 @@ the generated reference manual (`result/index.md`, and `result/site`).
   same compiler (the elaboration cache's own keys include the wiz binary's hash, but the
   test driver's grail runs use a fixed binary id and the `/tmp` programs a timestamp).
   The elaboration cache may also have read-only layers (`--cache-ro DIR`, repeatable,
-  searched in order after the written `--cache DIR`, never written; refused by default
-  unless `--cache-ro-unsigned`). The Nix package
+  searched in order after the written `--cache DIR`, never written; each is refused by
+  default unless `--cache-ro-unsigned` follows it). The Nix package
   ships one in `$out/share/wiz/cache` and its wrappers pass both flags, so CI and
   users share a warm cache without a writable store path; a run with no write cache
   hashes the wiz executable each time instead of remembering it under `bin/`.

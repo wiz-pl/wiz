@@ -42,10 +42,11 @@ structure Toolchain where
   write manifests to the write cache); default `warn`. It is not in `Toolchain.id` (a
   policy change must not invalidate entries). -/
   cacheVerify : String := "warn"
-  /-- `--cache-ro-unsigned`: serve a `--cache-ro` layer although its manifests are not
-  authenticated. Off by default: a manifest is a self-signed digest, so a foreign layer
-  is refused rather than trusted. Not in `Toolchain.id` (a policy, not an input). -/
-  cacheRoUnsigned : Bool := false
+  /-- The read-only caches served although their manifests are not authenticated
+  (`--cache-ro-unsigned`, which applies to the `--cache-ro` immediately before it). Empty
+  by default: a manifest is a self-signed digest, so a foreign layer is refused rather
+  than trusted. Not in `Toolchain.id` (a policy, not an input). -/
+  unsignedReads : List System.FilePath := []
   /-- (27a) `--trust-native`: `native_refl` may decide equations by running them -/
   trustNative : Bool := false
   /-- (27a) `--native-fuel N`: the interpreter steps one `native_refl` may take (none: the
@@ -88,8 +89,24 @@ def id (t : Toolchain) : UInt64 :=
   hash (toString [t.cc, " ".intercalate t.cflags, " ".intercalate t.ldflags, " ".intercalate t.libs, t.llc, " ".intercalate t.gmp,
     " ".intercalate t.gcCflags, " ".intercalate t.gcLdflags])
 
+/-- Is `d` one of the read-only caches served although its manifests are unauthenticated? -/
+def isUnsignedRead (t : Toolchain) (d : System.FilePath) : Bool :=
+  t.unsignedReads.any (·.toString == d.toString)
+
+/-- `--cache-ro-unsigned` is a modifier on the `--cache-ro` immediately before it: mark
+that layer unsigned, or (`false`) stop serving it unsigned. With no read cache yet it is
+a no-op, so the flag before any layer cannot silently trust a later one. -/
+def markLastRead (t : Toolchain) (unsigned : Bool) : Toolchain :=
+  match t.readCaches.reverse with
+  | d :: _ =>
+    if unsigned then
+      if t.isUnsignedRead d then t else { t with unsignedReads := t.unsignedReads ++ [d] }
+    else { t with unsignedReads := t.unsignedReads.filter (fun x => x.toString != d.toString) }
+  | [] => t
+
 /-- Set one field by its name (as in `grail.local.wiz` and the flags); `false` if unknown.
-Flag lists replace the field's words; `cache-ro` appends to the read-only caches. -/
+Flag lists replace the field's words; `cache-ro` appends to the read-only caches, and
+`cache-ro-unsigned` applies to the one just added. -/
 def set (t : Toolchain) (key value : String) : Option Toolchain :=
   match key with
   | "cc" => some { t with cc := value }
@@ -103,7 +120,7 @@ def set (t : Toolchain) (key value : String) : Option Toolchain :=
   | "cache" => some { t with cacheDir := some (System.FilePath.mk value) }
   | "cache-ro" => some { t with readCaches := t.readCaches ++ [System.FilePath.mk value] }
   | "cache-verify" => some { t with cacheVerify := value }
-  | "cache-ro-unsigned" => some { t with cacheRoUnsigned := value == "true" }
+  | "cache-ro-unsigned" => some (t.markLastRead (value == "true"))
   | "region-cache" => some { t with regionCache := value == "true" }
   | "region-stats" => some { t with regionStats := value == "true" }
   | "root" => some { t with searchPath := t.searchPath ++ [System.FilePath.mk value] }
@@ -113,8 +130,8 @@ def set (t : Toolchain) (key value : String) : Option Toolchain :=
 /-- Take the toolchain flags out of the arguments: `--cc X`, `--cflags "…"`,
 `--ldflags "…"`, `--libs "…"`, `--gmp "…"`, `--llc X`, `--gc-cflags "…"`,
 `--gc-ldflags "…"`, `--cache DIR` (the cache written to), `--cache-ro DIR` (repeatable:
-a read-only cache, searched in the order given), `--cache-ro-unsigned` (serve a read-only
-layer whose manifests are not authenticated; off by default), `--region-cache` (serve module effects
+a read-only cache, searched in the order given), `--cache-ro-unsigned` (serve the `--cache-ro` layer just before it although its manifests
+are not authenticated; off by default), `--region-cache` (serve module effects
 from `.wizr` regions in those layers; experimental), `--region-stats` (print what those
 regions served, per process), `--no-cache` (both: no write cache and
 no read caches; a later `--cache` or `--cache-ro` adds one again), `-I DIR`, (27a)
@@ -122,8 +139,9 @@ no read caches; a later `--cache` or `--cache-ro` adds one again), `-I DIR`, (27
 (28a) `--trust-smt`, `--smt-solver CMD` (flags only, not settings of a grail file). -/
 partial def parseFlags (t : Toolchain) : List String → Toolchain × List String
   | "--cache-verify" :: mode :: rest => parseFlags { t with cacheVerify := mode } rest
-  | "--cache-ro-unsigned" :: rest => parseFlags { t with cacheRoUnsigned := true } rest
-  | "--no-cache" :: rest => parseFlags { t with cacheDir := none, readCaches := [] } rest
+  | "--cache-ro-unsigned" :: rest => parseFlags (t.markLastRead true) rest
+  | "--no-cache" :: rest =>
+    parseFlags { t with cacheDir := none, readCaches := [], unsignedReads := [] } rest
   | "--region-cache" :: rest => parseFlags { t with regionCache := true } rest
   | "--region-stats" :: rest => parseFlags { t with regionStats := true } rest
   | "--trust-native" :: rest => parseFlags { t with trustNative := true } rest
@@ -145,21 +163,22 @@ partial def parseFlags (t : Toolchain) : List String → Toolchain × List Strin
   | [] => (t, [])
 
 /-- Flags that give this toolchain (its compilers, flags and caches) to another process.
-The read caches are reported in order, one `--cache-ro DIR` each. With no write cache,
+The read caches are reported in order, one `--cache-ro DIR` each, followed by
+`--cache-ro-unsigned` when that layer is served unsigned. With no write cache,
 `--no-cache` comes first: it clears both, so the read caches have to follow it (a program
 that starts from a default cache directory would otherwise keep it). -/
 def toFlags (t : Toolchain) : List String :=
   ["--cc", t.cc, "--cflags", " ".intercalate t.cflags, "--ldflags", " ".intercalate t.ldflags,
    "--libs", " ".intercalate t.libs, "--gmp", " ".intercalate t.gmp, "--llc", t.llc, "--gc-cflags", " ".intercalate t.gcCflags,
    "--gc-ldflags", " ".intercalate t.gcLdflags] ++
-  (let reads := t.readCaches.flatMap fun d => ["--cache-ro", d.toString]
+  (let reads := t.readCaches.flatMap fun d =>
+     ["--cache-ro", d.toString] ++ (if t.isUnsignedRead d then ["--cache-ro-unsigned"] else [])
    match t.cacheDir with
    | some d => reads ++ ["--cache", d.toString]
    | none => if t.readCaches.isEmpty then ["--no-cache"] else "--no-cache" :: reads) ++
   (if t.regionCache then ["--region-cache"] else []) ++
   (if t.regionStats then ["--region-stats"] else []) ++
   (if t.cacheVerify == "warn" then [] else ["--cache-verify", t.cacheVerify]) ++
-  (if t.cacheRoUnsigned then ["--cache-ro-unsigned"] else []) ++
   t.searchPath.flatMap (fun d => ["-I", d.toString]) ++
   (if t.trustNative then ["--trust-native"] else []) ++
   (match t.nativeFuel with | some n => ["--native-fuel", toString n] | none => []) ++
@@ -190,15 +209,17 @@ def withBundled (t : Toolchain) : IO Toolchain := do
   let sat ← if t.satSolver.isNone && (← (bin / "cadical").pathExists) then pure (some (bin / "cadical").toString) else pure t.satSolver
   pure { t with cc := (bin / "cc").toString, llc := (bin / "llc").toString, gcLdflags := ["-lgc", "-lpthread"], satSolver := sat }
 
-/-- `grail config`: one `key value` line per field (`cache-ro` once per read cache, then
-the written cache or `(off)`). -/
+/-- `grail config`: one `key value` line per field (`cache-ro` once per read cache, with
+`cache-ro-unsigned` after the layers served unsigned, then the written cache or
+`(off)`). -/
 def render (t : Toolchain) : String :=
   s!"cc {t.cc}\ncflags {" ".intercalate t.cflags}\nldflags {" ".intercalate t.ldflags}\nlibs {" ".intercalate t.libs}\ngmp {" ".intercalate t.gmp}\nllc {t.llc}\n" ++
   s!"gc-cflags {" ".intercalate t.gcCflags}\ngc-ldflags {" ".intercalate t.gcLdflags}\n" ++
-  String.join (t.readCaches.map fun d => s!"cache-ro {d}\n") ++
+  String.join (t.readCaches.map fun d =>
+    s!"cache-ro {d}\n" ++ (if t.isUnsignedRead d then "cache-ro-unsigned\n" else "")) ++
   s!"cache {(t.cacheDir.map toString).getD "(off)"}\nregion-cache {t.regionCache}\nregion-stats {t.regionStats}\n" ++
   s!"roots {" ".intercalate (t.searchPath.map toString)}\n" ++
-  s!"cache-verify {t.cacheVerify}\ncache-ro-unsigned {t.cacheRoUnsigned}\n"
+  s!"cache-verify {t.cacheVerify}\n"
 
 end Toolchain
 end Wiz
