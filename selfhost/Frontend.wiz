@@ -3595,15 +3595,22 @@ def tmSort : Tm → Bool
   | .sortL _ => .true
   | _ => .false
 -- a binder kind's default quantity, as the printer sees it (rule (b)): an implicit binder
--- over a sort or Prop is at 0, every other binder at ω
-def sigDfltQ (kind : BKind) (dom : Tm) : Q := match kind with
+-- over a sort *or a proposition* is at 0, every other binder at ω. The proposition test is
+-- the domain's sort (`i`, from `.pi q i _ a b`), as the host's `binderDefault` does
+-- (`Wiz/Core/Pretty.lean:114-117`); without it an implicit proof binder would print a
+-- spurious `0`.
+def sigDfltQ (kind : BKind) (i : Lvl) (dom : Tm) : Q := match kind with
   | .impl => match tmSort dom with
     | .true => .qz
-    | .false => .qw
+    | .false => match lvlClosed i with
+      | .some n => match n with
+        | .zero => .qz
+        | _ => .qw
+      | .none => .qw
   | _ => .qw
 -- the quantity prefix of a signature binder, before the name (`{0 α : Type}`, `(1 x : A)`),
 -- only when it differs from the kind's default (`qtyPrefixD`, `Wiz/Core/Pretty.lean:419-421`)
-def sigQty (kind : BKind) (dom : Tm) (q : Q) : String := match qEq q (sigDfltQ kind dom) with
+def sigQty (kind : BKind) (i : Lvl) (dom : Tm) (q : Q) : String := match qEq q (sigDfltQ kind i dom) with
   | .true => ""
   | .false => String.append (qName q) " "
 def strIn : List String → String → Bool
@@ -3619,7 +3626,8 @@ def sigNameGo (names : List String) (x : String) : Nat → String
     | .true => sigNameGo names (String.append x "'") k
     | .false => x
 def sigName (names : List String) (x : String) : String := match strEq x "_" with
-  | .true => "x"
+  -- the host renames a `_` binder to `x` and then freshens it (`:465`)
+  | .true => sigNameGo names "x" 8
   | .false => sigNameGo names x 8
 -- A declaration's type as the host's declaration hover writes it (`Wiz/LSP.lean:456-460`,
 -- `declHover`: `d.type.pretty []`, i.e. `keepFrom = none`): the leading Pis use the
@@ -3630,18 +3638,30 @@ def sigName (names : List String) (x : String) : String := match strEq x "_" wit
 partial def showSigGo (pnames : List String) (mask : List BKind) (names : List String)
     (l : Nat) (t : Tm) : String :=
   match t with
-  | .pi q _ _ a b => match mask with
+  | .pi q i _ a b => match mask with
     | .nil => showM .true names l t
     | .cons kind rest => match pnames with
       | .nil => showM .true names l t
       | .cons pn prest =>
         let name := sigName names pn;
+        -- the arrow form: an ordinary ω binder whose variable the type does not use
+        let arrow := match kind with
+          | .dflt => match qEq q .qw with
+            | .true => match usesVar 0 b with
+              | .true => .false
+              | .false => .true
+            | .false => .false
+          | _ => .false;
+        -- the host pushes `_` for an arrow binder and the freshened name otherwise (`:462`)
+        let pushed := match arrow with
+          | .true => "_"
+          | .false => name;
         let dom := showM .true names l a;
         -- an arrow's domain: a Pi under it needs the parens the host's `sub 26` gives it
         let domArrow := match a with
           | .pi _ _ _ _ _ => String.append (String.append "(" dom) ")"
           | _ => dom;
-        let cod := showSigGo prest rest (List.append names (.cons name .nil)) (l + 1) b;
+        let cod := showSigGo prest rest (List.append names (.cons pushed .nil)) (l + 1) b;
         let o := match kind with
           | .impl => "{"
           | .inst => "["
@@ -3651,16 +3671,12 @@ partial def showSigGo (pnames : List String) (mask : List BKind) (names : List S
           | .inst => "]"
           | .dflt => ")";
         -- `o qty name : dom c   →   cod`
-        let head1 := String.append (String.append (String.append o (sigQty kind a q)) name)
+        let head1 := String.append (String.append (String.append o (sigQty kind i a q)) name)
           (String.append " : " dom);
         let binder := String.append (String.append head1 c) (String.append " → " cod);
-        match kind with
-        | .dflt => match qEq q .qw with
-          | .true => match usesVar 0 b with
-            | .false => String.append (String.append domArrow " → ") cod
-            | .true => binder
-          | .false => binder
-        | _ => binder
+        match arrow with
+        | .true => String.append (String.append domArrow " → ") cod
+        | .false => binder
   | t => showM .true names l t
 -- `showSig` for a global's type from its parameter names and mask
 def showSig (pnames : List String) (mask : List BKind) (l : Nat) (t : Tm) : String :=

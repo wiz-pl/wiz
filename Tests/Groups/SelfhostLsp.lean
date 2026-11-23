@@ -425,14 +425,15 @@ def selfhostLspGroup : Group where
         -- the erased binder's name is synthetic here (the kernel stores none); its
         -- quantity and the binder form are what this pins
         let erased := (lspStrs d2s[0]! ["goals"]).headD ""
-        check ((erased.splitOn ":0 ").length > 1) "an erased binder keeps its quantity"
+        -- (27a') the quantity comes before the name, as the host writes it
+        check ((erased.splitOn "(0 x").length > 1) "an erased binder keeps its quantity"
         check ((erased.splitOn ") → Nat").length > 1) "an erased binder keeps the binder form"
-        -- D3 (task 27a): a Pi under an application inside a hypothesis prints the goal
-        -- form too (`Nat → Nat`, not `(x0 : Nat) → Nat`). `show`'s application parens
-        -- stay (27c), so the hypothesis reads `(List (Nat → Nat))`.
+        -- D3 (task 27a): a Pi under an application prints the goal form too (`Nat → Nat`,
+        -- not `(x0 : Nat) → Nat`), and (27a') the application has no outer parens, so the
+        -- hypothesis is the host's `List (Nat → Nat)`.
         let d3 := "import Prelude\ndef g (xs : List (Nat → Nat)) : Nat := by\n  exact 0\n"
-        let d3s ← query "d3" d3 dq false
-        checkEq ["xs : (List (Nat → Nat))\n⊢ Nat"] (lspStrs d3s[0]! ["goals"])
+        let d3s ← query "d3" d3 dq true
+        checkEq ["xs : List (Nat → Nat)\n⊢ Nat"] (lspStrs d3s[0]! ["goals"])
         -- a diagnostic inside an `exact` term, for the span-threading pin
         let bad := "import Prelude\ndef bad : Nat := by\n  exact (Nat.add 1 true)\n"
         let badUri := "file:///tmp/selfhost-nested-diag.wiz"
@@ -472,7 +473,7 @@ def selfhostLspGroup : Group where
         withSelfhostCli fun exe => do
         -- `twice` is arrow-only in its type, `idx` has an implicit sort binder and `dep`
         -- a used explicit one: the three shapes a declaration signature has (task 27a)
-        let doc := "import Prelude\ndef one : Nat := 1\ndef label : String := \"x\"\ndef two : Nat := one\ndef twice (f : Nat → Nat) (x : Nat) : Nat := f (f x)\ndef idx {A : Type} (x : A) : A := x\ndef dep (A : Type) (xs : List A) : Nat := 0\ndef three : Nat := lab\n"
+        let doc := "import Prelude\ndef one : Nat := 1\ndef label : String := \"x\"\ndef two : Nat := one\ndef twice (f : Nat → Nat) (x : Nat) : Nat := f (f x)\ndef idx {A : Type} (x : A) : A := x\ndef dep (A : Type) (xs : List A) : Nat := 0\ndef pr {A : Prop} {h : A} (n : Nat) : Nat := n\ndef sh (x : Nat) (0 _ : Nat) : x = x := rfl\ndef three : Nat := lab\n"
         let uri := "file:///tmp/selfhost-nav.wiz"
         let nav (i : Nat) (method : String) (line char : Nat) : Lean.Json :=
           lspReq i method (Lean.Json.mkObj [
@@ -489,17 +490,19 @@ def selfhostLspGroup : Group where
             -- the `3` the declaration index can promise)
             nav 10 "textDocument/hover" 1 6,
             nav 11 "textDocument/definition" 3 17,
-            nav 12 "textDocument/completion" 7 22,
+            nav 12 "textDocument/completion" 9 22,
             nav 13 "textDocument/hover" 4 6,
             nav 14 "textDocument/hover" 5 6,
             nav 15 "textDocument/hover" 6 6,
+            nav 16 "textDocument/hover" 7 6,
+            nav 17 "textDocument/hover" 8 6,
             lspNote "exit" (Lean.Json.mkObj []) ]
         let dir ← IO.FS.createTempDir
         let (code, out, err) ← selfhostLspSession exe dir #[] msgs
         check (code == 0) s!"the server exited {code}, stderr:\n{err}"
         checkEq "" err
         let got ← lspMessages out
-        checkEq 8 got.length
+        checkEq 10 got.length
         -- initialize advertises the three providers, with the host's fields
         let init ← lspAt got 0
         checkEq "utf-16" (lspStr init ["result", "capabilities", "positionEncoding"])
@@ -518,8 +521,11 @@ def selfhostLspGroup : Group where
           (Lean.Json.mkObj [("textDocument", lspTextDoc uri doc 1)]))
         let (srv, hoverOut) ← LSP.handle srv (nav 10 "textDocument/hover" 1 6)
         let (srv, defOut) ← LSP.handle srv (nav 11 "textDocument/definition" 3 17)
-        let (srv, compOut) ← LSP.handle srv (nav 12 "textDocument/completion" 7 22)
-        let (_, sigOut) ← LSP.handle srv (nav 13 "textDocument/hover" 4 6)
+        let (srv, compOut) ← LSP.handle srv (nav 12 "textDocument/completion" 9 22)
+        let (srv, sigOut) ← LSP.handle srv (nav 13 "textDocument/hover" 4 6)
+        let (srv, sigImplicitOut) ← LSP.handle srv (nav 14 "textDocument/hover" 5 6)
+        let (srv, sigDepOut) ← LSP.handle srv (nav 15 "textDocument/hover" 6 6)
+        let (_, sigProofOut) ← LSP.handle srv (nav 16 "textDocument/hover" 7 6)
         let hostOf (outs : Array Lean.Json) (i : Nat) : Lean.Json :=
           match outs.toList.find? (fun m =>
               (jpath m ["id"] |>.bind (·.getNat?.toOption)) == some i) with
@@ -539,14 +545,27 @@ def selfhostLspGroup : Group where
         checkEq "```wiz\ntwice : (Nat → Nat) → Nat → Nat\n```"
           (lspStr (← lspAt got 5) ["result", "contents", "value"])
         -- an implicit binder prints `{…}` with its default quantity suppressed (rule (b)
-        -- for a sort: `{A : Type}`, never `{0 A : Type}`); the sort itself is `show`'s
-        -- spelling (`U0` for `Type`, 27c)
-        checkEq "```wiz\nidx : {A : U0} → A → A\n```"
+        -- for a sort: `{A : Type}`, never `{0 A : Type}`); with 27a' the sort, the
+        -- application and the quantity order are the host's, so these are compared too
+        checkEq (lspStr (hostOf sigImplicitOut 14) ["contents", "value"])
           (lspStr (← lspAt got 6) ["result", "contents", "value"])
-        -- a used explicit binder keeps its written name (`A`, not `x0`); `List A` is an
-        -- application, so `show`'s spelling keeps its parens (27c)
-        checkEq "```wiz\ndep : (A : U0) → (List A) → Nat\n```"
+        checkEq "```wiz\nidx : {A : Type} → A → A\n```"
+          (lspStr (← lspAt got 6) ["result", "contents", "value"])
+        -- a used explicit binder keeps its written name (`A`, not `x0`)
+        checkEq (lspStr (hostOf sigDepOut 15) ["contents", "value"])
           (lspStr (← lspAt got 7) ["result", "contents", "value"])
+        checkEq "```wiz\ndep : (A : Type) → List A → Nat\n```"
+          (lspStr (← lspAt got 7) ["result", "contents", "value"])
+        -- an implicit PROOF binder's default is also 0 (rule (b) from the domain's sort),
+        -- so `{h : A}` keeps no `0`
+        checkEq (lspStr (hostOf sigProofOut 16) ["contents", "value"])
+          (lspStr (← lspAt got 8) ["result", "contents", "value"])
+        checkEq "```wiz\npr : {A : Prop} → {h : A} → Nat → Nat\n```"
+          (lspStr (← lspAt got 8) ["result", "contents", "value"])
+        -- a `_` binder is printed as `x` and freshened against an outer name (`x'`); the
+        -- `x = x` result is `Eq(...)` in this printer's spelling (27c), so no host compare
+        checkEq "```wiz\nsh : (x : Nat) → (0 x' : Nat) → Eq(Nat, x, x)\n```"
+          (lspStr (← lspAt got 9) ["result", "contents", "value"])
         -- definition: the declaration's `Location`. The host's declaration range is the
         -- whole command (its own tests pin the line only); the selfhost and the shim
         -- point at the name token, so the lines and the uri are compared and the

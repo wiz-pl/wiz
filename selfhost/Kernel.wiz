@@ -2508,7 +2508,12 @@ mutual
 -- `names` names it)
 def showM (goal : Bool) (names : List String) : Nat → Tm → String
   | l, .var i => nameAt names (l - i - 1)
-  | _, .univ n => String.append "U" (Nat.toString n)
+  | _, .univ n => match goal with
+    -- (27a') the host's sort spelling (`showSort`, `Wiz/Core/Pretty.lean:55-62`)
+    | .true => match n with
+      | .zero => "Type"
+      | _ => String.append "Type " (Nat.toString n)
+    | .false => String.append "U" (Nat.toString n)
   | _, .prop => "Prop"
   | l, .pi q _ _ a b => match goal with
     -- a goal's type: the host's `GoalView.show` rule, which a Pi *anywhere* in the type
@@ -2520,9 +2525,14 @@ def showM (goal : Bool) (names : List String) : Nat → Tm → String
       let domArrow := match a with
         | .pi _ _ _ _ _ => String.append (String.append "(" dom) ")"
         | _ => dom;
-      -- the binder form, with the quantity (`showQ` is ` : ` at ω)
-      let binder := String.append (String.append (String.append "(" (nameAt names l))
-        (String.append (showQ q) dom)) (String.append ") → " cod);
+      -- (27a') the binder form with the quantity *before* the name, as the host writes
+      -- it (`(0 x : Nat) → …`, `Wiz/Core/Pretty.lean:419-421`)
+      let qpre := match q with
+        | .qw => ""
+        | _ => String.append (qLit q) " ";
+      let head1 := String.append (String.append (String.append "(" qpre) (nameAt names l))
+        (String.append " : " dom);
+      let binder := String.append (String.append head1 ") → ") cod;
       match q with
       | .qw => match usesVar 0 b with
         | .false => String.append (String.append domArrow " → ") cod
@@ -2531,14 +2541,20 @@ def showM (goal : Bool) (names : List String) : Nat → Tm → String
     | .false => String.append (String.append (String.append "(" (nameAt names l))
         (String.append (showQ q) (showM goal names l a))) (String.append ") → " (showM goal names (l + 1) b))
   | l, .lam b => String.append (String.append "λ" (nameAt names l)) (String.append ". " (showM goal names (l + 1) b))
-  | l, .app f a =>
-    -- a Pi argument in a goal keeps its parens (`List (Nat → Nat)`, task 27a)
-    let arg := match goal with
-      | .true => match a with
+  | l, .app f a => match goal with
+    -- (27a') the host's application precedence (`Wiz/Core/Pretty.lean:417-419`): no outer
+    -- parens, and an application's function / an app, Pi or λ argument keeps its own
+    | .true =>
+      let fn := match f with
+        | .app _ _ => String.append (String.append "(" (showM goal names l f)) ")"
+        | _ => showM goal names l f;
+      let arg := match a with
+        | .app _ _ => String.append (String.append "(" (showM goal names l a)) ")"
         | .pi _ _ _ _ _ => String.append (String.append "(" (showM goal names l a)) ")"
-        | _ => showM goal names l a
-      | .false => showM goal names l a;
-    String.append (String.append "(" (showM goal names l f)) (String.append " " (String.append arg ")"))
+        | .lam _ => String.append (String.append "(" (showM goal names l a)) ")"
+        | _ => showM goal names l a;
+      String.append (String.append fn " ") arg
+    | .false => String.append (String.append "(" (showM goal names l f)) (String.append " " (String.append (showM goal names l a) ")"))
   | l, .letE t v b => String.append (String.append "let " (nameAt names l))
       (String.append (String.append " := " (showM goal names l v)) (String.append "; " (showM goal names (l + 1) b)))
   | l, .letUnit u b => String.append (String.append "let () := " (showM goal names l u)) (String.append "; " (showM goal names l b))
@@ -2598,11 +2614,19 @@ def showM (goal : Bool) (names : List String) : Nat → Tm → String
   | l, .coit _ _ _ S st i x => String.append (String.append (String.append "coit(" (showM goal names l S)) (String.append ", " (showM goal names l st)))
       (String.append (String.append ", " (showM goal names l i)) (String.append ", " (String.append (showM goal names l x) ")")))
   | _, .const n _ ls _ _ => String.append (privBase n) (showLvls ls)
-  | _, .sortL l => match lvlClosed l with
-    | .some n => match n with
-      | .zero => "Prop"
-      | .succ m => String.append "U" (Nat.toString m)
-    | .none => String.append (String.append "Sort(" (lvlShow l)) ")"
+  | _, .sortL l => match goal with
+    | .true => match lvlClosed l with
+      | .some n => match n with
+        | .zero => "Prop"
+        | .succ m => match m with
+          | .zero => "Type"
+          | _ => String.append "Type " (Nat.toString m)
+      | .none => String.append (String.append "Sort(" (lvlShow l)) ")"
+    | .false => match lvlClosed l with
+      | .some n => match n with
+        | .zero => "Prop"
+        | .succ m => String.append "U" (Nat.toString m)
+      | .none => String.append (String.append "Sort(" (lvlShow l)) ")"
   | _, .axiomC n _ => privBase n
   | l, .ind _ _ _ _ P m i x => String.append (String.append (String.append "ind(" (showM goal names l P)) (String.append ", " (showM goal names l m)))
       (String.append (String.append ", " (showM goal names l i)) (String.append ", " (String.append (showM goal names l x) ")")))
