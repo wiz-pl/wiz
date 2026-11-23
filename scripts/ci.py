@@ -1019,8 +1019,9 @@ def changes(args):
 
 
 GROUP = re.compile(r"^── (.*?) \((.*)\)$")
-# a case line starts with its position in the run (`[n/total] `; optional for older logs)
-POS = r"(?:\[\d+/\d+\] )?"
+# a case line starts with its position in the run (`[n/failed/total] `, or `[n/total] ` in
+# older logs; both accepted)
+POS = r"(?:\[\d+/(?:\d+/)?\d+\] )?"
 PASS = re.compile(rf"^{POS}  ✓ (.*?)(?: \([\d.]+ s\))?$")
 FAIL = re.compile(rf"^{POS}  ✗ (.*?)(?: \([\d.]+ s\))?$")
 SKIP = re.compile(rf"^{POS}  ⊘ (.*?)(?: \([\d.]+ s\))?$")

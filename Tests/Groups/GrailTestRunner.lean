@@ -189,7 +189,7 @@ def testRunnerGroup : Group where
           pure (o.exitCode, o.stdout ++ o.stderr)
         let has (out s : String) : IO Unit := check ((out.splitOn s).length > 1) s!"no {s} in:\n{out}"
         let (code, out) ← run #["--run", "driver-fixtures", "0"]
-        checkEq 0 code; has out "[1/1]   ✓ fixture: passes"; has out "driver-fixtures #0: passed"
+        checkEq 0 code; has out "[1/0/1]   ✓ fixture: passes"; has out "driver-fixtures #0: passed"
         let (code, out) ← run #["--run", "driver-fixtures", "1"]
         checkEq 1 code; has out "✗ fixture: fails"; has out "fixture failure"
         has out "fixture output before the failure"; has out "FAILED"
@@ -245,7 +245,7 @@ def testRunnerGroup : Group where
         let (c1, one) ← run #["--jobs", "1", "=rig"]
         let (c4, four) ← run #["--jobs", "4", "=rig"]
         checkEq 0 c1; checkEq 0 c4
-        -- the case lines, without their times (`(0.032 s)`) but with their `[n/total]`
+        -- the case lines, without their times (`(0.032 s)`) but with their `[n/failed/total]`
         -- position (which `--jobs` must not change); the group total too
         let norm (out : String) : List String :=
           (out.splitOn "\n").filterMap fun l =>
