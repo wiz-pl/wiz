@@ -156,10 +156,9 @@ jobs:
           out=$(mktemp -d)
           ui=$(nix build .#wiz-source-ui --no-link --print-out-paths)
           sh web/source-bundle.sh ./scry/.grail/bin/scry "$out/b" --ui "$ui"
-          chrome=$(command -v chromium || command -v chromium-browser || command -v google-chrome || true)
-          if [ -z "$chrome" ]; then
-            chrome=$(nix shell --inputs-from . nixpkgs#chromium -c sh -c 'command -v chromium')
-          fi
+          # Use the pinned nixpkgs chromium: the runner's system chromium is often a
+          # snap stub that never opens a DevTools target.
+          chrome=$(nix shell --inputs-from . nixpkgs#chromium -c sh -c 'command -v chromium')
           node web/source_chrome_test.mjs "$chrome" "$out/b"
       - name: grail test (the *.expected goldens)
         run: |

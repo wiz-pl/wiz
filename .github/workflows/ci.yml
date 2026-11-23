@@ -1606,10 +1606,9 @@ jobs:
         # the artifact deploy-docs will publish. The test serves it and loads it twice
         # (JavaScript off: the SSR; on: mount, hover, #/f/<id>).
         run: |
-          chrome=$(command -v chromium || command -v chromium-browser || command -v google-chrome || true)
-          if [ -z "$chrome" ]; then
-            chrome=$(nix shell --inputs-from . nixpkgs#chromium -c sh -c 'command -v chromium')
-          fi
+          # Use the pinned nixpkgs chromium: the runner's system chromium is often a
+          # snap stub that never opens a DevTools target.
+          chrome=$(nix shell --inputs-from . nixpkgs#chromium -c sh -c 'command -v chromium')
           node web/source_chrome_test.mjs "$chrome" doc-site/source
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
