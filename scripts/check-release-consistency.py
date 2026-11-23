@@ -1192,7 +1192,9 @@ TOWER_SPEC_RE = re.compile(
     r"([A-Za-z0-9_.@/<>…-]+)"
 )
 CHANNEL_FLAG_RE = re.compile(r"--channel\s+([A-Za-z0-9_.-]+)")
-SCRIPT_REF_RE = re.compile(r"((?:scry/)?scripts/[A-Za-z0-9_./+*<>-]+)")
+# A repository script, or one inside a package that keeps its own `scripts/` (scry's
+# tooling, hdl's standalone check and generators, tower's if it grows one).
+SCRIPT_REF_RE = re.compile(r"((?:scry/|hdl/|tower/)?scripts/[A-Za-z0-9_./+*<>-]+)")
 ARTIFACT_RE = re.compile(
     r"[A-Za-z0-9_.<>-]+\.(?:tar\.gz(?:\.(?:sha256|manifest\.json|cdx\.json))?"
     r"|cdx\.json|intoto\.json(?:\.dsse|\.sig)?|sha256|dsse|sig)"
@@ -1397,7 +1399,9 @@ def documented_scripts(root: Path) -> list[tuple[str, int, str]]:
             continue
         for match in SCRIPT_REF_RE.finditer(text):
             token = match.group(1).rstrip(".,;:")
-            if token.rstrip("/") in ("scripts", "scry/scripts"):
+            if token.rstrip("/") in (
+                "scripts", "scry/scripts", "hdl/scripts", "tower/scripts"
+            ):
                 continue  # a directory or a `scripts/...` placeholder, not a command
             if any(char in token for char in "*<>") or "..." in token or "…" in token:
                 continue

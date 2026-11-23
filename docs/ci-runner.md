@@ -51,7 +51,9 @@ self-hosted runner executes that pull request's code on the machine. So:
 | `web` | web (browser-free tests) | `web` |
 | `docs` | docs (the published site) | a push |
 | `deploy docs to Pages` | docs | a push |
-| `packages` | packages (`scry/`, `hdl/`, `tower/`) | `subset_packages` |
+| `packages (hdl)` | hdl (`hdl/`) | `subset_hdl` |
+| `packages (scry)` | scry (`scry/`) | `subset_scry` |
+| `packages (tower)` | tower (`tower/`) | `subset_tower` |
 | `runtime` | runtime (`runtime/`, `c/`) | `subset_runtime` |
 | `CI result` | all | every run but the weekly schedule |
 | `bootstrap fixpoint` | none (schedule/dispatch) | the schedule or the `fixpoint` input |
@@ -61,8 +63,8 @@ A path that matches several subsets sets all of them. A path no subset claims
 an input the table does not classify still runs every job. The `lean` job runs for any
 `code` change rather than the `lean` subset alone: the shard matrix is a job output, and
 a non-empty `shards` list cannot be expanded without it. The build is warm on a
-`wizlib`/`packages` change (the sources and the seed are unchanged, so Cachix
-substitutes or Lake recompiles nothing).
+`wizlib` or package (`hdl`/`scry`/`tower`) change (the sources and the seed are
+unchanged, so Cachix substitutes or Lake recompiles nothing).
 
 ## What the runner needs
 
@@ -263,13 +265,16 @@ restores its own subset's previous entry and recompiles what changed.
 | `lean` | `.lake/docs-examples` | `subset-v1-lean-<os>-<arch>-<toolchain12>-docs-examples-<lean12>` |
 | `docs examples` | `.lake/docs-examples` | `subset-v1-docs-<os>-<arch>-<toolchain12>-examples-<docs12>` |
 | `docs` | `.wiz-doc-cache/ro` | `subset-v1-docs-<os>-<arch>-<toolchain12>-site-<docs12>` |
-| `packages` | `scry/.grail` | `subset-v1-packages-<os>-<arch>-<toolchain12>-<compiler-key>-<packages12>` |
+| `packages (scry)` | `scry/.grail` | `subset-v1-scry-<os>-<arch>-<toolchain12>-<compiler-key>-<scry12>` |
 | `tests` | `~/.cache/wiz`, `.grail`, `/tmp/wiz-selfhost-*` | `subset-v1-tests-wizlib-<os>-<arch>-<toolchain12>-[pr-<N>-]<shard>-<compiler-key>-<selfhost/lib hash>-<tests12>-<wizlib12>-<wiz tree hash>` |
 | `trust ledger` | `.lake/trust-cache` | `subset-v1-wizlib-<os>-<arch>-<toolchain12>-[pr-<N>-]<driver sha>-<wizlib12>` |
 
-`web`, `wasm` and `runtime` own no Actions cache: the modules are Nix store paths in
-the PR Cachix cache (content-addressed and reused path by path), the web job's product
-is a check result, and the runtime script builds into a temporary directory.
+`web`, `wasm`, `runtime`, `packages (hdl)` and `packages (tower)` own no Actions cache:
+the modules and packages are Nix store paths in the PR Cachix cache (content-addressed
+and reused path by path), the web job's product is a check result, and the runtime
+script builds into a temporary directory. `packages (scry)` keeps only the checkout's
+`.grail` mirror (the package itself is the store path); the mirror is what `scry.yml`,
+`bench.yml` and the job's smoke read as `scry/.grail/bin/scry`.
 
 A job restores with `actions/cache/restore` (`key` plus `restore-keys` = the prefix) and
 saves with `actions/cache/save` under the same key. The save step has no `always()`:
@@ -293,9 +298,11 @@ untrusted.**
   (`cachix use badlydrawnwizards`).
 * A pull request publishes only to the PR cache `wiz-pl` (repository variable
   `CACHIX_PR_NAME`), with the token in the secret `CACHIX_PR_AUTH_TOKEN`. A PR's test
-  shards, trust-ledger, web, wasm, lean and packages jobs add that cache as an extra
-  substituter for that job only, so its key is trusted in that job and nowhere else;
-  master and the docs job never add it as a substituter.
+  shards, trust-ledger, web, wasm, lean and `packages (hdl)`/`packages (scry)`/
+  `packages (tower)` jobs add that cache as an extra substituter for that job only, so
+  its key is trusted in that job and nowhere else; master and the docs job never add it
+  as a substituter. Each package job pushes only its own output path (a failed package
+  never writes another package's entry).
 * If `CACHIX_PR_AUTH_TOKEN` is unset, or the PR is from a fork, the PR pushes nothing:
   the step prints "the store paths are not published" and continues, and the shards
   build the paths. Nothing falls back to `CACHIX_AUTH_TOKEN`.

@@ -11,7 +11,14 @@
         "AGENTS.md",
         ".github/**"
       ],
-      "sha256": "04d64fb05a837904720d7f1d6016d8f0688ab9276bfce874fb263ab7d0020498"
+      "sha256": "ea7d7231d4d1c7fe20784094ec471d11dab7bcc5e345255a31b4ba7103ac69b8"
+    },
+    "hdl": {
+      "files": 108,
+      "paths": [
+        "hdl/**"
+      ],
+      "sha256": "f17960a5cb4871ccb6b8fc9cc95fafc2ddd55c79d16a199aed626ce27fcafeb9"
     },
     "lean": {
       "files": 165,
@@ -29,15 +36,6 @@
       ],
       "sha256": "d6246f6a464d07a62cd3e613f62b082f40630a8571a97fa4a339a24cd6f31d48"
     },
-    "packages": {
-      "files": 927,
-      "paths": [
-        "scry/**",
-        "hdl/**",
-        "tower/**"
-      ],
-      "sha256": "7e4c39a9276d42e5e4c0f55c68436023f744ea309a95833d2c97853f94d64bed"
-    },
     "runtime": {
       "files": 11,
       "paths": [
@@ -46,6 +44,13 @@
       ],
       "sha256": "936432c49522ea723f3c57dbe0a6492fdb5d41f7cdc03acf07a90aec8e85fa60"
     },
+    "scry": {
+      "files": 812,
+      "paths": [
+        "scry/**"
+      ],
+      "sha256": "ee32f820d0f9d198bcea818b24d77b7d91ed20ef6b8849b37c010f687dcd2d79"
+    },
     "tests": {
       "files": 396,
       "paths": [
@@ -53,6 +58,13 @@
         "web/**"
       ],
       "sha256": "09c74eb8c039549f44d1141d830fe88f15a7ad9adb5bdd2b040e51f934f957e8"
+    },
+    "tower": {
+      "files": 7,
+      "paths": [
+        "tower/**"
+      ],
+      "sha256": "45419107697888dfca7be39e9fc88930634f40b59613464af4b38461b1b28e1e"
     },
     "wizlib": {
       "files": 110,

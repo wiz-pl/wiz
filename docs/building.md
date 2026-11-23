@@ -878,6 +878,7 @@ not invalidate the others:
 
 | output | what it is | keyed on |
 |---|---|---|
+| `.#hdl`, `.#scry`, `.#tower` | the three packages beside the compiler, each in the Nix sandbox with the Wiz toolchain: Hdl runs `hdl/scripts/check-standalone.sh` (build + its 32 goldens) and installs a stamp; Scry runs `grail build scry` with the fetched C# grammar and a generated `grail.local.wiz`, installing `bin/scry` and a stamp; tower is the toolchain manager. Ordinary store paths: their RPATH and store references are intact | `hdl/`; `scry/` + `tree-sitter-c-sharp` + `scry-native`; `tower/` + `scripts/build-tower-wiz.sh` (`passthru.subset`) |
 | `.#wasm-fixtures` | the `wasm-fixtures` programs under `scripts/` compiled with `wiz build --target wasm`, the host `web/wasm-host.mjs`, and each module's expected stdout; the check runs every module under Node | the `wasm-fixtures` directory under `scripts/`, `web/wasm-host.mjs` |
 | `.#wiz-web`, `.#wiz-playground`, `.#wiz-playground-ui`, `.#wiz-source-ui` | the Emscripten page modules, each with its own page files (unchanged) | each script's own fileset |
 | `.#web-bundle` | the three page-module outputs merged into one directory (the site's `web/out`) | `wiz-web` + `wiz-playground` + `wiz-playground-ui` |
@@ -887,8 +888,14 @@ not invalidate the others:
 | `.#release-tarball` / `.#source-tarball` | the deterministic source tarball, manifest and SBOM (unchanged) | the source tree |
 
 ```sh
+nix build .#hdl .#scry .#tower                    # the three packages
 nix build .#wasm-fixtures .#web-bundle .#docs-site .#pages .#release-bin
 ```
+
+Each package is its own repository subset (`hdl/**`, `scry/**`, `tower/**`) and its own
+CI job, so a change to one does not rerun or rekey the others. Only `.#release-bin` is
+the leaf that patches ELF interpreters, strips, or scrubs store paths; the three packages
+are normal store paths.
 
 The release archive's metadata is the flake's commit time (`RELEASE_SOURCE_DATE_EPOCH`,
 with `SOURCE_DATE_EPOCH` set to the same value for the tools); an ambient epoch cannot
@@ -1024,12 +1031,13 @@ reference manual, made with the cached `wiz`) on a push, off the shards' critica
 Every job pulls from Cachix through `cachix-action`, which is set up for substitution
 only (`skipPush: true`); on a pull request it reads the trusted cache anonymously, and
 the jobs that substitute this commit's store paths (the test shards, `trust-ledger`,
-`web`, `wasm`, `lean` and `packages`) also add the PR cache as an extra substituter for
-that job only. No job on the critical path runs `lake build` directly, and the `.lake`
-Actions caches are the `lake_seed` job's cold seed, a pull request's restore of it, and
-the per-subset caches in [ci-runner.md](ci-runner.md) (a PR's `lean`
-`.subset-cache/lean`, a shard's Wiz caches,
-and the docs/package caches); a failed job writes none of them. The shards run the
+`web`, `wasm`, `lean` and `packages (hdl)`/`packages (scry)`/`packages (tower)`) also
+add the PR cache as an extra substituter for that job only. No job on the critical path
+runs `lake build` directly, and the Actions caches are the `lake_seed` job's cold seed,
+a pull request's restore of it, and the per-subset caches in
+[ci-runner.md](ci-runner.md) (a PR's `lean` `.subset-cache/lean`, a shard's Wiz caches,
+and the docs-examples and scry-mirror caches); a failed job writes none of them. The
+shards run the
 Nix-built test driver
 (`packages.tests`), not
 `lake test`, and symlink the store `wiz`
@@ -1431,9 +1439,9 @@ setup action keeps the elan cache for those
   and the test driver from the same build, and wraps the binaries with the toolchain as
   flags (`--cc`, `--cflags`, `--ldflags`, `--llc`, `--gc-cflags`, `--gc-ldflags`; flags
   you pass come later and win) and, for `wiz`, the packaged standard library as a module
-  root after `./lib`. The `packages` job checks the package from a directory with no
-  checkout (`wiz check/build`, and `grail` starts), so the publication path is exercised
-  before the push. The `lean` job publishes to the public Cachix cache
+  root after `./lib`. The `packages (tower)` job checks the package from a directory
+  with no checkout (`wiz check/build`, and `grail` starts), so the publication path is
+  exercised before the push. The `lean` job publishes to the public Cachix cache
   `badlydrawnwizards` from `master` only; a pull request publishes to its own untrusted
   cache (`CACHIX_PR_NAME`), or nothing without that secret. `packages.tests` is
   `nix run .#tests -- --list`, and `packages.reference` is
@@ -1519,10 +1527,11 @@ the generated reference manual (`result/index.md`, and `result/site`).
   changed (a `lib/X.wiz` input brings the lib files it imports), and the shards without
   `"inputs"` (backends, library) for any non-docs change. The `lean` job runs whenever
   `code` changed (it emits the shard matrix every non-empty `shards` list needs); the
-  `packages` and `runtime` jobs run only when their subset (`scry/`/`hdl/`/`tower/`, or
-  `runtime/`/`c/`) changed, and `web`/`wasm` when a `web/` file did. So a PR touching
-  only, say, `lib/Json.wiz` runs the `lean` job (warm: its sources and seed are
-  unchanged) and the shards, but skips the packages/runtime jobs. `CI result` counts
+  `packages (hdl)`, `packages (scry)`, `packages (tower)` and `runtime` jobs run only
+  when their subset (`hdl/`, `scry/`, `tower/`, or `runtime/`/`c/`) changed, and
+  `web`/`wasm` when a `web/` file did. So a PR touching only, say, `lib/Json.wiz` runs
+  the `lean` job (warm: its sources and seed are unchanged) and the shards, but skips
+  the package/runtime jobs. `CI result` counts
   a job the filter skipped as fine and a job it wanted only if it succeeded. Pushes to
   `master`, the merge queue and manual runs always run everything, so a missing input
   shows up there at the latest. A test that starts reading a new file belongs in a shard

@@ -89,9 +89,10 @@ defaults:
 # The job graph, keyed by the repository subsets (`.github/repo-subsets.json`,
 # `scripts/repo-subsets.py`). The `changes` job publishes one `subset_<name>` boolean
 # per subset; a job's `if:` and the `CI result` verdict below use the same condition,
-# so a job is required exactly when it runs. `subset_packages`/`subset_runtime` gate
-# the jobs new to this split; `lean` cannot gate on its subset alone because it builds
-# the test driver and emits the shard matrix every code change needs.
+# so a job is required exactly when it runs. `subset_hdl`/`subset_scry`/`subset_tower`
+# and `subset_runtime` gate the jobs new to this split; `lean` cannot gate on its
+# subset alone because it builds the test driver and emits the shard matrix every code
+# change needs.
 #
 #   job                     | subset                         | gating output
 #   ------------------------+--------------------------------+------------------------
@@ -111,7 +112,9 @@ defaults:
 #   web                     | web (browser-free tests)       | web
 #   docs                    | docs (the published site)      | push
 #   deploy docs to Pages    | docs                           | push
-#   packages                | packages (scry/, hdl/, tower/) | subset_packages
+#   packages (hdl)          | hdl (hdl/)                    | subset_hdl
+#   packages (scry)         | scry (scry/)                  | subset_scry
+#   packages (tower)        | tower (tower/)                | subset_tower
 #   runtime                 | runtime (runtime/, c/)         | subset_runtime
 #   CI result               | all                            | every run but schedule
 #   bootstrap fixpoint      | (none: schedule/dispatch)      | schedule or fixpoint input
@@ -121,8 +124,9 @@ defaults:
 # subset, so an input the table does not classify still runs every job (as
 # `changes --all` does for a push). The `lean` job also reads `tests/` and `runtime/`
 # through flake.nix's build fileset, and it emits the shard matrix, so it runs for any
-# `code` change; on a `wizlib`/`packages` change the sources and seed are unchanged and
-# the build is warm (Cachix substitutes the store paths or Lake recompiles nothing).
+# `code` change; on a `wizlib` or package (`hdl`/`scry`/`tower`) change the sources
+# and seed are unchanged and the build is warm (Cachix substitutes the store paths or
+# Lake recompiles nothing).
 #
 # Subset caches (the untrusted/PR reuse rule). `scripts/ci.py subset-key NAME
 # [--with NAME] [--scope S] [--suffix S]` prints one `key=` and one `prefix=`:
@@ -140,14 +144,18 @@ defaults:
 #   lean           .lake/docs-examples            subset-v1-lean-…-docs-examples-<lean12>
 #   docs_examples  .lake/docs-examples            subset-v1-docs-…-examples-<docs12>
 #   docs           .wiz-doc-cache/ro              subset-v1-docs-…-site-<docs12>
-#   packages       scry/.grail                    subset-v1-packages-…-<compiler-key>-<packages12>
+#   packages (scry) scry/.grail                   subset-v1-scry-…-<compiler-key>-<scry12>
 #   tests          ~/.cache/wiz, .grail,          subset-v1-tests-wizlib-…-<shard>-
 #                  /tmp/wiz-selfhost-*            <compiler-key>-<selfhost/lib>-<tests12>-
 #                                                 <wizlib12>-<wiz tree>
 #   trust_ledger   .lake/trust-cache              subset-v1-wizlib-…-<driver sha>-<wizlib12>
-#   web, wasm, runtime  (no Actions cache)        their products are Nix store paths in the
+#   web, wasm, runtime, packages (hdl), packages (tower)
+#                  (no Actions cache)             their products are Nix store paths in the
 #                                                 PR Cachix cache (content-addressed) or the
 #                                                 runtime script is a temporary build
+#   packages (scry) keeps only the checkout's `.grail` mirror; the package itself is a
+#   Nix store path in the same Cachix cache, and that store path is what a later run
+#   substitutes.
 #
 #   * restore: `actions/cache/restore` with `key: steps.<subset-key>.outputs.key` and
 #     `restore-keys: steps.<subset-key>.outputs.prefix`, in the job that owns the subset;
@@ -166,7 +174,7 @@ defaults:
 #   subset-v1-lean-linux-x64-d6162537714e-docs-examples-f5590ef639de
 #   subset-v1-docs-linux-x64-d6162537714e-examples-<docs12>
 #   subset-v1-docs-linux-x64-d6162537714e-site-<docs12>
-#   subset-v1-packages-linux-x64-d6162537714e-<compiler-key>-c9d78b065f35
+#   subset-v1-scry-linux-x64-d6162537714e-<compiler-key>-ee32f820d0f9
 #   subset-v1-tests-wizlib-linux-x64-d6162537714e-<shard>-<compiler-key>-<selfhost/lib>-03517ef46948-8ed9ac2c4f10-<wiz tree>
 #   subset-v1-wizlib-linux-x64-d6162537714e-<driver sha>-8ed9ac2c4f10
 # `<docs12>` is read from .github/repo-subsets.json; it is not written out here because
@@ -200,7 +208,9 @@ jobs:
       subset_lean: ${{ steps.filter.outputs.subset_lean }}
       subset_runtime: ${{ steps.filter.outputs.subset_runtime }}
       subset_wizlib: ${{ steps.filter.outputs.subset_wizlib }}
-      subset_packages: ${{ steps.filter.outputs.subset_packages }}
+      subset_hdl: ${{ steps.filter.outputs.subset_hdl }}
+      subset_scry: ${{ steps.filter.outputs.subset_scry }}
+      subset_tower: ${{ steps.filter.outputs.subset_tower }}
       subset_tests: ${{ steps.filter.outputs.subset_tests }}
       subset_docs: ${{ steps.filter.outputs.subset_docs }}
       shards: ${{ steps.filter.outputs.shards }}
@@ -419,12 +429,13 @@ jobs:
   # built compiler or test driver: `check-shards`, the shard matrix the `tests` job
   # expands, the reproducibility corpus, and the docs examples (which run against the
   # `wiz` this job just built, so a fork PR needs no second build). The package checks
-  # live in `packages`, the runtime's own compile in `runtime`; both run beside this
-  # job instead of serialising after the build.
+  # live in `packages (hdl)`, `packages (scry)` and `packages (tower)`, the runtime's
+  # own compile in `runtime`; all run beside this job instead of serialising after the
+  # build.
   #
   # Gating: `code` (not `subset_lean` alone). The matrix is a job output, and every
   # shard that runs needs it plus the `tests`/`wiz` store paths, so skipping this job
-  # on a `wizlib` or `packages` change would leave `fromJSON('')` for a non-empty
+  # on a `wizlib` or package change would leave `fromJSON('')` for a non-empty
   # `shards` list. The build itself is warm on those changes: the sources and seed are
   # unchanged, so Cachix substitutes or Lake recompiles nothing.
   lean:
@@ -661,28 +672,181 @@ jobs:
           path: .lake/docs-examples
           key: ${{ steps.docs-subset-key.outputs.key }}
 
-  # The `packages` subset's job: the package outputs that live beside the compiler, not
-  # in the test matrix's critical path — the Hdl package (`hdl/`, built and tested from
-  # a copy of itself), the scry package (`scry/`, its CLI plus the native tree-sitter
-  # library) and tower (`nix build .#tower`). What the old `build` job checked in its
-  # "package" steps (the example index and a program built outside the checkout) is
-  # here too. It runs only when `scry/`, `hdl/` or `tower/` changed.
+  # The three package subsets' jobs: each package that lives beside the compiler is its
+  # own Nix derivation (`.#hdl`, `.#scry`, `.#tower`) and its own job, gated on its own
+  # subset, so a change to one neither runs nor invalidates another. `nix build` runs in
+  # the sandbox with the Wiz toolchain; on a Cachix hit it is a substitution, and each
+  # job publishes only its own output below (trusted on a push to master, the PR cache
+  # on a pull request), so a failed package never writes another package's entry.
   #
-  # It substitutes the lean job's `wiz`/`grail` (a pull request's seeded path from the
-  # PR cache; anything else from the trusted cache), so the package builds use exactly
-  # the compiler this commit publishes. On a fork, or with no PR cache, the fallback
-  # builds the pure `.#wiz`, as every other substituting job does.
-  packages:
-    name: packages (hdl, scry, tower)
+  # The toolchain publication smokes (the example index and a program built outside the
+  # checkout) stay in the tower job: tower is the smallest package job and its package
+  # wraps wiz/grail, and the smokes exercise the compiler every package substitutes.
+  # The Hdl derivation itself runs `check-standalone.sh` (build + its 32 goldens); the
+  # scry derivation runs `grail build scry`. Hdl and tower own no Actions cache; the
+  # scry job keeps the checkout's `.grail` mirror under the `scry` subset's key.
+
+  packages_hdl:
+    name: packages (hdl)
     needs: [changes, lean]
     if: >-
       !cancelled() && github.event_name != 'schedule' &&
       needs.changes.outputs.code == 'true' &&
-      needs.changes.outputs.subset_packages == 'true' &&
+      needs.changes.outputs.subset_hdl == 'true' &&
       needs.lean.result == 'success'
     runs-on: ubuntu-latest
-    # 60 min: scry's `grail build scry` (~12 min measured in scry.yml), the Hdl
-    # standalone build plus its 32 goldens, tower's Nix build and the package smokes.
+    # 60 min: the Hdl standalone build and its 32 goldens, plus a cold pure `wiz` when
+    # the trusted cache does not hold it; a substitution is seconds.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
+          cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
+          lean: false
+      - name: "nix build (the Hdl package: standalone build and its goldens)"
+        # `.#hdl` copies `hdl/` alone, then runs `check-standalone.sh` with the packaged
+        # `grail`; the yosys/Icarus/formal assertions stay in the `hdl` test shard.
+        # `$out/stamp` records the check.
+        id: nix
+        run: |
+          out=$(nix build .#hdl --no-link --print-out-paths -L)
+          echo "out=$out" >> "$GITHUB_OUTPUT"
+          cat "$out/stamp"
+          du -sh "$out"
+      - name: Publish the store path to Cachix (master)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "::error title=Cachix::CACHIX_AUTH_TOKEN is empty on a run that must publish"
+            exit 1
+          fi
+          nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_AUTH_TOKEN" cachix push "$CACHIX_NAME" \
+            ${{ steps.nix.outputs.out }}
+      - name: Publish the store path to the PR cache
+        if: github.event_name == 'pull_request'
+        env:
+          CACHIX_PR_AUTH_TOKEN: ${{ secrets.CACHIX_PR_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_PR_NAME" ] || [ -z "$CACHIX_PR_AUTH_TOKEN" ]; then
+            echo "::warning title=Cachix::no CACHIX_PR_AUTH_TOKEN: the Hdl path is not published"
+            exit 0
+          fi
+          nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_PR_AUTH_TOKEN" cachix push "$CACHIX_PR_NAME" \
+            ${{ steps.nix.outputs.out }}
+
+  packages_scry:
+    name: packages (scry)
+    needs: [changes, lean]
+    if: >-
+      !cancelled() && github.event_name != 'schedule' &&
+      needs.changes.outputs.code == 'true' &&
+      needs.changes.outputs.subset_scry == 'true' &&
+      needs.lean.result == 'success'
+    runs-on: ubuntu-latest
+    # 90 min: `grail build scry` (~12 min measured in scry.yml) on a cold Nix cache,
+    # plus a cold pure `wiz` (the lean job's seeded build is a different derivation and
+    # does not substitute here); a substitution is seconds.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
+          cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
+          lean: false
+      - name: Subset cache key (the scry subset)
+        # `subset-v1-scry-<os>-<arch>-<toolchain sha12>-<compiler-key>-<scry sha12>`:
+        # the scry subset's sha is the identity (a `hdl` or `tower` change does not
+        # move it). The compiler key is the scope: a compiler change must not restore
+        # a tree built by the old one. The derivation itself substitutes from Cachix;
+        # this entry is the checkout's `.grail` mirror, which scry.yml, bench.yml and
+        # the smoke read as `scry/.grail/bin/scry`.
+        id: subset-key
+        shell: bash
+        run: python3 scripts/ci.py subset-key scry --scope "${{ needs.lean.outputs.compiler-key }}" >> "$GITHUB_OUTPUT"
+      - name: Restore the scry subset cache (a pull request)
+        id: subset-cache
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: scry/.grail
+          key: ${{ steps.subset-key.outputs.key }}
+          restore-keys: ${{ steps.subset-key.outputs.prefix }}
+      - name: "nix build (the Scry package: the CLI and its native parser)"
+        # `.#scry` builds in the sandbox: `grail build scry` with the packaged
+        # toolchain, the C# grammar from the store (not a checkout out-link) and a
+        # generated `grail.local.wiz`. `$out/bin/scry` is the CLI, `$out/stamp` the record.
+        id: nix
+        run: |
+          out=$(nix build .#scry --no-link --print-out-paths -L)
+          echo "out=$out" >> "$GITHUB_OUTPUT"
+          cat "$out/stamp"
+          # the checkout's mirror of the same tree: the other workflows and the smoke
+          # read scry/.grail/bin/scry. The Nix store path is the package; this is not a
+          # build seed and never substitutes the build above. Install explicitly rather
+          # than `cp -a` so the runner's umask/ownership never decide the mode.
+          rm -rf scry/.grail
+          mkdir -p scry/.grail/bin
+          install -m755 "$out/bin/scry" scry/.grail/bin/scry
+          install -m644 "$out/stamp" scry/.grail/stamp
+          du -sh "$out"
+      - name: The scry CLI starts and parses a fixture
+        run: |
+          cd scry
+          ./.grail/bin/scry --help > /dev/null
+          ./.grail/bin/scry parse --stats fixtures/hello.c > /dev/null
+          echo "scry: help and parse --stats fixtures/hello.c ok"
+      - name: Publish the store path to Cachix (master)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "::error title=Cachix::CACHIX_AUTH_TOKEN is empty on a run that must publish"
+            exit 1
+          fi
+          nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_AUTH_TOKEN" cachix push "$CACHIX_NAME" \
+            ${{ steps.nix.outputs.out }}
+      - name: Publish the store path to the PR cache
+        if: github.event_name == 'pull_request'
+        env:
+          CACHIX_PR_AUTH_TOKEN: ${{ secrets.CACHIX_PR_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_PR_NAME" ] || [ -z "$CACHIX_PR_AUTH_TOKEN" ]; then
+            echo "::warning title=Cachix::no CACHIX_PR_AUTH_TOKEN: the scry path is not published"
+            exit 0
+          fi
+          nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_PR_AUTH_TOKEN" cachix push "$CACHIX_PR_NAME" \
+            ${{ steps.nix.outputs.out }}
+      - name: Save the scry subset cache (a pull request)
+        # The end of the job: a successful build and smoke, so a failed package writes
+        # nothing. PR-scoped and untrusted; only this job names this key.
+        if: github.event_name == 'pull_request' && steps.subset-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: scry/.grail
+          key: ${{ steps.subset-key.outputs.key }}
+
+  packages_tower:
+    name: packages (tower)
+    needs: [changes, lean]
+    if: >-
+      !cancelled() && github.event_name != 'schedule' &&
+      needs.changes.outputs.code == 'true' &&
+      needs.changes.outputs.subset_tower == 'true' &&
+      needs.lean.result == 'success'
+    runs-on: ubuntu-latest
+    # 60 min: tower's Nix build (grail + the C compiler), the two publication smokes,
+    # and a cold pure `wiz` when the trusted cache does not hold it; a substitution is
+    # seconds.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -695,27 +859,15 @@ jobs:
           cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
           cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
-      - name: Subset cache key (the packages subset)
-        # `subset-v1-packages-<os>-<arch>-<toolchain sha12>-<compiler-key>-<packages
-        # sha12>`: the scry package's `.grail` tree is the only workspace cache this job
-        # owns. The compiler key is the scope (a compiler change must not restore a tree
-        # built by the old one); the packages subset's sha is the cache identity. The
-        # tower and scry-native derivations are Nix store paths (the PR Cachix cache
-        # serves them); the Hdl standalone build uses a temporary copy and writes
-        # nothing back.
-        id: subset-key
-        shell: bash
-        run: python3 scripts/ci.py subset-key packages --scope "${{ needs.lean.outputs.compiler-key }}" >> "$GITHUB_OUTPUT"
-      - name: Restore the packages subset cache (a pull request)
-        id: subset-cache
-        if: github.event_name == 'pull_request'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: scry/.grail
-          key: ${{ steps.subset-key.outputs.key }}
-          restore-keys: ${{ steps.subset-key.outputs.prefix }}
-      - name: nix build (wiz and grail, from the lean job or Cachix)
+      - name: nix build (tower, the toolchain manager)
         id: nix
+        run: |
+          out=$(nix build .#tower --no-link --print-out-paths -L)
+          echo "out=$out" >> "$GITHUB_OUTPUT"
+          "$out/bin/tower" --help > /dev/null
+          du -sh "$out"
+      - name: nix build (wiz and grail, from the lean job or Cachix)
+        id: wiz
         run: |
           # The lean job's compiler (a PR's seeded build); a store path substitutes
           # directly, and a miss falls back to the pure derivation the trusted cache
@@ -730,31 +882,11 @@ jobs:
           ln -sf "$wiz/bin/wiz" .lake/build/bin/wiz
           ln -sf "$wiz/bin/grail" .lake/build/bin/grail
           echo "$wiz/bin" >> "$GITHUB_PATH"
-      - name: The Hdl package builds and tests standalone
-        # `hdl/scripts/check-standalone.sh` copies only `hdl/`, then `grail build` and
-        # `grail test` (the 32 golden examples and the two `-- test: run` outputs). The
-        # yosys/Icarus/formal assertions stay in the `hdl` test shard.
-        env:
-          GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
-        run: hdl/scripts/check-standalone.sh
-      - name: The scry package builds its CLI (and the native parser)
-        env:
-          GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
-        run: |
-          nix build .#scry-native --no-link -L
-          # the C# native-link target reads this gitignored out-link (scry.yml does the
-          # same); without it the build fails on a missing grammar
-          nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp
-          cd scry
-          cp ../grail.local.wiz .
-          "$GRAIL" build scry
-      - name: tower is the third package build
-        run: nix build .#tower --no-link -L
       - name: The example index validates offline
         # stage 23m: entries, archive SHA-256s, semver ranges, module-prefix conflicts and
         # index.wiz; no network (the sources are relative paths).
         env:
-          GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
+          GRAIL: ${{ steps.wiz.outputs.wiz }}/bin/grail
         run: scripts/grail-index-check.sh examples/fate-index
       - name: A package check, build and run outside the checkout
         # what the old `package` job tested: a program is checked and built from a
@@ -762,8 +894,8 @@ jobs:
         # step (not `nix run …#wiz`, which would evaluate, and on a pull request rebuild,
         # the pure packages).
         env:
-          WIZ: ${{ steps.nix.outputs.wiz }}
-          GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
+          WIZ: ${{ steps.wiz.outputs.wiz }}
+          GRAIL: ${{ steps.wiz.outputs.wiz }}/bin/grail
         run: |
           dir=$(mktemp -d)
           cp examples/io.wiz "$dir/"
@@ -772,15 +904,28 @@ jobs:
           "$WIZ/bin/wiz" build io.wiz -o io
           ./io | head -3
           "$GRAIL" 2>&1 | head -2
-      - name: Save the packages subset cache (a pull request)
-        # The end of the job: every package build above passed, so a partial packages run
-        # writes nothing. The entry is PR-scoped and untrusted; a later run of this PR
-        # restores `scry/.grail` when the `packages` subset's sha is unchanged.
-        if: github.event_name == 'pull_request' && steps.subset-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: scry/.grail
-          key: ${{ steps.subset-key.outputs.key }}
+      - name: Publish the store path to Cachix (master)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "::error title=Cachix::CACHIX_AUTH_TOKEN is empty on a run that must publish"
+            exit 1
+          fi
+          nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_AUTH_TOKEN" cachix push "$CACHIX_NAME" \
+            ${{ steps.nix.outputs.out }}
+      - name: Publish the store path to the PR cache
+        if: github.event_name == 'pull_request'
+        env:
+          CACHIX_PR_AUTH_TOKEN: ${{ secrets.CACHIX_PR_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_PR_NAME" ] || [ -z "$CACHIX_PR_AUTH_TOKEN" ]; then
+            echo "::warning title=Cachix::no CACHIX_PR_AUTH_TOKEN: the tower path is not published"
+            exit 0
+          fi
+          nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_PR_AUTH_TOKEN" cachix push "$CACHIX_PR_NAME" \
+            ${{ steps.nix.outputs.out }}
 
   # The `runtime` subset's job: the C runtime compiles on its own (`runtime/wiz_rt.h`,
   # `runtime/rt_*.inc`) in every ABI/threading configuration, and the one-thread build's
@@ -1654,10 +1799,11 @@ jobs:
     name: CI result
     # `docs` is wanted on a push only (it is push-only): making it a need here is what
     # makes a broken site red on master (review ci-02). It is skipped on a pull request
-    # and on a merge-queue entry, where `check` below accepts `skipped`. `packages` and
-    # `runtime` are required exactly when their subset changed; `lean` whenever `code`
-    # did (it carries the matrix), and `tests` whenever `shards` is not empty.
-    needs: [changes, docs_style, name_collisions_reachable, prelude_drift, docs_examples, source-tarball, attest, lean, lake_seed, trust_ledger, stc, tests, wasm, web, docs, packages, runtime]
+    # and on a merge-queue entry, where `check` below accepts `skipped`. `packages
+    # (hdl)`, `packages (scry)`, `packages (tower)` and `runtime` are required exactly
+    # when their subset changed; `lean` whenever `code` did (it carries the matrix),
+    # and `tests` whenever `shards` is not empty.
+    needs: [changes, docs_style, name_collisions_reachable, prelude_drift, docs_examples, source-tarball, attest, lean, lake_seed, trust_ledger, stc, tests, wasm, web, docs, packages_hdl, packages_scry, packages_tower, runtime]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # 10 min: download the logs, the summary, the skip lint and the balance check
@@ -1763,14 +1909,14 @@ jobs:
         shell: bash
         run: |
           echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, docs: ${{ needs.changes.outputs.docs }}, web: ${{ needs.changes.outputs.web }}, stc: ${{ needs.changes.outputs.stc }}, shards: ${{ needs.changes.outputs.shards }})"
-          echo "subsets: lean=${{ needs.changes.outputs.subset_lean }}, runtime=${{ needs.changes.outputs.subset_runtime }}, wizlib=${{ needs.changes.outputs.subset_wizlib }}, packages=${{ needs.changes.outputs.subset_packages }}, tests=${{ needs.changes.outputs.subset_tests }}, docs=${{ needs.changes.outputs.subset_docs }}"
+          echo "subsets: lean=${{ needs.changes.outputs.subset_lean }}, runtime=${{ needs.changes.outputs.subset_runtime }}, wizlib=${{ needs.changes.outputs.subset_wizlib }}, hdl=${{ needs.changes.outputs.subset_hdl }}, scry=${{ needs.changes.outputs.subset_scry }}, tower=${{ needs.changes.outputs.subset_tower }}, tests=${{ needs.changes.outputs.subset_tests }}, docs=${{ needs.changes.outputs.subset_docs }}"
           echo "docs style: ${{ needs.docs_style.result }}"
           echo "prelude drift: ${{ needs.prelude_drift.result }}"
           echo "docs examples: ${{ needs.docs_examples.result }}"
           echo "source tarball: ${{ needs['source-tarball'].result }}"
           echo "attestation: ${{ needs.attest.result }}"
           echo "lean: ${{ needs.lean.result }}, lake seed: ${{ needs.lake_seed.result }}, trust ledger: ${{ needs.trust_ledger.result }}, stc: ${{ needs.stc.result }}, tests: ${{ needs.tests.result }}, wasm modules: ${{ needs.wasm.result }}, web: ${{ needs.web.result }}, docs: ${{ needs.docs.result }}"
-          echo "packages: ${{ needs.packages.result }}, runtime: ${{ needs.runtime.result }}"
+          echo "packages: hdl ${{ needs.packages_hdl.result }}, scry ${{ needs.packages_scry.result }}, tower ${{ needs.packages_tower.result }}, runtime: ${{ needs.runtime.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
           [ "${{ needs.changes.result }}" = success ] || exit 1
@@ -1781,7 +1927,9 @@ jobs:
           want_tests=$([ "${{ needs.changes.outputs.shards }}" != "[]" ] && echo true || echo false)
           # the two split jobs are required exactly when their subset changed (the
           # `changes` job's boolean and the job's `if:` are the same condition)
-          want_packages=$([ "$code" = true ] && [ "${{ needs.changes.outputs.subset_packages }}" = true ] && echo true || echo false)
+          want_hdl=$([ "$code" = true ] && [ "${{ needs.changes.outputs.subset_hdl }}" = true ] && echo true || echo false)
+          want_scry=$([ "$code" = true ] && [ "${{ needs.changes.outputs.subset_scry }}" = true ] && echo true || echo false)
+          want_tower=$([ "$code" = true ] && [ "${{ needs.changes.outputs.subset_tower }}" = true ] && echo true || echo false)
           want_runtime=$([ "$code" = true ] && [ "${{ needs.changes.outputs.subset_runtime }}" = true ] && echo true || echo false)
           # the metatheory library is checked for an STC edit and for any change to the
           # default build (a toolchain or lakefile bump can break it too)
@@ -1818,7 +1966,9 @@ jobs:
           # job is skipped (and that is fine) only when the filter does not want it
           check web "${{ needs.web.result }}" "$web"
           check docs "${{ needs.docs.result }}" "$want_site"
-          check packages "${{ needs.packages.result }}" "$want_packages"
+          check "packages (hdl)" "${{ needs.packages_hdl.result }}" "$want_hdl"
+          check "packages (scry)" "${{ needs.packages_scry.result }}" "$want_scry"
+          check "packages (tower)" "${{ needs.packages_tower.result }}" "$want_tower"
           check runtime "${{ needs.runtime.result }}" "$want_runtime"
 
   # The three-stage bootstrap fixpoint (scripts/fixpoint.sh): stage-1 C = stage-2 C =

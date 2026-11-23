@@ -46,7 +46,7 @@
                                      imports), subset_NAME=true for each build subset
                                      of `.github/repo-subsets.json` that a changed file
                                      belongs to (`scripts/repo-subsets.py`: lean,
-                                     runtime, wizlib, packages, tests, docs), and
+                                     runtime, wizlib, hdl, scry, tower, tests, docs), and
                                      shards=[NAMES], the shards of
                                      .github/test-shards.json to run (each shard's
                                      "inputs", see `needed_shards`). A changed file no

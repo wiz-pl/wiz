@@ -86,7 +86,12 @@ SUBSETS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("runtime", ("runtime/**", "c/**")),
     ("wizlib", ("lib/**",)),
-    ("packages", ("scry/**", "hdl/**", "tower/**")),
+    # The three packages beside the compiler, one subset each: each is its own Nix
+    # derivation (`.#hdl`, `.#scry`, `.#tower`) and its own CI job, so a change to one
+    # never moves another's hash or cache key.
+    ("hdl", ("hdl/**",)),
+    ("scry", ("scry/**",)),
+    ("tower", ("tower/**",)),
     ("tests", ("Tests/**", "web/**")),
     ("docs", ("docs/**", "README.md", "CHANGELOG.md", "AGENTS.md", ".github/**")),
 )
@@ -293,6 +298,7 @@ FIXTURE = {
     "c/socket.c": "/* socket */\n",
     "scry/s.wiz": "def s := 1\n",
     "hdl/h.wiz": "def h := 1\n",
+    "tower/t.wiz": "def t := 1\n",
     "docs/d.md": "# d\n",
     "README.md": "# r\n",
     ".github/workflow.yml": "on: push\n",
