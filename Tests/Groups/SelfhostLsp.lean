@@ -405,13 +405,14 @@ def selfhostLspGroup : Group where
         checkEq "no goals" (lspStr gs[1]! ["rendered"])         -- g 2:28: the inner step's end
         checkEq ["x : Nat\n⊢ Nat"] (lspStrs ss[0]! ["goals"])   -- s 3:18: the first inner `by`
         checkEq ["x : Nat\n⊢ Nat"] (lspStrs ss[1]! ["goals"])   -- s 3:31: the second inner `by`
-        -- the function-typed carets: one goal from the block, never the enclosing step's
-        -- "no goals" (before the inner blocks had spans, all three answered "no goals")
-        for r in garrowRes do
-          checkEq 1 (lspStrs r ["goals"]).length
-          check (lspStr r ["rendered"] != "no goals") "a function-typed caret answers the block's goal"
-        -- a diagnostic inside an `exact` term is marked at the term (`true`), not at the
-        -- step's start: the self-hosted server and the host both report 2:19
+        -- the function-typed carets: the block's own goal, one goal and never the
+        -- enclosing step's "no goals". The self-hosted printer writes a Pi with its
+        -- binder (`(_ : Nat) → Nat`); task 26 makes it `Nat → Nat` like the host, so
+        -- these are pinned as text rather than compared field by field.
+        checkEq ["⊢ (_ : Nat) → Nat"] (lspStrs garrowRes[0]! ["goals"])   -- g 2:9: the inner `by`
+        checkEq ["⊢ (_ : Nat) → Nat"] (lspStrs garrowRes[1]! ["goals"])   -- g 2:11: the narrowest block
+        checkEq ["⊢ (_ : Nat) → Nat"] (lspStrs garrowRes[2]! ["goals"])   -- g 1:21: the outer block
+        -- a diagnostic inside an `exact` term, for the span-threading pin
         let bad := "import Prelude\ndef bad : Nat := by\n  exact (Nat.add 1 true)\n"
         let badUri := "file:///tmp/selfhost-nested-diag.wiz"
         let badMsgs :=
@@ -426,6 +427,9 @@ def selfhostLspGroup : Group where
         let selfDiag ← match findMsg bgot "textDocument/publishDiagnostics" badUri with
           | some d => pure d
           | none => throw (IO.userError s!"no diagnostics notification for {badUri}")
+        -- a diagnostic inside an `exact` term is marked at the term, not at the step's
+        -- start (2:2): the two servers must agree (the host's own column is the head of
+        -- the application, 9, or the failing argument, 19; follow the host)
         let bsrv : LSP.Server :=
           { libs := ({} : Std.HashMap String (String × String)).insert "Prelude" ("lib/Prelude.wiz", prelude),
             trusted := ["Prelude"] }
@@ -436,11 +440,13 @@ def selfhostLspGroup : Group where
           | some d => pure d
           | none => throw (IO.userError "the host published no diagnostics")
         checkEq 2 (lspNat selfDiag ["params", "diagnostics", "0", "range", "start", "line"])
-        checkEq 19 (lspNat selfDiag ["params", "diagnostics", "0", "range", "start", "character"])
         checkEq (lspNat hostDiag ["params", "diagnostics", "0", "range", "start", "line"])
           (lspNat selfDiag ["params", "diagnostics", "0", "range", "start", "line"])
         checkEq (lspNat hostDiag ["params", "diagnostics", "0", "range", "start", "character"])
-          (lspNat selfDiag ["params", "diagnostics", "0", "range", "start", "character"]) },
+          (lspNat selfDiag ["params", "diagnostics", "0", "range", "start", "character"])
+        -- and it is inside the term, not at `exact`'s own column (2)
+        check (lspNat selfDiag ["params", "diagnostics", "0", "range", "start", "character"] > 2)
+          "the diagnostic is marked inside the exact term" },
     { name := "lsp: hover, definition and completion answer in the host's shapes", run := fun _ =>
         withSelfhostCli fun exe => do
         let doc := "import Prelude\ndef one : Nat := 1\ndef label : String := \"x\"\ndef two : Nat := one\ndef three : Nat := lab\n"
