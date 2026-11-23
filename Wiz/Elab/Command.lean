@@ -137,6 +137,8 @@ structure CommandState (R : Type) where
   procMacros : List (Name × Name) := []
   /-- `attribute [tactic k] f` registrations, latest first -/
   tactics : List (Name × Name) := []
+  /-- (B1) `attribute [term_elab k] f` registrations, latest first -/
+  termElabs : List (Name × Name) := []
   /-- (6h S2) `attribute [simp] f` registrations, latest first (the default set `simp`
   uses; `local` ones are dropped by `endModule`) -/
   simpLemmas : List SimpLemma := []
@@ -1525,6 +1527,7 @@ that tactics added on success (`ElabState.sideDecls`; the trusted `smt` of 28a w
 def runElabS (g : Globals R) (x : ElabM R α) (levelParams : List Name := [])
     (macros : List MacroRule := []) (builtins : List (Name × Name) := [])
     (procMacros : List (Name × Name) := []) (tactics : List (Name × Name) := [])
+    (termElabs : List (Name × Name) := [])
     (simpLemmas : List SimpLemma := [])
     (metaCode : Thunk (Except String Code) := Thunk.pure (.ok {}))
     (classes : List ClassInfo := []) (instances : Array InstanceInfo := #[]) (termInfo : Bool := false)
@@ -1542,7 +1545,7 @@ def runElabS (g : Globals R) (x : ElabM R α) (levelParams : List Name := [])
   -- (mandatory sorts: an elaboration-time type, where a sort may still be a hole)
   let kernelInfer (ctx : Ctx R) (t : Term R) := (Wiz.infer { ctx with proof := true, globals := { ctx.globals with sortHolesOk := true } } t).map (·.1) |>.mapError toString
   -- (13b) structures with a constructor private to another module don't unfold here
-  match x.run { globals := g.elabView, levelParams, macros, builtins, procMacros, runProcMacro, tactics, simpLemmas, compileCode,
+  match x.run { globals := g.elabView, levelParams, macros, builtins, procMacros, runProcMacro, tactics, termElabs, simpLemmas, compileCode,
                 kernelInfer, classes, instances, termInfo, smt, smtDecl } with
   | .ok (a, st) => (.ok (a, st.sideDecls), finishInfos st)
   | .error e => (.error e, (e.state?.map finishInfos).getD #[])
@@ -1551,22 +1554,24 @@ def runElabS (g : Globals R) (x : ElabM R α) (levelParams : List Name := [])
 def runElabH (g : Globals R) (x : ElabM R α) (levelParams : List Name := [])
     (macros : List MacroRule := []) (builtins : List (Name × Name) := [])
     (procMacros : List (Name × Name) := []) (tactics : List (Name × Name) := [])
+    (termElabs : List (Name × Name) := [])
     (simpLemmas : List SimpLemma := [])
     (metaCode : Thunk (Except String Code) := Thunk.pure (.ok {}))
     (classes : List ClassInfo := []) (instances : Array InstanceInfo := #[]) (termInfo : Bool := false) :
     Except (ElabError R) α × Array (Info R) :=
   -- (one body: `runElabS` without solver settings, so no tactic adds a declaration)
-  match runElabS g x levelParams macros builtins procMacros tactics simpLemmas metaCode classes instances termInfo with
+  match runElabS g x levelParams macros builtins procMacros tactics termElabs simpLemmas metaCode classes instances termInfo with
   | (.ok (a, _), infos) => (.ok a, infos)
   | (.error e, infos) => (.error e, infos)
 
 def runElab (g : Globals R) (x : ElabM R α) (levelParams : List Name := [])
     (macros : List MacroRule := []) (builtins : List (Name × Name) := [])
     (procMacros : List (Name × Name) := []) (tactics : List (Name × Name) := [])
+    (termElabs : List (Name × Name) := [])
     (simpLemmas : List SimpLemma := [])
     (metaCode : Thunk (Except String Code) := Thunk.pure (.ok {}))
     (classes : List ClassInfo := []) (instances : Array InstanceInfo := #[]) : Except (ElabError R) α :=
-  (runElabH g x levelParams macros builtins procMacros tactics simpLemmas metaCode classes instances).1
+  (runElabH g x levelParams macros builtins procMacros tactics termElabs simpLemmas metaCode classes instances).1
 
 /-- The erased code of the registered macros and tactics (and what they reach), on demand. -/
 def mkMetaCode (g : Globals R) (builtins procMacros tactics : List (Name × Name)) (more : List Name := []) :
@@ -1689,6 +1694,15 @@ def builtinShapeError (g : Globals R) (key : Name) (d : Decl R) : Option String 
   let rec doms : Term R → List (Term R) × Term R
     | .pi _ _ _ a b _ => let (as, r) := doms b; (a :: as, r)
     | t => ([], t)
+  -- the result of a type former after its parameters: `List (A : Type)` is a `Π` whose
+  -- body is the sort
+  let rec peelPis : Term R → Term R
+    | .pi _ _ _ _ b _ => peelPis b
+    | t => t
+  -- the body of a type former after its parameters: `List`'s value is `fun A => μ …`
+  let rec peelLams : Term R → Term R
+    | .lam _ b => peelLams b
+    | t => t
   let isN (N : Name) : Term R → Bool
     | .const c [] => c == N
     | _ => false
@@ -1697,6 +1711,20 @@ def builtinShapeError (g : Globals R) (key : Name) (d : Decl R) : Option String 
     | .sort _, some (.mu _ _ _ _ _ (some (T, _, _)) _) => if T == d.name then none else some "it must be an inductive type"
     | _, _ => some "it must be an inductive type"
   else if key == "memo" then none
+  else if key == "char" || key == "list" then
+    -- (B1) a string literal's character and list types: both are inductive types (with
+    -- parameters, as `List` has), and a list type has the constructors the literal is
+    -- built with
+    match peelPis d.type, d.value.map peelLams with
+    | .sort _, some (.mu _ _ _ _ _ (some (T, _, _)) _) =>
+      if T != d.name then some "it must be an inductive type"
+      else if key == "char" && !(g.contains (d.name ++ ".mk")) then
+        some "it must have a constructor `mk`"
+      else if key == "list" &&
+          (!(g.contains (d.name ++ ".nil")) || !(g.contains (d.name ++ ".cons"))) then
+        some "it must have constructors `nil` and `cons`"
+      else none
+    | _, _ => some "it must be an inductive type"
   else match g.builtinOf? "nat" with
     | none => some "register `builtin nat := …` first"
     | some N =>
@@ -2236,10 +2264,11 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
   let structKind? (n : Name) : Option RVal.FKind :=
     (s.builtins.find? fun (k, x) => x == n && k.startsWith "cstruct:").bind fun (k, _) =>
       (RVal.FKind.parseOne (k.drop 8).toString.toList).map (·.1)
-  -- (HD8) the code of the registered macros, tactics and derivers
+  -- (HD8) the code of the registered macros, tactics, derivers and term elaborators
   let remakeMetaCode : StateM (CommandState R) Unit := modify fun s =>
-    let more := if s.cmdMacros.isEmpty && s.derivers.isEmpty then []
-      else "CommandMacro.run" :: (s.cmdMacros ++ s.derivers).map (·.2)
+    let more := s.termElabs.map (·.2) ++
+      (if s.cmdMacros.isEmpty && s.derivers.isEmpty then []
+       else "CommandMacro.run" :: (s.cmdMacros ++ s.derivers).map (·.2))
     { s with metaCode := mkMetaCode s.globals s.builtins s.procMacros s.tactics more }
   let metaCodeFor (f : Name) (runner : Name := "CommandMacro.run") : Except String Code := match s.metaCode.get with
     | .ok c => if c.contains f && c.contains runner then .ok c
@@ -2503,7 +2532,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         report .error nr.info "native evaluation is not enabled: `native_refl` decides an equation by running compiled code, which the kernel does not check; run with --trust-native to allow it"
       else if !binders.isEmpty || !levelParams.isEmpty || typeStx.isNone then
         report .error nr.info "native_refl proves a closed equation: `def X : a = b := native_refl`, with a type and without parameters or universe parameters"
-      else match runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals (elabDeclTerms binders typeStx none cmd.info (declName? := some (name, (cmd.getArg 1).info, declInsertAt cmd))) [] with
+      else match runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals (elabDeclTerms binders typeStx none cmd.info (declName? := some (name, (cmd.getArg 1).info, declInsertAt cmd))) [] with
       | (.error e, hv) => addInfos hv; reportErr e
       | (.ok (ty, _), hv) =>
         addInfos hv
@@ -2547,7 +2576,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
                 modify fun s => { s with globals := g'.insert d }
                 report .warning nr.info s!"{name} is accepted on the strength of native evaluation (--trust-native, {v.steps} steps), not checked by the kernel: its proof is the axiom {ax}, which `#print axioms` lists for everything that uses {name}"
         | _ => report .error nr.info "native_refl proves an equation `a = b`; this type is not one"
-    else match runElabS (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) (smt := { s.smt with trustNative := s.trustNative, nativeFuel := s.nativeFuel }) (smtDecl := name) s.globals (elabDeclTerms binders typeStx valStx cmd.info (declName? := some (name, (cmd.getArg 1).info, declInsertAt cmd))) levelParams with
+    else match runElabS (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) (smt := { s.smt with trustNative := s.trustNative, nativeFuel := s.nativeFuel }) (smtDecl := name) s.globals (elabDeclTerms binders typeStx valStx cmd.info (declName? := some (name, (cmd.getArg 1).info, declInsertAt cmd))) levelParams with
       | (.ok ((ty, val), sides), hv) =>
         addInfos hv
         if sides.isEmpty then addDeclChecked name levelParams ty val (typeWritten := typeStx.isSome)
@@ -2627,7 +2656,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         reportDup (d.getArg 1).info name
         return
       let some tyStx := typeOf d | report .error d.info "a partial definition needs a type"; return
-      match runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) g (elabDeclTerms (d.getArg 3).args (some tyStx) none d.info) levelParams with
+      match runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) g (elabDeclTerms (d.getArg 3).args (some tyStx) none d.info) levelParams with
       | (.ok (ty, _), _) =>
         -- the kernel takes `name : ty` only with a witness of `ty`: the one written, or
         -- one the elaborator finds
@@ -2639,7 +2668,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             ensureNoMVars t w.info
             pure (some t)
           | none => findWitness ty
-        let w ← match runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) g findW levelParams with
+        let w ← match runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) g findW levelParams with
           | .ok (some w) => pure w
           | .ok none =>
             report .error (d.getArg 1).info s!"partial definition {name}: no witness found for its type {ty.pretty [] (some s.globals)}; give one with `partial (default := w) def {name} …` (the kernel takes {name} only if its type is inhabited)"
@@ -2663,7 +2692,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         else do
           let (_, v) ← elabDeclTerms (d.getArg 3).args (typeOf d) (some (d.getArg 6)) d.info
           pure (v.getD (.const name []))
-      match runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) g body levelParams with
+      match runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) g body levelParams with
       | (.ok v, hv) =>
         addInfos hv
         let v := match g.find? name with
@@ -2681,7 +2710,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       | (.error e, hv) => addInfos hv; reportErr e; return
     modify fun s => { s with globals := g }
   | "command.check" =>
-    let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
+    let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
       let (t, ty) ← Elab.infer {} (cmd.getArg 1)
       solveSortConstraints
       let t ← zonk 0 t
@@ -2704,7 +2733,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     | .ok text => report .info cmd.info text
     | .error e => reportErr e
   | "command.reduce" =>
-    let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
+    let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
       let (t, _) ← Elab.infer {} (cmd.getArg 1)
       solveSortConstraints
       let t ← zonk 0 t
@@ -2751,8 +2780,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             "copatterns outside it")
           return
       let r := match coinductiveOf?.map (·.2) with
-        | some obs => runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals (do let (t, v) ← elabCopatterns name cmd obs; pure (t, v, none)) levelParams
-        | none => runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals (elabDefEqns name cmd) levelParams
+        | some obs => runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals (do let (t, v) ← elabCopatterns name cmd obs; pure (t, v, none)) levelParams
+        | none => runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals (elabDefEqns name cmd) levelParams
       match r with
       | (.ok (ty, val, impl), hv) =>
         addInfos hv
@@ -2764,7 +2793,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     if s.globals.contains name then
       reportDup (cmd.getArg 1).info name
     else
-      match ← withTraces (runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) s.globals (elabCoinductive cmd levelParams) levelParams) with
+      match ← withTraces (runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) s.globals (elabCoinductive cmd levelParams) levelParams) with
       | .error e => reportErr e
       | .ok (decls, obs) =>
         let mut g := s.globals
@@ -2792,7 +2821,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     else if let some f := (cmd.getArg 6).args.find? fun f => !(f.getArg 0).args.isEmpty then
       report .error f.info "a class's methods can't be private (make the class private instead)"
     else
-      match runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) s.globals
+      match runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) s.globals
           (elabStructure cmd levelParams) levelParams with
       | .error e => reportErr e
       | .ok decls =>
@@ -2879,7 +2908,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     match valStx with
     | .error (e, code, i) => reportC i e code
     | .ok valStx =>
-      match ← withTraces (runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas)
+      match ← withTraces (runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas)
           (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) s.globals
           (elabDeclTerms binders (some typeStx) (some valStx) cmd.info (checkName? := some name)) levelParams) with
       | .error e => reportErr e
@@ -2911,7 +2940,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     else
       let elabCmd := if cmd.isOfKind "command.inductive" then elabInductive cmd levelParams
         else elabStructure cmd levelParams
-      match ← withTraces (runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals elabCmd levelParams) with
+      match ← withTraces (runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals elabCmd levelParams) with
       | .error e => reportErr e
       | .ok decls =>
         -- a structure's projection functions `S.f` (unless the name is taken, as `S.mk`)
@@ -2995,7 +3024,15 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let n0 := ((cmd.getArg 3).getId?).getD "_"
     let n := (s.globals.resolveName n0).toOption.getD n0
     let known := ["nat", "nat.zero", "nat.succ", "nat.pred", "nat.add", "nat.sub", "nat.mul", "nat.beq", "nat.blt", "string", "memo", "int",
-      "nat.div", "nat.mod", "nat.pow", "nat.land", "nat.lor", "nat.xor", "nat.shiftLeft", "nat.shiftRight", "nat.log2"]
+      "nat.div", "nat.mod", "nat.pow", "nat.land", "nat.lor", "nat.xor", "nat.shiftLeft", "nat.shiftRight", "nat.log2",
+      -- (B1) the data-primitive spellings: what the elaborator writes for a kernel former
+      -- (`unit`, `empty`, `qty`, `size`) or for a string literal (`char`, `list`)
+      "unit", "empty", "qty", "size", "char", "list"]
+    -- (B1) a kernel former's spelling: the name need not be a declaration (there is none
+    -- for `Unit`); it is what the elaborator accepts in place of the former, and a
+    -- declaration of the same name shadows it. `char` and `list` do name declarations.
+    let formerSpellings := ["unit", "empty", "qty", "size"]
+    let spellings := formerSpellings ++ ["char", "list"]
     if !known.contains key then report .error cmd.info s!"unknown builtin {key}; known: {known}"
     -- one registration per key, and one key per constant: a second `builtin nat.add := K`
     -- would redirect how the first one's constant unfolds (the kernel finds the definition
@@ -3004,6 +3041,11 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       report .error cmd.info s!"builtin {key} is already registered (as {m}); a builtin can be registered only once"
     else if let some (k, _) := s.globals.builtins.find? fun (k, m) => m == n && known.contains k then
       report .error cmd.info s!"{n} is already registered as builtin {k}"
+    else if formerSpellings.contains key then
+      -- the spelling of a kernel former: no declaration is needed, and there is nothing
+      -- to compute, so it is not an axiom
+      modify fun s => { s with builtins := (key, n) :: s.builtins,
+                               globals := s.globals.addBuiltin key n }
     else match s.globals.find? n with
     | none => reportC cmd.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
     | some d =>
@@ -3013,8 +3055,9 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         -- the toolchain's library is trusted (its registrations are reviewed: README,
         -- "Trusted base"); anywhere else, nothing checks that `n` computes like the native
         -- operation, so the registration is an axiom of whatever depends on `n`
-        -- (`builtin int` only says how values print: nothing to trust)
-        let trusted := s.trustedModule s.module || key == "int"
+        -- (`builtin int` only says how values print: nothing to trust; the data-primitive
+        -- spellings `char`/`list` only name a type the literal is checked against)
+        let trusted := s.trustedModule s.module || key == "int" || spellings.contains key
         let g := s.globals.addBuiltin key n
         modify fun s => { s with builtins := (key, n) :: s.builtins,
                                  globals := { g with assumed := if trusted then s.globals.assumed
@@ -3278,7 +3321,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let body := ((cmd.getArg 6).getStr?).getD ""
     if s.globals.contains name then reportDup (cmd.getArg 1).info name
     else
-      let elabTy := runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) s.globals
+      let elabTy := runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) s.globals
         (elabDeclTerms binders (some (cmd.getArg 4)) none cmd.info) []
       match elabTy with
       | .error e => reportErr e
@@ -3351,7 +3394,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         let fname := ((f.getArg 2).getId?).getD "_"
         let q0 := !(f.getArg 1).isNone && ((f.getArg 1).getArg 0 |>.getArg 0).getNat? == some 0
         if q0 then return (fname, .k 'e')
-        match runElab (macros := s.macros) (builtins := s.builtins) (classes := s.classes) (instances := s.instances) s.globals
+        match runElab (macros := s.macros) (builtins := s.builtins) (termElabs := s.termElabs) (classes := s.classes) (instances := s.instances) s.globals
             (elabDeclTerms #[] (some (f.getArg 4)) none f.info) [] with
         | .error e => throw (e.info, s!"c_struct field {fname}: {e.msg} (fields may not depend on other fields)")
         | .ok (ty, _) =>
@@ -3407,7 +3450,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let name := ((cmd.getArg 3).getId?).getD "_"
     if s.globals.contains name then reportDup (cmd.getArg 3).info name
     else
-      let elabTy := runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) s.globals
+      let elabTy := runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) s.globals
         (elabDeclTerms #[] (some (cmd.getArg 5)) none cmd.info) []
       match elabTy with
       | .error e => reportErr e
@@ -3492,7 +3535,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       -- an optional type, which must be the definition's
       let ty? : Except (ElabError R) (Term R) :=
         if (cmd.getArg 3).isNone then pure d.type else do
-          let (ty, _) ← runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) s.globals
+          let (ty, _) ← runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) s.globals
             (elabDeclTerms #[] (some ((cmd.getArg 3).getArg 1)) none cmd.info) []
           pure ty
       match ty? with
@@ -3702,6 +3745,32 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             else
               modify fun s => { s with builtins := s.builtins ++ [(inlineKey, f)],
                                        globals := s.globals.addBuiltinBack inlineKey f }
+        | .termElab =>
+          -- (B1) `attribute [term_elab k] f`: `f : TermElab` (Syntax → TacticM Unit)
+          -- elaborates the term syntax `k`, in `check` against the expected type and in
+          -- `infer` against a fresh type metavariable. The kind must be a syntax kind
+          -- declared already (`syntax "τ" : term` is `term.τ`); a registration changes
+          -- how every later term of that kind elaborates, so it is not a `local`
+          -- attribute (the `local` check above refuses it, like `[tactic]`/`[deriver]`).
+          let kindStx := args[0]!
+          let k := (kindStx.getId?).getD "_"
+          let f0 := ((targetStx.getId?).getD "_")
+          -- the kernel name (a namespace or `open` may be needed; a private one keeps
+          -- its private name, which is what the interpreter's `.global` looks up)
+          let f := (s.globals.resolveName f0).toOption.getD (s.globals.resolve f0)
+          if !s.tables.kinds.contains k then
+            reportC kindStx.info
+              s!"attribute [term_elab {k}]: unknown syntax kind '{k}' (declare it with `syntax … : term`)" ErrorCode.unknownSyntax
+          else
+            let ok := runElab s.globals do
+              let (_, ty) ← Elab.infer {} (.node cmd.info "term.ident" #[cmd.getArg 5])
+              let termElabTy ← evalIn {} (.const "TermElab" [])
+              unifyAt {} cmd termElabTy ty
+            match ok with
+            | .error e => reportC e.info s!"{f} is not a term elaborator: {e.msg}" e.code
+            | .ok () =>
+              modify fun s => { s with termElabs := (k, f) :: s.termElabs }
+              remakeMetaCode
         | _ =>
           report .error cmd.info s!"attribute '[{d.name}]' has no generic form"
 
@@ -3919,7 +3988,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .error err => report .error cmd.info s!"cannot erase {n}: {err}"
   | "command.eval" =>
     -- elaborate, erase, run, and read the result back using its type
-    let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
+    let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
       let (t, _) ← Elab.infer {} (cmd.getArg 1)
       solveSortConstraints
       let t ← zonk 0 t
@@ -3934,7 +4003,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         #[.node {} "term.ident" #[.ident {} "Repr.repr"], .node {} "null" #[cmd.getArg 1]]
     let reprTerm? : Option (Term R) :=
       if s.globals.contains "Repr.repr" then
-        match (runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
+        match (runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
             let (t, _) ← Elab.infer {} reprStx
             solveSortConstraints
             let t ← zonk 0 t
@@ -4001,7 +4070,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     -- `#plot expr`: elaborate the chart, then run `Plot.widget` on it and report the
     -- `WIZ_WIDGET:` display value as a message at the command (the infoview turns such
     -- a message into a widget item; docs/design/infoview-protocol.md).
-    let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
+    let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
       let (t, _) ← Elab.infer {} (cmd.getArg 1)
       solveSortConstraints
       let t ← zonk 0 t
@@ -4036,7 +4105,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .error err => report .error cmd.info s!"cannot run this: {err}"
   | "command.run" =>
     -- like `#eval`, but through the IR, with reference counting, on a checked heap
-    let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
+    let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (termElabs := s.termElabs) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
       let (t, _) ← Elab.infer {} (cmd.getArg 1)
       solveSortConstraints
       let t ← zonk 0 t

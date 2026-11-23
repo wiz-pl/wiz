@@ -8,6 +8,15 @@ set_option compiler.extract_closed false
 
 namespace Tests.Elab
 
+/-- (B1) A library module with a term elaborator: `τ` is elaborated by `tauElab` to
+`Nat.zero`, so `#check (τ : Nat)` and `#check τ` both pass in an importer. -/
+def termElabDemo : String := "import Prelude\n" ++
+  "syntax \"τ\" : term\n" ++
+  "def tauElab : TermElab := fun stx => do\n" ++
+  "  g ← TacticM.mainGoal;\n" ++
+  "  TacticM.assign g (Expr.const \"Nat.zero\")\n" ++
+  "attribute [term_elab term.τ] tauElab\n"
+
 def group : Group where
   name := "elab"
   exercise := "Exercises 3.1–3.9"
@@ -210,7 +219,87 @@ def usesInferred (n : Nat) : Nat := inferred n
           "6:16: error: the equation hypothesis 'h' is named twice" },
     { name := "the equation's name belongs before the scrutinee, not in a pattern", run := fun _ =>
         fails "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ndef d (n : Nat) : Nat :=\n  match h : n with\n  | h : .zero => .zero\n  | _ => .zero\n"
-          "7:5: error: a pattern is expected here" }
+          "7:5: error: a pattern is expected here" },
+    -- (B1) term elaborators: `[term_elab k] f` runs `f : TermElab` on the term syntax
+    -- `k` in `check` (the expected type) and in `infer` (a fresh type metavariable). The
+    -- registration lives in a library module, as a tactic or a macro does.
+    { name := "term_elab: a library's handler elaborates its syntax in check and infer", run := fun _ => do
+        let loader ← libLoader
+        let demo := termElabDemo
+        let src := "import Demo\n#check (τ : Nat)\n#check τ\n"
+        let s := runFrontend (R := ZeroOneMany) src
+          { loader := fun m => if m == "Demo" then some demo else loader m, trustedModule := Tests.libModule }
+        let errs := (s.messages.filter (·.severity == .error)).map (·.render src)
+        unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+        checkEq (repr ["0 : Nat", "0 : Nat"]).pretty
+          (repr (s.messages.toList.map (·.text))).pretty },
+    { name := "term_elab: the handler's term is still checked against the expected type", run := fun _ =>
+        failsLib ("import Prelude\nsyntax \"τ\" : term\n" ++
+          "def tauElab : TermElab := fun stx => do\n  g ← TacticM.mainGoal;\n  TacticM.assign g (Expr.const \"Nat.zero\")\n" ++
+          "attribute [term_elab term.τ] tauElab\ndef bad : Bool := τ\n") "type mismatch" },
+    { name := "term_elab: another user syntax kind is still unhandled", run := fun _ =>
+        failsLib "import Prelude\nsyntax \"σ\" : term\ndef f : Nat := σ\n"
+          "the syntax term.σ has no meaning" },
+    -- the registration is not cacheable, so a warm cache re-runs it: a command added after
+    -- the cached prefix still sees the handler (a cache `Effect` field would be needed if
+    -- `attribute` were cacheable; it is not)
+    { name := "term_elab: a warm cache re-runs the registration for a later command", run := fun _ => do
+        let loader ← libLoader
+        let demo := termElabDemo
+        let init : CommandState ZeroOneMany :=
+          { loader := fun m => if m == "Demo" then some demo else loader m, trustedModule := Tests.libModule }
+        let src1 := "import Demo\ndef x : Nat := τ\n"
+        let src2 := src1 ++ "#check (τ : Nat)\n"
+        let dir ← IO.FS.createTempDir
+        let (s1, _) ← Cache.elaborateCached (some dir) [] src1 init 0
+        let errs1 := (s1.messages.filter (·.severity == .error)).map (·.render src1)
+        unless errs1.isEmpty do throw (IO.userError s!"unexpected errors (cold):\n{"\n".intercalate errs1.toList}")
+        let (s2, _) ← Cache.elaborateCached (some dir) [] src2 init 0
+        let errs2 := (s2.messages.filter (·.severity == .error)).map (·.render src2)
+        unless errs2.isEmpty do throw (IO.userError s!"unexpected errors (warm):\n{"\n".intercalate errs2.toList}")
+        checkEq (repr ["0 : Nat"]).pretty (repr (s2.messages.toList.map (·.text))).pretty },
+    -- (B1) the fallback spellings, before any `builtin unit := …`: the kernel formers
+    -- keep the names they had (the data table is an override, not a new requirement)
+    { name := "the kernel formers keep their spellings when no key is registered", run := fun _ =>
+        okLib "import Prelude\n#check Unit\n#check Empty\n#check Qty\n#check Size\n#check True\n#check False\n#check Unit.{2}"
+          ["Unit : Type", "Empty : Type", "Qty : Type", "Size : Type", "True : Prop", "False : Prop",
+           "Unit.{2} : Type 1"] },
+    -- (B1) the data-primitive spellings are data: the kernel formers stay, and `builtin`
+    -- gives them a new spelling (the pretty printer follows the table)
+    { name := "builtin unit/empty/qty/size: the former's spelling is data", run := fun _ =>
+        ok ("builtin unit := MyUnit\nbuiltin empty := MyEmpty\nbuiltin qty := MyQty\nbuiltin size := MySize\n" ++
+            "#check (() : MyUnit)\n#check MyUnit\n#check MyEmpty\n#check MyQty\n#check MySize")
+          ["() : MyUnit", "MyUnit : Type", "MyEmpty : Type", "MyQty : Type", "MySize : Type"] },
+    -- a string literal is `String.mk (List MyChar)`: `builtin char` and `builtin list`
+    -- decide the character and list types, and `builtin string` the result type. No
+    -- Prelude: the module is its own data-primitive layer.
+    { name := "builtin char/list: a string literal uses the registered data primitives", run := fun _ => do
+        let src := "inductive Nat where\n  | zero\n  | succ (n : Nat)\n" ++
+          "builtin nat := Nat\nbuiltin nat.zero := Nat.zero\nbuiltin nat.succ := Nat.succ\n" ++
+          "inductive List (A : Type) where\n  | nil\n  | cons (head : A) (tail : List A)\n" ++
+          "builtin list := List\n" ++
+          "inductive MyChar where\n  | mk (val : Nat)\n" ++
+          "builtin char := MyChar\n" ++
+          "inductive String where\n  | mk (data : List MyChar)\n" ++
+          "builtin string := String\n" ++
+          "def s : String := \"AB\"\n" ++
+          "def sEq : s = String.mk (List.cons (MyChar.mk 65) (List.cons (MyChar.mk 66) List.nil)) := rfl\n"
+        let errs := errors src
+        unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}") },
+    { name := "builtin char: a string type that takes another list reports it at the literal", run := fun _ => do
+        let src := "inductive Nat where\n  | zero\n  | succ (n : Nat)\n" ++
+          "builtin nat := Nat\nbuiltin nat.zero := Nat.zero\nbuiltin nat.succ := Nat.succ\n" ++
+          "inductive List (A : Type) where\n  | nil\n  | cons (head : A) (tail : List A)\n" ++
+          "inductive MyChar where\n  | mk (val : Nat)\n" ++
+          "builtin char := MyChar\n" ++
+          "inductive Char where\n  | mk (val : Nat)\n" ++
+          "inductive String where\n  | mk (data : List Char)\n" ++
+          "builtin string := String\n" ++
+          "def s : String := \"A\"\n"
+        let errs := errors src
+        unless errs.size == 1 do throw (IO.userError s!"expected one error, got {errs.size}: {errs}")
+        unless (errs[0]!.splitOn "builtin char").length > 1 do
+          throw (IO.userError s!"the error does not name the primitives:\n{errs[0]!}") }
   ]
 
 builtin_initialize registerGroup group

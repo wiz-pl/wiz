@@ -1168,6 +1168,11 @@ s.optValue? "pp.notation"  -- the module's value, or the declared default
   state cannot reuse a module elaborated under another one.
 * `AttributeDecl` and `OptDecl` are deliberately small typed entries: they are the seed
   for the ext layer (`Wiz/Ext/Basic.lean`'s `Kind`/`Stage`/`Payload`/`Entry`, CORE-3.3),
-  not that layer. `[term_elab]` and per-deriver options can land here without a new
-  parser rule or a new match arm; user code today gets no-op attributes/options as data.
-  `[simp]` and `[hint]` are registered entries too, each with its dedicated parser rule.
+  not that layer. `[term_elab]` landed this way (B1): the generic `command.attr` rule
+  parses it and the registry's action dispatches it (`AttrAction.termElab`), with no new
+  parser rule and no new `elabCommand` kind; the handler is `TermElab := Syntax →
+  TacticM Unit` (`lib/Prelude.wiz`), run by the elaborator in `check`/`infer`, and it is
+  not `local` (it has an effect that outlives its module, like `[tactic]`). Per-deriver
+  options can land here the same way; user code today gets no-op attributes/options as
+  data. `[simp]` and `[hint]` are registered entries too, each with its dedicated parser
+  rule.
