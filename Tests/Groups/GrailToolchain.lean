@@ -1,4 +1,5 @@
 import Tests.Grail
+import Tests.Groups.GrailModules
 
 namespace Tests.Grail
 open Wiz Tests
@@ -42,18 +43,11 @@ def toolchainGroup : Group where
   exercise := "Stage 23a"
   parallel := true
   cases := [
-    { name := "wiz and grail read no environment variables; the test driver reads only WIZ_ALLOW_MISSING_DEPS", run := fun _ => do
+    { name := "wiz, grail and the test driver read no environment variables", run := fun _ => do
         let files := (← leanFiles "Wiz") ++ (← leanFiles "Grail") ++ #[System.FilePath.mk "Main.lean", "Tests/Main.lean"]
         for f in files do
           let text ← IO.FS.readFile f
-          -- the driver's one explicit environment hook: the shard driver's equivalent of
-          -- `--allow-missing-deps` (Tests.skipMissing). Any other WIZ_ variable in these
-          -- files would change behaviour behind the command line's back.
-          let allow := (text.splitOn "getEnv \"WIZ_ALLOW_MISSING_DEPS\"").length - 1
-          let others := (text.splitOn "getEnv \"WIZ").length - 1 - allow
-          let want := if f.toString == "Tests/Main.lean" then 1 else 0
-          check (others == 0) s!"{f} reads a WIZ_ variable other than WIZ_ALLOW_MISSING_DEPS"
-          check (allow == want) s!"{f}: {allow} WIZ_ALLOW_MISSING_DEPS read(s), expected {want}" },
+          check ((text.splitOn "getEnv \"WIZ").length == 1) s!"{f} reads a WIZ_ variable" },
     { name := "wiz: an unknown flag or command is an error (exit 2), the usage alone is not", run := fun _ => do
         let wiz := ".lake/build/bin/wiz"
         let run (args : Array String) := IO.Process.output { cmd := wiz, args }
@@ -375,7 +369,8 @@ def toolchainGroup : Group where
           #[Cache.ManifestEntry.ofEffect man.binary cmdKey forged] man.region
         let tampered ← snapshot pkg
         let served : IO (CommandState ZeroOneMany) := do
-          pure (← Cache.elaborateCached none [pkg] "import M\n" init 0 (verify := .warn) (rig := rig)).1
+          let (s, _) ← Cache.elaborateCached none [pkg] "import M\n" init 0 (verify := .warn) (rig := rig)
+          pure s
         -- (the documented default: the layer is refused, so the module is elaborated)
         let s0 ← served
         check (!s0.globals.contains "forgedFalse") "the forged declaration was served by default"
@@ -384,8 +379,8 @@ def toolchainGroup : Group where
         checkEq tampered (← snapshot pkg)
         -- (the explicit opt-in really does serve it: this is what the default refuses, not a
         -- fixture that happens to miss)
-        let s1 ← (Cache.elaborateCached none [pkg] "import M\n" init 0 (verify := .warn)
-          (rig := rig) (roUnsigned := true)).1
+        let (s1, _) ← Cache.elaborateCached none [pkg] "import M\n" init 0 (verify := .warn)
+          (rig := rig) (roUnsigned := true)
         check (s1.globals.contains "forgedFalse") "the opt-in did not serve the forged entry"
         check (match s1.globals.find? "forgedFalse" with
           | some d => (match d.type with | .const "False" _ => true | _ => false)
