@@ -203,7 +203,8 @@
       "=scaling",
       "=prop",
       "=audit",
-      "=desc-sweep"
+      "=desc-sweep",
+      "=perf-core"
     ]
   },
   {
