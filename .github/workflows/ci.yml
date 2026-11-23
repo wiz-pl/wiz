@@ -564,6 +564,10 @@ jobs:
           fi
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          # The one statement of "this run built the seeded variants": the self-hosted
+          # programs below take the same branch, so an integration push (seeded) and a
+          # merge_group run (not seeded) cannot disagree with it.
+          echo "seeded=$USE_SEED" >> "$GITHUB_OUTPUT"
           echo "wiz: $wiz"; echo "tests: $tests"
           du -sh "$wiz" "$tests"
           nix path-info -S "$wiz" "$tests" | sed 's/^/closure: /'
@@ -581,7 +585,10 @@ jobs:
         env:
           WIZ: ${{ steps.nix.outputs.wiz }}
           TESTS: ${{ steps.nix.outputs.tests }}
-          SEEDED: ${{ github.event_name != 'push' }}
+          # the same statement the nix step took (PR *or* integration push), not a second
+          # guess at it: `event != 'push'` was wrong for merge_group (pure attributes on
+          # a run whose wiz/tests are seeded) and for an integration push (the reverse)
+          SEEDED: ${{ steps.nix.outputs.seeded }}
         run: |
           if [ "$SEEDED" = true ]; then
             sys=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -1276,6 +1283,11 @@ jobs:
           if [ -n "$SELFHOST_COMPILER" ] && [ -n "$SELFHOST_CHECKER" ]; then
             shflags=(--selfhost-compiler "$SELFHOST_COMPILER/bin/compiler" \
                      --selfhost-checker "$SELFHOST_CHECKER/bin/checker")
+          else
+            # Loud on purpose: the shard still runs, but it pays the `/tmp` build this
+            # change exists to remove (perf H2), so a silent fallback would hide a
+            # broken lean-job output for as long as nobody read the timings.
+            echo "::warning title=selfhost::the lean job produced no self-hosted programs; this shard builds them in /tmp (perf H2)"
           fi
           # the Nix-built driver, exactly as `lake test -- …` would run it; every case's
           # time as JSON lines (scripts/ci.py summary and baseline read them)

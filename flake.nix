@@ -1374,11 +1374,11 @@ EOF
               runHook preBuild
               export HOME=$TMPDIR
               ${testsPkg}/bin/tests --selfhost-source ${name} > ${from}.wiz
-              ${wizPkg}/bin/wiz --cc cc \
-                --cflags "-I${lib.getDev pkgs.gmp}/include -I${lib.getDev pkgs.boehmgc}/include" \
-                --ldflags "-L${pkgs.gmp}/lib -L${pkgs.boehmgc}/lib -Wl,-rpath,${pkgs.gmp}/lib -Wl,-rpath,${pkgs.boehmgc}/lib" \
-                --gmp "-lgmp" \
-                build ${from}.wiz -o ${name}
+              # No --cflags/--ldflags/--gmp here: the wrapped `wiz` already carries the
+              # toolchain's full flags (GMP, and Boehm's -lgc through --gc-ldflags), and
+              # these options REPLACE the wrapper's rather than adding to them - spelling
+              # them here was a second, drifting copy that worked only by flag order.
+              ${wizPkg}/bin/wiz --cc cc build ${from}.wiz -o ${name}
               runHook postBuild
             '';
             installPhase = ''
