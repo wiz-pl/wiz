@@ -1,6 +1,6 @@
 {
   "generated_by": "scripts/repo-subsets.py",
-  "git": "unstaged",
+  "git": "830ea04ad728bfdc4e4fd8f7109b4226ee070965",
   "subsets": {
     "docs": {
       "files": 117,
@@ -11,7 +11,7 @@
         "AGENTS.md",
         ".github/**"
       ],
-      "sha256": "e3962ec1bce2e3e954e729e07b60e2cc18778a901c7f3573b142ea062e7e4019"
+      "sha256": "44e2cbb1aa30a31cdfddbc68309f01b35c70751db3a750dadb7aad376dfdddb8"
     },
     "lean": {
       "files": 162,
@@ -27,7 +27,7 @@
         "lake-manifest.json",
         "lean-toolchain"
       ],
-      "sha256": "df6934df88825616656cf094e61ea9245a5592698258c0666235af6c43661e7a"
+      "sha256": "34f2259173e01a03db77868feed8ea951a5ddc4cb61fb0bdbab63f95f35e18bd"
     },
     "packages": {
       "files": 916,
@@ -52,7 +52,7 @@
         "Tests/**",
         "web/**"
       ],
-      "sha256": "eaaee06a621b7755f5e97a8efd29ffa941876ef5f319ac34496e405768a129a3"
+      "sha256": "9d1df5cebedadf5cfbef353dcb888e9dba429f17f41c7e76636b89c5921b7621"
     },
     "wizlib": {
       "files": 109,
