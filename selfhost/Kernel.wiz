@@ -2616,6 +2616,22 @@ def showFieldQ (names : List String) (l : Nat) (q : Tm) : String := match q with
   | _ => String.append (String.append "%" (show names l q)) " "
 end
 
+-- A goal's type as the host's `GoalView.show` writes it: a nondependent Pi hides its
+-- binder (`Nat → Nat`, where `show` writes `(x0 : Nat) → Nat`) and a dependent one keeps
+-- it (`(x0 : Nat) → Vec x0`). `Tm.pi` carries no binder name (`Kernel.wiz`, the `pi`
+-- constructor), so the test is the bound variable's occurrence in the codomain — which is
+-- the host's own criterion. Everything that is not a Pi delegates to `show`, so this is
+-- the goal-text (language server) printer only: `#check` and diagnostics keep `show`.
+def showGoal (names : List String) (l : Nat) (t : Tm) : String :=
+  match t with
+  | .pi q _ _ a b => match usesVar 0 b with
+    | .true => String.append (String.append (String.append "(" (nameAt names l))
+        (String.append (showQ q) (showGoal names l a)))
+        (String.append ") → " (showGoal names (l + 1) b))
+    | .false => String.append (String.append (showGoal names l a) " → ")
+        (showGoal names (l + 1) b)
+  | t => show names l t
+
 -- the typing context: values of the variables, their types, the depth
 -- (and whether we are in an erased position: a type, a proof, an argument to a `0`
 -- binder, where erased fields may be projected)

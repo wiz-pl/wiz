@@ -2886,7 +2886,7 @@ partial def tacGoalShowStep (es : ES) (gl : TacGoal) (d : Nat) (names : List Str
     | .true =>
       let j := d - 1 - i;
       let line := String.append (String.append (nthStr names (d - 1 - j)) " : ")
-        (show names d (tacGoalHypType es gl j));
+        (showGoal names d (tacGoalHypType es gl j));
       let acc' := match strEq acc "" with
         | .true => line
         | .false => String.append (String.append acc "\n") line;
@@ -2895,8 +2895,8 @@ def tacGoalShow (es : ES) (gl : TacGoal) : String :=
   let d := Cx.lvl (TacGoal.cx gl);
   let names := tacGoalNamesOuter gl;
   let body := match zonk es d (quote d (TacGoal.ty gl)) with
-    | .some t => show names d t
-    | .none => show names d (quote d (TacGoal.ty gl));
+    | .some t => showGoal names d t
+    | .none => showGoal names d (quote d (TacGoal.ty gl));
   let ctx := tacGoalShowStep es gl d names 0 "";
   match strEq ctx "" with
   | .true => String.append "⊢ " body
@@ -3540,7 +3540,7 @@ partial def goalShowHyps (names : List String) (types : List Val) (d : Nat) : Na
     | .false => acc
     | .true =>
       let line := String.append (String.append (nthStr names i) " : ")
-        (show names d (match nthVal types (d - 1 - i) with
+        (showGoal names d (match nthVal types (d - 1 - i) with
           | .some v => quote d v
           | .none => .star));
       let acc' := match first with
@@ -3550,7 +3550,7 @@ partial def goalShowHyps (names : List String) (types : List Val) (d : Nat) : Na
 def goalShowCtx (names : List String) (c : TCtx) (target : Val) : String :=
   let d := TCtx.lvl c;
   let ctx := goalShowHyps names (envToList (TCtx.types c)) d 0 .true "";
-  let body := String.append "⊢ " (show names d (quote d target));
+  let body := String.append "⊢ " (showGoal names d (quote d target));
   match strEq ctx "" with
   | .true => body
   | .false => String.append (String.append ctx "\n") body
