@@ -17,6 +17,12 @@ Frontend.lean). It stays a function of its arguments in the sense that matters:
 * without a cache directory (`--no-cache`), the solver runs every time (in a temporary
   directory, removed afterwards).
 
+The deadline is the host's. `-T:`/`-t` only ask the solver to stop; `runIO` also kills
+the child (its whole process group: SIGTERM, then SIGKILL) when `--solver-timeout`
+elapses, so a solver that ignores its own limit cannot hang the elaborator. A cache
+entry is parsed defensively: a truncated or corrupt `.ans` is a miss (the query is
+answered again), never a panic.
+
 `sat_decide` checks the solver's LRAT proof in the kernel, so a wrong, stale or
 nondeterministic answer can only make the tactic fail; the trusted `smt` (28a) believes
 `unsat`, so for it the cache is part of the trusted base (hence the digest and the check).
@@ -58,18 +64,101 @@ private def sep : String := "\n\x00wiz-smt\x00\n"
 /-- Per process: the identity of each solver (`path --version`), computed once. -/
 initialize solverIds : IO.Ref (Std.HashMap String String) ← IO.mkRef {}
 
-private def solverId (cmd : String) : IO String := do
+/-- What one process run gave, and whether the host's deadline killed it. -/
+private structure ProcOutput where
+  exitCode : UInt32
+  stdout : String
+  stderr : String
+  timedOut : Bool
+  deriving Inhabited
+
+/-- Read a pipe after the child is gone, but not forever: a process the kill did not
+reach (an unkillable `D` state, a grandchild holding the pipe) must not hang the host. -/
+private def drain (t : Task (Except IO.Error String)) : IO String := do
+  let mut i := 0
+  let mut done := false
+  done ← IO.hasFinished t
+  while !done && i < 100 do
+    IO.sleep 2
+    i := i + 1
+    done ← IO.hasFinished t
+  if done then
+    match t.get with
+    | .ok s => pure s
+    | .error _ => pure ""
+  else pure ""
+
+/-- Run `cmd` with `args` (stdin empty, `stdout`/`stderr` captured) and enforce
+`timeoutMs` here. The child is started in its own process group (`setsid`), so the
+timeout kills the solver *and* anything it forked: SIGTERM first, then SIGKILL if it is
+still alive after a short grace, and the child is reaped (`tryWait`) either way. A run
+that the deadline killed is reported with `timedOut := true`. -/
+private def runProcessTimed (timeoutMs : Nat) (cmd : String) (args : Array String) :
+    IO ProcOutput := do
+  let child ← IO.Process.spawn
+    { cmd, args, stdin := .null, stdout := .piped, stderr := .piped, setsid := true }
+  let stdoutTask ← IO.asTask child.stdout.readToEnd .dedicated
+  let stderrTask ← IO.asTask child.stderr.readToEnd .dedicated
+  let start ← IO.monoMsNow
+  let mut code? ← child.tryWait
+  let mut now ← IO.monoMsNow
+  -- (`-T:`/`-t` ask; this is the deadline that holds)
+  while code?.isNone && now - start < timeoutMs do
+    IO.sleep 5
+    code? ← child.tryWait
+    now ← IO.monoMsNow
+  let timedOut := code?.isNone
+  if timedOut then
+    try child.kill catch _ => pure ()
+    -- a polite SIGTERM to the group; most solvers stop here
+    for _ in [0:10] do
+      if code?.isNone then
+        IO.sleep 10
+        code? ← child.tryWait
+    -- a solver that ignores SIGTERM still gets no more than the grace: SIGKILL the
+    -- group through a shell (Lean's `kill` is SIGTERM only). `kill` returns at once, so
+    -- this little run needs no deadline of its own.
+    if code?.isNone then
+      try
+        -- (a negative pid is the process group: dash takes it as an operand directly,
+        -- bash accepts `--`; try the portable spelling first)
+        let pid := child.pid
+        let kill := s!"kill -9 -{pid} 2>/dev/null || kill -9 -- -{pid} 2>/dev/null"
+        let _ ← IO.Process.output { cmd := "/bin/sh", args := #["-c", kill] }
+        pure ()
+      catch _ => pure ()
+      for _ in [0:20] do
+        if code?.isNone then
+          IO.sleep 5
+          code? ← child.tryWait
+  let stdout ← drain stdoutTask
+  let stderr ← drain stderrTask
+  pure { exitCode := code?.getD 137, stdout, stderr, timedOut }
+
+private def solverId (timeoutMs : Nat) (cmd : String) : IO String := do
   if let some v := (← solverIds.get).get? cmd then return v
   let v ← try
-      let out ← IO.Process.output { cmd, args := #["--version"] }
-      pure s!"{cmd} {out.stdout.trimAscii.toString}"
+      let out ← runProcessTimed timeoutMs cmd #["--version"]
+      if out.timedOut then pure s!"{cmd} (version timed out after {timeoutMs} ms)"
+      else pure s!"{cmd} {out.stdout.trimAscii.toString}"
     catch _ => pure s!"{cmd} (not found)"
   solverIds.modify (·.insert cmd v)
   pure v
 
+/-- An `.ans` entry's answer, or `none` when it is truncated or corrupt: a cache miss
+(the query is answered again), never a `toNat!` panic on a split field of a file that
+was not checked. -/
+private def parseAnswer (ans : String) : Option Answer :=
+  match ans.splitOn sep with
+  | [code, out, file] =>
+    match code.toNat? with
+    | some n => if n < 4294967296 then some { exitCode := n.toUInt32, stdout := out, outFile := file } else none
+    | none => none
+  | _ => none
+
 private def runIO (cfg : Config) (cmd : String) (args : List String) (input : String) (inExt : String)
     (wantOut : Bool) (keep : Answer → Bool) : IO (Except String (String × Answer)) := do
-  let id ← solverId cmd
+  let id ← solverId cfg.timeoutMs cmd
   if id.endsWith "(not found)" then
     return .error s!"the solver `{cmd}` is not installed (not on PATH)"
   let query := s!"{id}{sep}{sep.intercalate args}{sep}{input}"
@@ -81,28 +170,36 @@ private def runIO (cfg : Config) (cmd : String) (args : List String) (input : St
   let base := dir / key
   let ansFile := base.addExtension "ans"
   if !temp && (← ansFile.pathExists) then
-    let txt ← IO.FS.readFile ansFile
-    -- (the answer, then the query it answers: replayed only for exactly this query)
-    match txt.splitOn s!"{sep}query{sep}" with
-    | [ans, q] => if q == query then
-        match ans.splitOn sep with
-        | [code, out, file] => return .ok (id, { exitCode := code.toNat!.toUInt32, stdout := out, outFile := file })
-        | _ => pure ()
-    | _ => pure ()
+    -- (an unreadable or corrupt entry is a miss: the file is not a checked artifact)
+    let txt? ← try some <$> IO.FS.readFile ansFile catch _ => pure none
+    match txt? with
+    | some txt =>
+      -- (the answer, then the query it answers: replayed only for exactly this query)
+      match txt.splitOn s!"{sep}query{sep}" with
+      | [ans, q] => if q == query then
+          match parseAnswer ans with
+          | some a => return .ok (id, a)
+          | none => pure ()
+      | _ => pure ()
+    | none => pure ()
   let inFile := base.addExtension inExt
   let outPath := base.addExtension "out"
   IO.FS.writeFile inFile input
   let args := args.map fun a => if a == "{in}" then inFile.toString else if a == "{out}" then outPath.toString else a
   let r ← try
-      let out ← IO.Process.output { cmd, args := args.toArray }
-      let file ← if wantOut && (← outPath.pathExists) then IO.FS.readFile outPath else pure ""
-      pure (Except.ok { exitCode := out.exitCode, stdout := out.stdout, outFile := file : Answer } : Except String Answer)
+      let out ← runProcessTimed cfg.timeoutMs cmd args.toArray
+      if out.timedOut then
+        pure (Except.error s!"the solver `{cmd}` timed out after {cfg.timeoutMs} ms" :
+          Except String (String × Answer))
+      else
+        let file ← if wantOut && (← outPath.pathExists) then IO.FS.readFile outPath else pure ""
+        pure (Except.ok (id, { exitCode := out.exitCode, stdout := out.stdout, outFile := file }))
     catch e => pure (Except.error s!"running `{cmd}` failed: {e}")
   try IO.FS.removeFile inFile catch _ => pure ()
   try IO.FS.removeFile outPath catch _ => pure ()
   if temp then try IO.FS.removeDirAll dir catch _ => pure ()
   match r with
-  | .ok a =>
+  | .ok (id, a) =>
     if !temp && keep a then
       IO.FS.writeFile ansFile s!"{a.exitCode}{sep}{a.stdout}{sep}{a.outFile}{sep}query{sep}{query}"
     pure (.ok (id, a))
@@ -132,7 +229,7 @@ def shortId (id : String) : String :=
 /-- The configuration with the SMT solver's identity filled in (when `--trust-smt`). -/
 def Config.resolve (c : Config) : IO Config := do
   if c.trust then
-    let id ← Wiz.Smt.solverId c.solver
+    let id ← Wiz.Smt.solverId c.timeoutMs c.solver
     pure { c with solverId := id }
   else pure c
 

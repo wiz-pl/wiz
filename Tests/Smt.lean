@@ -45,6 +45,28 @@ def onPath (cmd : String) : IO Bool := do
 def needs (cmd : String) (k : IO Unit) : IO Unit := do
   if ← onPath cmd then k else skip s!"no {cmd} on PATH (nix develop has it)"
 
+/-- Run `k` in a fresh temporary directory, removed afterwards (on failure too). -/
+def withTempDir (k : System.FilePath → IO Unit) : IO Unit := do
+  let dir ← IO.FS.createTempDir
+  try
+    k dir
+  catch e =>
+    try IO.FS.removeDirAll dir catch _ => pure ()
+    throw e
+  try IO.FS.removeDirAll dir catch _ => pure ()
+
+/-- Is process `pid` still alive? (`kill -0` cannot signal, only check.) -/
+def alive (pid : String) : IO Bool := do
+  let out ← IO.Process.output { cmd := "/bin/sh", args := #["-c", s!"kill -0 {pid} 2>/dev/null"] }
+  pure (out.exitCode == 0)
+
+/-- The `.ans` file(s) of a cache directory. -/
+def ansFiles (cache : System.FilePath) : IO (List System.FilePath) := do
+  let mut ans : List System.FilePath := []
+  for e in ← System.FilePath.readDir (cache / "smt") do
+    if e.path.extension == some "ans" then ans := ans ++ [e.path]
+  pure ans
+
 /-- The four clauses over two variables, refuted by CaDiCaL (its LRAT, by hand). -/
 def tinyCnf : String :=
   "import Sat\n" ++
@@ -285,6 +307,66 @@ def smtGroup : Group where
         checkEq "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" (Smt.Sha256.hex "abc")
         checkEq "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
           (Smt.Sha256.hex "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") },
+    { name := "the host enforces --solver-timeout: a solver that never answers is killed and reaped", run := fun _ => do
+        withTempDir fun tmp => do
+          let script := tmp / "slow.sh"
+          let pidFile := tmp / "pid"
+          IO.FS.writeFile script "#!/bin/sh\necho $$ > \"$1\"\nsleep 30\n"
+          let cfg : Smt.Config := { timeoutMs := 200 }
+          let t0 ← IO.monoMsNow
+          let r := Smt.runSolver cfg "/bin/sh" [script.toString, pidFile.toString, "{in}"]
+            "(check-sat)" "smt2" false (fun _ => true)
+          let dt := (← IO.monoMsNow) - t0
+          IO.println s!"  --solver-timeout 200 ms, a solver that sleeps 30 s: returned after {dt} ms"
+          match r with
+          | .ok (_, a) => throw (IO.userError s!"the solver answered though it never does: {repr a}")
+          | .error e => check (has [e] "timed out") s!"expected a timeout, got: {e}"
+          check (dt ≥ 200) s!"returned before the deadline: {dt} ms"
+          check (dt ≤ 1200) s!"the deadline was not enforced: {dt} ms for --solver-timeout 200"
+          let pid := (← IO.FS.readFile pidFile).trimAscii.toString
+          check (!pid.isEmpty) "the stub did not write its pid"
+          check (!(← alive pid)) s!"the solver (pid {pid}) is still alive after the timeout" },
+    { name := "the host kills a solver that ignores SIGTERM (SIGKILL on its process group)", run := fun _ => do
+        withTempDir fun tmp => do
+          let script := tmp / "stubborn.sh"
+          let pidFile := tmp / "pid"
+          IO.FS.writeFile script "#!/bin/sh\ntrap '' TERM\necho $$ > \"$1\"\nsleep 30\n"
+          let cfg : Smt.Config := { timeoutMs := 200 }
+          let t0 ← IO.monoMsNow
+          let r := Smt.runSolver cfg "/bin/sh" [script.toString, pidFile.toString, "{in}"]
+            "(check-sat)" "smt2" false (fun _ => true)
+          let dt := (← IO.monoMsNow) - t0
+          IO.println s!"  --solver-timeout 200 ms, a solver oblivious to SIGTERM: returned after {dt} ms"
+          match r with
+          | .ok (_, a) => throw (IO.userError s!"the solver answered though it never does: {repr a}")
+          | .error e => check (has [e] "timed out") s!"expected a timeout, got: {e}"
+          check (dt ≤ 2000) s!"SIGKILL escalation did not bound the run: {dt} ms"
+          let pid := (← IO.FS.readFile pidFile).trimAscii.toString
+          check (!pid.isEmpty) "the stub did not write its pid"
+          check (!(← alive pid)) s!"the solver (pid {pid}) is still alive after the timeout" },
+    { name := "the answer cache: a replay, and a truncated or corrupt .ans is a miss, not a panic", run := fun _ => do
+        withTempDir fun tmp => do
+          let script := tmp / "stub.sh"
+          let cache : Smt.Config := { timeoutMs := 2000, cacheDir := some tmp.toString }
+          let run (input : String) : IO Smt.Answer :=
+            match Smt.runSolver cache "/bin/sh" [script.toString, "{in}"] input "txt" false (fun _ => true) with
+            | .ok (_, a) => pure a
+            | .error e => throw (IO.userError s!"the stub solver failed: {e}")
+          IO.FS.writeFile script "#!/bin/sh\necho unsat\n"
+          let a ← run "(check-sat)"
+          checkEq 0 a.exitCode
+          checkEq "unsat\n" a.stdout
+          let ans ← ansFiles tmp
+          checkEq 1 ans.length
+          -- replay: the script now says `sat`; the key (solver, args, input) is unchanged
+          IO.FS.writeFile script "#!/bin/sh\necho sat\n"
+          checkEq "unsat\n" (← run "(check-sat)").stdout
+          -- truncated: a miss (the solver runs again, now printing `sat`), not a panic
+          IO.FS.writeFile ans.head! ""
+          checkEq "sat\n" (← run "(check-sat)").stdout
+          -- a non-numeric exit code, with the query intact: also a miss
+          IO.FS.writeFile ans.head! ("garbage" ++ (← IO.FS.readFile ans.head!))
+          checkEq "sat\n" (← run "(check-sat)").stdout },
     { name := "lib/ never uses smt", run := fun _ => do
         for e in ← System.FilePath.readDir "lib" do
           if e.path.extension == some "wiz" && e.path.fileName != some "Prelude.wiz" then
