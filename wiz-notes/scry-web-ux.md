@@ -245,8 +245,10 @@ decodes one character to the right, past the name; one character of drift inside
 8-letter name would pass).
 
 * `web/source_live_test.mjs` asserts the fixture is real (`character === codePointColumn
-  + 1`) and then asks the real `wiz lsp --ws` for a hover and a definition at that last
-  unit.
+  + 1`), that the host advertises `positionEncoding: "utf-16"` (H2's visible contract;
+  before it the capability was absent and the host counted code points whatever the
+  client sent), and then asks the real `wiz lsp --ws` for a hover and a definition at
+  that last unit.
 * `web/source_chrome_test.mjs` puts the pointer on that last unit (`pointerAt`'s new
   `charIndex`), asserts the pointer's own offset is a UTF-16 offset
   (`over.start > over.codePoints`), and hovers/clicks there.
