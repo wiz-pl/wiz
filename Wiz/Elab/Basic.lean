@@ -291,6 +291,9 @@ structure ElabState (R : Type) where
     fun _ _ _ => (#[], .error "procedural macros can't run here")
   /-- tactics: node kind and the Wiz function that runs it, latest first -/
   tactics : List (Name × Name) := []
+  /-- (B1) term elaborators: term syntax kind and the Wiz function that elaborates it,
+  latest first (`attribute [term_elab k] f`) -/
+  termElabs : List (Name × Name) := []
   /-- (6h S2) the `[simp]` lemmas, latest first (`Tac.getSimpLemmas`; the Wiz driver
   owns the order, the priority and the policy) -/
   simpLemmas : List SimpLemma := []

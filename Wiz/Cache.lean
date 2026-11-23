@@ -347,8 +347,10 @@ def Effect.whose : Option String → String
 def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
   -- a builtin key is registered once (`command.builtin`); a replayed registration (a
   -- module that was elaborated on its own) must not get around that. (Other keys,
-  -- `extern:…`, `repr:…`, `inline`, are per constant.)
-  let once (k : Name) : Bool := k == "nat" || k.startsWith "nat." || k == "string" || k == "memo"
+  -- `extern:…`, `repr:…`, `inline`, are per constant.) The data-primitive spellings
+  -- (B1) are registered once too: they name what a literal means.
+  let once (k : Name) : Bool := k == "nat" || k.startsWith "nat." || k == "string" || k == "memo" ||
+    k == "unit" || k == "empty" || k == "qty" || k == "size" || k == "char" || k == "list"
   let clash := e.builtins.filter fun (k, n) => once k && (s.globals.builtinOf? k).any (· != n)
   if let (k, n) :: _ := clash then
     let was := (s.globals.builtinOf? k).getD "?"

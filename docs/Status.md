@@ -1431,12 +1431,12 @@ outside the kernel (`docs/Status.md` §7.0).
 
 ## 8. Testing evidence
 
-* **Negative tests**: the `elab` group (`Tests/Groups/Elab.lean`) has 43 cases and 24
+* **Negative tests**: the `elab` group (`Tests/Groups/Elab.lean`) has 51 cases and 26
   checks that must be *rejected* (`grep -c -E '^\s+\{ name :='` and
-  `grep -c -E '\bfails(Lib|LibW|Libs|LibsWithin)? '`; counted 2026-11-22), plus the
+  `grep -c -E '\bfails(Lib|LibW|Libs|LibsWithin)? '`; counted 2026-11-23), plus the
   quantity and structural cases in `Tests/Check.lean` (e.g. "linear variable used twice
   is rejected", "linear pair projected twice is rejected", "Type : Type is rejected").
-  Across `Tests/Groups/*.lean` the same two patterns count 1,986 case entries and 457
+  Across `Tests/Groups/*.lean` the same two patterns count 2,118 case entries and 487
   rejection checks (`grep -rhc … | awk '{s+=$1} END {print s}'`).
 * **Attacks that are regression tests**: F1 and F2 above (both kernels), and every
   fixed item of §3 since (F3–F14, T1), with the probe files of
