@@ -258,8 +258,10 @@ async function session(url) {
 
 // ## Pointer → token, the way a person would: a Range around the token gives viewport
 // coordinates, and a synthesised `mouseover`/`click` there is what the live host's
-// `caretRangeFromPoint` reads. `line` is found by a substring of its text.
-async function pointerAt(page, marker, needle, kind) {
+// `caretRangeFromPoint` reads. `line` is found by a substring of its text; `charIndex`
+// picks the character of the needle the pointer lands on (its first by default), so a
+// test can aim at the last UTF-16 unit of a name.
+async function pointerAt(page, marker, needle, kind, charIndex = 0) {
   return page.evaluate(`(() => {
     const marker = ${JSON.stringify(marker)};
     const needle = ${JSON.stringify(needle)};
@@ -271,8 +273,8 @@ async function pointerAt(page, marker, needle, kind) {
     const text = code ? (code.textContent || "") : "";
     const idx = text.indexOf(needle);
     if (idx < 0) return { error: "no " + needle + " in the line" };
-    const start = idx;
-    const stop = idx + needle.replace(/[^A-Za-z0-9_]+$/, "").length;
+    const start = idx + ${charIndex};
+    const stop = start + 1;
     const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
     let node, seen = 0, a = null, b = null;
     while ((node = walker.nextNode())) {
@@ -290,7 +292,8 @@ async function pointerAt(page, marker, needle, kind) {
     const at = { clientX: r.left + 2, clientY: r.top + Math.min(3, Math.max(1, r.height / 2)) };
     const ev = new MouseEvent(${JSON.stringify(kind)}, { bubbles: true, ...at });
     line.dispatchEvent(ev);
-    return { text: line.textContent, x: at.clientX, y: at.clientY };
+    return { text: line.textContent, x: at.clientX, y: at.clientY, start,
+      codePoints: [...text.slice(0, start)].length };
   })()`);
 }
 
@@ -426,11 +429,19 @@ try {
         `document.querySelector('section.source-pane')?.getAttribute('data-file') === "${wiz.id}"`, 5000);
       ok(onFile, "the Wiz file opens in the source pane", String(wiz.path));
 
-      // Hover the `contains` of `Source.Span.contains` in the reader's fact table.
-      const over = await pointerAt(page, "Source.Span.contains r.span offset", "contains r.span offset", "mouseover");
+      // Hover the `contains` of `Source.Span.contains` in the reader's fact table. The
+      // pointer goes on the token's last UTF-16 unit: the line carries a non-BMP
+      // character in an inline comment, so every offset after it is a UTF-16 offset one
+      // greater than its code-point column, and a host that decoded the column as code
+      // points would land one character past the name (`Web.EditorModel`'s index and the
+      // LSP server's `ofPos` must agree). The first answer pays the server's term-info
+      // elaboration (~51 s measured).
+      const over = await pointerAt(page, "Source.Span.contains r.span offset", "contains r.span offset", "mouseover", 7);
       ok(!over || !over.error, "the pointer lands on a Wiz identifier",
         over && over.error ? over.error : "");
-      // The first answer pays the server's term-info elaboration (~51 s measured).
+      ok(!!over && over.start > over.codePoints,
+        "the pointer's offset is a real UTF-16 offset (an astral character precedes it)",
+        over && JSON.stringify({ utf16: over.start, codePoints: over.codePoints }));
       const card = await page.waitFor(
         `!!document.querySelector(".hover-host .wiz-hover")`, 120000);
       const cardText = await page.evaluate(
@@ -445,9 +456,9 @@ try {
           cardText.slice(0, 200));
       }
 
-      // Click the same name: `textDocument/definition`, parsed by Web.Hover, mapped to a
-      // bundle file and outlined there.
-      const clicked = await pointerAt(page, "Source.Span.contains r.span offset", "contains r.span offset", "click");
+      // Click the same name (same last UTF-16 unit): `textDocument/definition`, parsed by
+      // Web.Hover, mapped to a bundle file and outlined there.
+      const clicked = await pointerAt(page, "Source.Span.contains r.span offset", "contains r.span offset", "click", 7);
       ok(!clicked || !clicked.error, "the click lands on a Wiz identifier",
         clicked && clicked.error ? clicked.error : "");
       const definition = await page.waitFor(

@@ -52,14 +52,14 @@
         "Tests/**",
         "web/**"
       ],
-      "sha256": "54ad7da4fef859772ada874093fe4ab526410099caca89107d2ffdd211e362a6"
+      "sha256": "0441268f340cffd36470a946d983ea516826aa34ebe356896076a537acd84a22"
     },
     "wizlib": {
       "files": 110,
       "paths": [
         "lib/**"
       ],
-      "sha256": "0b6b356ce341ad9fb7e4caf72937e22f1b828b67be0024dcf66c8998c5074de6"
+      "sha256": "b87b259872eb6ca8067535acbdfcbec4d4ef156d92eca14e4c98f920c1791efc"
     }
   }
 }

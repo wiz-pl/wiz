@@ -113,6 +113,32 @@ try {
     "the definition range is `def Source.Span.contains`'s line",
     range ? JSON.stringify(range) : "no range");
 
+  // ## UTF-16 columns
+  //
+  // The use line carries a non-BMP character in an inline comment, so its UTF-16 column
+  // is one more than its code-point column for everything after it. `positionOf` above
+  // is a UTF-16 offset by construction (a JS string index); the last unit of `contains`
+  // is the boundary that tells the two counts apart: a server that decoded the column as
+  // code points would land one character to the right, past the name. The host side of
+  // that is `Wiz/LSP.lean`'s `ofPos` (H2/H3); this is the request the page makes.
+  const lastAt = useAt + "contains".length - 1;
+  const lastLineStart = text.lastIndexOf("\n", lastAt - 1) + 1;
+  const codePointColumn = [...text.slice(lastLineStart, lastAt)].length;
+  const lastPos = positionOf(text, lastAt);
+  ok(lastPos.character === codePointColumn + 1,
+    "the use line is a real UTF-16 case (one astral character before the token)",
+    JSON.stringify({ character: lastPos.character, codePointColumn }));
+  const hoverLast = await client.hover(uriOf(source), lastPos);
+  ok(hoverLast && /contains/.test(JSON.stringify(hoverLast)),
+    "hover at the last UTF-16 unit of `contains` (after an astral character)",
+    JSON.stringify(hoverLast === undefined ? null : hoverLast).slice(0, 300));
+  const defLast = await client.definition(uriOf(source), lastPos);
+  const locLast = Array.isArray(defLast) ? defLast[0] : defLast;
+  const uriLast = locLast && (locLast.uri || locLast.targetUri);
+  ok(!!locLast && String(uriLast).endsWith("Web/Source/Span.wiz"),
+    "definition at the last UTF-16 unit of `contains` names Span.wiz",
+    JSON.stringify(defLast === undefined ? null : defLast).slice(0, 300));
+
   // The same question at a position with no identifier (an empty line) is answered
   // `null`, not an error: the reader's "no answer" path.
   const blankLine = text.split("\n").findIndex((line) => line.trim() === "");

@@ -216,6 +216,47 @@ rc=0. The mock-server fallback smoke runs locally: 44/44, rc=0. Bundle sizes:
 fixtures 1,017,425 B, live 1,084,960 B (`wiz-source-ui.wasm` 843,812 B,
 `wiz-source-ui.mjs` 14,726 B, merged `lsp-client.js` 27,018 B, data 69,869 B).
 
+### Restack onto current train12 with the UTF-16 host (2026-11-23)
+
+`agent/scry-web-ux` (3b97605db) was based on the old train12 `b5eb50555`. The restack is
+`agent/scry-web-ux-merge` (worktree `/workspace/wt/scry-web-ux-merge`), two merges on
+current `integration/train12` `2ad8f0f8c`:
+
+* `401987d38` merges `agent/lsp-host-h1-h3` (`540141a79`, H1 unknown request → -32601,
+  H2 UTF-16 positions + `positionEncoding`, H3 `ofPos` clamp/`surrogate`/EOF). H2 is the
+  reason for the merge: the reader's offsets are UTF-16 end to end (`data-start` and the
+  bundle spans come from `Scry.WebCmd`/`EditorModel`, both UTF-16) and the host used to
+  count code points, so anything after a non-BMP character drifted by one per character.
+* `528ecb3a8` merges `agent/scry-web-ux`. Two conflicts, both generated:
+  `.github/repo-subsets.json` (regenerated with `scripts/repo-subsets.py --write`) and
+  `Wiz/LegacyNames.lean`'s digest (`legacy-names.tsv` auto-merged, then regenerated from
+  the merged tree with `scripts/gen-legacy-names.py --update-digest`: 12,635 rows in 242
+  files, digest `4b8e3d74…`). `gen-legacy-names.py --check`, `check-names.py` and
+  `check-companion-lists.py` are clean (5 lists; test-shards skipped, no test driver in
+  this worktree), so the companion fix from `daf06385` survives the restack.
+
+**The UTF-16 fixture.** The demo's facts file now carries a non-BMP character on the line
+the live tests hover: `lib/Web/Source/Facts.wiz`'s `factsAt` use of
+`Source.Span.contains` starts with `/- 😀 UTF-16 fixture -/`, and the module doc says why.
+Every offset after it is a real UTF-16 offset: the UTF-16 column is one greater than the
+code-point column. The tests aim at the *last* UTF-16 unit of `contains` rather than its
+first, because that is the boundary that tells the two counts apart (a code-point server
+decodes one character to the right, past the name; one character of drift inside an
+8-letter name would pass).
+
+* `web/source_live_test.mjs` asserts the fixture is real (`character === codePointColumn
+  + 1`) and then asks the real `wiz lsp --ws` for a hover and a definition at that last
+  unit.
+* `web/source_chrome_test.mjs` puts the pointer on that last unit (`pointerAt`'s new
+  `charIndex`), asserts the pointer's own offset is a UTF-16 offset
+  (`over.start > over.codePoints`), and hovers/clicks there.
+* The mock-server smoke runs locally on a copy of the previous live bundle whose
+  `data/f/<facts>.json` source is patched to carry the character: 39/39, rc=0 (the
+  mock's fixed card and the pointer/offset assertions).
+
+Heavy is held behind train11 at the time of writing, so the built-host runs (the Node
+live test and the browser smoke with `WIZ_BIN=<built wiz>`) are not yet claimed here.
+
 ## Honesty ledger
 
 | what | how it ran | verdict |
