@@ -1283,8 +1283,8 @@ the generated reference manual (`result/index.md`, and `result/site`).
   ever read. The opt-in is deliberate: a read-only layer is refused by default because a
   manifest is a self-signed digest, and this layer is the one case where the reader and
   the writer are the same derivation (the store path is content-addressed and the entries
-  are keyed by the packaged binary's hash), not a foreign trust domain. The
-  warm runs pass the *same* toolchain flags the wrappers add: `Toolchain.tag` hashes
+  are keyed by the packaged binary's hash), not a foreign trust domain. The warm runs
+  pass the *same* toolchain flags the wrappers add: `Toolchain.tag` hashes
   exactly those fields and is part of every manifest's strong key, so a cache warmed
   with default flags is rejected by every wrapper invocation (it would be a clean miss
   for the whole layer).
