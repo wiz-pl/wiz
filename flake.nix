@@ -879,6 +879,7 @@ EOF
               case "$a" in
                 -c|-E|-S|-M|-MM) compile=yes ;;
                 -lgmp|-luv|-lssl|-lcrypto|-lstdc++|-lc++|-lc++abi|-lgcc|-lgcc_s|-latomic) continue ;;
+                -lstdc++*|-lc++*|-lc++abi*|-lgmp*|-luv*|-lssl*|-lcrypto*|-lgcc*|-latomic*) continue ;;
               esac
               args+=("$a")
             done
@@ -923,6 +924,16 @@ EOF
               done
               export PATH=$PWD/cc-bin:$PATH
               lake build wiz grail
+              # Relink the executables with the release wrapper. Lake's own link
+              # ignores LEAN_CC/CC/CXX for the final C++ driver; its .rsp files hold
+              # the exact objects and libraries, so expand them here and let the
+              # wrapper turn every non-glibc -l into the static archive.
+              for t in wiz grail; do
+                rsp=.lake/build/bin/$t.rsp
+                [ -f "$rsp" ] || { echo "release-unwrapped: no $rsp" >&2; exit 1; }
+                eval "set -- $(cat "$rsp")"
+                ${releaseCC} "$@"
+              done
               runHook postBuild
             '';
             installPhase = ''
