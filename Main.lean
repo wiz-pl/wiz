@@ -46,6 +46,10 @@ def usage : String := "usage:
   wiz build FILE -o OUT [--split N]  compile the program as N C units in parallel
                                    (default 1: one unit; a split build is faster but the
                                    generated program runs somewhat slower, stage 15k)
+  wiz ir FILE [-o OUT]             write the versioned `wiz-ir/1` document of `main`
+                                   (stdout, or OUT); it is the input a package backend
+                                   reads. `wiz build FILE -o OUT --emit-ir` is the same
+                                   output and does not invoke a C compiler.
   wiz build FILE -o OUT --lib      … or the exported functions to an object file, with OUT.h
   wiz build FILE -o OUT --no-main  … or the exported functions, linked without a `main`
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
@@ -794,6 +798,30 @@ def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
       s!"{c.mismatches} mismatches, {c.unverified} unverified")
   pure (if s.messages.any (·.severity == .error) then 1 else 0)
 
+/-- `wiz ir FILE [-o OUT]`: write the `wiz-ir/1` document of `main`. The document is the
+input of a package backend (or of an IR pass written in Wiz), so this path elaborates as
+`wiz build` does and stops before selecting a target: no C compiler, no linker. -/
+def irCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let usage := "usage: wiz ir FILE [-o OUT]  (or: wiz build FILE -o OUT --emit-ir)"
+  let emit (path : String) (out : Option String) : IO UInt32 := do
+    let some input ← readSourceDiag path | pure 1
+    let s ← elaborate tc path input
+    let errs := s.messages.filter (·.severity == .error)
+    unless errs.isEmpty do
+      for m in errs do IO.eprintln s!"{path}:{m.render input}"
+      return 1
+    match Build.irProgram s "main" with
+    | .error e => IO.eprintln s!"wiz ir: {e}"; pure 1
+    | .ok (decls, _) =>
+      let text := IRDoc.render decls
+      match out with
+      | none => IO.print text; pure 0
+      | some file => IO.FS.writeFile file text; pure 0
+  match args with
+  | [path] => emit path none
+  | [path, "-o", out] => emit path (some out)
+  | _ => IO.eprintln usage; pure 2
+
 /-- `wiz lint`'s options. -/
 structure LintArgs where
   file : Option String := none
@@ -1373,6 +1401,9 @@ def mainImpl (args : List String) : IO UInt32 := do
   | "cache" :: "manifest" :: rest => cacheManifestCmd tc rest
   | ["check", path] => checkCmd tc path
   | "lint" :: rest => lintCmd tc rest
+  | "ir" :: rest => irCmd tc rest
+  | ["build", path, "-o", out, "--emit-ir"] => irCmd tc [path, "-o", out]
+  | ["build", path, "--emit-ir"] => irCmd tc [path]
   | ["build", path, "-o", out] => buildCmd tc path out target (split := split) (attest := attest)
   | ["build", path, "-o", out, "--lib"] => buildCmd tc path out target true (split := split) (attest := attest)
   | ["build", path, "-o", out, "--no-main"] =>

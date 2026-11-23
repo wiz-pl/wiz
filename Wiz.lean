@@ -35,6 +35,7 @@ import Wiz.Compiler.Erase
 import Wiz.Compiler.Inline
 import Wiz.Compiler.Run
 import Wiz.Compiler.IR
+import Wiz.Compiler.IRDoc
 import Wiz.Compiler.PrimCode
 import Wiz.Compiler.Lower
 import Wiz.Compiler.RC

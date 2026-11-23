@@ -425,6 +425,17 @@ schemas must be siblings, not one schema.
 **Foundation.** Yes, for backends and every IR pass; also the second consumer of the
 registry, so it tests whether Item 1's entry model really fits a second kind.
 
+**Status (lane `ir-abi`, 2026-11-23).** The emitter and the Wiz reader are implemented
+on `agent/ir-abi` (base `f489cc876`, not merged): `Wiz/Compiler/IRDoc.lean`, `lib/Ir.wiz`,
+`wiz ir FILE [-o OUT]`/`wiz build … --emit-ir`, the `=ir` group and three fixtures.
+The schema, the version-refusal rule, the one-pass choice (a narrow IR-level Inline:
+identity elimination, because the compiler's Inline/Push run before lowering and a
+faithful IR inline needs the ownership analysis the document does not carry) and what
+remains (RC/borrow annotations, a registry backend as the second consumer, a faithful
+inline) are in `wiz-notes/wiz-ir.md`. That lane ran no `lake` build and no test; its §5 is the
+honesty ledger of what was checked (the Wiz module with the installed `wiz`, the Lean
+emitter against a type stub) and what was not.
+
 ### Dependencies, in one line
 
 ```

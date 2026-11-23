@@ -1,0 +1,521 @@
+import Text
+/-!
+# Ir
+
+`wiz-ir/1`, the serialized IR (`Wiz/Compiler/IRDoc.lean`): a pure reader, a canonical
+printer, and one pass. The schema is specified in `wiz-notes/wiz-ir.md`; this module is
+the independent implementation the emitter is checked against, so it is deliberately
+written against the document rather than against the Lean inductive types.
+
+```
+(wiz-ir/1
+  (decl "twice" (params 0 1) (borrow 0 0) (dup 0 (vdecl 2 (ap 0 (1)) (vdecl 3 (ap 0 (2)) (ret 3)))))
+)
+```
+
+* `Ir.parse` reads a document. A first atom other than `wiz-ir/1` is refused: a later
+  major names itself (`wiz-ir/2`) and this reader says so, instead of misreading it.
+* `Ir.render` writes the canonical bytes: `(wiz-ir/1`, one declaration per line indented
+  by two spaces, `)`, and one final newline. `Ir.render (Ir.parse text)` is the
+  round-trip invariant.
+* `Ir.inlineIdentity` is the one pass: a call of a one-parameter identity definition is
+  replaced by its argument. It is the IR-level slice of the compiler's `Inline.lean`
+  that needs no ownership analysis; see the note for why a faithful inline waits.
+
+Everything is pure, so `#eval` runs it (`Tests/Groups/Ir.lean` does).
+-/
+
+-- ## The document's tree
+
+/-- One S-expression: an unquoted atom, a quoted string, or a list. `Ir.Sexps` is the
+list type: Wiz has no nested inductive types, so the spine is its own mutual type (the
+same shape `Json`/`Jsons` uses). -/
+mutual
+inductive Ir.Sexp where
+  | atom (s : String)
+  | str (s : String)
+  | list (xs : Ir.Sexps)
+/-- The elements of a list form. -/
+inductive Ir.Sexps where
+  | nil
+  | cons (head : Ir.Sexp) (tail : Ir.Sexps)
+end
+
+/-- A `List` of forms as the mutual spine. -/
+def Ir.sexpsOfList (xs : List Ir.Sexp) : Ir.Sexps :=
+  List.foldr (fun x acc => .cons x acc) .nil xs
+
+/-- The reverse of a spine onto `acc`. -/
+partial def Ir.reverseSexps : Ir.Sexps → Ir.Sexps → Ir.Sexps
+  | .nil, acc => acc
+  | .cons x rest, acc => Ir.reverseSexps rest (.cons x acc)
+
+/-- An expression form. `prim` keeps the external key (`nat.add`, or a whole `extern:`
+string), not a Lean constructor, so a backend can own its primitive table. -/
+inductive Ir.Expr where
+  | erased
+  | lit (n : Nat)
+  | ctor (tag : Nat) (args : List Nat)
+  | proj (i : Nat) (x : Nat)
+  | fap (f : String) (args : List Nat)
+  | pap (f : String) (args : List Nat)
+  | ap (f : Nat) (args : List Nat)
+  | prim (key : String) (args : List Nat)
+  | reset (x : Nat)
+  | reuse (tok : Nat) (tag : Nat) (args : List Nat)
+
+/-- A body form. `caseOf` is the document's `case` (the constructor's other spelling
+keeps the language keyword out of the library); its alternatives are `Ir.Bodies`, the
+mutual spine. -/
+mutual
+inductive Ir.Body where
+  | vdecl (x : Nat) (e : Ir.Expr) (b : Ir.Body)
+  | caseOf (x : Nat) (alts : Ir.Bodies)
+  | ret (x : Nat)
+  | jdecl (j : Nat) (params : List Nat) (body : Ir.Body) (k : Ir.Body)
+  | jmp (j : Nat) (args : List Nat)
+  | dup (x : Nat) (b : Ir.Body)
+  | drop (x : Nat) (b : Ir.Body)
+  | unreachable
+/-- The alternatives of a `case`. -/
+inductive Ir.Bodies where
+  | nil
+  | cons (head : Ir.Body) (tail : Ir.Bodies)
+end
+
+/-- One declaration: its name, its parameters, one borrow bit per parameter, and its
+body. -/
+structure Ir.Decl where
+  name : String
+  params : List Nat
+  borrow : List Bool
+  body : Ir.Body
+
+/-- A whole document, declarations in emission order. -/
+structure Ir.Doc where
+  decls : List Ir.Decl
+
+-- ## Tokens
+
+inductive Ir.Tok where
+  | lp
+  | rp
+  | atom (s : String)
+  | str (s : String)
+
+/-- After `;`: the rest of the comment, up to and including its newline. -/
+partial def Ir.skipComment : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match Nat.beq (Char.code c) 10 with
+    | .true => cs
+    | .false => Ir.skipComment cs
+
+/-- The characters of an atom and the rest of the input. It stops before white space,
+`(`, `)`, `;` and `"`. -/
+partial def Ir.takeAtom (cs : List Char) (acc : List Char) : List Char × List Char :=
+  match cs with
+  | .nil => (List.reverse acc, .nil)
+  | .cons c rest =>
+    match Char.isSpace c with
+    | .true => (List.reverse acc, cs)
+    | .false =>
+      let n := Char.code c;
+      match Nat.beq n 40 with
+      | .true => (List.reverse acc, cs)
+      | .false => match Nat.beq n 41 with
+        | .true => (List.reverse acc, cs)
+        | .false => match Nat.beq n 59 with
+          | .true => (List.reverse acc, cs)
+          | .false => match Nat.beq n 34 with
+            | .true => (List.reverse acc, cs)
+            | .false => Ir.takeAtom rest (.cons c acc)
+
+/-- A quoted string after its opening quote, and the rest of the input. The escapes are
+`\"`, `\\`, `\n`, `\t` and `\r` (the ones `Ir.quote` emits). -/
+partial def Ir.readString (cs : List Char) (acc : List Char) : Except String (String × List Char) :=
+  match cs with
+  | .nil => .error "ir: unterminated string"
+  | .cons c rest => match Nat.beq (Char.code c) 34 with
+    | .true => .ok (String.ofChars (List.reverse acc), rest)
+    | .false => match Nat.beq (Char.code c) 92 with
+      | .false => Ir.readString rest (.cons c acc)
+      | .true => match rest with
+        | .nil => .error "ir: unterminated string escape"
+        | .cons d rest2 => match Nat.beq (Char.code d) 34 with
+          | .true => Ir.readString rest2 (.cons (Char.mk 34) acc)
+          | .false => match Nat.beq (Char.code d) 92 with
+            | .true => Ir.readString rest2 (.cons (Char.mk 92) acc)
+            | .false => match Nat.beq (Char.code d) 110 with
+              | .true => Ir.readString rest2 (.cons (Char.mk 10) acc)
+              | .false => match Nat.beq (Char.code d) 116 with
+                | .true => Ir.readString rest2 (.cons (Char.mk 9) acc)
+                | .false => match Nat.beq (Char.code d) 114 with
+                  | .true => Ir.readString rest2 (.cons (Char.mk 13) acc)
+                  | .false => .error "ir: unknown string escape"
+
+/-- Every token, in order. White space separates; `;` starts a comment. -/
+partial def Ir.tokenize (cs : List Char) (acc : List Ir.Tok) : Except String (List Ir.Tok) :=
+  match cs with
+  | .nil => .ok (List.reverse acc)
+  | .cons c rest =>
+    match Char.isSpace c with
+    | .true => Ir.tokenize rest acc
+    | .false =>
+      let n := Char.code c;
+      match Nat.beq n 59 with
+      | .true => Ir.tokenize (Ir.skipComment rest) acc
+      | .false => match Nat.beq n 40 with
+        | .true => Ir.tokenize rest (.cons .lp acc)
+        | .false => match Nat.beq n 41 with
+          | .true => Ir.tokenize rest (.cons .rp acc)
+          | .false => match Nat.beq n 34 with
+            | .true => match Ir.readString rest .nil with
+              | .error e => .error e
+              | .ok (s, rest2) => Ir.tokenize rest2 (.cons (.str s) acc)
+            | .false =>
+              let a := Ir.takeAtom cs .nil;
+              match List.isEmpty a.1 with
+              | .true => .error "ir: unexpected character"
+              | .false => Ir.tokenize a.2 (.cons (.atom (String.ofChars a.1)) acc)
+
+-- ## S-expressions
+
+/-- The forms of a list, until its closing `)`, which is consumed. `one` is the form
+parser (`Ir.parseSexp` itself: the parameter keeps the two functions out of a mutual
+block, which also keeps the recursive pair `partial` with one clear entry point). -/
+partial def Ir.parseListWith (one : List Ir.Tok → Except String (Ir.Sexp × List Ir.Tok))
+    (ts : List Ir.Tok) (acc : Ir.Sexps) : Except String (Ir.Sexps × List Ir.Tok) :=
+  match ts with
+  | .nil => .error "ir: unterminated list"
+  | .cons .rp rest => .ok (Ir.reverseSexps acc .nil, rest)
+  | _ => match one ts with
+    | .error e => .error e
+    | .ok (s, rest) => Ir.parseListWith one rest (.cons s acc)
+
+/-- One form and the tokens after it. -/
+partial def Ir.parseSexp (ts : List Ir.Tok) : Except String (Ir.Sexp × List Ir.Tok) :=
+  match ts with
+  | .nil => .error "ir: unexpected end of input"
+  | .cons .lp rest => match Ir.parseListWith Ir.parseSexp rest .nil with
+    | .error e => .error e
+    | .ok (xs, rest) => .ok (.list xs, rest)
+  | .cons .rp _ => .error "ir: unexpected `)`"
+  | .cons (.atom a) rest => .ok (.atom a, rest)
+  | .cons (.str s) rest => .ok (.str s, rest)
+
+-- ## Reading the typed forms
+
+/-- `Except`'s bind, as a function (the pure library does not use `do` notation). -/
+def Ir.bind {A B : Type} (r : Except String A) (f : A → Except String B) : Except String B :=
+  match r with
+  | .ok a => f a
+  | .error e => .error e
+
+def Ir.natOf (s : Ir.Sexp) : Except String Nat :=
+  match s with
+  | .atom a => match String.parseNat a with
+    | .some n => .ok n
+    | .none => .error "ir: expected a number"
+  | _ => .error "ir: expected a number"
+
+partial def Ir.natsOf : Ir.Sexps → Except String (List Nat)
+  | .nil => .ok .nil
+  | .cons s rest => Ir.bind (Ir.natOf s) (fun n =>
+      Ir.bind (Ir.natsOf rest) (fun ns => .ok (.cons n ns)))
+
+def Ir.natListOf (s : Ir.Sexp) : Except String (List Nat) :=
+  match s with
+  | .list xs => Ir.natsOf xs
+  | _ => .error "ir: expected a list of numbers"
+
+def Ir.namedNatList (head : String) (s : Ir.Sexp) : Except String (List Nat) :=
+  match s with
+  | .list (.cons (.atom h) xs) => match String.eq h head with
+    | .true => Ir.natsOf xs
+    | .false => .error ("ir: expected " ++ head)
+  | _ => .error ("ir: expected " ++ head)
+
+def Ir.bitOf (s : Ir.Sexp) : Except String Bool :=
+  match s with
+  | .atom "0" => .ok .false
+  | .atom "1" => .ok .true
+  | _ => .error "ir: a borrow bit is 0 or 1"
+
+partial def Ir.bitsOf : Ir.Sexps → Except String (List Bool)
+  | .nil => .ok .nil
+  | .cons s rest => Ir.bind (Ir.bitOf s) (fun b =>
+      Ir.bind (Ir.bitsOf rest) (fun bs => .ok (.cons b bs)))
+
+def Ir.namedBits (head : String) (s : Ir.Sexp) : Except String (List Bool) :=
+  match s with
+  | .list (.cons (.atom h) xs) => match String.eq h head with
+    | .true => Ir.bitsOf xs
+    | .false => .error ("ir: expected " ++ head)
+  | _ => .error ("ir: expected " ++ head)
+
+/-- An expression form. -/
+def Ir.exprOf (s : Ir.Sexp) : Except String Ir.Expr :=
+  match s with
+  | .list (.cons (.atom "erased") .nil) => .ok .erased
+  | .list (.cons (.atom "lit") (.cons n .nil)) =>
+    Ir.bind (Ir.natOf n) (fun k => .ok (.lit k))
+  | .list (.cons (.atom "ctor") (.cons t (.cons args .nil))) =>
+    Ir.bind (Ir.natOf t) (fun tag =>
+      Ir.bind (Ir.natListOf args) (fun xs => .ok (.ctor tag xs)))
+  | .list (.cons (.atom "proj") (.cons i (.cons x .nil))) =>
+    Ir.bind (Ir.natOf i) (fun ix =>
+      Ir.bind (Ir.natOf x) (fun xv => .ok (.proj ix xv)))
+  | .list (.cons (.atom "fap") (.cons (.str f) (.cons args .nil))) =>
+    Ir.bind (Ir.natListOf args) (fun xs => .ok (.fap f xs))
+  | .list (.cons (.atom "pap") (.cons (.str f) (.cons args .nil))) =>
+    Ir.bind (Ir.natListOf args) (fun xs => .ok (.pap f xs))
+  | .list (.cons (.atom "ap") (.cons f (.cons args .nil))) =>
+    Ir.bind (Ir.natOf f) (fun fv =>
+      Ir.bind (Ir.natListOf args) (fun xs => .ok (.ap fv xs)))
+  | .list (.cons (.atom "prim") (.cons (.str key) (.cons args .nil))) =>
+    Ir.bind (Ir.natListOf args) (fun xs => .ok (.prim key xs))
+  | .list (.cons (.atom "reset") (.cons x .nil)) =>
+    Ir.bind (Ir.natOf x) (fun xv => .ok (.reset xv))
+  | .list (.cons (.atom "reuse") (.cons tok (.cons t (.cons args .nil)))) =>
+    Ir.bind (Ir.natOf tok) (fun tv =>
+      Ir.bind (Ir.natOf t) (fun tag =>
+        Ir.bind (Ir.natListOf args) (fun xs => .ok (.reuse tv tag xs))))
+  | _ => .error "ir: unknown expression form"
+
+/-- The forms of a `case`, in tag order. `one` is the body parser (`Ir.bodyOf` itself,
+for the same reason as `parseListWith`). -/
+partial def Ir.bodiesWith (one : Ir.Sexp → Except String Ir.Body) :
+    Ir.Sexps → Except String Ir.Bodies
+  | .nil => .ok .nil
+  | .cons s rest => Ir.bind (one s) (fun b =>
+      Ir.bind (Ir.bodiesWith one rest) (fun bs => .ok (.cons b bs)))
+
+/-- A body form. -/
+partial def Ir.bodyOf (s : Ir.Sexp) : Except String Ir.Body :=
+  match s with
+  | .list (.cons (.atom "vdecl") (.cons x (.cons e (.cons b .nil)))) =>
+    Ir.bind (Ir.natOf x) (fun xv =>
+      Ir.bind (Ir.exprOf e) (fun ev =>
+        Ir.bind (Ir.bodyOf b) (fun bv => .ok (.vdecl xv ev bv))))
+  | .list (.cons (.atom "case") (.cons x alts)) =>
+    Ir.bind (Ir.natOf x) (fun xv =>
+      Ir.bind (Ir.bodiesWith Ir.bodyOf alts) (fun bs => .ok (.caseOf xv bs)))
+  | .list (.cons (.atom "ret") (.cons x .nil)) =>
+    Ir.bind (Ir.natOf x) (fun xv => .ok (.ret xv))
+  | .list (.cons (.atom "jdecl") (.cons j (.cons ps (.cons body (.cons k .nil))))) =>
+    Ir.bind (Ir.natOf j) (fun jv =>
+      Ir.bind (Ir.natListOf ps) (fun params =>
+        Ir.bind (Ir.bodyOf body) (fun bv =>
+          Ir.bind (Ir.bodyOf k) (fun kv => .ok (.jdecl jv params bv kv)))))
+  | .list (.cons (.atom "jmp") (.cons j (.cons args .nil))) =>
+    Ir.bind (Ir.natOf j) (fun jv =>
+      Ir.bind (Ir.natListOf args) (fun xs => .ok (.jmp jv xs)))
+  | .list (.cons (.atom "dup") (.cons x (.cons b .nil))) =>
+    Ir.bind (Ir.natOf x) (fun xv =>
+      Ir.bind (Ir.bodyOf b) (fun bv => .ok (.dup xv bv)))
+  | .list (.cons (.atom "drop") (.cons x (.cons b .nil))) =>
+    Ir.bind (Ir.natOf x) (fun xv =>
+      Ir.bind (Ir.bodyOf b) (fun bv => .ok (.drop xv bv)))
+  | .list (.cons (.atom "unreachable") .nil) => .ok .unreachable
+  | _ => .error "ir: unknown body form"
+
+/-- One declaration. The borrow array must have one bit per parameter. -/
+def Ir.declOf (s : Ir.Sexp) : Except String Ir.Decl :=
+  match s with
+  | .list (.cons (.atom "decl") (.cons (.str name) (.cons ps (.cons bs (.cons body .nil))))) =>
+    Ir.bind (Ir.namedNatList "params" ps) (fun params =>
+      Ir.bind (Ir.namedBits "borrow" bs) (fun borrow =>
+        match Nat.beq (List.length params) (List.length borrow) with
+        | .false => .error "ir: borrow has one bit per parameter"
+        | .true => Ir.bind (Ir.bodyOf body) (fun b =>
+            .ok (Ir.Decl.mk name params borrow b))))
+  | _ => .error "ir: expected a decl"
+
+partial def Ir.declsOf : Ir.Sexps → Except String (List Ir.Decl)
+  | .nil => .ok .nil
+  | .cons s rest => Ir.bind (Ir.declOf s) (fun d =>
+      Ir.bind (Ir.declsOf rest) (fun ds => .ok (.cons d ds)))
+
+/-- The document. The first form's head is the version; `wiz-ir/N` with `N ≠ 1` is
+refused with the version in the message, and a non-`wiz-ir` head is refused as such. -/
+def Ir.docOf (s : Ir.Sexp) : Except String Ir.Doc :=
+  match s with
+  | .list (.cons (.atom v) decls) => match String.eq v "wiz-ir/1" with
+    | .true => Ir.bind (Ir.declsOf decls) (fun ds => .ok (Ir.Doc.mk ds))
+    | .false => match String.startsWith v "wiz-ir/" with
+      | .true => .error ("ir: unsupported version " ++ v ++ " (this reader is wiz-ir/1)")
+      | .false => .error "ir: not a wiz-ir document"
+  | _ => .error "ir: not a wiz-ir document"
+
+/-- Parse a whole `wiz-ir/1` document. Trailing tokens after the one form are an
+error, so a truncated or double document cannot pass as one. -/
+def Ir.parse (text : String) : Except String Ir.Doc :=
+  match Ir.tokenize (String.chars text) .nil with
+  | .error e => .error e
+  | .ok ts => match Ir.parseSexp ts with
+    | .error e => .error e
+    | .ok (s, rest) => match rest with
+      | .nil => Ir.docOf s
+      | _ => .error "ir: trailing tokens after the document"
+
+-- ## Printing
+
+/-- A string as a `wiz-ir/1` literal, with the escapes `Ir.readString` reads. -/
+partial def Ir.quoteChars (cs : List Char) (acc : List Char) : List Char :=
+  match cs with
+  | .nil => List.reverse acc
+  | .cons c rest =>
+    let n := Char.code c;
+    match Nat.beq n 34 with
+    | .true => Ir.quoteChars rest (.cons (Char.mk 34) (.cons (Char.mk 92) acc))
+    | .false => match Nat.beq n 92 with
+      | .true => Ir.quoteChars rest (.cons (Char.mk 92) (.cons (Char.mk 92) acc))
+      | .false => match Nat.beq n 10 with
+        | .true => Ir.quoteChars rest (.cons (Char.mk 110) (.cons (Char.mk 92) acc))
+        | .false => match Nat.beq n 9 with
+          | .true => Ir.quoteChars rest (.cons (Char.mk 116) (.cons (Char.mk 92) acc))
+          | .false => match Nat.beq n 13 with
+            | .true => Ir.quoteChars rest (.cons (Char.mk 114) (.cons (Char.mk 92) acc))
+            | .false => Ir.quoteChars rest (.cons c acc)
+
+def Ir.quote (s : String) : String :=
+  String.append "\"" (String.append (String.ofChars (Ir.quoteChars (String.chars s) .nil)) "\"")
+
+def Ir.sym (s : String) : Ir.Sexp := .atom s
+def Ir.text (s : String) : Ir.Sexp := .str s
+def Ir.natSexp (n : Nat) : Ir.Sexp := .atom (Nat.repr n)
+/-- A list form from a `List` of forms. -/
+def Ir.l (xs : List Ir.Sexp) : Ir.Sexp := .list (Ir.sexpsOfList xs)
+/-- A list form from a head and the rest. -/
+def Ir.lc (x : Ir.Sexp) (xs : List Ir.Sexp) : Ir.Sexp :=
+  .list (Ir.sexpsOfList (.cons x xs))
+def Ir.varSexp (xs : List Nat) : Ir.Sexp := Ir.l (List.map Ir.natSexp xs)
+
+/-- The flat text of every element, in order (the spine, for `String.intercalate`).
+`one` is `Ir.flat` itself, as a parameter so the pair needs no mutual block. -/
+partial def Ir.flatPartsWith (one : Ir.Sexp → String) : Ir.Sexps → List String
+  | .nil => .nil
+  | .cons x rest => .cons (one x) (Ir.flatPartsWith one rest)
+
+partial def Ir.flat (s : Ir.Sexp) : String :=
+  match s with
+  | .atom a => a
+  | .str x => Ir.quote x
+  | .list xs => String.append "(" (String.append
+      (String.intercalate " " (Ir.flatPartsWith Ir.flat xs)) ")")
+
+def Ir.exprSexp : Ir.Expr → Ir.Sexp
+  | .erased => Ir.l [Ir.sym "erased"]
+  | .lit n => Ir.l [Ir.sym "lit", Ir.natSexp n]
+  | .ctor t as => Ir.l [Ir.sym "ctor", Ir.natSexp t, Ir.varSexp as]
+  | .proj i x => Ir.l [Ir.sym "proj", Ir.natSexp i, Ir.natSexp x]
+  | .fap f as => Ir.l [Ir.sym "fap", Ir.text f, Ir.varSexp as]
+  | .pap f as => Ir.l [Ir.sym "pap", Ir.text f, Ir.varSexp as]
+  | .ap f as => Ir.l [Ir.sym "ap", Ir.natSexp f, Ir.varSexp as]
+  | .prim key as => Ir.l [Ir.sym "prim", Ir.text key, Ir.varSexp as]
+  | .reset x => Ir.l [Ir.sym "reset", Ir.natSexp x]
+  | .reuse tok t as => Ir.l [Ir.sym "reuse", Ir.natSexp tok, Ir.natSexp t, Ir.varSexp as]
+
+/-- The alternatives of a `case` as a `List` of forms. `one` is `Ir.bodySexp` itself. -/
+partial def Ir.bodySexpsWith (one : Ir.Body → Ir.Sexp) : Ir.Bodies → List Ir.Sexp
+  | .nil => .nil
+  | .cons b rest => .cons (one b) (Ir.bodySexpsWith one rest)
+
+partial def Ir.bodySexp : Ir.Body → Ir.Sexp
+  | .vdecl x e b => Ir.l [Ir.sym "vdecl", Ir.natSexp x, Ir.exprSexp e, Ir.bodySexp b]
+  | .caseOf x alts => Ir.lc (Ir.sym "case") (.cons (Ir.natSexp x) (Ir.bodySexpsWith Ir.bodySexp alts))
+  | .ret x => Ir.l [Ir.sym "ret", Ir.natSexp x]
+  | .jdecl j ps body k => Ir.l [Ir.sym "jdecl", Ir.natSexp j, Ir.varSexp ps, Ir.bodySexp body, Ir.bodySexp k]
+  | .jmp j as => Ir.l [Ir.sym "jmp", Ir.natSexp j, Ir.varSexp as]
+  | .dup x b => Ir.l [Ir.sym "dup", Ir.natSexp x, Ir.bodySexp b]
+  | .drop x b => Ir.l [Ir.sym "drop", Ir.natSexp x, Ir.bodySexp b]
+  | .unreachable => Ir.l [Ir.sym "unreachable"]
+
+def Ir.bitText (b : Bool) : String := match b with
+  | .true => "1"
+  | .false => "0"
+
+def Ir.declSexp (d : Ir.Decl) : Ir.Sexp :=
+  Ir.l [Ir.sym "decl", Ir.text d.name,
+    Ir.lc (Ir.sym "params") (List.map Ir.natSexp d.params),
+    Ir.lc (Ir.sym "borrow") (List.map (fun b => Ir.sym (Ir.bitText b)) d.borrow),
+    Ir.bodySexp d.body]
+
+/-- The canonical document: a header line, one declaration per line, a closing line and
+one final newline. -/
+def Ir.render (d : Ir.Doc) : String :=
+  String.append "(wiz-ir/1\n" (String.append
+    (String.join (List.map (fun x => String.append "  " (String.append
+      (Ir.flat (Ir.declSexp x)) "\n")) d.decls)) ")\n")
+
+-- ## The one pass: identity elimination
+
+def Ir.substOne (x y z : Nat) : Nat := match Nat.beq z x with
+  | .true => y
+  | .false => z
+
+def Ir.substMany (x y : Nat) (zs : List Nat) : List Nat := List.map (Ir.substOne x y) zs
+
+/-- Apply `one` to every alternative, preserving order. -/
+partial def Ir.mapBodies (one : Ir.Body → Ir.Body) : Ir.Bodies → Ir.Bodies
+  | .nil => .nil
+  | .cons b rest => .cons (one b) (Ir.mapBodies one rest)
+
+def Ir.substExpr (x y : Nat) : Ir.Expr → Ir.Expr
+  | .erased => .erased
+  | .lit n => .lit n
+  | .ctor t as => .ctor t (Ir.substMany x y as)
+  | .proj i z => .proj i (Ir.substOne x y z)
+  | .fap f as => .fap f (Ir.substMany x y as)
+  | .pap f as => .pap f (Ir.substMany x y as)
+  | .ap f as => .ap (Ir.substOne x y f) (Ir.substMany x y as)
+  | .prim key as => .prim key (Ir.substMany x y as)
+  | .reset z => .reset (Ir.substOne x y z)
+  | .reuse tok t as => .reuse (Ir.substOne x y tok) t (Ir.substMany x y as)
+
+partial def Ir.substBody (x y : Nat) : Ir.Body → Ir.Body
+  | .vdecl z e b => match Nat.beq z x with
+    | .true => .vdecl z e b
+    | .false => .vdecl z (Ir.substExpr x y e) (Ir.substBody x y b)
+  | .caseOf z alts => .caseOf (Ir.substOne x y z) (Ir.mapBodies (Ir.substBody x y) alts)
+  | .ret z => .ret (Ir.substOne x y z)
+  | .jdecl j ps body k => match List.any (fun p => Nat.beq p x) ps with
+    | .true => .jdecl j ps body (Ir.substBody x y k)
+    | .false => .jdecl j ps (Ir.substBody x y body) (Ir.substBody x y k)
+  | .jmp j as => .jmp j (Ir.substMany x y as)
+  -- `dup`/`drop` are not binders: both name the variable the operation reads and then
+  -- continue in the same scope, so the substitution reaches their argument and body.
+  | .dup z b => .dup (Ir.substOne x y z) (Ir.substBody x y b)
+  | .drop z b => .drop (Ir.substOne x y z) (Ir.substBody x y b)
+  | .unreachable => .unreachable
+
+def Ir.isIdentity (d : Ir.Decl) : Bool :=
+  match d.params, d.body with
+  | .cons p .nil, .ret x => Nat.beq p x
+  | _, _ => .false
+
+def Ir.identityName (ds : List Ir.Decl) (f : String) : Bool :=
+  List.any (fun d => Bool.and (String.eq d.name f) (Ir.isIdentity d)) ds
+
+partial def Ir.inlineBody (ds : List Ir.Decl) : Ir.Body → Ir.Body
+  | .vdecl x (.fap f args) b => match args with
+    | .cons a .nil => match Ir.identityName ds f with
+      | .true => match Nat.beq a x with
+        | .true => .vdecl x (.fap f args) (Ir.inlineBody ds b)
+        | .false => Ir.inlineBody ds (Ir.substBody x a b)
+      | .false => .vdecl x (.fap f args) (Ir.inlineBody ds b)
+    | _ => .vdecl x (.fap f args) (Ir.inlineBody ds b)
+  | .vdecl x e b => .vdecl x e (Ir.inlineBody ds b)
+  | .caseOf x alts => .caseOf x (Ir.mapBodies (Ir.inlineBody ds) alts)
+  | .ret x => .ret x
+  | .jdecl j ps body k => .jdecl j ps (Ir.inlineBody ds body) (Ir.inlineBody ds k)
+  | .jmp j as => .jmp j as
+  | .dup x b => .dup x (Ir.inlineBody ds b)
+  | .drop x b => .drop x (Ir.inlineBody ds b)
+  | .unreachable => .unreachable
+
+/-- The IR-level Inline pass: a call of a one-parameter identity definition is its
+argument. Declarations are kept. -/
+def Ir.inlineIdentity (d : Ir.Doc) : Ir.Doc :=
+  Ir.Doc.mk (List.map (fun x => Ir.Decl.mk x.name x.params x.borrow
+    (Ir.inlineBody d.decls x.body)) d.decls)

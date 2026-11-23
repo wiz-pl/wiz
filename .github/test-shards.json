@@ -146,6 +146,7 @@
       "vec",
       "word",
       "backend",
+      "=ir",
       "borrow",
       "=c",
       "callbacks",

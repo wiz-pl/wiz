@@ -1,0 +1,4 @@
+(wiz-ir/1
+  (decl "id" (params 0) (borrow 0) (ret 0))
+  (decl "main" (params) (borrow) (vdecl 1 (lit 41) (vdecl 2 (fap "id" (1)) (dup 2 (ret 2)))))
+)
