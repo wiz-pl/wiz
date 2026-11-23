@@ -13,6 +13,7 @@
 # one sentence instead of shipping a false warning.
 #
 #   usage: web/source-bundle.sh SCRY OUT [--ui DIR] [--assets DIR] [--target PATH]
+#                                   [--source FILE]...
 #
 #   SCRY      a built scry binary (scry/.grail/bin/scry, or `nix run .#wiz -- ...` is not
 #             enough: `grail build scry` is the binary this reads)
@@ -21,10 +22,12 @@
 #             `nix build .#wiz-source-ui --print-out-paths`
 #   --assets  the checkout's web/ directory (default: this script's ../web)
 #   --target  the C file or directory to analyse (default: scry/tests/fixtures/report)
+#   --source  a file to copy in verbatim with no analysis (repeatable); a Wiz file here
+#             is what the live host (`?lsp=`) answers hover and definition about
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 [ $# -ge 2 ] || {
-  echo "usage: web/source-bundle.sh SCRY OUT [--ui DIR] [--assets DIR] [--target PATH]" >&2
+  echo "usage: web/source-bundle.sh SCRY OUT [--ui DIR] [--assets DIR] [--target PATH] [--source FILE]..." >&2
   exit 2
 }
 SCRY=$1
@@ -33,12 +36,15 @@ shift 2
 UI=${WIZ_SOURCE_UI_FROM:-}
 ASSETS=$ROOT/web
 TARGET=scry/tests/fixtures/report
+SOURCES=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --ui) UI=$2; shift 2 ;;
     --assets) ASSETS=$2; shift 2 ;;
     --target) TARGET=$2; shift 2 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    --source) SOURCES="$SOURCES
+$2"; shift 2 ;;
+    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
     *) echo "source-bundle: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -55,17 +61,23 @@ fi
 # `web/` from there; run it there so a caller can pass a repository-relative target.
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
-if [ -n "$UI" ]; then
-  (cd "$ROOT" && "$SCRY" web "$TARGET" --out "$OUT" --assets "$ASSETS" \
-    --ui "$UI/wiz-source-ui.mjs")
-else
-  (cd "$ROOT" && "$SCRY" web "$TARGET" --out "$OUT" --assets "$ASSETS")
-fi
+# Rebuild the extra arguments with `set --`, one word per argument, so a path with a
+# space survives (`--source` lines are newline-separated above).
+set --
+[ -n "$UI" ] && set -- "$@" --ui "$UI/wiz-source-ui.mjs"
+oldIFS=$IFS
+IFS='
+'
+for s in $SOURCES; do
+  [ -n "$s" ] && set -- "$@" --source "$s"
+done
+IFS=$oldIFS
+(cd "$ROOT" && "$SCRY" web "$TARGET" --out "$OUT" --assets "$ASSETS" "$@")
 
 need() {
   [ -f "$OUT/$1" ] || { echo "source-bundle: scry web wrote no $OUT/$1" >&2; exit 1; }
 }
-for f in index.html app.js app.css source-static.js \
+for f in index.html app.js app.css source-static.js source-live.js lsp-client.js \
          framework/mount.js framework/driver.js framework/runtime.js framework/adopt.js \
          data/manifest.json data/findings.json; do
   need "$f"

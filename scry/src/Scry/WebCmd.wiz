@@ -22,8 +22,16 @@ the source, the findings and the precomputed fact rows the browser needs.
 ```
 scry web FILE.c|DIR --out BUNDLE [--rules FILE] [--allow-errors]
                     [--timeout SECS] [--max-nodes N] [--max-rounds N]
-                    [--assets DIR] [--ui FILE]
+                    [--assets DIR] [--ui FILE] [--source FILE]...
 ```
+
+**Two kinds of file.** The analysed files are the target's (`*.c`/`*.cs`) and carry
+findings and facts. A `--source FILE` is copied in verbatim with no analysis (its
+language comes from the extension): it exists so a Wiz file can be read in the same
+pane as the analysed code, with the live host (`web/source-live.js`, `?lsp=`) answering
+hover and definition from `wiz lsp --ws`. Repeat `--source` for several. A file outside
+the server's own module root cannot resolve its `import`s (today's `wiz lsp` has no
+`-I`), so the live demo uses files under `lib/`.
 
 **One pipeline.** The evidence is `scry report`'s: this command calls
 `Scry.reportFilesOf`/`Scry.reportFileOf`, the same functions `scry report` runs, so the
@@ -41,6 +49,7 @@ counts a code point.
 ```
 index.html                           first paint (the SSR of Web.Source.View) + app.js
 app.js, app.css, source-static.js    the host (copied from the checkout's web/)
+source-live.js, lsp-client.js        the live host (?lsp=); source-live.js imports lsp-client.js
 wiz-source-ui.mjs                    optional (--ui): the Loom runtime
 framework/{mount,driver,runtime}.js  optional: copied when the checkout has them
 data/manifest.json                   schema, tool, file table, hashes, counts
@@ -71,18 +80,24 @@ structure Scry.WebOpts where
   maxRounds : Option Nat
   assets : Option String
   ui : Option String
+  sources : List String
 
 def Scry.emptyWebOpts : Scry.WebOpts :=
-  Scry.WebOpts.mk "" "web-bundle" .none .false (.some 300) (.some 2000000) .none .none .none
+  Scry.WebOpts.mk "" "web-bundle" .none .false (.some 300) (.some 2000000) .none .none
+    .none []
 
 def Scry.webUsage : String :=
   "usage: scry web FILE.c|DIR --out BUNDLE [--rules FILE] [--allow-errors]\n"
   ++ "                [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
-  ++ "                [--assets DIR] [--ui FILE]\n"
+  ++ "                [--assets DIR] [--ui FILE] [--source FILE]...\n"
   ++ "  writes a static source-reader bundle (index.html + data/*.json).\n"
   ++ "  --assets DIR  the checkout's web/ directory (source-app.js, source.css,\n"
-  ++ "                source-static.js, framework/); default: the first web/ found here.\n"
+  ++ "                source-static.js, source-live.js, lsp-client.js, framework/);\n"
+  ++ "                default: the first web/ found here.\n"
   ++ "  --ui FILE     copy a built wiz-source-ui.mjs into the bundle (web/build-source-ui.sh).\n"
+  ++ "  --source FILE also copy FILE in verbatim, with no analysis (repeatable): a\n"
+  ++ "                Wiz file read in the pane, with the live host answering hover\n"
+  ++ "                and definition (web/source-live.js, ?lsp=)."
 
 partial def Scry.webArgsGo (path : Option String) (o : Scry.WebOpts) :
     List String → Except String Scry.WebOpts
@@ -103,6 +118,9 @@ partial def Scry.webArgsGo (path : Option String) (o : Scry.WebOpts) :
     | "--ui" => match rest with
       | .cons p more => Scry.webArgsGo path { o with ui := .some p } more
       | .nil => .error "--ui needs a module file"
+    | "--source" => match rest with
+      | .cons p more => Scry.webArgsGo path { o with sources := List.append o.sources [p] } more
+      | .nil => .error "--source needs a file"
     | "--timeout" => match rest with
       | .cons p more => match String.parseNat p with
         | .some n => Scry.webArgsGo path { o with timeoutSecs := .some n } more
@@ -141,7 +159,8 @@ def Scry.webReportOpts (o : Scry.WebOpts) (file : String) : Scry.ReportOpts :=
 
 -- ## Small helpers
 
-/-- The language a path's extension names (only the front ends the analyser has). -/
+/-- The language a path's extension names (only the front ends the analyser has, plus
+`wiz` for a `--source` file the live host can ask a language server about). -/
 def Scry.webLanguage (path : String) : String :=
   match String.endsWith path ".cs" with
   | .true => "csharp"
@@ -149,7 +168,9 @@ def Scry.webLanguage (path : String) : String :=
     | .true => "c"
     | .false => match String.endsWith path ".h" with
       | .true => "c"
-      | .false => "text"
+      | .false => match String.endsWith path ".wiz" with
+        | .true => "wiz"
+        | .false => "text"
 
 /-- The UTF-8 length of a code point. -/
 def Scry.webUtf8Len (c : Nat) : Nat :=
@@ -287,6 +308,40 @@ partial def Scry.webModelsGo (o : Scry.WebOpts) :
     more ← Scry.webModelsGo o rest;
     EIO.pure (List.cons m.1 more.1,
       List.append m.2.1 more.2.1, List.append m.2.2 more.2.2)
+
+/-- The reader model of one `--source` file: its text, no findings and no facts. The id
+is a content *name* rather than an analysis anchor, because nothing was analysed; the
+path is what `--source` was given (so the live host can form the LSP URI). -/
+def Scry.webSourceOf (path : String) : EIO Source.File := do
+  text ← FS.readFile path;
+  let i := EditorModel.index text;
+  EIO.pure (Source.File.mk (String.append "src_" (Scry.wfHex (Scry.wfFnv path)))
+    path (Scry.webLanguage path) text (EditorModel.lineCount i))
+
+/-- The `--source` files, in flag order, skipping a path that was already named. -/
+partial def Scry.webSourcesGo : List String → List String → EIO (List Source.File)
+  | .nil, _ => EIO.pure []
+  | .cons p rest, seen => match List.any (fun q => String.eq q p) seen with
+    | .true => Scry.webSourcesGo rest seen
+    | .false => do
+      f ← Scry.webSourceOf p;
+      more ← Scry.webSourcesGo rest (List.cons p seen);
+      EIO.pure (List.cons f more)
+
+/-- Warn (on stderr) about a file whose text is large enough that the Wasm reader's
+`Json.parse` can exhaust its stack: a single string of about 50 KB failed in a browser
+probe, while 10 KB worked. The bundle is still written — the limit is the runtime's
+parser, not the data — but the page may show only "Maximum call stack size exceeded". -/
+partial def Scry.webWarnLarge : List Source.File → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons f rest => do
+    let n := String.length f.text;
+    match Nat.lt 40000 n with
+    | .true => EIO.lift (IO.ePrintln (String.append "note: "
+        (String.append f.path (String.append " is " (String.append (Nat.repr n)
+          " characters; the Wasm reader's JSON parser can overflow its stack on a single string of about 50 KB, so this bundle may not mount")))))
+    | .false => EIO.pure ();
+    Scry.webWarnLarge rest
 
 -- ## JSON writers
 
@@ -610,7 +665,9 @@ def Scry.webRun (o : Scry.WebOpts) : EIO Nat := do
   found ← Scry.reportFilesOf o.path;
   let files := found.1;
   models ← Scry.webModelsGo o files;
-  let bundleFiles := models.1;
+  sources ← Scry.webSourcesGo o.sources ([] : List String);
+  let bundleFiles := List.append models.1 sources;
+  Scry.webWarnLarge bundleFiles;
   let bundleFindings := Scry.webSortById models.2.1;
   let bundleFacts := models.2.2;
   let tool := "scry 0.1.0-dev (S1)";
@@ -635,7 +692,9 @@ def Scry.webRun (o : Scry.WebOpts) : EIO Nat := do
     | .none => EIO.pure ([] : List String)
     | .some d => Scry.webCopyHostGo d out
         [("source-app.js", "app.js"), ("source.css", "app.css"),
-         ("source-static.js", "source-static.js")]);
+         ("source-static.js", "source-static.js"),
+         ("source-live.js", "source-live.js"),
+         ("lsp-client.js", "lsp-client.js")]);
   frameworkCopied ← (match assets with
     | .none => EIO.pure ([] : List String)
     | .some d => Scry.webCopyFrameworkGo d out

@@ -135,11 +135,11 @@ encoding: a server that answers with a `positionEncoding` must answer `"utf-16"`
 offsets are never used, and line endings are whatever the editor holds (`\n` in the
 playground; a `\r` before a `\n` counts as one character on the line, as in LSP).
 
-The Lean server counts Unicode scalar values, which agrees with UTF-16 for every
-character in the BMP (it is off only for astral characters). A self-hosted server should
-count UTF-16 units; if it counts scalar values instead, it must make the same BMP-only
-assumption. The playground's positions come from `textarea.selectionStart`, i.e. a
-UTF-16 index.
+The Lean server (`wiz lsp`) counts UTF-16 code units and advertises
+`positionEncoding: "utf-16"`, so its positions agree with the playground's UTF-16
+indices (`textarea.selectionStart`) for astral characters too. A self-hosted server
+should count UTF-16 units and say so as well; one that counts scalar values is off by
+one per astral character before the caret.
 
 `lib/Web/EditorModel.wiz` has both conversions (`positionFromOffset`,
 `codePointPositionFromOffset`, `utf16OffsetFromCodePoints`), and the Node tests

@@ -16,6 +16,19 @@ namespace Wiz.Semantic
 
 variable {R : Type} [QRig R] [DecidableEq R] [ToString R] [QuantitySyntax R]
 
+/-! ## UTF-16 columns
+
+LSP positions count UTF-16 code units; the query engine's offsets count Unicode
+characters. A character outside the Basic Multilingual Plane (an emoji, a rare CJK
+ideograph) is one `Char` and two UTF-16 units. `Wiz/LSP.lean` counts lines and columns
+with the same helper, so the server's ranges and the semantic tokens agree. -/
+
+/-- UTF-16 code units of a character: 2 outside the Basic Multilingual Plane. -/
+@[inline] def utf16Width (c : Char) : Nat := if c.val > 0xFFFF then 2 else 1
+
+/-- The UTF-16 length of `s` (`String.length` counts characters). -/
+def utf16Length (s : String) : Nat := s.foldl (fun n c => n + utf16Width c) 0
+
 /-- The identifier-like words of a parser (its atoms and non-reserved words). -/
 partial def words : ParserDescr → List String
   | .atom t | .nonReserved t =>
@@ -64,7 +77,7 @@ def scan (chars : Array Char) : Array (Nat × String) := Id.run do
     else i := i + 1
   out
 
-/-- The keyword tokens of the document: (start, length), sorted. -/
+/-- The keyword tokens of the document: (start, UTF-16 length), sorted. -/
 def keywords (s : CommandState R) (text : String) : Array (Nat × Nat) := Id.run do
   let chars := text.toList.toArray
   let ws := scan chars
@@ -76,7 +89,7 @@ def keywords (s : CommandState R) (text : String) : Array (Nat × Nat) := Id.run
   let mut marks : Std.HashSet Nat := {}
   let mut out : Array (Nat × Nat) := #[]
   for (a, w) in ws do
-    if reserved.contains w then marks := marks.insert a; out := out.push (a, w.length)
+    if reserved.contains w then marks := marks.insert a; out := out.push (a, utf16Length w)
   -- the words of declared syntax, inside its nodes but not inside their child nodes
   let refs : Array (SourceInfo × Name) := s.infos.filterMap fun
     | .syntaxRef r (.kind k) => if r.synthetic then none else some (r, k)
@@ -92,11 +105,11 @@ def keywords (s : CommandState R) (text : String) : Array (Nat × Nat) := Id.run
     for (a, w) in ws do
       if r.start ≤ a && a + w.length ≤ r.stop && kw.contains w && !marks.contains a &&
          !(inner.any fun (r', _) => r'.start ≤ a && a + w.length ≤ r'.stop) then
-        marks := marks.insert a; out := out.push (a, w.length)
+        marks := marks.insert a; out := out.push (a, utf16Length w)
   out.qsort (·.1 < ·.1)
 
 /-- The LSP encoding: per token, the line and start deltas, the length, the type (0,
-`keyword`) and no modifiers. -/
+`keyword`) and no modifiers. Columns and lengths are UTF-16 code units. -/
 def encode (text : String) (toks : Array (Nat × Nat)) : Array Nat := Id.run do
   let chars := text.toList.toArray
   let mut out : Array Nat := #[]
@@ -107,7 +120,7 @@ def encode (text : String) (toks : Array (Nat × Nat)) : Array Nat := Id.run do
   let mut pc := 0
   for (a, len) in toks do
     while i < a && i < chars.size do
-      if chars[i]! == '\n' then line := line + 1; col := 0 else col := col + 1
+      if chars[i]! == '\n' then line := line + 1; col := 0 else col := col + utf16Width chars[i]!
       i := i + 1
     out := out ++ #[line - pl, if line == pl then col - pc else col, len, 0, 0]
     pl := line; pc := col
