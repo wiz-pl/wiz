@@ -695,7 +695,12 @@ jobs:
   # Tower is built with `lib.towerWith (builtins.storePath <seeded wiz>)` and guarded by
   # `scripts/check-seeded-wiz.py`; Hdl and Scry keep their in-job `$wiz`/`grail` path.
   packages:
-    name: packages (hdl, scry, tower)
+    name: packages (${{ matrix.package }})
+    # One job per package. They were one job that built hdl, scry and tower in
+    # sequence: a failure in any of them cancelled nothing (fail-fast is off) but the
+    # three waited for each other's setup, and the job's 60-minute timeout was sized for
+    # the sum rather than for the slowest. A matrix keeps the same work with three
+    # independent verdicts, three independent caches and parallel walls.
     needs: [changes, lean]
     if: >-
       !cancelled() && github.event_name != 'schedule' &&
@@ -703,10 +708,13 @@ jobs:
       needs.changes.outputs.subset_packages == 'true' &&
       needs.lean.result == 'success'
     runs-on: ubuntu-latest
-    # 60 min: scry's `grail build scry` (~12 min measured in scry.yml), the Hdl
-    # standalone build plus its 32 goldens (the slow temporal case has its own
-    # --test-timeout), tower's Nix build and the package smokes.
+    # 60 min: scry's `grail build scry` is the longest single package (~12 min measured
+    # in scry.yml); each matrix leg now waits only for its own work.
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [scry, hdl, tower, smoke]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
@@ -719,6 +727,7 @@ jobs:
           cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
       - name: Subset cache key (the packages subset)
+        if: matrix.package == 'scry'
         # `subset-v1-packages-<os>-<arch>-<toolchain sha12>-<compiler-key>-<packages
         # sha12>`: the scry package's `.grail` tree is the only workspace cache this job
         # owns. The compiler key is the scope (a compiler change must not restore a tree
@@ -731,7 +740,7 @@ jobs:
         run: python3 scripts/ci.py subset-key packages --scope "${{ needs.lean.outputs.compiler-key }}" >> "$GITHUB_OUTPUT"
       - name: Restore the packages subset cache (a pull request)
         id: subset-cache
-        if: github.event_name == 'pull_request'
+        if: matrix.package == 'scry' && github.event_name == 'pull_request'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: scry/.grail
@@ -761,6 +770,7 @@ jobs:
           ln -sf "$wiz/bin/grail" .lake/build/bin/grail
           echo "$wiz/bin" >> "$GITHUB_PATH"
       - name: The Hdl package builds and tests standalone
+        if: matrix.package == 'hdl'
         # `hdl/scripts/check-standalone.sh` copies only `hdl/`, then `grail build` and
         # `grail test` (the 32 golden examples and the two `-- test: run` outputs). The
         # yosys/Icarus/formal assertions stay in the `hdl` test shard.
@@ -768,6 +778,7 @@ jobs:
           GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
         run: hdl/scripts/check-standalone.sh
       - name: The scry package builds its CLI (and the native parser)
+        if: matrix.package == 'scry'
         env:
           GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
         run: |
@@ -779,6 +790,7 @@ jobs:
           cp ../grail.local.wiz .
           "$GRAIL" build scry
       - name: "tower is the third package build (seeded with the lean job's wiz)"
+        if: matrix.package == 'tower'
         # `lib.towerWith (builtins.storePath <seeded wiz>)` makes the seeded compiler an
         # input source of tower-unwrapped, so Nix substitutes it and never starts
         # `wiz-unwrapped`. The guard asserts that on the derivation graph before the
@@ -798,12 +810,14 @@ jobs:
           "$out/bin/tower" --help > /dev/null
           du -sh "$out"
       - name: The example index validates offline
+        if: matrix.package == 'smoke'
         # stage 23m: entries, archive SHA-256s, semver ranges, module-prefix conflicts and
         # index.wiz; no network (the sources are relative paths).
         env:
           GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
         run: scripts/grail-index-check.sh examples/fate-index
       - name: A package check, build and run outside the checkout
+        if: matrix.package == 'smoke'
         # what the old `package` job tested: a program is checked and built from a
         # directory with no checkout, and grail starts. The store paths from the build
         # step (not `nix run …#wiz`, which would evaluate, and on a pull request rebuild,
@@ -820,10 +834,10 @@ jobs:
           ./io | head -3
           "$GRAIL" 2>&1 | head -2
       - name: Save the packages subset cache (a pull request)
-        # The end of the job: every package build above passed, so a partial packages run
-        # writes nothing. The entry is PR-scoped and untrusted; a later run of this PR
-        # restores `scry/.grail` when the `packages` subset's sha is unchanged.
-        if: github.event_name == 'pull_request' && steps.subset-cache.outputs.cache-hit != 'true'
+        # The end of the leg: this leg's package build passed, so a partial run writes
+        # nothing. The entry is PR-scoped and untrusted; a later run of this PR restores
+        # `scry/.grail` when the `packages` subset's sha is unchanged.
+        if: matrix.package == 'scry' && github.event_name == 'pull_request' && steps.subset-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: scry/.grail
