@@ -543,7 +543,7 @@ def wasmGroup : Group where
         match sel with
         | .ok _ => throw (IO.userError "an extern with no wasm implementation was selected")
         | .error e =>
-          check ((e.splitOn "lib/IO.wiz:251:1").length > 1) e
+          check ((e.splitOn "lib/IO.wiz:254:1").length > 1) e
           check ((e.splitOn "no-target-implementation").length > 1) e
           check ((e.splitOn "`Bytes.empty`").length > 1) e
           check ((e.splitOn "implemented by: c").length > 1) e
@@ -556,8 +556,9 @@ def wasmGroup : Group where
         match ← Build.build ({} : Toolchain) s "main" (dir / "m.wasm") false false false 0 true with
         | .ok _ => throw (IO.userError "the build accepted a program with no wasm implementation")
         | .error e =>
-          check ((e.splitOn "lib/IO.wiz:251:1").length > 1) e
-          check ((e.splitOn "no-target-implementation").length > 1) e },
+          check ((e.splitOn "lib/IO.wiz:254:1").length > 1) e
+          check ((e.splitOn "no-target-implementation").length > 1) e
+          check ((e.splitOn "`Bytes.empty` has no `wasm` implementation (implemented by: c)").length > 1) e },
     { name := "dropping the wasm row is a positioned refusal at lib/Std.wiz", run := fun _ => do
         -- the row, not the C name, is what admits the target: remove Array.push's row and
         -- the same program is refused at the declaration
