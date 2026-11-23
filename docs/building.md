@@ -1420,10 +1420,13 @@ the generated reference manual (`result/index.md`, and `result/site`).
     in grail's namespace would add another ~4,100 entries and ~50 MB for about 3
     minutes of build time, which is not worth it for the uncommon imports.
   Flags parse left to right: a later `--no-cache` turns both the packaged cache and the
-  write cache off, and a user's `--cache-ro DIR` appends another read-only layer
-  (`--cache-ro` is repeatable and searched in the order given). A layer passed this way
-  is refused unless `--cache-ro-unsigned` (or `--cache-verify off`) is also given: its
-  manifests are self-signed, so they are integrity, not authenticity. The entries are keyed
+  write cache off (and clears the packaged layer's opt-in), and a user's `--cache-ro DIR`
+  appends another read-only layer (`--cache-ro` is repeatable and searched in the order
+  given). A layer passed this way is refused unless `--cache-ro-unsigned` **immediately
+  after that layer** (or `--cache-verify off`) is also given: its manifests are
+  self-signed, so they are integrity, not authenticity. The opt-in names one layer, so the
+  wrappers' opt-in for the packaged cache does not also trust a user's later
+  `--cache-ro`. The entries are keyed
   by the packaged binary's hash (its bytes) and by `lib`'s text and module names, so
   the Nix build invalidates them automatically; there is no manual invalidation and a
   stale store path is never reused (a new build gets new keys). The cache is
@@ -1437,8 +1440,8 @@ the generated reference manual (`result/index.md`, and `result/site`).
   same compiler (the elaboration cache's own keys include the wiz binary's hash, but the
   test driver's grail runs use a fixed binary id and the `/tmp` programs a timestamp).
   The elaboration cache may also have read-only layers (`--cache-ro DIR`, repeatable,
-  searched in order after the written `--cache DIR`, never written; refused by default
-  unless `--cache-ro-unsigned`). The Nix package
+  searched in order after the written `--cache DIR`, never written; each is refused by
+  default unless `--cache-ro-unsigned` follows it). The Nix package
   ships one in `$out/share/wiz/cache` and its wrappers pass both flags, so CI and
   users share a warm cache without a writable store path; a run with no write cache
   hashes the wiz executable each time instead of remembering it under `bin/`.

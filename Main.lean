@@ -107,7 +107,8 @@ measurement, and not part of a cache key or a result),
 content-addressed), --cache-ro DIR (repeatable: a read-only cache, searched in order
 after the write cache and never written, as in a Nix package's share/wiz/cache; its
 manifests are self-signed, so the layer is refused unless --cache-ro-unsigned),
---cache-ro-unsigned (serve a read-only layer although it is unauthenticated),
+--cache-ro-unsigned (serve the --cache-ro layer just before it although it is
+unauthenticated; it does not cover a later --cache-ro),
 --no-cache (both), -I DIR (another module root, after lib/),
 --cache-prune DAYS (before the run: from the write cache only, remove keyed
   .wizc/.wizm/.wizr files older than DAYS days; a pruned entry is just a miss, and
@@ -435,7 +436,7 @@ def elaborateHitsCore (tc : Toolchain) (path : String) (input : String)
       (verify := verify) (rig := RigTag.tag (R := ZeroOneMany))
       (stats := if verify == .off then none else some verifyStats)
       (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := key₀Tag)
-      (rootPath := path) (roUnsigned := tc.cacheRoUnsigned))
+      (rootPath := path) (unsignedReads := tc.unsignedReads))
   else
     pure ((← Cache.elaborateUncached input init), 0)
 

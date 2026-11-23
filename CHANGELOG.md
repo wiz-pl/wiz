@@ -111,6 +111,10 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   `--cache-ro-unsigned` (or `--cache-verify off`); write caches need one cold pass to
   acquire manifests. A regression fixture plants a forged `.wizc` + `.wizmf` (a claim of
   `False` and a forged `builtin`) and shows it is refused under the defaults.
+  `--cache-ro-unsigned` names the `--cache-ro` layer immediately before it, not every
+  read-only layer in the process, and `--no-cache` clears it with the caches: the Nix
+  wrappers' opt-in for their store cache no longer also trusts a user's later
+  `--cache-ro` (`=toolchain` runs the refusal against the wrapped binary in CI).
 * release: a deterministic source tarball (`nix build .#release-tarball`, or
   `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
   SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes
