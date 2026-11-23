@@ -1534,6 +1534,11 @@ jobs:
           WIZ_MODULES_WEB: ${{ needs.wasm.outputs.web }}
           WIZ_MODULES_PLAYGROUND: ${{ needs.wasm.outputs.playground }}
           WIZ_MODULES_UI: ${{ needs.wasm.outputs.ui }}
+          # The source reader's module. It is realised here as a store path, not just
+          # carried as a string: nothing demanded it from Nix, so on master the docs
+          # job had a path with no file behind it and source-bundle.sh failed with
+          # "wiz-source-ui.mjs is missing".
+          WIZ_MODULES_SOURCE_UI: ${{ needs.wasm.outputs.source_ui }}
         run: sh web/modules-from-store.sh
       - name: The Wasm modules in web/out (web/build.sh, web/build-playground.sh)
         env:
@@ -1593,7 +1598,10 @@ jobs:
         id: source
         env:
           WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
-          SOURCE_UI: ${{ needs.wasm.outputs.source_ui }}
+          # the path the modules step realised (substituted from Cachix or, on a fork
+          # pull request, built); the producer's raw output string is not a store path
+          # that exists on this runner
+          SOURCE_UI: ${{ steps.modules.outputs.source_ui }}
         run: |
           [ -n "$SOURCE_UI" ] || {
             echo "docs: wasm produced no source_ui (the wasm modules job must build .#wiz-source-ui)" >&2

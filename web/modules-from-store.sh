@@ -13,7 +13,10 @@
 # from a fork: it has no Cachix token, so nothing could be published for it, and that run
 # builds them (loudly, as a warning) instead of failing.
 #
-# Writes `web=…`, `playground=…` and `ui=…` (store paths) to $GITHUB_OUTPUT.
+# Writes `web=…`, `playground=…`, `ui=…` and (when the caller passes it) `source_ui=…`
+# (store paths) to $GITHUB_OUTPUT. The source reader's module is optional because only
+# the `docs` job renders `/source/`; when `WIZ_MODULES_SOURCE_UI` is set it is realised
+# the same way (`nix build <path> --max-jobs 0` substitutes it, it does not rebuild).
 set -eu
 # One bundle for all three module sets (`nix build .#web-bundle`): the `web` job can set
 # WIZ_WEB_BUNDLE=1 (or a store path) and export the same directory for each `--from`.
@@ -34,10 +37,12 @@ if [ -n "${WIZ_WEB_BUNDLE:-}" ]; then
   exit 0
 fi
 ids=".#wiz-web .#wiz-playground .#wiz-playground-ui"
+source_ids=".#wiz-source-ui"
 # The producer's paths, when the workflow passes them. On a pull request they are
 # `withLakeCache` derivations (the seed is an input), so their store paths differ
 # from the pure attrs above; recomputing those can never match what was pushed.
 producer="${WIZ_MODULES_WEB:-} ${WIZ_MODULES_PLAYGROUND:-} ${WIZ_MODULES_UI:-}"
+# (the source reader is a separate, optional call when the caller needs it)
 if [ -n "${WIZ_MODULES_WEB:-}" ] && [ -n "${WIZ_MODULES_PLAYGROUND:-}" ] && [ -n "${WIZ_MODULES_UI:-}" ] \
    && paths=$(nix build $producer --no-link --print-out-paths --max-jobs 0 2>/dev/null); then
   :
@@ -65,5 +70,26 @@ web=$1 playground=$2 ui=$3
 echo "web=$web" >> "$GITHUB_OUTPUT"
 echo "playground=$playground" >> "$GITHUB_OUTPUT"
 echo "ui=$ui" >> "$GITHUB_OUTPUT"
+# The source reader's module: the `docs` job renders /source/ and used to take the
+# producer's path as a string, which nothing demanded from Nix - so the path was absent
+# on the runner and source-bundle.sh failed with "wiz-source-ui.mjs is missing".
+if [ -n "${WIZ_MODULES_SOURCE_UI:-}" ]; then
+  if ! source_ui=$(nix build "$WIZ_MODULES_SOURCE_UI" --no-link --print-out-paths --max-jobs 0 2>/dev/null); then
+    if [ "${GITHUB_EVENT_NAME:-}" = pull_request ] && [ -z "${CACHIX_AUTH_TOKEN:-}" ]; then
+      echo "::warning title=Cachix::a fork pull request has no token: building .#wiz-source-ui here"
+      source_ui=$(nix build $source_ids --no-link --print-out-paths -L)
+    else
+      echo "::error title=Cachix::.#wiz-source-ui is not in the cache: the wasm modules job must build and publish it"
+      nix build "$WIZ_MODULES_SOURCE_UI" --no-link --print-out-paths --max-jobs 0
+      exit 1
+    fi
+  fi
+  [ -f "$source_ui/wiz-source-ui.mjs" ] || {
+    echo "modules-from-store: $source_ui has no wiz-source-ui.mjs" >&2; exit 1; }
+  [ -f "$source_ui/wiz-source-ui.wasm" ] || {
+    echo "modules-from-store: $source_ui has no wiz-source-ui.wasm" >&2; exit 1; }
+  echo "source_ui=$source_ui" >> "$GITHUB_OUTPUT"
+  echo "wiz-source-ui: $source_ui"
+fi
 echo "wiz-web: $web"; echo "wiz-playground: $playground"; echo "wiz-playground-ui: $ui"
 du -sh "$web" "$playground" "$ui"
