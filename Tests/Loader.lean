@@ -1,0 +1,129 @@
+import Wiz
+
+/-!
+# One loader for the test suite's Wiz sources
+
+Every group that elaborates against the library (and, for the Scry groups, the Scry
+sources) used to carry its own copy of the same directory walk and file read: eleven
+copies under `Tests/`, and a fourth copy of `wizStr`. They all resolve module names the
+same way — `lib/Foo.wiz` is `Foo`, `lib/Dir/Bar.wiz` is `Dir.Bar`, and
+`scry/src/Scry/Baz.wiz` is `Scry.Baz` — so changes to the layout (a new depth, a new
+package root) had to be made everywhere or the copies silently disagreed.
+
+There is now one implementation, and its result is cached for the process lifetime:
+the walk and the reads happen once per `(root, prefix)`, and later calls reuse the list
+while the files' names, sizes and modification times are unchanged. A test case is its
+own process (`Group.run` starts `tests --run-case`), so the cache saves the repeated
+loads *within* a case — the Desc sweep and every `runProbe`-style helper call the loader
+once per probe — and the single implementation is what keeps the copies from drifting.
+-/
+
+namespace Tests
+
+open Wiz
+
+/-- The modules of one root: the import name and the source of each `.wiz` file. -/
+abbrev LoadedModules := List (Name × String)
+
+/-- `root`'s `.wiz` files at any depth, with the module name each one is imported as:
+`root/*.wiz` as `NAME`, `root/DIR/…/X.wiz` as `DIR.….X`, prefixed by `pfx`. Sorted by
+module name, so a loader's behaviour does not depend on the directory order. (A fixed
+two-level walk silently dropped `lib/Web/Source/*.wiz` from the whole-library walk and
+from the trust ledger.) -/
+private partial def moduleFilesGo (dir : System.FilePath) (pfx name : String)
+    (out : Array (String × System.FilePath)) : IO (Array (String × System.FilePath)) := do
+  let mut out := out
+  for e in ← dir.readDir do
+    if e.path.extension == some "wiz" then
+      let stem := e.path.fileStem.getD ""
+      let mod := pfx ++ (if name.isEmpty then stem else name ++ "." ++ stem)
+      out := out.push (mod, e.path)
+    else if ← e.path.isDir then
+      let sub := if name.isEmpty then e.fileName else name ++ "." ++ e.fileName
+      out ← moduleFilesGo e.path pfx sub out
+  pure out
+
+private def moduleFiles (root : String) (pfx : String) : IO (List (String × System.FilePath)) := do
+  let out ← moduleFilesGo root pfx "" #[]
+  pure ((out.qsort (fun a b => a.1 < b.1)).toList)
+
+/-- A fingerprint of a root's files: their names, sizes and modification times. A cached
+load is reused while this is unchanged, so a test that writes a module into a root between
+two loads sees the new one. -/
+private def moduleStamp (fs : List (String × System.FilePath)) : IO UInt64 := do
+  let mut h : UInt64 := 1469598103934665603
+  for (n, p) in fs do
+    let md ← p.metadata
+    h := mixHash h (hash n)
+    h := mixHash h md.byteSize
+    h := mixHash h md.modified.sec.toNat.toUInt64
+    h := mixHash h md.modified.nsec.toUInt64
+  pure h
+
+/-- The process-lifetime cache: `(root, prefix)` to the fingerprint and modules it was
+loaded from. -/
+initialize loaderCache : IO.Ref (Std.HashMap (String × String) (UInt64 × LoadedModules)) ← IO.mkRef {}
+
+/-- The sources of `fs`, by module name. -/
+private def readModules (fs : List (String × System.FilePath)) : IO LoadedModules :=
+  fs.mapM fun (n, p) => do
+    let src ← IO.FS.readFile p
+    pure (n, src)
+
+/-- The modules of `root`, with `pfx` prepended to each name. Cached by
+`(root, prefix)` and the fingerprint of the files (see `moduleStamp`). -/
+def loadedModules (root : String) (pfx : String := "") : IO LoadedModules := do
+  let fs ← moduleFiles root pfx
+  let stamp ← moduleStamp fs
+  let key := (root, pfx)
+  let ms ← match (← loaderCache.get).get? key with
+    | some (s, ms) => if s == stamp then pure ms else readModules fs
+    | none => readModules fs
+  loaderCache.modify (·.insert key (stamp, ms))
+  pure ms
+
+/-- A loader for several roots: every `(root, prefix)`'s modules, by import name. One
+module name must have one source; a later root wins if the names collide. -/
+def moduleLoader (roots : List (String × String)) : IO (Name → Option String) := do
+  let mut ms : LoadedModules := []
+  for (root, pfx) in roots do
+    ms := (← loadedModules root pfx) ++ ms
+  pure fun n => ms.lookup n
+
+/-- The Hdl package root: `HDL_ROOT` (a copy of the package, e.g. a parity checkout),
+default `hdl`. The `=hdl-*` groups read the package's sources and examples from here,
+as the Scry groups read `SCRY_ROOT`; nothing in the harness may bake in `hdl/`. The
+package's own roots are relative to this directory (`grail.wiz`: the library is `src/`,
+the tests are `examples/`). -/
+def hdlRoot : IO System.FilePath := do
+  pure (((← IO.getEnv "HDL_ROOT").map System.FilePath.mk).getD (System.FilePath.mk "hdl"))
+
+/-- A file under the Hdl package (`HDL_ROOT`, default `hdl`), read as text. -/
+def hdlRead (path : String) : IO String := do
+  IO.FS.readFile ((← hdlRoot) / path)
+
+/-- Every module of `lib/` (`lib/Dir/Mod.wiz` is `Dir.Mod`) and of the Scry and Hdl
+packages (`scry/src/Scry/Mod.wiz` is `Scry.Mod`, `hdl/src/Hdl/Mod.wiz` is `Hdl.Mod`), by
+import name. Scry and Hdl moved out of `lib/` (`separate-repos.md` P0.1, §1.2), so the
+loader offers all three roots: the engine groups elaborate the lowering they test
+against the std and the packages. The Hdl root is `HDL_ROOT` (default `hdl`), so a
+parity run reads the package copy. -/
+def libLoader : IO (Name → Option String) := do
+  let hdl ← hdlRoot
+  moduleLoader [("lib", ""), ("scry/src/Scry", "Scry."), ((hdl / "src" / "Hdl").toString, "Hdl.")]
+
+/-- Every module of `lib/` and of the Scry package: today the same roots as `libLoader`.
+Kept as the named loader the Scry groups use (a parity group reads the package, not
+`lib/`). -/
+def scryLoader : IO (Name → Option String) := libLoader
+
+/-- A Wiz string literal for `s` (the escapes the Wiz lexer reads). -/
+def wizStr (s : String) : String :=
+  "\"" ++ s.foldl (fun acc c => acc ++ match c with
+    | '"' => "\\\""
+    | '\\' => "\\\\"
+    | '\n' => "\\n"
+    | '\t' => "\\t"
+    | c => c.toString) "" ++ "\""
+
+end Tests

@@ -55,12 +55,27 @@ function start() {
   const endpoint = endpointOf(data);
   if (!data || !endpoint) return;
 
-  const panel = document.createElement("aside");
-  panel.id = "doc-live";
-  panel.className = "doc-live";
-  panel.setAttribute("aria-live", "polite");
-  panel.setAttribute("aria-label", "live documentation");
-  document.body.appendChild(panel);
+  // The page's `wizHighlight` data (the static doc comments' spans, `wiz doc`'s
+  // `wiz.highlight/1`). The live panel sends it once; `DocLive.hoverView` uses it when
+  // a hover answer is the LSP's Markdown rather than a `wiz.hover/1` payload.
+  const pageData = (() => {
+    const el = document.getElementById("wiz-doc-data");
+    if (!el) return null;
+    try { return JSON.parse(el.textContent || "null"); } catch (_) { return null; }
+  })();
+  const highlight = pageData && pageData.wizHighlight ? pageData.wizHighlight : null;
+
+  // A server-rendered panel (a future `wiz doc --serve` shell) carries `data-wiz-*`;
+  // with none, this empty mount point is the panel (mount's replace path).
+  let panel = document.getElementById("doc-live");
+  if (!panel) {
+    panel = document.createElement("aside");
+    panel.id = "doc-live";
+    panel.className = "doc-live";
+    panel.setAttribute("aria-live", "polite");
+    panel.setAttribute("aria-label", "live documentation");
+    document.body.appendChild(panel);
+  }
 
   let handle = null;
   let client = null;
@@ -95,9 +110,13 @@ function start() {
     const position = positionOf(el);
     const token = ++generation;
     pinned = pin || pinned;
-    effect("pinned", pinned ? "1" : "0");
-    effect("position", `line ${position.line + 1}, col ${position.character + 1}`);
     mark(el);
+    // One hover is seven fields of one state: send them as one `batch`, so the runtime
+    // renders the panel once instead of once per field (and patches the DOM once).
+    const pending = [
+      { kind: "pinned", a: pinned ? "1" : "0", b: "" },
+      { kind: "position", a: `line ${position.line + 1}, col ${position.character + 1}`, b: "" },
+    ];
     const status = [];
     let hover = null;
     try {
@@ -108,12 +127,14 @@ function start() {
     const goals = await answer(client, uri, position, "interactiveGoals", "plainGoal");
     const term = await answer(client, uri, position, "interactiveTermGoal", "plainTermGoal");
     if (token !== generation) return;
-    effect("hover", hover ? JSON.stringify(hover) : "");
-    effect("goals", goals ? JSON.stringify(goals.value) : "", goals ? goals.kind : "");
-    effect("term", term ? JSON.stringify(term.value) : "", term ? term.kind : "");
+    pending.push({ kind: "hover", a: hover ? JSON.stringify(hover) : "", b: "" });
+    pending.push({ kind: "goals", a: goals ? JSON.stringify(goals.value) : "", b: goals ? goals.kind : "" });
+    pending.push({ kind: "term", a: term ? JSON.stringify(term.value) : "", b: term ? term.kind : "" });
     const stored = client.diagnostics && client.diagnostics.get(uri);
-    effect("diagnostics", JSON.stringify((stored && stored.diagnostics) || []));
-    effect("message", status.concat(goals ? goals.errors : [], term ? term.errors : []).join("; "));
+    pending.push({ kind: "diagnostics", a: JSON.stringify((stored && stored.diagnostics) || []), b: "" });
+    pending.push({ kind: "message",
+      a: status.concat(goals ? goals.errors : [], term ? term.errors : []).join("; "), b: "" });
+    effect("batch", JSON.stringify(pending));
   }
 
   function watched(node) {
@@ -187,6 +208,7 @@ function start() {
     onRequest: (kind) => { effect("ack", kind); if (kind === "reconnect") connect(); },
   }).then((mounted) => {
     handle = mounted;
+    if (highlight) effect("highlight", JSON.stringify(highlight));
     connect();
   }).catch((e) => console.warn("wiz doc: live docs need the runtime (" + e + ")"));
 

@@ -1,7 +1,7 @@
 [
   {
     "name": "selfhost",
-    "split": 3,
+    "split": 6,
     "heavy": true,
     "inputs": [
       "selfhost/*",
@@ -13,7 +13,12 @@
       "lib/Deriving.wiz",
       "Wiz/Parser/*",
       "scripts/GenSelfhostTables.lean",
+      "scripts/check-wizc-release.sh",
+      "scripts/fixtures/wizc-release/*",
+      "scripts/diff-fuzz.py",
+      "Tests/data/selfhost-trust-cross.tsv",
       "Tests/Groups/SelfHost.lean",
+      "Tests/Groups/SelfhostTrust.lean",
       "Tests/Elab.lean"
     ],
     "select": [
@@ -22,16 +27,23 @@
       "=selfhost",
       "=selfhost-host",
       "=audit-kernels",
-      "=selfhost-macro"
+      "=selfhost-macro",
+      "=selfhost-cli",
+      "=selfhost-cli-diff",
+      "=selfhost-trust",
+      "=selfhost-lsp"
     ],
     "split-cases": true
   },
   {
     "name": "hdl",
+    "split": 1,
+    "split-cases": true,
     "heavy": true,
     "select": [
       "=hdl-verified",
       "=hdl-uart-temporal",
+      "=hdl-examples",
       "=selfhost-parse-diff"
     ]
   },
@@ -45,6 +57,7 @@
       "scry/*",
       "selfhost/*",
       "Tests/Groups/SelfhostLibDiff.lean",
+      "Tests/libdiff-baseline.tsv",
       "Tests/Main.lean",
       "Tests/Harness.lean"
     ],
@@ -54,9 +67,9 @@
   },
   {
     "name": "library",
-    "split": 10,
+    "split": 8,
     "jobs": 4,
-    "default": true,
+    "allow-missing-deps": true,
     "select": [
       "=bus-crc",
       "=bus-law",
@@ -64,6 +77,7 @@
       "builtins",
       "calc",
       "classes",
+      "context",
       "deriving",
       "=display",
       "=doc",
@@ -73,6 +87,7 @@
       "=grail-commands",
       "=grail-deps",
       "=grail-e2e",
+      "=attest",
       "=grail-hygiene",
       "=grail-index",
       "=grail-jobs",
@@ -84,11 +99,13 @@
       "language",
       "lsp",
       "macros",
-      "modules",
+      "modules", "=namespace",
       "=native",
       "=natives",
+      "=numerics",
       "=nvim",
       "=loom",
+      "=wire",
       "optic",
       "persistent",
       "phantom",
@@ -99,6 +116,7 @@
       "=scry-wil",
       "=scry-c2wil",
       "=scry-csharp",
+      "=scry-cs",
       "=scry-prover",
       "=scry-ai",
       "=scry-taint",
@@ -113,6 +131,8 @@
       "=scry-datalog",
       "=scry-cert",
       "=scry-egraph",
+      "=scry-project",
+      "=scry-e2e",
       "=smt",
       "std",
       "tactics",
@@ -133,6 +153,7 @@
       "=task",
       "effects",
       "ffi",
+      "=js",
       "llvm",
       "reuse",
       "serial",
@@ -146,6 +167,7 @@
       "data",
       "desceq",
       "elab",
+      "elab-ext",
       "eval",
       "format",
       "=fmt",
@@ -153,6 +175,7 @@
       "lexer",
       "lift",
       "=lint",
+      "=wiz-lint",
       "match",
       "=meta",
       "observational",
@@ -160,16 +183,28 @@
       "quantity",
       "rig",
       "sized",
-      "universes"
+      "universes",
+      "=args",
+      "=library",
+      "=list-lemmas",
+      "=scry-modules",
+      "=storage-mmap",
+      "=storage-multiproc",
+      "=storage-quire",
+      "=dist-proofs",
+      "bpf"
     ]
   },
   {
     "name": "scaling",
     "split": 2,
+    "jobs": 3,
     "select": [
       "=scaling",
       "=prop",
-      "=audit"
+      "=audit",
+      "=desc-sweep",
+      "=perf-core"
     ]
   },
   {

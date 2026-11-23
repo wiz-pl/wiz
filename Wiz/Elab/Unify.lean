@@ -549,10 +549,7 @@ partial def reevalStale? (l : Lvl) (v : Val R) : ElabM R (Option (Val R)) := do
   let g ← getGlobals
   let env : Env R := ((List.range l).map fun i => Val.var i).reverse
   let rec inst (k : Lvl) (t : Term R) : ElabM R (Term R) := do
-    let rec spine : Term R → Array (Term R) → Term R × Array (Term R)
-      | .app f a, acc => spine f (#[a] ++ acc)
-      | t, acc => (t, acc)
-    let (h, args) := spine t #[]
+    let (h, args) := Term.spine t
     match h with
     | .mvar m =>
       match (← lookupMeta m).solution with

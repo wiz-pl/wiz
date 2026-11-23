@@ -22,7 +22,7 @@ def textGroup : Group where
           okLibs s!"import {m}\nimport Text\n#eval String.eq \"ab\" \"ab\"" [".true"]
         okLibs ("import Json\nimport Deriving\nimport Hoare\nimport Hdl.Core\nimport Functor\nimport Text\n" ++
           "#eval List.reverse (.cons 1 (.cons 2 .nil))\n#eval String.beq \"a\" \"b\"")
-          [".cons 2 (.cons 1 .nil)", ".false"] },
+          ["[2, 1]", ".false"] },
     { name := "split, join, trim, replace, prefixes, numbers (#eval)", run := fun _ =>
         okLibs ("import Text\n#eval String.splitOn \"a,b,,c\" \",\"\n#eval String.splitOn \"a::b::\" \"::\"\n" ++
           "#eval String.splitOn \"abc\" \"\"\n#eval String.intercalate \", \" (.cons \"a\" (.cons \"b\" .nil))\n" ++

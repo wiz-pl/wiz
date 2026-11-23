@@ -1,0 +1,11 @@
+import Grail
+
+/-- The manifest of this index repository (23m): its name, the format, and the packages
+it publishes. `grail index check` evaluates `Index.render index` and compares it with
+`index/*.sexpr`, `registry.sexpr` and the archives. -/
+def index : Index :=
+  Index.new "wiz-pl/fate-index-example"
+    |> Index.withFormat 1
+    |> Index.package "base"
+    |> Index.package "hello"
+    |> Index.package "text"

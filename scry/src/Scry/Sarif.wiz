@@ -1,0 +1,549 @@
+import Json
+import Scry.Rules
+import Scry.Interproc
+import Scry.Diff
+import Scry.Identity
+import Scry.Budget
+import Text
+/-!
+# Scry.Sarif
+
+**SARIF 2.1.0 output** for `Scry.RuleFinding`s (`import Scry.Sarif`): rule metadata,
+severity, message, the primary sink location, and the related locations of the source ->
+sink path. `Scry.renderSarif` is the library JSON writer; a `scry taint` command can
+call it once S2's C frontend supplies locations.
+
+## Origins
+
+The analyser's facts are program points, not source spans. S2 adds an `origin`
+(span/CST node) to `Wil.Stmt`; until then this module accepts an `Scry.OriginMap`, a
+test-only association list from `(function, program point)` to a span. A finding without
+an origin is still emitted: its location carries a `logicalLocation` naming the function
+and a `properties.programPoint` instead of a `physicalLocation`. S2 replaces the map with
+the origin-carrying statement type; the writer's shape does not change.
+
+## Shape
+
+```
+{ "$schema": "…sarif-schema-2.1.0.json", "version": "2.1.0",
+  "runs": [ { "tool": { "driver": { "name": "scry", "rules": [ … ] } },
+              "invocations": [ { "executionSuccessful": true,
+                                 "toolExecutionNotifications": [ … ] } ],
+              "results": [ { "ruleId": …, "level": …,
+                             "locations": [ … ], "relatedLocations": [ … ],
+                             "codeFlows": [ … ],
+                             "partialFingerprints": { "scry/v1": …, "primaryLocationLineHash": … } } ] } ] }
+```
+
+Related locations are the origin-carrying path nodes (the sink is `locations`), numbered
+from 1; each names its `PathKind` in the message and keeps the program point in
+`properties`. A path with no origins still lists its length and function in the result's
+properties, so a caller can see the evidence even before spans exist.
+
+`codeFlows` is the source -> sink chain (`f.path`, the same order as `relatedLocations`,
+with the sink included as the last step). Every step becomes a `threadFlowLocation`; a
+step with no origin becomes a logical location, so the chain is never silently
+shortened. `nestingLevel` is the call depth: a `.call` step enters a callee and a
+`.returnValue` step leaves it.
+
+`partialFingerprints` carries both Scry's line-independent semantic id (`scry/v1`) and
+GitHub code scanning's key, `primaryLocationLineHash`. When the caller can supply the
+primary line's text the value is `Scry.lineHash` (the whitespace-normalised line
+identity); otherwise it is the semantic id, which is stable across line moves.
+
+A **partial run** (a `scry/budget/*` note) is a run-level `invocations[]` notification,
+and `executionSuccessful` is false exactly then. `sarifWithBaselines` also promotes a
+`scry/budget/*` boundary result to that notification, so the existing CLI call site
+cannot emit a truncated run that looks complete. `evalBudget`'s `EvalOutcome` is the
+source of the notes; `renderSarifPartial` is the direct API.
+-/
+
+-- ## Origins
+
+structure Scry.Origin where
+  uri : String
+  /-- 1-based. -/
+  line : Nat
+  /-- 1-based **character** column (a multibyte character counts once, even though a
+  `Wil.Span` range is a byte range; the conversion happens before the origin is built). -/
+  column : Nat
+  endLine : Nat
+  /-- 1-based character column, exclusive. -/
+  endColumn : Nat
+
+structure Scry.OriginEntry where
+  func : String
+  point : Nat
+  origin : Scry.Origin
+
+def Scry.OriginMap : Type := List Scry.OriginEntry
+
+def Scry.originAt (m : Scry.OriginMap) (func : String) (point : Nat) : Option Scry.Origin :=
+  match List.find (fun e => Bool.and (String.eq e.func func) (Nat.beq e.point point)) m with
+  | .none => .none
+  | .some e => .some e.origin
+
+-- ## Baseline identity (`partialFingerprints`)
+
+-- `Scry.semanticKey`, `Scry.semanticId`, `Scry.boundaryId` and the 64-bit hash live in
+-- `Scry.Identity`; `Scry.Workflow.wfId` is the same function under its workflow name.
+
+/-- The file a finding's primary location names (empty when it has no origin). -/
+def Scry.findingFile (m : Scry.OriginMap) (f : Scry.RuleFinding) : String :=
+  match Scry.originAt m f.func f.sink with
+  | .some o => o.uri
+  | .none => ""
+
+/-- The two fingerprint keys: Scry's namespaced semantic id, and
+`primaryLocationLineHash`, the key GitHub code scanning uses for cross-run identity. -/
+def Scry.partialFingerprintsJson (id lineHash : String) : Json :=
+  Json.mkObj
+    [ ("scry/v1", Json.mkStr id)
+    , ("primaryLocationLineHash", Json.mkStr lineHash) ]
+
+/-- The value for `primaryLocationLineHash`: the GitHub-compatible line hash when the
+primary line's text is known, otherwise the semantic id (also line-independent and
+stable). -/
+def Scry.primaryLineHash (f : Scry.RuleFinding) (file : String)
+    (lineText : Option String) : String :=
+  match lineText with
+  | .some t => Scry.lineHash f t
+  | .none => Scry.semanticId f file
+
+/-- Source line text by `(uri, 1-based line)`; `none` when the caller has no source
+text (the writer then falls back to the semantic id). -/
+def Scry.LineTextAt : Type := String → Nat → Option String
+
+def Scry.noLineText : Scry.LineTextAt := fun _ _ => .none
+
+/-- The primary line's text for a finding, from the origin map and the provider. -/
+def Scry.findingLineText (m : Scry.OriginMap) (at : Scry.LineTextAt)
+    (f : Scry.RuleFinding) : Option String :=
+  match Scry.originAt m f.func f.sink with
+  | .some o => at o.uri o.line
+  | .none => .none
+
+-- ## JSON pieces
+
+def Scry.regionJson (o : Scry.Origin) : Json :=
+  Json.mkObj
+    [ ("startLine", Json.ofNat o.line)
+    , ("startColumn", Json.ofNat o.column)
+    , ("endLine", Json.ofNat o.endLine)
+    , ("endColumn", Json.ofNat o.endColumn) ]
+
+def Scry.physicalLocationJson (o : Scry.Origin) : Json :=
+  Json.mkObj
+    [ ("physicalLocation", Json.mkObj
+        [ ("artifactLocation", Json.mkObj [("uri", Json.mkStr o.uri)])
+        , ("region", Scry.regionJson o) ]) ]
+
+def Scry.logicalLocationJson (func : String) (point : Nat) : Json :=
+  Json.mkObj
+    [ ("logicalLocations", Json.mkArr
+        [ Json.mkObj
+            [ ("name", Json.mkStr func)
+            , ("kind", Json.mkStr "function")
+            , ("fullyQualifiedName", Json.mkStr func) ] ])
+    , ("properties", Json.mkObj [("programPoint", Json.ofNat point)]) ]
+
+/-- A location for a point: a physical location when an origin is known, a logical one
+otherwise. -/
+def Scry.locationJson (m : Scry.OriginMap) (func : String) (point : Nat) : Json :=
+  match Scry.originAt m func point with
+  | .some o => Scry.physicalLocationJson o
+  | .none => Scry.logicalLocationJson func point
+
+def Scry.sinkListJson (r : Scry.TaintRule) : Json :=
+  Json.mkArr (List.map (fun s => match s.arg with
+    | .one k => Json.mkObj
+        [("name", Json.mkStr s.name), ("argument", Json.ofNat k)]
+    | .any => Json.mkObj
+        [("name", Json.mkStr s.name), ("argument", Json.mkStr "any")]) r.sinks)
+
+def Scry.sourceListJson (r : Scry.TaintRule) : Json :=
+  Json.mkArr (List.map (fun p => Json.mkObj
+    [("name", Json.mkStr p.1), ("part", Json.mkStr (Scry.ArgRef.show p.2))]) r.sources)
+
+def Scry.sanListJson (r : Scry.TaintRule) : Json :=
+  Json.mkArr (List.map (fun p => Json.mkObj
+    [("name", Json.mkStr p.1), ("part", Json.mkStr (Scry.ArgRef.show p.2))]) r.sanitisers)
+
+def Scry.callListJson (r : Scry.ForbiddenRule) : Json :=
+  Json.mkArr (List.map (fun c => Json.mkStr c) r.calls)
+
+/-- A stable, **namespaced** SARIF rule id: `scry/c/<pack rule id>`. The namespace keeps
+Scry's ids distinct from CodeQL's (`cpp/…`) and Semgrep's when results are aggregated in
+one dashboard, and the id does not encode an array index or a version. Findings keep the
+short pack id in `properties.packRuleId`, so the human line and the JSON stay readable. -/
+def Scry.sarifRuleId (id : String) : String := String.append "scry/c/" id
+
+/-- A rule's SARIF metadata (`reportingDescriptor`). -/
+def Scry.ruleJson (r : Scry.PackRule) : Json :=
+  let props := match r with
+    | .taint t =>
+      Json.mkObj
+        [ ("kind", Json.mkStr "taint")
+        , ("sinks", Scry.sinkListJson t)
+        , ("sources", Scry.sourceListJson t)
+        , ("sanitisers", Scry.sanListJson t) ]
+    | .forbidden f =>
+      Json.mkObj
+        [ ("kind", Json.mkStr "forbidden")
+        , ("calls", Scry.callListJson f) ]
+    | .memory m =>
+      Json.mkObj
+        [ ("kind", Json.mkStr "memory")
+        , ("check", Json.mkStr m.check) ];
+  Json.mkObj
+    [ ("id", Json.mkStr (Scry.sarifRuleId (Scry.PackRule.id r)))
+    , ("name", Json.mkStr (Scry.PackRule.id r))
+    , ("shortDescription", Json.mkObj [("text", Json.mkStr (Scry.PackRule.message r))])
+    , ("defaultConfiguration", Json.mkObj
+        [("level", Json.mkStr (Scry.Severity.sarif (Scry.PackRule.severity r)))])
+    , ("properties", props) ]
+
+def Scry.ruleIndexFrom (rs : List Scry.PackRule) (id : String) (i : Nat) : Nat :=
+  match rs with
+  | .nil => 0
+  | .cons r rest =>
+    if String.eq (Scry.PackRule.id r) id then i else Scry.ruleIndexFrom rest id (Nat.succ i)
+
+def Scry.ruleIndexOf (pack : Scry.RulePack) (id : String) : Nat :=
+  Scry.ruleIndexFrom pack.rules id 0
+
+/-- The related locations of a path: every step with a known origin, numbered from 1. -/
+def Scry.relatedGo (m : Scry.OriginMap) : List Scry.PathNode → Nat → List Json
+  | .nil, _ => .nil
+  | .cons p rest, i =>
+    match Scry.originAt m p.func p.point with
+    | .none => Scry.relatedGo m rest i
+    | .some o =>
+      List.cons (Json.mkObj
+        [ ("id", Json.ofNat i)
+        , ("message", Json.mkObj
+            [("text", Json.mkStr (String.append (String.append (Scry.PathKind.show p.kind)
+                " in ") p.func))])
+        , ("physicalLocation", Scry.physicalLocationJson o)
+        , ("properties", Json.mkObj
+            [ ("programPoint", Json.ofNat p.point)
+            , ("function", Json.mkStr p.func) ]) ])
+        (Scry.relatedGo m rest (Nat.succ i))
+
+def Scry.dropLast {A : Type} : List A → List A
+  | .nil => .nil
+  | .cons _ .nil => .nil
+  | .cons x xs => List.cons x (Scry.dropLast xs)
+
+/-- The related locations of a path: every path step *before* the sink that has a known
+origin, numbered from 1. -/
+def Scry.relatedLocations (m : Scry.OriginMap) (path : List Scry.PathNode) : List Json :=
+  Scry.relatedGo m (Scry.dropLast path) 1
+
+def Scry.pathLengthJson (path : List Scry.PathNode) : Json :=
+  Json.ofNat (List.length path)
+
+/-- "checked" or "unchecked": whether the finding's derivation verified
+(`Scry.Certify.certifyFinding`). -/
+def Scry.derivationText (checked : Bool) : String :=
+  match checked with
+  | .true => "checked"
+  | .false => "unchecked"
+
+/-- One step of a code flow. `depth` is the call depth: a `.call` step enters a callee
+and a `.returnValue` step leaves one; the step itself stays at the caller/callee depth
+it belongs to. `order` is the 1-based execution order GitHub renders. -/
+def Scry.threadFlowGo (m : Scry.OriginMap) (path : List Scry.PathNode) (depth order : Nat) :
+    List Json :=
+  match path with
+  | .nil => .nil
+  | .cons p rest =>
+    let next := match p.kind with
+      | .call => Nat.succ depth
+      | .returnValue => Nat.sub depth 1
+      | _ => depth;
+    List.cons (Json.mkObj
+      [ ("location", Scry.locationJson m p.func p.point)
+      , ("nestingLevel", Json.ofNat depth)
+      , ("executionOrder", Json.ofNat order)
+      , ("properties", Json.mkObj
+          [ ("programPoint", Json.ofNat p.point)
+          , ("function", Json.mkStr p.func)
+          , ("stepKind", Json.mkStr (Scry.PathKind.show p.kind)) ]) ])
+      (Scry.threadFlowGo m rest next (Nat.succ order))
+
+/-- The source -> sink chain as a SARIF `codeFlow`: one thread flow, one
+`threadFlowLocation` per path step (the sink included as the last step). An unknown
+origin becomes a `logicalLocation`, so the chain is never silently shortened. -/
+def Scry.codeFlowsJson (m : Scry.OriginMap) (path : List Scry.PathNode) : Json :=
+  Json.mkArr
+    [ Json.mkObj
+        [ ("threadFlows", Json.mkArr
+            [ Json.mkObj
+                [ ("locations", Json.mkArr (Scry.threadFlowGo m path 0 1)) ] ]) ] ]
+
+/-- **The** SARIF result object: the rule id, an optional descriptor index (warnings
+have no descriptor), severity, message, primary and related locations, the stable
+fingerprint, the kind-specific properties and the optional diff `baselineState`. Field
+order is fixed here so every caller emits the same shape; `resultJsonFull` and
+`boundaryResultJsonFull` are the two parameterisations. -/
+def Scry.resultJsonCore (ruleId : String) (ruleIndex : Option Nat) (level : String)
+    (message : String) (locations : List Json) (related : Option (List Json))
+    (flow : Option Json) (fingerprint : String) (lineHash : String)
+    (properties : List (String × Json)) (baseline : Option String) : Json :=
+  let base :=
+    List.append
+      [ ("ruleId", Json.mkStr ruleId) ]
+      (List.append
+        (match ruleIndex with
+          | .some i => [("ruleIndex", Json.ofNat i)]
+          | .none => .nil)
+        (List.append
+          [ ("level", Json.mkStr level)
+          , ("message", Json.mkObj [("text", Json.mkStr message)])
+          , ("locations", Json.mkArr locations) ]
+          (List.append
+            (match related with
+              | .some rs => [("relatedLocations", Json.mkArr rs)]
+              | .none => .nil)
+            (List.append
+              (match flow with
+                | .some f => [("codeFlows", f)]
+                | .none => .nil)
+              [ ("partialFingerprints", Scry.partialFingerprintsJson fingerprint lineHash)
+              , ("properties", Json.mkObj properties) ]))));
+  Json.mkObj (List.append base (match baseline with
+    | .some b => [("baselineState", Json.mkStr b)]
+    | .none => .nil))
+
+-- `Scry.Project.resultJsonAt` (`scry/src/Scry/ProjectTaint.wiz`) is the project-owned
+-- result writer still to be folded into `Scry.resultJsonCore`: it renders
+-- `artifacts`-relative locations and omits `partialFingerprints`. That file is owned by
+-- `scry-e2e`; `Scry.sarifLog` already takes the artifact table it needs.
+
+/-- A finding result with its stable baseline fingerprint and, when a diff baseline is
+known, a SARIF `baselineState` (`new` for a result in the changed lines, `unchanged` for
+a suppressed pre-existing one). `lineText` is the primary line's text when the caller has
+it; `none` falls back to the semantic id for `primaryLocationLineHash`. The
+`codeFlows` chain is `f.path` (source -> sink), and `relatedLocations` is unchanged: the
+path steps before the sink with a known origin. -/
+def Scry.resultJsonFullLine (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (f : Scry.RuleFinding) (checked : Bool) (baseline : Option String)
+    (lineText : Option String) : Json :=
+  let file := Scry.findingFile m f;
+  let flow : Option Json := match f.path with
+    | .nil => .none
+    | _ => .some (Scry.codeFlowsJson m f.path);
+  Scry.resultJsonCore (Scry.sarifRuleId f.rule) (.some (Scry.ruleIndexOf pack f.rule))
+    (Scry.Severity.sarif f.severity) f.message
+    [Scry.locationJson m f.func f.sink]
+    (.some (Scry.relatedLocations m f.path))
+    flow
+    (Scry.semanticId f file)
+    (Scry.primaryLineHash f file lineText)
+    [ ("kind", Json.mkStr (Scry.FindingKind.show f.kind))
+    , ("function", Json.mkStr f.func)
+    , ("sink", Json.ofNat f.sink)
+    , ("callee", Json.mkStr f.name)
+    , ("sinkArgument", Json.ofNat f.arg)
+    , ("pathLength", Scry.pathLengthJson f.path)
+    , ("derivation", Json.mkStr (Scry.derivationText checked))
+    , ("packRuleId", Json.mkStr f.rule) ]
+    baseline
+
+def Scry.resultJsonFull (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (f : Scry.RuleFinding) (checked : Bool) (baseline : Option String) : Json :=
+  Scry.resultJsonFullLine m pack f checked baseline .none
+
+def Scry.resultJsonWith (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (f : Scry.RuleFinding) (checked : Bool) : Json :=
+  Scry.resultJsonFull m pack f checked .none
+
+/-- A finding without a status (the default of `Scry.sarif`). -/
+def Scry.resultJson (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (f : Scry.RuleFinding) : Json :=
+  Scry.resultJsonWith m pack f .false
+
+/-- A warning result with its own rule id: a lowering-boundary warning (what S2 could not
+model: a havoc'd or skipped construct) or a points-to/nullness memory warning
+(`unknown-memory`, `use-after-free`, `unknown-indirect`, `unmodelled-external`,
+`null-dereference`). It has no rule descriptor; the location is the
+offending statement's span, or a logical location when no origin is known. -/
+def Scry.boundaryResultJsonFull (rule : String) (origin : Option Scry.Origin)
+    (func : String) (point : Nat) (message : String) (file : String)
+    (baseline : Option String) : Json :=
+  let loc := match origin with
+    | .some o => Scry.physicalLocationJson o
+    | .none => Scry.logicalLocationJson func point;
+  Scry.resultJsonCore rule .none "warning" message [loc] .none .none
+    (Scry.boundaryId rule file func message)
+    (Scry.boundaryId rule file func message)
+    [ ("kind", Json.mkStr "boundary")
+    , ("function", Json.mkStr func)
+    , ("programPoint", Json.ofNat point)
+    , ("derivation", Json.mkStr "unchecked") ]
+    baseline
+
+def Scry.boundaryResultJson (rule : String) (origin : Option Scry.Origin) (func : String)
+    (point : Nat) (message : String) : Json :=
+  Scry.boundaryResultJsonFull rule origin func point message "" .none
+
+/-- A finding result together with its checked status and, in diff mode, its SARIF
+`baselineState` (`new` or `unchanged`). -/
+structure Scry.SarifFinding where
+  finding : Scry.RuleFinding
+  checked : Bool
+  baseline : Option String
+
+/-- One SARIF `notification` for a budget note. The descriptor id is the `scry/budget/*`
+rule, so a consumer can filter partial-run notices without parsing the message. -/
+def Scry.notificationJson (n : Scry.BudgetNote) : Json :=
+  Json.mkObj
+    [ ("level", Json.mkStr "warning")
+    , ("message", Json.mkObj
+        [("text", Json.mkStr (String.append (String.append n.rule ": ") n.message))])
+    , ("descriptor", Json.mkObj [("id", Json.mkStr n.rule)]) ]
+
+/-- The run's `invocations` entry. `executionSuccessful` is true exactly when there is
+no budget note: a partial run can never look complete to a consumer that checks only
+that flag, and the notes carry the reason. -/
+def Scry.invocationJson (notes : List Scry.BudgetNote) : Json :=
+  Json.mkObj
+    [ ("executionSuccessful", Json.mkBool (List.isEmpty notes))
+    , ("toolExecutionNotifications", Json.mkArr (List.map Scry.notificationJson notes))
+    , ("properties", Json.mkObj
+        [ ("truncated", Json.mkBool (Bool.not (List.isEmpty notes)))
+        , ("budgetNotes", Json.ofNat (List.length notes)) ]) ]
+
+/-- **The** SARIF log assembler: the tool driver with the pack's rule descriptors, an
+optional `artifacts` table (the project renderer's multi-file addition), the already
+written result objects, and the run-level budget notes. `sarifLog` is the complete-run
+case. -/
+def Scry.sarifLogWithNotes (tool : String) (pack : Scry.RulePack) (artifacts : List Json)
+    (results : List Json) (notes : List Scry.BudgetNote) : Json :=
+  let rules := Json.mkArr (List.map Scry.ruleJson pack.rules);
+  let driver := Json.mkObj [ ("name", Json.mkStr tool)
+    , ("version", Json.mkStr "0.1.0")
+    , ("informationUri", Json.mkStr "https://github.com/wiz-pl/wiz")
+    , ("rules", rules) ];
+  let toolObj := Json.mkObj [("driver", driver)];
+  /-- SARIF regions are 1-based line/column pairs; the default `columnKind` is UTF-16 code
+  units. The C frontend's slice is ASCII (see `wiz-notes/scry-c2wil.md`), where a byte
+  column is a UTF-16 column, so the declaration is exact for the supported subset; a
+  non-ASCII source would need a byte -> UTF-16 conversion here (documented gap). -/
+  let run := Json.mkObj
+    (List.append
+      [ ("tool", toolObj)
+      , ("columnKind", Json.mkStr "utf16CodeUnits") ]
+      (List.append
+        (match artifacts with
+          | .nil => .nil
+          | _ => [("artifacts", Json.mkArr artifacts)])
+        (List.append
+          [("invocations", Json.mkArr [Scry.invocationJson notes])]
+          [("results", Json.mkArr results)])));
+  Json.mkObj
+    [ ("$schema", Json.mkStr "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json")
+    , ("version", Json.mkStr "2.1.0")
+    , ("runs", Json.mkArr [run]) ]
+
+/-- `sarifLogWithNotes` for a complete run. -/
+def Scry.sarifLog (tool : String) (pack : Scry.RulePack) (artifacts : List Json)
+    (results : List Json) : Json :=
+  Scry.sarifLogWithNotes tool pack artifacts results .nil
+
+/-- The text of a result's `message.text` (`""` when absent). -/
+def Scry.resultMessageText (j : Json) : String :=
+  match Json.getPath j ["message", "text"] with
+  | .some (.str s) => s
+  | _ => ""
+
+/-- Budget notes a caller supplied as boundary results (`scry/budget/*`), promoted to
+run-level notifications. Promoting here, rather than only in a second call path, keeps
+an existing `renderSarifWithBaselines` caller honest: a truncated run cannot lose its
+notice just because the note was passed as a result. -/
+def Scry.budgetNotesOfResults (results : List Json) : List Scry.BudgetNote :=
+  List.foldr (fun (j : Json) (acc : List Scry.BudgetNote) =>
+    let id := Json.getStr j "ruleId";
+    match String.startsWith id "scry/budget/" with
+    | .true => List.cons (Scry.BudgetNote.mk id (Scry.resultMessageText j)) acc
+    | .false => acc) .nil results
+
+/-- The result objects for these findings, with `primaryLocationLineHash` from `at` when
+it knows the primary line. -/
+def Scry.sarifResultsWith (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (findings : List Scry.SarifFinding) (at : Scry.LineTextAt) : List Json :=
+  List.map (fun r => Scry.resultJsonFullLine m pack r.finding r.checked r.baseline
+    (Scry.findingLineText m at r.finding)) findings
+
+/-- **The** partial-run-aware log: findings, extra results, an optional line-text
+provider and explicit budget notes. `renderSarifPartial` is the direct API. -/
+def Scry.sarifWithBaselinesLineNotes (tool : String) (m : Scry.OriginMap)
+    (pack : Scry.RulePack) (findings : List Scry.SarifFinding) (extra : List Json)
+    (at : Scry.LineTextAt) (notes : List Scry.BudgetNote) : Json :=
+  Scry.sarifLogWithNotes tool pack .nil
+    (List.append (Scry.sarifResultsWith m pack findings at) extra) notes
+
+/-- The SARIF log for findings with their derivation status, plus extra results
+(boundary warnings). A `scry/budget/*` extra result is promoted to a run-level
+notification, so this existing call shape cannot emit a truncated run that looks
+complete. `tool` names the driver ("scry"). -/
+def Scry.sarifWithBaselines (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (findings : List Scry.SarifFinding) (extra : List Json) : Json :=
+  let results := List.append (Scry.sarifResultsWith m pack findings Scry.noLineText) extra;
+  Scry.sarifLogWithNotes tool pack .nil results (Scry.budgetNotesOfResults results)
+
+/-- `sarifWithBaselines` with explicit budget notes (the `EvalOutcome` path). -/
+def Scry.sarifWithBaselinesNotes (tool : String) (m : Scry.OriginMap)
+    (pack : Scry.RulePack) (findings : List Scry.SarifFinding) (extra : List Json)
+    (notes : List Scry.BudgetNote) : Json :=
+  Scry.sarifWithBaselinesLineNotes tool m pack findings extra Scry.noLineText notes
+
+/-- `sarifWithBaselines` for `(finding, checked)` pairs (no baseline state). -/
+def Scry.sarifWith (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (findings : List (Scry.RuleFinding × Bool)) (extra : List Json) : Json :=
+  Scry.sarifWithBaselines tool m pack
+    (List.map (fun p => Scry.SarifFinding.mk p.1 p.2 .none) findings) extra
+
+/-- The SARIF log for these findings. `tool` names the driver ("scry"). -/
+def Scry.sarif (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (findings : List Scry.RuleFinding) : Json :=
+  Scry.sarifWith tool m pack (List.map (fun f => (f, .false)) findings) .nil
+
+/-- The SARIF JSON as text (compact; SARIF does not require pretty-printing). -/
+def Scry.renderSarif (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (findings : List Scry.RuleFinding) : String :=
+  Json.render (Scry.sarif tool m pack findings)
+
+/-- `Scry.renderSarif` with derivation statuses, SARIF baseline states and boundary
+results. -/
+def Scry.renderSarifWithBaselines (tool : String) (m : Scry.OriginMap)
+    (pack : Scry.RulePack) (findings : List Scry.SarifFinding)
+    (extra : List Json) : String :=
+  Json.render (Scry.sarifWithBaselines tool m pack findings extra)
+
+/-- `Scry.renderSarifWithBaselines` with explicit budget notes: **the** call a CLI with
+a truncated `EvalOutcome` should make. -/
+def Scry.renderSarifPartial (tool : String) (m : Scry.OriginMap)
+    (pack : Scry.RulePack) (findings : List Scry.SarifFinding) (extra : List Json)
+    (notes : List Scry.BudgetNote) : String :=
+  Json.render (Scry.sarifWithBaselinesNotes tool m pack findings extra notes)
+
+/-- `Scry.renderSarifPartial` for `(finding, checked)` pairs. -/
+def Scry.renderSarifPartialWith (tool : String) (m : Scry.OriginMap)
+    (pack : Scry.RulePack) (findings : List (Scry.RuleFinding × Bool))
+    (extra : List Json) (notes : List Scry.BudgetNote) : String :=
+  Json.render (Scry.sarifWithBaselinesNotes tool m pack
+    (List.map (fun p => Scry.SarifFinding.mk p.1 p.2 .none) findings) extra notes)
+
+/-- `Scry.renderSarifWithBaselines` with a line-text provider, for the exact GitHub
+`primaryLocationLineHash`. -/
+def Scry.renderSarifWithLines (tool : String) (m : Scry.OriginMap)
+    (pack : Scry.RulePack) (findings : List Scry.SarifFinding) (extra : List Json)
+    (at : Scry.LineTextAt) : String :=
+  Json.render (Scry.sarifWithBaselinesLineNotes tool m pack findings extra at .nil)
+
+/-- `Scry.renderSarif` with derivation statuses and boundary results. -/
+def Scry.renderSarifWith (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (findings : List (Scry.RuleFinding × Bool)) (extra : List Json) : String :=
+  Json.render (Scry.sarifWith tool m pack findings extra)

@@ -338,7 +338,7 @@ partial def run (prog : Std.HashMap Name Decl) (env : Std.HashMap Var IVal)
       | .fap f as => call prog f (← as.mapM get)
       | .pap f as => alloc (.clo f (← as.mapM get))
       | .ap f as => apply prog (← get f) (← as.mapM get)
-      | .prim op as => nativeOp op (← as.mapM get)
+      | .prim op as => nativeOp op.key (← as.mapM get)
       | .reset y => do
         let v ← get y
         match v with

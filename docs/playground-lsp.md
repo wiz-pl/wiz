@@ -297,7 +297,8 @@ methods are the fallback (§ Fallback). `wiz/subtermInfo` is optional: it fills 
 "Selected subterm" box when a tagged subterm is clicked, and a `MethodNotFound` answer
 is silently ignored. `wiz/interactiveInfo` is asked at the same position for its
 `widget` items (`WIZ_WIDGET:` payloads): `web/widgets.js` draws the `wiz.widget/1`
-bundle in the playground's goals panel and in the standalone page's widget pane. Other
+bundle in a widget pane on both pages (the playground's `#widget-list`, the standalone
+page's `#widget-list` aside). The goals panel never renders a payload's markup. Other
 item kinds are not drawn.
 
 ### Shapes
@@ -531,6 +532,13 @@ polish. Nothing in the playground is specific to the Lean server beyond this lis
 8. **Optional, for the editor.** `textDocument/completion` (an array or a
    `CompletionList`; `textEdit`/`insertText`/`filterText`/`sortText` honoured), so
    Ctrl-Space and typing have something to show. Without it the popup stays closed.
+9. **Optional, formatting.** `documentFormattingProvider` and
+   `documentRangeFormattingProvider` with `textDocument/formatting` and
+   `textDocument/rangeFormatting` (a `TextEdit[]` or `null`); the page's
+   `format()`/`formatSelection()` action (Ctrl/⌘+Shift+F) applies the edits through
+   `LspClient.applyWorkspaceEdit` — UTF-16 positions, reverse order, a version guard —
+   and sends the result as a normal `didChange`. The server sees `options.tabSize` and
+   `options.insertSpaces`; `wiz lsp` refuses `insertSpaces: false`.
 
 The server must not require `stdin` (the page is its own editor), must tolerate any
 number of clients (one document each), and may share state between them as the Lean

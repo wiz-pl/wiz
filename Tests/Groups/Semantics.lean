@@ -202,7 +202,7 @@ def compare (pipeline : String) (cells : Array SCell) (got : Got) : IO (Except S
   | .skipped why =>
     -- a skipped case is not a pass: the driver shows it as ⊘ (the cases that do run
     -- still compare; this one could not)
-    skip s!"{why} ({pipeline}: {cells.size} cells not compared)"
+    skipMissing s!"{why} ({pipeline}: {cells.size} cells not compared)"
     pure (.ok #[])
   | .failed msg => pure (.error s!"{pipeline}: {msg}")
   | .ok vals =>
@@ -308,7 +308,7 @@ def semanticsGroup : Group where
         let dir ← IO.FS.createTempDir
         match ← Build.runGlobal (← toolchain) s "main" dir false (timeout := some 180) with
         | .error e =>
-          if e.isToolchain then skip "no toolchain"
+          if e.isToolchain then skipMissing "no toolchain"
           else throw (IO.userError e.message)
         | .ok out =>
           let vals := (out.splitOn "\n").filter (fun l => !l.trimAscii.isEmpty)

@@ -10,7 +10,7 @@
 // the cursor of the editor that owns the server instead of its own document.
 "use strict";
 import { mount } from "./framework/mount.js";
-import { startInfoview } from "./playground-lsp.js";
+import { startInfoview, createIndexer } from "./playground-lsp.js";
 import { endpointFromSearch } from "./lsp-client.js";
 
 // The server the page's URL names: `?lsp=` wins, else `?port=`, else 8765.
@@ -36,13 +36,9 @@ export async function startPage({ doc = globalThis.document, loc = globalThis.lo
   const effect = (kind, a = "", b = "") => {
     if (handle) handle.call("wiz_loom_effect", kind, a, b);
   };
-  // The editor's pure rules are the runtime's (`Web.EditorModel`), read through `ask`.
-  const rules = {
-    position: (text, offset) =>
-      JSON.parse(handle.ask("wiz_loom_editor_position", text, String(offset))),
-    segments: (text, diagnostics) =>
-      JSON.parse(handle.ask("wiz_loom_editor_segments", text, JSON.stringify(diagnostics || []), "0")),
-  };
+  // The editor's pure rules are the runtime's (`Web.EditorModel`), read through `ask`;
+  // the index cache is the same one the payload's overlays use.
+  const rules = createIndexer((name, ...args) => handle.ask(name, ...args));
   const onRequest = (kind, payload) => {
     effect("ack", kind);
     if (app) app.request(kind, payload);

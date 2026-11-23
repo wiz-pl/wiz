@@ -23,7 +23,7 @@
 #            the whole toolchain (self.wiz) to C: ~22 s, ~380 MB each on the perf cores
 #            (perf-history.tsv, stage1-selfcompile). Its C output must be byte-identical
 #            across the three builds (checked).
-#   stdlib   bench/stdlib-bench.wiz, all 18 modes, through scripts/stdlib-bench.py with
+#   stdlib   bench/stdlib-bench.wiz, all 20 modes, through scripts/stdlib-bench.py with
 #            --baseline-bin mt (interleaved A/B pairs; checksums must agree).
 #
 # Usage (from the repository root, with the toolchain environment: . /workspace/wiz-env.sh

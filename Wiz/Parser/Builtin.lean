@@ -64,6 +64,15 @@ def simpleBinder : ParserDescr := orelse (bracketedBinder false) binderIdent
 def matchAlt : ParserDescr :=
   node "match.alt" (seqs ["|", sepBy1 (cat "term" 0) ",", "=>", cat "term" 0])
 
+/-- `| h : p => rhs`: the equation form written where a pattern belongs. It is parsed
+(`match.altEq`) so that the elaborator can say where `h :` goes; no match accepts it. -/
+def matchAltEq : ParserDescr :=
+  node "match.altEq" (seqs ["|", ident, ":", sepBy1 (cat "term" 0) ",", "=>", cat "term" 0])
+
+/-- A scrutinee of a `match`: `e`, or `h : e` for the branch's equation `h : e = p`. -/
+def matchScrut : ParserDescr :=
+  orelse (node "match.scrut" (seqs [ident, ":", term])) term
+
 /-- A `calc` step: a relation `a ≤ b` and its proof. The relation may start with `_`,
 the previous step's right endpoint. -/
 def calcStep : ParserDescr := node "calc.step" (seqs [term, ":=", term])
@@ -153,7 +162,7 @@ def tuplePat : ParserDescr :=
 | `term.tag`           | max  | "'" ident |
 | `term.ecase`         | lead | "ecase" term "[" [terms] "]" |
 | `term.dotIdent`      | max  | "." ident (a constructor of the expected type) |
-| `term.match`         | lead | "match" [terms] "with" [alts] |
+| `term.match`         | lead | "match" [scrutinees] "with" [alts] (`h : e` names the branch equation) |
 | `term.calc`          | lead | "calc" [`calc.step`: term ":=" term, aligned] |
 | `term.szInf`, `term.szSuc`, `term.sizeLt` | | "∞", "↑" s, "Size<" s |
 | `term.sized` (trailing) | max | T "^" s: an inductive or coinductive type at size `s` |
@@ -236,7 +245,8 @@ def termLeading : List LeadingParser := [
   { kind := "term.match", prec := leadPrec,
     -- alternatives line up at or right of the first `|`, so an outer match's next
     -- alternative ends a nested match (as in Lean)
-    p := seqs ["match", sepBy1 term ",", "with", withPosition (many (seqs [colGe, matchAlt]))] },
+    p := seqs ["match", sepBy1 matchScrut ",", "with",
+      withPosition (many (seqs [colGe, orelse matchAltEq matchAlt]))] },
   -- tactics line up (or are separated by `;`); the tactics themselves come from the prelude
   { kind := "term.by", prec := leadPrec,
     p := seqs ["by", withPosition (many1 (seqs [colGe, cat "tactic" 0, optional ";"]))] },
@@ -275,6 +285,24 @@ def structureWhere : ParserDescr :=
 /-- `deriving C₁, C₂` after an `inductive` or `structure` (HD8) -/
 def derivingClause : ParserDescr := optional (seqs ["deriving", sepBy1 ident ","])
 
+/-- The `import` declaration: `import M`, a *header* declaration, parsed by
+`Wiz.Frontend.Parse.parseCommand` before it tries the `command` category.
+
+It is deliberately **not** a rule of `command`: `command` is the extensible category
+(`syntax`, `macro_rules`, `attribute [macro …]`), and a fixed header must not be
+producible by an extension. A `syntax` rule cannot mention it, and `` `(command| import M) ``
+does not parse. A node of kind `command.import` that reaches the elaborator anyway (a
+hand-built one from a command macro) is rejected in `Wiz.Elab.Command.elabCommand`. -/
+def importDescr : ParserDescr := node "command.import" (seqs ["import", ident])
+
+/-- (13u) `open import M`: the header shorthand for `import M` plus a file-scope
+`open M`. It is parsed with the imports (header-only): `import` is reserved, so
+`command.open`'s `ident` cannot match it, and the node never reaches the elaborator. -/
+def openImportDescr : ParserDescr := node "command.openImport" (seqs [nonReserved "open", "import", ident])
+
+/-- `[decl, spans]`: the capability list of a package lint set or rule. -/
+def lintCaps : ParserDescr := node "lint.caps" (seqs ["[", sepBy ident ",", "]"])
+
 /-- Commands. Each command is parsed inside `withPosition`, so an application can't
 continue onto a line starting at the command's column.
 
@@ -293,14 +321,19 @@ continue onto a line starting at the command's column.
 | `command.local`              | "local" command (13m: a `syntax`, `notation`, `infix…`, `macro_rules` or `attribute [macro …]` whose syntax stays in the module; 11w: an `instance` found only in the module; 6h: `attribute [simp]`) |
 | `command.deriving`           | "deriving" "instance" C,+ "for" T,+ |
 | `command.attrDeriver`        | "attribute" "[" "deriver" ident "]" ident |
-| `command.attrInline`         | "attribute" "[" "inline" "]" ident |
+| `command.attr`               | "attribute" "[" ident [ident/num/str]* "]" ident (TT-04: a registered attribute) |
 | `command.attrDefaultInstance`| "attribute" "[" "default_instance" [num] "]" ident (7f) |
 | `command.attrBinop`          | "attribute" "[" "binop" "]" ident (7f) |
 | `command.attrSimp`           | "attribute" "[" "simp" [num] "]" ident (6h: the default `simp` set; 1000 unless a priority is given) |
+| `command.registerAttribute`  | "register_attribute" ident (TT-04: a user no-op attribute) |
+| `command.registerOption`     | "register_option" ident ":" ident ":=" ident/num/str (TT-04: a user option) |
 | `command.coinductive`        | like `structure`; the fields are observations |
 | `command.defEqns`            | "def" ident [".{" us "}"] [binders] ":" T [alts] |
 | `command.partial`            | "partial" ["(" "default" ":=" w ")"] command (a `def`) |
 | `command.mutual`             | "mutual" [command+] "end" (`def`s, all partial; or `partial (default := w) def`s) |
+| `command.namespace`          | "namespace" ident (opens a namespace; ended by `command.end`) |
+| `command.open`               | "open" ident ["as" ident] (13t: names visible unqualified; `as` an alias for qualified names) |
+| `command.end`                | "end" [ident] (13t: closes the innermost `namespace`; `end Foo` must name it) |
 | `command.printAxioms`        | "#print" "axioms" ident |
 | `command.cStruct`            | "c_struct" [str] ["(" "header" ":=" str ")"] ident "where" [fields] ["deriving" C,+] (9i) |
 
@@ -309,22 +342,41 @@ A constructor is `inductive.ctor`: "|" ["private"] ident [binders] [":" T]. A fi
 makes the constructor, or the field's projection or observation, private to the module).
 -/
 def commandLeading : List LeadingParser := [
+  -- TT-04: the generic attribute form. It is declared first so that every dedicated
+  -- attribute rule below has a higher index and wins a tie; it still parses an unknown
+  -- name, or a malformed use of a known one, for the registry to report.
+  { kind := "command.attr", prec := maxPrec,
+    p := seqs ["attribute", "[", ident, many (orelse ident (orelse num str)), "]", ident] },
   { kind := "command.def", prec := maxPrec,
     p := seqs ["def", ident, univParams, many (bracketedBinder false), typeSpec false, ":=", term] },
   { kind := "command.defEqns", prec := maxPrec,
     p := seqs ["def", ident, univParams, many (bracketedBinder false), typeSpec true, many1 matchAlt] },
   -- 13b: every name the command declares is visible only in this module
-  { kind := "command.private", prec := maxPrec, p := seqs ["private", cat "command" 0] },
+  -- (the `import` alternative lets the parser reach the elaborator, which reports that an
+  -- import is not allowed inside `private`; it does not make `import` a command rule)
+  { kind := "command.private", prec := maxPrec, p := seqs ["private", orelse (cat "command" 0) importDescr] },
   -- 22k: `sealed inductive T …`: only this declaration is the type `T` (a look-alike is
   -- another type); needed for a native representation
-  { kind := "command.sealed", prec := maxPrec, p := seqs ["sealed", cat "command" 0] },
+  { kind := "command.sealed", prec := maxPrec, p := seqs ["sealed", orelse (cat "command" 0) importDescr] },
   -- 13m: notation that importers don't see (`local` is not reserved)
-  { kind := "command.local", prec := maxPrec, p := seqs [nonReserved "local", cat "command" 0] },
+  { kind := "command.local", prec := maxPrec, p := seqs [nonReserved "local", orelse (cat "command" 0) importDescr] },
   -- stage 13: general recursion; a `mutual` block's definitions are partial too
   -- (a partial definition's type needs a witness: found, or given with `(default := w)`)
   { kind := "command.partial", prec := maxPrec,
-    p := seqs ["partial", optional (seqs ["(", nonReserved "default", ":=", term, ")"]), cat "command" 0] },
-  { kind := "command.mutual", prec := maxPrec, p := seqs ["mutual", many1 (cat "command" 0), "end"] },
+    p := seqs ["partial", optional (seqs ["(", nonReserved "default", ":=", term, ")"]),
+      orelse (cat "command" 0) importDescr] },
+  -- (13t) the block body parses at precedence 1, so its `end` is the block's, not
+  -- `command.end` (precedence 0)
+  { kind := "command.mutual", prec := maxPrec,
+    p := seqs ["mutual", many1 (orelse (cat "command" 1) importDescr), "end"] },
+  -- (13t) `namespace Foo` opens a namespace; `end`/`end Foo` closes the innermost.
+  -- (`end` is a command only at the top level: its precedence 0 keeps it out of a
+  -- `mutual` block's body, which parses commands at precedence 1 and has its own `end`.)
+  { kind := "command.namespace", prec := maxPrec,
+    p := seqs [nonReserved "namespace", ident] },
+  { kind := "command.open", prec := maxPrec,
+    p := seqs [nonReserved "open", ident, optional (seqs [colGt, nonReserved "as", ident])] },
+  { kind := "command.end", prec := 0, p := seqs ["end", optional (seqs [colGt, ident])] },
   { kind := "command.axiom", prec := maxPrec,
     p := seqs ["axiom", ident, univParams, many (bracketedBinder false), typeSpec true] },
   { kind := "command.check", prec := maxPrec, p := seqs ["#check", term] },
@@ -334,7 +386,6 @@ def commandLeading : List LeadingParser := [
   -- `#plot expr`: evaluate a `Plot.Chart` and emit its infoview widget (lib/Plot.wiz)
   { kind := "command.plot", prec := maxPrec, p := seqs ["#plot", term] },
   { kind := "command.erase", prec := maxPrec, p := seqs ["#erase", ident] },
-  { kind := "command.import", prec := maxPrec, p := seqs ["import", ident] },
   -- stage 8: run through the backend pipeline (IR, reference counting), print the IR
   { kind := "command.run", prec := maxPrec, p := seqs ["#run", term] },
   { kind := "command.ir", prec := maxPrec, p := seqs ["#ir", ident] },
@@ -362,6 +413,14 @@ def commandLeading : List LeadingParser := [
   -- stage 9g: a C symbol for a Wiz function
   { kind := "command.export", prec := maxPrec,
     p := seqs ["export", str, ident, optional (seqs [":", term])] },
+  -- (P1) a package lint set: its header, and one `lint` per rule. `lint` is
+  -- `nonReserved`, so a program can still use it as a name; these are commands only at
+  -- the start of a line. The runner is a pure `String → String` (the stable
+  -- `Lint.Command` view in, findings out); see `docs/lint-abi.md`.
+  { kind := "command.lintSet", prec := maxPrec,
+    p := seqs ["lint-set", str, str, lintCaps] },
+  { kind := "command.lint", prec := maxPrec,
+    p := seqs [nonReserved "lint", ident, str, ident, ident, ident, lintCaps, ident] },
   { kind := "command.attrMacro", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "macro", ident, "]", ident] },
   { kind := "command.attrTactic", prec := maxPrec,
@@ -371,8 +430,7 @@ def commandLeading : List LeadingParser := [
   { kind := "command.attrImplementedBy", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "implemented_by", ident, optional ident, "]", ident] },
   -- 22i: compiled code inlines the definition where it is applied (to all its arguments)
-  { kind := "command.attrInline", prec := maxPrec,
-    p := seqs ["attribute", "[", nonReserved "inline", "]", ident] },
+  -- (TT-04: `[inline]` is a registered attribute, written in the generic form below)
   -- 7f: a default instance (with a priority), and an operator whose numeral operands take
   -- the type of the others (Lean's `binop%`)
   { kind := "command.attrDefaultInstance", prec := maxPrec,
@@ -382,9 +440,18 @@ def commandLeading : List LeadingParser := [
   -- 6h (S2): `attribute [simp] f` (and `[simp 500] f`) puts a theorem in the default set
   { kind := "command.attrSimp", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "simp", optional num, "]", ident] },
+  -- P0: `attribute [hint] f`, `[hint 500] f` (priority) and `[hint intro] f` (kind)
+  { kind := "command.attrHint", prec := maxPrec,
+    p := seqs ["attribute", "[", nonReserved "hint", optional num, "]", ident] },
+  { kind := "command.attrHintKind", prec := maxPrec,
+    p := seqs ["attribute", "[", nonReserved "hint", ident, "]", ident] },
   -- HD8: `deriving`
   { kind := "command.attrDeriver", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "deriver", ident, "]", ident] },
+  -- TT-04: register a user attribute (a no-op, flag payload) or a typed option
+  { kind := "command.registerAttribute", prec := maxPrec, p := seqs ["register_attribute", ident] },
+  { kind := "command.registerOption", prec := maxPrec,
+    p := seqs ["register_option", ident, ":", ident, ":=", orelse ident (orelse num str)] },
   { kind := "command.deriving", prec := maxPrec,
     p := seqs ["deriving", "instance", sepBy1 ident ",", nonReserved "for", sepBy1 ident ","] },
   { kind := "command.declareSyntaxCat", prec := maxPrec, p := seqs ["declare_syntax_cat", ident, optional (seqs ["(", nonReserved "keywords", ":=", ident, ")"])] },
@@ -474,7 +541,7 @@ def addMetaParsers (t : ParserTables) (c : Name) : ParserTables :=
 | `command.infix`        | ("infixl" / "infixr" / "infix") ":" num str "=>" term |
 | `command.appUnexpander` | "app_unexpander" ident [alts] (11r: printing `ident`'s applications as notation) |
 | `command.attrUnexpander` | "attribute" "[" "app_unexpander" ident "]" ident (11r) |
-| `command.setOption`    | "set_option" ident (ident / num) (11r: `pp.notation`, `pp.all`) |
+| `command.setOption`    | "set_option" ident (ident / num / str) (11r: `pp.notation`, `pp.all`; TT-04: a registered option) |
 -/
 def macroCommands : List LeadingParser := [
   { kind := "command.macroRules", prec := maxPrec, p := seqs ["macro_rules", many1 matchAlt] },
@@ -488,7 +555,7 @@ def macroCommands : List LeadingParser := [
   { kind := "command.appUnexpander", prec := maxPrec, p := seqs ["app_unexpander", ident, many1 matchAlt] },
   { kind := "command.attrUnexpander", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "app_unexpander", ident, "]", ident] },
-  { kind := "command.setOption", prec := maxPrec, p := seqs ["set_option", ident, orelse ident num] }
+  { kind := "command.setOption", prec := maxPrec, p := seqs ["set_option", ident, orelse ident (orelse num str)] }
 ]
 
 def tables : ParserTables :=
@@ -502,6 +569,10 @@ def tables : ParserTables :=
   let t := stxLeading.foldl (·.addLeading "stx" ·) t
   let t := stxTrailing.foldl (·.addTrailing "stx" ·) t
   let t := macroCommands.foldl (·.addLeading "command" ·) t
+  -- `import` is no longer a `command` rule, but it stays reserved: it is a keyword of the
+  -- fixed header (`importDescr`), parsed by `parseCommand` before the command category,
+  -- and `def import := 1` is an error as before.
+  let t := t.addTokens ["import"]
   ["term", "command", "level", "tactic"].foldl addMetaParsers t
 
 /-- The number of children a descriptor adds to its node, when that is fixed. -/

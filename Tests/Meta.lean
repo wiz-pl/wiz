@@ -362,6 +362,123 @@ partial def subterms (t : Term ZeroOneMany) (d : Nat := 0) : List (Term ZeroOneM
 
 end Review
 
+/-! A concrete instance of `DescEq_subst` (plan O7): `dret (var 0)` at `Desc_0 Unit_1`,
+substituted by `var 0 ↦ tt`, is `dret tt`. The theorems are `Prop`s, so the pin is the
+type ascription: `descEq_subst_concrete` is stated at the *substituted* judgment, which
+only elaborates if the lemma's conclusion computes to it. -/
+namespace DescEqSubst
+
+open WizMeta
+open WizMeta.Spec
+
+/-- The empty signature is closed: there are no declarations. -/
+theorem sigClosed : Sig.Closed ([] : Sig) := by
+  intro d hd
+  exact absurd hd List.not_mem_nil
+
+def R : Rules := Tprog ([] : Sig) .cross PayloadStuck
+
+theorem wfNil : Derivable R (.wf ([] : Ctx)) :=
+  ofRule (core_in_Tprog Core.wfNil) (by intro p hp; exact absurd hp List.not_mem_nil)
+
+theorem unit1 : Derivable R (([] : Ctx) ⊢ Tm.unit 1 ∶ Tm.sort 1) := by
+  refine ofRule (T1_in_Tprog (Or.inl (unit_in_T0 (Unit.form (l := 1))))) ?_
+  intro p hp
+  simp only [List.mem_cons, List.mem_nil_iff, or_false] at hp
+  rw [hp]
+  exact wfNil
+
+theorem tt1 : Derivable R (([] : Ctx) ⊢ Tm.tt ∶ Tm.unit 1) := by
+  refine ofRule (T1_in_Tprog (Or.inl (unit_in_T0 (Unit.tt (l := 1))))) ?_
+  intro p hp
+  simp only [List.mem_cons, List.mem_nil_iff, or_false] at hp
+  rw [hp]
+  exact wfNil
+
+/-- `[] ⊢ Desc_0 (Unit_1) ∶ Sort 2`. -/
+theorem descTy : Derivable R (([] : Ctx) ⊢ Tm.desc 0 (Tm.unit 1) ∶ Tm.sort 2) := by
+  refine ofRule (desc_in_Tprog (Desc.form (l := 0) (I := Tm.unit 1))) ?_
+  intro p hp
+  simp only [List.mem_cons, List.mem_nil_iff, or_false] at hp
+  rw [hp]
+  exact unit1
+
+theorem wfΓ : Derivable R (.wf ([Tm.unit 1] : Ctx)) := by
+  refine ofRule (core_in_Tprog (Core.wfCons (A := Tm.unit 1) (l := 1))) ?_
+  intro p hp
+  simp only [List.mem_cons, List.mem_nil_iff, or_false] at hp
+  rcases hp with rfl | rfl
+  · exact wfNil
+  · exact unit1
+
+theorem var0 : Derivable R (([Tm.unit 1] : Ctx) ⊢ Tm.var 0 ∶ Tm.unit 1) := by
+  refine ofRule (core_in_Tprog (Core.var (Γ := [Tm.unit 1]) (A := Tm.unit 1) (i := 0) ?_)) ?_
+  · simp [Ctx.lookup, Tm.shiftN, Tm.ren]
+  · intro p hp
+    simp only [List.mem_cons, List.mem_nil_iff, or_false] at hp
+    rw [hp]
+    exact wfΓ
+
+theorem unit1Γ : Derivable R (([Tm.unit 1] : Ctx) ⊢ Tm.unit 1 ∶ Tm.sort 1) := by
+  refine ofRule (T1_in_Tprog (Or.inl (unit_in_T0 (Unit.form (l := 1))))) ?_
+  intro p hp
+  simp only [List.mem_cons, List.mem_nil_iff, or_false] at hp
+  rw [hp]
+  exact wfΓ
+
+theorem descTyΓ : Derivable R (([Tm.unit 1] : Ctx) ⊢ Tm.desc 0 (Tm.unit 1) ∶ Tm.sort 2) := by
+  refine ofRule (desc_in_Tprog (Desc.form (l := 0) (I := Tm.unit 1))) ?_
+  intro p hp
+  simp only [List.mem_cons, List.mem_nil_iff, or_false] at hp
+  rw [hp]
+  exact unit1Γ
+
+/-- `[Unit_1] ⊢ dret (var 0) ∶ Desc_0 (Unit_1)`. -/
+theorem dretVar : Derivable R (([Tm.unit 1] : Ctx) ⊢ Tm.dret (Tm.var 0) ∶ Tm.desc 0 (Tm.unit 1)) := by
+  refine ofRule (desc_in_Tprog (Desc.ret (l := 0) (I := Tm.unit 1) (i := Tm.var 0))) ?_
+  intro p hp
+  simp only [List.mem_cons, List.mem_nil_iff, or_false] at hp
+  rcases hp with rfl | rfl
+  · exact descTyΓ
+  · exact var0
+
+theorem eqRefl : Derivable R
+    (([Tm.unit 1] : Ctx) ⊢ Tm.dret (Tm.var 0) ≡ Tm.dret (Tm.var 0) ∶ Tm.desc 0 (Tm.unit 1)) := by
+  refine ofRule (core_in_Tprog (Core.refl (t := Tm.dret (Tm.var 0))
+    (A := Tm.desc 0 (Tm.unit 1)))) ?_
+  intro p hp
+  simp only [List.mem_cons, List.mem_nil_iff, or_false] at hp
+  rw [hp]
+  exact dretVar
+
+/-- `var 0 ↦ tt`, everything else untouched. -/
+def σ : Nat → Tm
+  | 0 => Tm.tt
+  | n + 1 => Tm.var n
+
+theorem hσ : SubOK R σ [Tm.unit 1] [] := by
+  intro i A h
+  cases i with
+  | zero =>
+    have hA : A = Tm.unit 1 := by
+      have hs : some (Tm.unit 1) = some A := by simpa [Ctx.lookup, Tm.shiftN, Tm.ren] using h
+      cases hs
+      rfl
+    rw [hA]
+    show Derivable R (([] : Ctx) ⊢ σ 0 ∶ (Tm.unit 1).sub σ)
+    simpa [σ, Tm.sub] using tt1
+  | succ i => exact absurd h (by simp [Ctx.lookup])
+
+/-- `DescEq_subst` at this instance, ascribed the concrete judgment. -/
+theorem descEq_subst_concrete : Derivable R
+    (([] : Ctx) ⊢ Tm.dret Tm.tt ≡ Tm.dret Tm.tt ∶ Tm.desc 0 (Tm.unit 1)) := by
+  simpa [R, σ, Tm.sub] using
+    (DescEq_subst (sg := ([] : Sig)) (var := .cross) sigClosed (Γ := [Tm.unit 1]) (Δ := ([] : Ctx))
+      (l := 0) (I := Tm.unit 1) (D := Tm.dret (Tm.var 0)) (D' := Tm.dret (Tm.var 0))
+      (σ := σ) eqRefl hσ wfNil)
+
+end DescEqSubst
+
 open Review in
 def group : Group where
   name := "meta"
@@ -575,6 +692,26 @@ def group : Group where
         accepts t stuck
         accepts t uniform
         check (kernelAccepts t) "the kernel rejects the Σ rule at a canonical field" },
+    { name := "O7 sanity: dropping the quantity side condition q ≡ q' changes the computed description equation (a differential case)", run := fun _ => do
+        let DU : MTm := desc 0 (unit 0)
+        let S : MTm := enum 1
+        let E : MTm := lam (dret star)
+        -- two different literal quantities: `eqQtyApart` makes the equation `False`, and `λ e. e` checks at `eq -> False`
+        accepts (erased (lam (var 0)) (pi (eq DU (darg S E .one) (darg S E .many)) pfalse))
+        -- the *same* literal quantity: the equation is the `arg` relation (a Σ), not `False`, so the same term is rejected
+        rejects (erased (lam (var 0)) (pi (eq DU (darg S E .one) (darg S E .one)) pfalse))
+        -- the reference checker computes both the same way as the kernel (no dropped premise)
+        check (refVerdict (erased (lam (var 0)) (pi (eq DU (darg S E .one) (darg S E .many)) pfalse)) == "ok")
+          "the reference checker rejects the qtyApart equation"
+        check (refVerdict (erased (lam (var 0)) (pi (eq DU (darg S E .one) (darg S E .one)) pfalse)) != "ok")
+          "the reference checker accepts the same-quantity equation as False"
+        -- `Sigma.eq`'s negative side condition: the reduct `eqSigma` at a proposition first component
+        -- forms `a.1 = b.1` at a proposition, which the spec's `Eq.eq` rule (with the kernels'
+        -- formation restriction) rejects. If the side condition were dropped, this would be formed.
+        check (match WizMeta.infer (Review.env kernelOpts) Review.F []
+            (Tm.eqSigma Tm.True' (.unit 0) (.pair .tt .tt) (.pair .tt .tt)) with
+          | .error (.fail m) => has m "may be a proposition"
+          | _ => false) "eqSigma at a proposition is formed: the ¬ i.IsZero side condition is not enforced" },
     { name := "T4: an equation between Π types with domains in different universes (accepted by the kernels' rule, stuck with the levelled one)", run := fun _ => do
         accepts crossLevel
         rejects crossLevel { kernelOpts with eqTyLevelled := true }
@@ -689,7 +826,15 @@ def group : Group where
             check (WizMeta.ofTerm [] (u.instantiateAt 1 s) == some (u'.sub σ)) s!"instantiate 1: {repr u}"
             n := n + 1
         IO.println s!"    {n} subterms"
-        check (n ≥ 5000) s!"too few subterms: {n}" }
+        check (n ≥ 5000) s!"too few subterms: {n}" },
+    { name := "O7: `DescEq_subst` on a concrete substitution (`dret (var 0)` under `var 0 ↦ tt`)", run := fun _ => do
+        check (((Tm.dret (Tm.var 0)).sub DescEqSubst.σ) == Tm.dret Tm.tt)
+          "the concrete substitution does not compute to `dret tt`"
+        check (((Tm.dret (Tm.var 0)).sub DescEqSubst.σ) != Tm.dret (Tm.var 0))
+          "the substitution is the identity: the case pins nothing"
+        -- `DescEqSubst.descEq_subst_concrete` is the lemma applied at this instance; it is
+        -- elaborated when this module is compiled, at the substituted judgment.
+        IO.println "    `dret (var 0)` under `var 0 ↦ tt` derives `dret tt ≡ dret tt` at `Desc_0 Unit_1`" }
   ]
 
 def groups : List Group :=

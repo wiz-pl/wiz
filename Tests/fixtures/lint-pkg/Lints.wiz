@@ -1,0 +1,26 @@
+import Prelude
+import Text
+
+/-!
+A fixture package lint set: the smallest useful `wiz-lint/1` set. `W501` fires on a
+declaration whose name starts with `raw`; it reads only the `decl` and `spans`
+capabilities the set declares. The runner is a pure `String → String`: the stable view
+in, one `start<TAB>stop<TAB>anchor<TAB>text` finding per line out.
+-/
+
+lint-set "fixture" "wiz-lint/1" [decl, spans]
+
+def isRawDecl (line : String) : Bool :=
+  match String.splitOn line "\t" with
+  | field :: rest =>
+      match rest with
+      | name :: _ => if String.startsWith field "decl" then String.startsWith name "raw" else .false
+      | _ => .false
+  | _ => .false
+
+def noRawName (view : String) : String :=
+  if List.any isRawDecl (String.splitOn view "\n") then
+    "0\t0\traw\ta raw declaration"
+  else ""
+
+lint W501 "no-raw-name" api warning declaration [decl, spans] noRawName

@@ -1,0 +1,5 @@
+import Prelude
+
+-- A declaration already written under its module's prefix (`Thing.f` in module
+-- `Thing`): the default prefix leaves it at `Thing.f`, so it is not a violation.
+def Thing.f : Nat := 0

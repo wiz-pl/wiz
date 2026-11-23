@@ -1,0 +1,1854 @@
+{
+ "comment": "CORE-1.2 (wiz-notes/roadmap/wiz-core-next.md, M1.2): MTm values and the expected F0.Tm (`f0`, in the canonical rendering of Tests/StcBridge.lean's `renderTm`) or the expected refusal (`outside` + `why`). Sections are the classes; a case's `outside` must equal its section. The group `=stc-bridge` checks every case against `go` and compares the report to report.txt.",
+ "classes": [
+  {
+   "class": "core",
+   "note": "In F0: closed sorts, \u03c9 binders, \u03a0/\u03a3 whose component sorts are syntactic, globals without level arguments. `prf` is dropped: it is a kernel-evaluator marker, not a term, and F0 has no markers.",
+   "cases": [
+    {
+     "id": "var",
+     "mtm": [
+      "var",
+      3
+     ],
+     "f0": "(var 3)"
+    },
+    {
+     "id": "univ-sort-1",
+     "mtm": [
+      "univ",
+      0
+     ],
+     "f0": "(sort u0)"
+    },
+    {
+     "id": "univ-sort-2",
+     "mtm": [
+      "univ",
+      1
+     ],
+     "f0": "(sort u1)"
+    },
+    {
+     "id": "prop",
+     "mtm": [
+      "prop"
+     ],
+     "f0": "(sort prop)"
+    },
+    {
+     "id": "true",
+     "mtm": [
+      "ptrue"
+     ],
+     "f0": "(unit prop)"
+    },
+    {
+     "id": "false",
+     "mtm": [
+      "pfalse"
+     ],
+     "f0": "(empty prop)"
+    },
+    {
+     "id": "unit-sort-1",
+     "mtm": [
+      "unit",
+      0
+     ],
+     "f0": "(unit u0)"
+    },
+    {
+     "id": "unit-sort-2",
+     "mtm": [
+      "unit",
+      1
+     ],
+     "f0": "(unit u1)"
+    },
+    {
+     "id": "empty-sort-1",
+     "mtm": [
+      "empty",
+      0
+     ],
+     "f0": "(empty u0)"
+    },
+    {
+     "id": "enum",
+     "mtm": [
+      "enum",
+      3
+     ],
+     "f0": "(enum 3)"
+    },
+    {
+     "id": "tag",
+     "mtm": [
+      "tag",
+      3,
+      2
+     ],
+     "f0": "(tag 3 2)"
+    },
+    {
+     "id": "idU/type",
+     "mtm": [
+      "pi",
+      [
+       "univ",
+       0
+      ],
+      [
+       "univ",
+       0
+      ]
+     ],
+     "f0": "(pi u1 (sort u0) (sort u0))"
+    },
+    {
+     "id": "idU/value",
+     "mtm": [
+      "lam",
+      [
+       "var",
+       0
+      ]
+     ],
+     "f0": "(lam (var 0))"
+    },
+    {
+     "id": "twice/type",
+     "mtm": [
+      "pi",
+      [
+       "pi",
+       [
+        "univ",
+        0
+       ],
+       [
+        "univ",
+        0
+       ]
+      ],
+      [
+       "pi",
+       [
+        "univ",
+        0
+       ],
+       [
+        "univ",
+        0
+       ]
+      ]
+     ],
+     "f0": "(pi u1 (pi u1 (sort u0) (sort u0)) (pi u1 (sort u0) (sort u0)))"
+    },
+    {
+     "id": "twice/value",
+     "mtm": [
+      "lam",
+      [
+       "lam",
+       [
+        "app",
+        [
+         "var",
+         1
+        ],
+        [
+         "app",
+         [
+          "var",
+          1
+         ],
+         [
+          "var",
+          0
+         ]
+        ]
+       ]
+      ]
+     ],
+     "f0": "(lam (lam (app (var 1) (app (var 1) (var 0)))))"
+    },
+    {
+     "id": "caseF/type",
+     "mtm": [
+      "pi",
+      [
+       "prop"
+      ],
+      [
+       "pi",
+       [
+        "enum",
+        1
+       ],
+       [
+        "prop"
+       ]
+      ]
+     ],
+     "f0": "(pi u0 (sort prop) (pi u0 (enum 1) (sort prop)))"
+    },
+    {
+     "id": "caseF/value",
+     "mtm": [
+      "lam",
+      [
+       "lam",
+       [
+        "ecase",
+        [
+         "prop"
+        ],
+        [
+         "var",
+         0
+        ],
+        [
+         [
+          "var",
+          1
+         ]
+        ]
+       ]
+      ]
+     ],
+     "f0": "(lam (lam (ecase (sort prop) (var 0) (bcons (var 1) bnil))))"
+    },
+    {
+     "id": "A/type",
+     "mtm": [
+      "univ",
+      0
+     ],
+     "f0": "(sort u0)"
+    },
+    {
+     "id": "a/type",
+     "mtm": [
+      "const",
+      "A",
+      []
+     ],
+     "f0": "(const A)"
+    },
+    {
+     "id": "sigma",
+     "mtm": [
+      "sigma",
+      [
+       "univ",
+       0
+      ],
+      [
+       "unit",
+       0
+      ]
+     ],
+     "f0": "(sigma u1 (sort u0) (unit u0))"
+    },
+    {
+     "id": "sorted/pi",
+     "mtm": [
+      "sorted",
+      1,
+      1,
+      [
+       "pi",
+       [
+        "prop"
+       ],
+       [
+        "prop"
+       ]
+      ]
+     ],
+     "f0": "(pi u0 (sort prop) (sort prop))"
+    },
+    {
+     "id": "sorted/sigma",
+     "mtm": [
+      "sorted",
+      0,
+      1,
+      [
+       "sigma",
+       [
+        "univ",
+        0
+       ],
+       [
+        "unit",
+        0
+       ]
+      ]
+     ],
+     "f0": "(sigma u0 (sort u0) (unit u0))"
+    },
+    {
+     "id": "pair-fst-snd",
+     "mtm": [
+      "snd",
+      [
+       "pair",
+       [
+        "var",
+        0
+       ],
+       [
+        "var",
+        1
+       ]
+      ]
+     ],
+     "f0": "(snd (pair (var 0) (var 1)))"
+    },
+    {
+     "id": "eq",
+     "mtm": [
+      "eq",
+      [
+       "unit",
+       0
+      ],
+      [
+       "star"
+      ],
+      [
+       "star"
+      ]
+     ],
+     "f0": "(eq (unit u0) tt tt)"
+    },
+    {
+     "id": "eqTy",
+     "mtm": [
+      "eqTy",
+      [
+       "univ",
+       0
+      ],
+      [
+       "unit",
+       0
+      ]
+     ],
+     "f0": "(eqTy (sort u0) (unit u0))"
+    },
+    {
+     "id": "refl",
+     "mtm": [
+      "refl",
+      [
+       "enum",
+       1
+      ],
+      [
+       "tag",
+       1,
+       0
+      ]
+     ],
+     "f0": "(refl (enum 1) (tag 1 0))"
+    },
+    {
+     "id": "reflTy",
+     "mtm": [
+      "reflTy",
+      [
+       "univ",
+       0
+      ]
+     ],
+     "f0": "(reflTy (sort u0))"
+    },
+    {
+     "id": "cast",
+     "mtm": [
+      "cast",
+      [
+       "univ",
+       0
+      ],
+      [
+       "univ",
+       0
+      ],
+      [
+       "reflTy",
+       [
+        "univ",
+        0
+       ]
+      ],
+      [
+       "unit",
+       0
+      ]
+     ],
+     "f0": "(cast (sort u0) (sort u0) (reflTy (sort u0)) (unit u0))"
+    },
+    {
+     "id": "transp",
+     "mtm": [
+      "transp",
+      [
+       "unit",
+       0
+      ],
+      [
+       "star"
+      ],
+      [
+       "lam",
+       [
+        "unit",
+        0
+       ]
+      ],
+      [
+       "star"
+      ],
+      [
+       "star"
+      ],
+      [
+       "refl",
+       [
+        "unit",
+        0
+       ],
+       [
+        "star"
+       ]
+      ]
+     ],
+     "f0": "(transp (unit u0) tt (lam (unit u0)) tt tt (refl (unit u0) tt))"
+    },
+    {
+     "id": "ulift",
+     "mtm": [
+      "ulift",
+      1,
+      2,
+      [
+       "enum",
+       2
+      ]
+     ],
+     "f0": "(ulift u1 (enum 2))"
+    },
+    {
+     "id": "up",
+     "mtm": [
+      "up",
+      [
+       "star"
+      ]
+     ],
+     "f0": "(up tt)"
+    },
+    {
+     "id": "down",
+     "mtm": [
+      "down",
+      [
+       "var",
+       0
+      ]
+     ],
+     "f0": "(down (var 0))"
+    },
+    {
+     "id": "letE",
+     "mtm": [
+      "letE",
+      [
+       "unit",
+       0
+      ],
+      [
+       "star"
+      ],
+      [
+       "star"
+      ]
+     ],
+     "f0": "(letE (unit u0) tt tt)"
+    },
+    {
+     "id": "letUnit",
+     "mtm": [
+      "letUnit",
+      [
+       "star"
+      ],
+      [
+       "star"
+      ]
+     ],
+     "f0": "(letUnit tt tt)"
+    },
+    {
+     "id": "ann",
+     "mtm": [
+      "ann",
+      [
+       "star"
+      ],
+      [
+       "unit",
+       0
+      ]
+     ],
+     "f0": "(ann tt (unit u0))"
+    },
+    {
+     "id": "exfalso",
+     "mtm": [
+      "exfalso",
+      [
+       "unit",
+       0
+      ],
+      [
+       "star"
+      ]
+     ],
+     "f0": "(absurd (unit u0) tt)"
+    },
+    {
+     "id": "global/app",
+     "mtm": [
+      "app",
+      [
+       "const",
+       "idU",
+       []
+      ],
+      [
+       "enum",
+       2
+      ]
+     ],
+     "f0": "(app (const idU) (enum 2))"
+    },
+    {
+     "id": "prf/dropped",
+     "mtm": [
+      "prf",
+      [
+       "num",
+       0
+      ],
+      [
+       "star"
+      ]
+     ],
+     "f0": "tt"
+    },
+    {
+     "id": "prf/open-level-dropped",
+     "mtm": [
+      "prf",
+      [
+       "param",
+       "u"
+      ],
+      [
+       "star"
+      ]
+     ],
+     "f0": "tt"
+    }
+   ]
+  },
+  {
+   "class": "qty",
+   "note": "A binder, field or sized case at a quantity other than \u03c9. `darg` at a literal is a quantity error before it is a `Desc` former.",
+   "cases": [
+    {
+     "id": "piq",
+     "mtm": [
+      "piq",
+      "one",
+      [
+       "univ",
+       0
+      ],
+      [
+       "univ",
+       0
+      ]
+     ],
+     "outside": "qty",
+     "why": "piq"
+    },
+    {
+     "id": "sigmaq",
+     "mtm": [
+      "sigmaq",
+      "zero",
+      [
+       "univ",
+       1
+      ],
+      [
+       "unit",
+       0
+      ]
+     ],
+     "outside": "qty",
+     "why": "sigmaq"
+    },
+    {
+     "id": "letq",
+     "mtm": [
+      "letq",
+      "one",
+      [
+       "univ",
+       0
+      ],
+      [
+       "enum",
+       2
+      ],
+      [
+       "var",
+       0
+      ]
+     ],
+     "outside": "qty",
+     "why": "letq"
+    },
+    {
+     "id": "darg",
+     "mtm": [
+      "darg",
+      [
+       "enum",
+       2
+      ],
+      [
+       "lam",
+       [
+        "dret",
+        [
+         "star"
+        ]
+       ]
+      ],
+      "zero"
+     ],
+     "outside": "qty",
+     "why": "darg"
+    },
+    {
+     "id": "scaseq",
+     "mtm": [
+      "scaseq",
+      "zero",
+      0,
+      [
+       "unit",
+       0
+      ],
+      [
+       "darg",
+       [
+        "enum",
+        2
+       ],
+       [
+        "lam",
+        [
+         "ecase",
+         [
+          "desc",
+          0,
+          [
+           "unit",
+           0
+          ]
+         ],
+         [
+          "var",
+          0
+         ],
+         [
+          [
+           "dret",
+           [
+            "star"
+           ]
+          ],
+          [
+           "drec",
+           [
+            "star"
+           ],
+           [
+            "dret",
+            [
+             "star"
+            ]
+           ],
+           "many"
+          ]
+         ]
+        ]
+       ],
+       "many"
+      ],
+      0,
+      [
+       "lam",
+       [
+        "unit",
+        0
+       ]
+      ],
+      [
+       "star"
+      ],
+      [
+       "star"
+      ],
+      [
+       "star"
+      ],
+      [
+       "star"
+      ]
+     ],
+     "outside": "qty",
+     "why": "scaseq"
+    }
+   ]
+  },
+  {
+   "class": "level",
+   "note": "A level parameter, a `const` with level arguments, or a closed sort outside F0's `Prop`/`Sort 1`/`Sort 2`.",
+   "cases": [
+    {
+     "id": "sortParam",
+     "mtm": [
+      "sortParam",
+      "u"
+     ],
+     "outside": "level",
+     "why": "sortParam"
+    },
+    {
+     "id": "const-levels",
+     "mtm": [
+      "const",
+      "idP",
+      [
+       1
+      ]
+     ],
+     "outside": "level",
+     "why": "const/levels"
+    },
+    {
+     "id": "sortLv/open",
+     "mtm": [
+      "sortLv",
+      [
+       "param",
+       "u"
+      ]
+     ],
+     "outside": "level",
+     "why": "sortLv/open"
+    },
+    {
+     "id": "sortLv/range",
+     "mtm": [
+      "sortLv",
+      [
+       "num",
+       3
+      ]
+     ],
+     "outside": "level",
+     "why": "sortLv/range"
+    },
+    {
+     "id": "univ/range",
+     "mtm": [
+      "univ",
+      2
+     ],
+     "outside": "level",
+     "why": "univ"
+    },
+    {
+     "id": "ulift/range",
+     "mtm": [
+      "ulift",
+      1,
+      3,
+      [
+       "enum",
+       2
+      ]
+     ],
+     "outside": "level",
+     "why": "ulift"
+    },
+    {
+     "id": "sorted/range",
+     "mtm": [
+      "sorted",
+      1,
+      3,
+      [
+       "pi",
+       [
+        "univ",
+        0
+       ],
+       [
+        "univ",
+        0
+       ]
+      ]
+     ],
+     "outside": "level",
+     "why": "sorted/pi"
+    }
+   ]
+  },
+  {
+   "class": "desc",
+   "note": "`Desc`/`\u03bc` and its constructors and eliminators.",
+   "cases": [
+    {
+     "id": "Nat/type",
+     "mtm": [
+      "mu",
+      0,
+      [
+       "unit",
+       0
+      ],
+      [
+       "darg",
+       [
+        "enum",
+        2
+       ],
+       [
+        "lam",
+        [
+         "ecase",
+         [
+          "desc",
+          0,
+          [
+           "unit",
+           0
+          ]
+         ],
+         [
+          "var",
+          0
+         ],
+         [
+          [
+           "dret",
+           [
+            "star"
+           ]
+          ],
+          [
+           "drec",
+           [
+            "star"
+           ],
+           [
+            "dret",
+            [
+             "star"
+            ]
+           ],
+           "many"
+          ]
+         ]
+        ]
+       ],
+       "many"
+      ],
+      [
+       "star"
+      ]
+     ],
+     "outside": "desc",
+     "why": "mu"
+    },
+    {
+     "id": "zero/value",
+     "mtm": [
+      "ann",
+      [
+       "con",
+       [
+        "pair",
+        [
+         "tag",
+         2,
+         0
+        ],
+        [
+         "pair",
+         [
+          "star"
+         ],
+         [
+          "star"
+         ]
+        ]
+       ]
+      ],
+      [
+       "const",
+       "Nat",
+       []
+      ]
+     ],
+     "outside": "desc",
+     "why": "con"
+    },
+    {
+     "id": "desc",
+     "mtm": [
+      "desc",
+      0,
+      [
+       "unit",
+       0
+      ]
+     ],
+     "outside": "desc",
+     "why": "desc"
+    },
+    {
+     "id": "dret",
+     "mtm": [
+      "dret",
+      [
+       "star"
+      ]
+     ],
+     "outside": "desc",
+     "why": "dret"
+    },
+    {
+     "id": "darg",
+     "mtm": [
+      "darg",
+      [
+       "enum",
+       2
+      ],
+      [
+       "lam",
+       [
+        "dret",
+        [
+         "star"
+        ]
+       ]
+      ],
+      "many"
+     ],
+     "outside": "desc",
+     "why": "darg"
+    },
+    {
+     "id": "drec",
+     "mtm": [
+      "drec",
+      [
+       "star"
+      ],
+      [
+       "dret",
+       [
+        "star"
+       ]
+      ],
+      "many"
+     ],
+     "outside": "desc",
+     "why": "drec"
+    },
+    {
+     "id": "dhrec",
+     "mtm": [
+      "dhrec",
+      [
+       "star"
+      ],
+      [
+       "star"
+      ],
+      [
+       "dret",
+       [
+        "star"
+       ]
+      ],
+      "many"
+     ],
+     "outside": "desc",
+     "why": "dhrec"
+    },
+    {
+     "id": "delim",
+     "mtm": [
+      "delim",
+      1,
+      [
+       "lam",
+       [
+        "unit",
+        0
+       ]
+      ],
+      [
+       "lam",
+       [
+        "star"
+       ]
+      ],
+      [
+       "lam",
+       [
+        "lam",
+        [
+         "lam",
+         [
+          "lam",
+          [
+           "star"
+          ]
+         ]
+        ]
+       ]
+      ],
+      [
+       "lam",
+       [
+        "lam",
+        [
+         "lam",
+         [
+          "lam",
+          [
+           "star"
+          ]
+         ]
+        ]
+       ]
+      ],
+      [
+       "lam",
+       [
+        "lam",
+        [
+         "lam",
+         [
+          "lam",
+          [
+           "lam",
+           [
+            "star"
+           ]
+          ]
+         ]
+        ]
+       ]
+      ],
+      [
+       "ann",
+       [
+        "darg",
+        [
+         "enum",
+         2
+        ],
+        [
+         "lam",
+         [
+          "ecase",
+          [
+           "desc",
+           0,
+           [
+            "unit",
+            0
+           ]
+          ],
+          [
+           "var",
+           0
+          ],
+          [
+           [
+            "dret",
+            [
+             "star"
+            ]
+           ],
+           [
+            "drec",
+            [
+             "star"
+            ],
+            [
+             "dret",
+             [
+              "star"
+             ]
+            ],
+            "many"
+           ]
+          ]
+         ]
+        ],
+        "many"
+       ],
+       [
+        "desc",
+        0,
+        [
+         "unit",
+         0
+        ]
+       ]
+      ]
+     ],
+     "outside": "desc",
+     "why": "delim"
+    },
+    {
+     "id": "ind",
+     "mtm": [
+      "ind",
+      0,
+      [
+       "unit",
+       0
+      ],
+      [
+       "darg",
+       [
+        "enum",
+        2
+       ],
+       [
+        "lam",
+        [
+         "ecase",
+         [
+          "desc",
+          0,
+          [
+           "unit",
+           0
+          ]
+         ],
+         [
+          "var",
+          0
+         ],
+         [
+          [
+           "dret",
+           [
+            "star"
+           ]
+          ],
+          [
+           "drec",
+           [
+            "star"
+           ],
+           [
+            "dret",
+            [
+             "star"
+            ]
+           ],
+           "many"
+          ]
+         ]
+        ]
+       ],
+       "many"
+      ],
+      1,
+      [
+       "lam",
+       [
+        "lam",
+        [
+         "enum",
+         2
+        ]
+       ]
+      ],
+      [
+       "lam",
+       [
+        "lam",
+        [
+         "lam",
+         [
+          "tag",
+          2,
+          0
+         ]
+        ]
+       ]
+      ],
+      [
+       "star"
+      ],
+      [
+       "star"
+      ]
+     ],
+     "outside": "desc",
+     "why": "ind"
+    }
+   ]
+  },
+  {
+   "class": "size",
+   "note": "Sizes: `size`, `szInf`, `szSuc`, `sizeLt`, `mus`, `sfix` and the sized case.",
+   "cases": [
+    {
+     "id": "size",
+     "mtm": [
+      "size"
+     ],
+     "outside": "size",
+     "why": "size"
+    },
+    {
+     "id": "szInf",
+     "mtm": [
+      "szInf"
+     ],
+     "outside": "size",
+     "why": "szInf"
+    },
+    {
+     "id": "szSuc",
+     "mtm": [
+      "szSuc",
+      [
+       "szInf"
+      ]
+     ],
+     "outside": "size",
+     "why": "szSuc"
+    },
+    {
+     "id": "sizeLt",
+     "mtm": [
+      "sizeLt",
+      [
+       "szInf"
+      ]
+     ],
+     "outside": "size",
+     "why": "sizeLt"
+    },
+    {
+     "id": "mus",
+     "mtm": [
+      "mus",
+      0,
+      [
+       "unit",
+       0
+      ],
+      [
+       "darg",
+       [
+        "enum",
+        2
+       ],
+       [
+        "lam",
+        [
+         "ecase",
+         [
+          "desc",
+          0,
+          [
+           "unit",
+           0
+          ]
+         ],
+         [
+          "var",
+          0
+         ],
+         [
+          [
+           "dret",
+           [
+            "star"
+           ]
+          ],
+          [
+           "drec",
+           [
+            "star"
+           ],
+           [
+            "dret",
+            [
+             "star"
+            ]
+           ],
+           "many"
+          ]
+         ]
+        ]
+       ],
+       "many"
+      ],
+      [
+       "star"
+      ],
+      [
+       "szInf"
+      ]
+     ],
+     "outside": "size",
+     "why": "mus"
+    },
+    {
+     "id": "sfix",
+     "mtm": [
+      "sfix",
+      0,
+      [
+       "unit",
+       0
+      ],
+      [
+       "darg",
+       [
+        "enum",
+        2
+       ],
+       [
+        "lam",
+        [
+         "ecase",
+         [
+          "desc",
+          0,
+          [
+           "unit",
+           0
+          ]
+         ],
+         [
+          "var",
+          0
+         ],
+         [
+          [
+           "dret",
+           [
+            "star"
+           ]
+          ],
+          [
+           "drec",
+           [
+            "star"
+           ],
+           [
+            "dret",
+            [
+             "star"
+            ]
+           ],
+           "many"
+          ]
+         ]
+        ]
+       ],
+       "many"
+      ],
+      1,
+      [
+       "lam",
+       [
+        "lam",
+        [
+         "enum",
+         2
+        ]
+       ]
+      ],
+      [
+       "lam",
+       [
+        "lam",
+        [
+         "lam",
+         [
+          "lam",
+          [
+           "tag",
+           2,
+           0
+          ]
+         ]
+        ]
+       ]
+      ],
+      [
+       "szInf"
+      ],
+      [
+       "star"
+      ],
+      [
+       "star"
+      ]
+     ],
+     "outside": "size",
+     "why": "sfix"
+    },
+    {
+     "id": "scase",
+     "mtm": [
+      "scase",
+      0,
+      [
+       "unit",
+       0
+      ],
+      [
+       "darg",
+       [
+        "enum",
+        2
+       ],
+       [
+        "lam",
+        [
+         "ecase",
+         [
+          "desc",
+          0,
+          [
+           "unit",
+           0
+          ]
+         ],
+         [
+          "var",
+          0
+         ],
+         [
+          [
+           "dret",
+           [
+            "star"
+           ]
+          ],
+          [
+           "drec",
+           [
+            "star"
+           ],
+           [
+            "dret",
+            [
+             "star"
+            ]
+           ],
+           "many"
+          ]
+         ]
+        ]
+       ],
+       "many"
+      ],
+      1,
+      [
+       "lam",
+       [
+        "lam",
+        [
+         "enum",
+         2
+        ]
+       ]
+      ],
+      [
+       "lam",
+       [
+        "lam",
+        [
+         "lam",
+         [
+          "tag",
+          2,
+          0
+         ]
+        ]
+       ]
+      ],
+      [
+       "star"
+      ],
+      [
+       "star"
+      ],
+      [
+       "star"
+      ]
+     ],
+     "outside": "size",
+     "why": "scase"
+    }
+   ]
+  },
+  {
+   "class": "nu",
+   "note": "`\u03bd` and its operations.",
+   "cases": [
+    {
+     "id": "nu",
+     "mtm": [
+      "nu",
+      0,
+      [
+       "unit",
+       0
+      ],
+      [
+       "darg",
+       [
+        "enum",
+        2
+       ],
+       [
+        "lam",
+        [
+         "ecase",
+         [
+          "desc",
+          0,
+          [
+           "unit",
+           0
+          ]
+         ],
+         [
+          "var",
+          0
+         ],
+         [
+          [
+           "dret",
+           [
+            "star"
+           ]
+          ],
+          [
+           "drec",
+           [
+            "star"
+           ],
+           [
+            "dret",
+            [
+             "star"
+            ]
+           ],
+           "many"
+          ]
+         ]
+        ]
+       ],
+       "many"
+      ],
+      [
+       "star"
+      ],
+      [
+       "szInf"
+      ]
+     ],
+     "outside": "nu",
+     "why": "nu"
+    },
+    {
+     "id": "out",
+     "mtm": [
+      "out",
+      [
+       "var",
+       0
+      ]
+     ],
+     "outside": "nu",
+     "why": "out"
+    },
+    {
+     "id": "cocon",
+     "mtm": [
+      "cocon",
+      [
+       "star"
+      ]
+     ],
+     "outside": "nu",
+     "why": "cocon"
+    },
+    {
+     "id": "scofix",
+     "mtm": [
+      "scofix",
+      0,
+      [
+       "unit",
+       0
+      ],
+      [
+       "darg",
+       [
+        "enum",
+        2
+       ],
+       [
+        "lam",
+        [
+         "ecase",
+         [
+          "desc",
+          0,
+          [
+           "unit",
+           0
+          ]
+         ],
+         [
+          "var",
+          0
+         ],
+         [
+          [
+           "dret",
+           [
+            "star"
+           ]
+          ],
+          [
+           "drec",
+           [
+            "star"
+           ],
+           [
+            "dret",
+            [
+             "star"
+            ]
+           ],
+           "many"
+          ]
+         ]
+        ]
+       ],
+       "many"
+      ],
+      [
+       "unit",
+       0
+      ],
+      [
+       "star"
+      ],
+      [
+       "szInf"
+      ],
+      [
+       "star"
+      ],
+      [
+       "star"
+      ]
+     ],
+     "outside": "nu",
+     "why": "scofix"
+    },
+    {
+     "id": "coit",
+     "mtm": [
+      "coit",
+      0,
+      [
+       "unit",
+       0
+      ],
+      [
+       "darg",
+       [
+        "enum",
+        2
+       ],
+       [
+        "lam",
+        [
+         "ecase",
+         [
+          "desc",
+          0,
+          [
+           "unit",
+           0
+          ]
+         ],
+         [
+          "var",
+          0
+         ],
+         [
+          [
+           "dret",
+           [
+            "star"
+           ]
+          ],
+          [
+           "drec",
+           [
+            "star"
+           ],
+           [
+            "dret",
+            [
+             "star"
+            ]
+           ],
+           "many"
+          ]
+         ]
+        ]
+       ],
+       "many"
+      ],
+      [
+       "unit",
+       0
+      ],
+      [
+       "star"
+      ],
+      [
+       "star"
+      ],
+      [
+       "szInf"
+      ]
+     ],
+     "outside": "nu",
+     "why": "coit"
+    }
+   ]
+  },
+  {
+   "class": "sort",
+   "note": "The component sorts are not syntactic: the domain is a `const` or an `app`, so the elaborator's sorts pass would be needed. Counted, not guessed.",
+   "cases": [
+    {
+     "id": "pi-over-const",
+     "mtm": [
+      "ann",
+      [
+       "lam",
+       [
+        "var",
+        0
+       ]
+      ],
+      [
+       "pi",
+       [
+        "const",
+        "A",
+        []
+       ],
+       [
+        "const",
+        "A",
+        []
+       ]
+      ]
+     ],
+     "outside": "sort",
+     "why": "pi/component-sort"
+    },
+    {
+     "id": "sigma-over-app",
+     "mtm": [
+      "sigma",
+      [
+       "app",
+       [
+        "const",
+        "idU",
+        []
+       ],
+       [
+        "enum",
+        2
+       ]
+      ],
+      [
+       "unit",
+       0
+      ]
+     ],
+     "outside": "sort",
+     "why": "sigma/component-sort"
+    },
+    {
+     "id": "ulift/k",
+     "mtm": [
+      "ulift",
+      2,
+      2,
+      [
+       "enum",
+       2
+      ]
+     ],
+     "outside": "sort",
+     "why": "ulift/k"
+    }
+   ]
+  }
+ ]
+}

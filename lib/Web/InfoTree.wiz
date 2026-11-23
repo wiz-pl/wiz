@@ -1,0 +1,553 @@
+import IO
+import Json
+import Text
+import Web.Highlight
+import Web.Loom
+
+/-!
+# Web.InfoTree
+
+The one typed model behind the infoview's answers: tagged text, its spans, a goal/term
+tree, the `wiz.hover/1` answer and the `wiz.highlight/1` span block.
+
+Before this module `Web.Goals` walked the protocol's JSON as it drew, `Web.Hover` parsed
+the LSP `contents` on its own, and `Web.DocLive` had a third shape for the same hover.
+The shapes agreed only by inspection. Here they are decoded once:
+
+* `InfoTree.Node` — the protocol's tagged text (`infoview-protocol.md` §2): text, an
+  `append`, or a `tag` with its kind, name, reference and source span. `InfoTree.ofJson`
+  reads the JSON; `InfoTree.view` renders it with the infoview's markup; `tagsOf` walks it
+  for selection and navigation.
+* `InfoTree.Answer` — the `wiz.hover/1` payload (`docs-highlighting.md` §8.1): the query
+  position, kind, name/type, doc, definition and the optional `wizHighlight` blocks.
+  `InfoTree.Answer.ofJson` is stricter than the old `contents` parse: a schema it does
+  not know is "no answer", never a card built from fields it guessed.
+* `InfoTree.HighlightBlock` — the `wiz.highlight/1` blocks (`wiz doc`'s page data and an
+  LSP answer's `wizHighlight`): `{index, language, spans}`, with the class vocabulary of
+  `Web.Highlight` and the all-or-plain refusal rule. `tokensForLine` slices a block's
+  spans to one rendered line, so the hover card, the docs panel and a future reader all
+  assemble spans through one function.
+
+The model is data only: no `Loom.raw`, no parser and no language in the runtime. Offsets
+are UTF-16, the browser's unit; the docs highlighter converts once at its edge.
+-/
+
+-- ## JSON helpers (the protocol's field access)
+
+/-- A number field at a path, or 0. -/
+partial def InfoTree.natAt (j : Json) : List String → Nat
+  | .nil => match Json.asNat j with
+    | .some n => n
+    | .none => 0
+  | .cons k ks => match Json.get j k with
+    | .some v => InfoTree.natAt v ks
+    | .none => 0
+
+/-- A string field. -/
+partial def InfoTree.strAt (j : Json) : List String → String
+  | .nil => match Json.asString j with
+    | .some s => s
+    | .none => ""
+  | .cons k ks => match Json.get j k with
+    | .some v => InfoTree.strAt v ks
+    | .none => ""
+
+/-- An array's elements, or none for any other value. -/
+def InfoTree.arrOf (j : Json) : List Json := match j with
+  | .arr xs => Jsons.toList xs
+  | _ => []
+
+/-- The strings at the front of a list (a missing one is the empty string). -/
+def InfoTree.strings (js : List Json) : List String := List.map (fun j => match Json.asString j with
+  | .some s => s
+  | .none => "") js
+
+/-- The `[info, body]` of a tagged-text `tag`, if that is the shape. -/
+def InfoTree.tagParts (o : Option Json) : Option (Json × Json) := match o with
+  | .some v => match v with
+    | .arr xs => match Jsons.toList xs with
+      | .cons info (.cons body .nil) => .some (info, body)
+      | _ => .none
+    | _ => .none
+  | .none => .none
+
+-- ## Spans (the infoview's display form)
+
+/-- A range as `LINE:CHAR-LINE:CHAR`, or `""` when there is no start. -/
+def InfoTree.spanText (range : Json) : String :=
+  match Json.get range "start" with
+  | .none => ""
+  | .some start =>
+    let stop := match Json.get range "end" with
+      | .some e => e
+      | .none => start;
+    String.append (Nat.toString (InfoTree.natAt start ["line"]))
+      (String.append ":" (String.append (Nat.toString (InfoTree.natAt start ["character"]))
+        (String.append "-" (String.append (Nat.toString (InfoTree.natAt stop ["line"]))
+          (String.append ":" (Nat.toString (InfoTree.natAt stop ["character"])))))))
+
+/-- `data-span` for a range, or `[]` when there is no span. -/
+def InfoTree.spanAttrs (range : Json) : List Loom.Attr :=
+  let s := InfoTree.spanText range;
+  match String.isEmpty s with
+  | .true => []
+  | .false => [Loom.attr "data-span" s]
+
+/-- A tag's class suffix: its kind, or `other` when the server omits one. -/
+def InfoTree.tagKind (kind : String) : String :=
+  match String.isEmpty kind with
+  | .true => "other"
+  | .false => kind
+
+/-- A tag's range (`tag.range`, when a server sends one). -/
+def InfoTree.tagRange (info : Json) : Json := match Json.get info "range" with
+  | .some r => r
+  | .none => Json.mkNull
+
+/-- A tag's numeric `ref` as the attribute text (`""` when absent). -/
+def InfoTree.refText (info : Json) : String := match Json.get info "ref" with
+  | .some v => match Json.asNat v with
+    | .some n => Nat.toString n
+    | .none => match Json.asString v with
+      | .some x => x
+      | .none => ""
+  | .none => ""
+
+-- ## Tagged text as a typed tree
+
+/-- One tag of the infoview's tagged text: its reference, kind, name and display span.
+`ref` is text, not a number, because the protocol permits either (`refText`). -/
+structure InfoTree.Tag where
+  ref : String
+  kind : String
+  name : String
+  span : String
+
+/-- Tagged text: a text run, a tag around a body, or a sequence. `Node` and `Kids` are
+mutual because Wiz has no nested inductive types. -/
+mutual
+inductive InfoTree.Node where
+  | text (s : String)
+  | tag (tag : InfoTree.Tag) (body : InfoTree.Node)
+  | append (kids : InfoTree.Kids)
+/-- The pieces of an `append`, in reading order. -/
+inductive InfoTree.Kids where
+  | nil
+  | cons (head : InfoTree.Node) (tail : InfoTree.Kids)
+end
+
+/-- A tag's metadata from the protocol's info object. -/
+def InfoTree.tagOf (info : Json) : InfoTree.Tag :=
+  InfoTree.Tag.mk (InfoTree.refText info) (InfoTree.tagKind (Json.getStr info "kind"))
+    (Json.getStr info "name") (InfoTree.spanText (InfoTree.tagRange info))
+
+mutual
+/-- Tagged text from the protocol's JSON: `{"text": s}`, `{"append": [tt…]}` or
+`{"tag": [{"ref": n, "kind": k, "name"?: x, "range"?: r}, tt]}`. -/
+partial def InfoTree.ofJson (j : Json) : InfoTree.Node :=
+  match Json.get j "text" with
+  | .some (.str s) => .text s
+  | .some _ => .text ""
+  | .none => match Json.get j "append" with
+    | .some v => .append (InfoTree.ofAll (InfoTree.arrOf v))
+    | .none => match Json.get j "tag" with
+      | .some v => match InfoTree.tagParts (.some v) with
+        | .some p => .tag (InfoTree.tagOf p.1) (InfoTree.ofJson p.2)
+        | .none => .text ""
+      | .none => .text ""
+/-- `InfoTree.ofJson` on each element. -/
+partial def InfoTree.ofAll : List Json → InfoTree.Kids
+  | .nil => .nil
+  | .cons x rest => .cons (InfoTree.ofJson x) (InfoTree.ofAll rest)
+end
+
+/-- The `Kids` as an ordinary list. -/
+def InfoTree.kidsToList : InfoTree.Kids → List InfoTree.Node
+  | .nil => []
+  | .cons x rest => List.append [x] (InfoTree.kidsToList rest)
+
+-- ## Tags: numbering, selection and navigation
+
+/-- One tag of a rendered view: its `data-idx`, the server's `ref` and its source span. -/
+structure InfoTree.WalkTag where
+  idx : Nat
+  ref : String
+  span : String
+
+/-- The state of a tagged-text traversal: the next tag index and the tags seen. -/
+structure InfoTree.Walk where
+  next : Nat
+  tags : List InfoTree.WalkTag
+
+/-- The next numbering state for a tag `t`. -/
+def InfoTree.Walk.tag (st : InfoTree.Walk) (t : InfoTree.Tag) : InfoTree.Walk :=
+  InfoTree.Walk.mk (st.next + 1)
+    (List.append st.tags [InfoTree.WalkTag.mk st.next t.ref t.span])
+
+mutual
+/-- Collect a typed tagged text's tags, in document order, onto `st`. -/
+partial def InfoTree.tagsOf (n : InfoTree.Node) (st : InfoTree.Walk) : InfoTree.Walk :=
+  match n with
+  | .text _ => st
+  | .append kids => InfoTree.tagsOfAll kids st
+  | .tag t body => InfoTree.tagsOf body (InfoTree.Walk.tag st t)
+
+/-- `InfoTree.tagsOf` on each element. -/
+partial def InfoTree.tagsOfAll (kids : InfoTree.Kids) (st : InfoTree.Walk) : InfoTree.Walk :=
+  match kids with
+  | .nil => st
+  | .cons x rest => InfoTree.tagsOfAll rest (InfoTree.tagsOf x st)
+end
+
+/-- The tags of tagged text, numbered from 0 in reading order. -/
+def InfoTree.tags (j : Json) : List InfoTree.WalkTag :=
+  (InfoTree.tagsOf (InfoTree.ofJson j) (InfoTree.Walk.mk 0 [])).tags
+
+/-- The plain text of a typed tagged text (tags discarded). -/
+partial def InfoTree.plainText (n : InfoTree.Node) : String :=
+  match n with
+  | .text s => s
+  | .tag _ body => InfoTree.plainText body
+  | .append kids => String.join (List.map InfoTree.plainText (InfoTree.kidsToList kids))
+
+-- ## The view
+
+mutual
+/-- A typed tagged text as a Loom tree, numbering tags from `next`; `mkMsg` turns a tag's
+index into the pane's message (a click selects it). A text leaf goes through
+`Web.Highlight.text`, the same escaped-text path the hover card and the source pane use;
+the tag classes stay the infoview protocol's (`tt k-KIND`), not the docs' `hl-*` set. -/
+partial def InfoTree.view {M : Type} (sel next : Nat) (mkMsg : Nat → M)
+    (n : InfoTree.Node) : Loom.VNode M × Nat :=
+  match n with
+  | .text s => (Highlight.text s, next)
+  | .append kids => InfoTree.appendAll sel next mkMsg kids []
+  | .tag info body =>
+    let idx := next;
+    let bodyNext := InfoTree.view sel (next + 1) mkMsg body;
+    let selCls := match Nat.beq sel (idx + 1) with
+      | .true => " sel"
+      | .false => "";
+    let attrs : List Loom.Attr :=
+      List.append [Loom.class (String.append "tt k-" (String.append info.kind selCls))]
+        (List.append (match String.isEmpty info.ref with
+            | .true => []
+            | .false => [Loom.attr "data-ref" info.ref])
+          (List.append [Loom.attr "data-idx" (Nat.toString idx)]
+            (List.append (match String.isEmpty info.name with
+                | .true => []
+                | .false => [Loom.attr "title" info.name])
+              (match String.isEmpty info.span with
+                | .true => []
+                | .false => [Loom.attr "data-span" info.span]))));
+    (Loom.on "click" (mkMsg idx) (Loom.el "span" attrs [bodyNext.1]), bodyNext.2)
+
+/-- The siblings of a tagged text, in order. -/
+partial def InfoTree.appendAll {M : Type} (sel next : Nat) (mkMsg : Nat → M)
+    (kids : InfoTree.Kids) (acc : List (Loom.VNode M)) : Loom.VNode M × Nat :=
+  match kids with
+  | .nil => (Loom.seq acc, next)
+  | .cons x rest =>
+    let r := InfoTree.view sel next mkMsg x;
+    InfoTree.appendAll sel r.2 mkMsg rest (List.append acc [r.1])
+end
+
+-- ## The term tree
+
+mutual
+/-- One tagged node of the term tree (a `<li>` with its children). -/
+partial def InfoTree.treeView {M : Type} (mkMsg : Nat → M) (n : InfoTree.Node)
+    (next fuel : Nat) : Loom.VNode M × Nat :=
+  match Nat.beq fuel 0 with
+  | .true => (Loom.text "", next)
+  | .false => match n with
+    | .tag info body =>
+      let idx := next;
+      let text := InfoTree.plainText body;
+      let shown := match Nat.lt 80 (String.length text) with
+        | .true => String.append (String.take 79 text) "…"
+        | .false => text;
+      let label := match String.isEmpty info.name with
+        | .true => info.kind
+        | .false => String.append info.name (String.append " · " info.kind);
+      let kids := InfoTree.treeChildren mkMsg body (next + 1) (fuel - 1);
+      let nested := match kids.1 with
+        | .nil => []
+        | _ => [Loom.el "ul" [] kids.1];
+      (Loom.el "li" []
+        (List.append [Loom.on "click" (mkMsg idx)
+          (Loom.el "span" [Loom.class (String.append "tt k-" info.kind),
+            Loom.attr "data-idx" (Nat.toString idx), Loom.attr "title" label]
+            [Loom.text shown])] nested), kids.2)
+    | _ => (Loom.text "", next)
+
+/-- A tree node's children; `append` nodes are flattened into the list. -/
+partial def InfoTree.treeChildren {M : Type} (mkMsg : Nat → M) (n : InfoTree.Node)
+    (next fuel : Nat) : List (Loom.VNode M) × Nat :=
+  match n with
+  | .tag _ _ => let r := InfoTree.treeView mkMsg n next fuel; ([r.1], r.2)
+  | .append kids => InfoTree.treeChildrenAll mkMsg kids next fuel []
+  | .text _ => ([], next)
+
+/-- `InfoTree.treeChildren` for each element. -/
+partial def InfoTree.treeChildrenAll {M : Type} (mkMsg : Nat → M) (kids : InfoTree.Kids)
+    (next fuel : Nat) (acc : List (Loom.VNode M)) : List (Loom.VNode M) × Nat :=
+  match kids with
+  | .nil => (acc, next)
+  | .cons x rest =>
+    let r := InfoTree.treeChildren mkMsg x next fuel;
+    InfoTree.treeChildrenAll mkMsg rest r.2 fuel (List.append acc r.1)
+end
+
+/-- The optional tagged term tree under a goal result, as a `<details>` block. -/
+def InfoTree.treeSection {M : Type} (mkMsg : Nat → M) (j : Json) (head : Loom.VNode M) :
+    Loom.VNode M :=
+  match Json.get j "tag" with
+  | .some _ =>
+    let t := InfoTree.treeView mkMsg (InfoTree.ofJson j) 1 200;
+    Loom.el "details" [Loom.class "tree-wrap"]
+      [Loom.el "summary" [] [Loom.text "term tree"], Loom.el "ul" [Loom.class "tree"] [t.1]]
+  | _ => Loom.text ""
+
+-- ## `wiz.highlight/1` (span blocks)
+
+/-- The fixed class name as a `Highlight.Class`, or `none` for a name outside the eight.
+`Web.Highlight`'s table is the only authority. -/
+partial def InfoTree.classOfNameGo (name : String) :
+    List (Highlight.Class × String) → Option Highlight.Class
+  | .nil => .none
+  | .cons p rest => match String.eq p.2 name with
+    | .true => .some p.1
+    | .false => InfoTree.classOfNameGo name rest
+
+def InfoTree.classOfName (name : String) : Option Highlight.Class :=
+  InfoTree.classOfNameGo name Highlight.table
+
+/-- One highlighted block: its position in the Markdown, the language the fence named,
+and the checked (already validated) tokens. -/
+structure InfoTree.HighlightBlock where
+  index : Nat
+  language : String
+  tokens : List Highlight.Token
+
+/-- Read one `[start, end, class]` span; `none` if it is malformed or the class is not
+one of the eight. -/
+def InfoTree.tokenOf (v : Json) : Option Highlight.Token :=
+  match v with
+  | .arr xs => match Jsons.toList xs with
+    | .cons a (.cons b (.cons c .nil)) =>
+      match Json.asNat a, Json.asNat b, Json.asString c with
+      | .some start, .some stop, .some cls =>
+        match InfoTree.classOfName cls with
+        | .some k => .some (Highlight.Token.mk start stop k)
+        | .none => .none
+      | _, _, _ => .none
+    | _ => .none
+  | _ => .none
+
+/-- The tokens of a spans array, or `none` if any span is malformed (the whole block is
+then plain: the refusal rule, `docs-highlighting.md` §5.3). -/
+def InfoTree.tokensOf (xs : List Json) : Option (List Highlight.Token) :=
+  match xs with
+  | .nil => .some []
+  | .cons x rest => match InfoTree.tokenOf x, InfoTree.tokensOf rest with
+    | .some t, .some ts => .some (List.append [t] ts)
+    | _, _ => .none
+
+/-- One block from its JSON: `index`, `language`, `spans`. The tokens must be ascending
+and disjoint (a non-monotone or overlapping span refuses the whole block); the line
+clipper and `Web.Highlight.checked` then catch an out-of-range span. -/
+def InfoTree.blockOf (j : Json) : Option InfoTree.HighlightBlock :=
+  match InfoTree.tokensOf (InfoTree.arrOf (match Json.get j "spans" with
+    | .some s => s
+    | .none => Json.mkArr [])) with
+  | .none => .none
+  | .some ts =>
+    let n := List.foldl (fun m t => match Nat.le m t.stop with
+      | .true => t.stop
+      | .false => m) 0 ts;
+    match Highlight.checkedTokens n ts with
+    | .false => .none
+    | .true => .some (InfoTree.HighlightBlock.mk (Json.getNat j "index")
+        (Json.getStr j "language") ts)
+
+/-- `InfoTree.blockOf` on each element, dropping a refused block. -/
+partial def InfoTree.blocksOf (xs : List Json) : List InfoTree.HighlightBlock :=
+  match xs with
+  | .nil => []
+  | .cons x rest => match InfoTree.blockOf x with
+    | .none => InfoTree.blocksOf rest
+    | .some b => List.append [b] (InfoTree.blocksOf rest)
+
+/-- The blocks of a `wiz.highlight/1` object, or `[]` when the schema is absent or the
+object is malformed. At most `MAX_SPANS` spans in total (`docs-highlighting.md` §5.2);
+over the cap is no highlighting, never a truncated block. -/
+def InfoTree.highlightBlocks (j : Json) : List InfoTree.HighlightBlock :=
+  match String.eq (Json.getStr j "schema") "wiz.highlight/1" with
+  | .false => []
+  | .true =>
+    match Json.get j "blocks" with
+    | .none => []
+    | .some (.arr xs) =>
+      let blocks := InfoTree.blocksOf (Jsons.toList xs);
+      let total := List.foldl (fun n b => n + List.length b.tokens) 0 blocks;
+      match Nat.le total 10000 with
+      | .true => blocks
+      | .false => []
+    | _ => []
+
+/-- The tokens of a line: clip every block span to `[start, stop)` and rebase it to the
+line's own offsets. `start`/`stop` are UTF-16 offsets in the block's source. -/
+partial def InfoTree.clipTokens (start stop : Nat) (ts : List Highlight.Token) :
+    List Highlight.Token :=
+  match ts with
+  | .nil => []
+  | .cons t rest =>
+    let keep := InfoTree.clipTokens start stop rest;
+    let a := match Nat.le start t.start with
+      | .true => t.start
+      | .false => start;
+    let b := match Nat.le t.stop stop with
+      | .true => t.stop
+      | .false => stop;
+    match Nat.lt a b with
+    | .true => List.append [Highlight.Token.mk (a - start) (b - start) t.cls] keep
+    | .false => keep
+
+/-- The block with `index`, if there is one. -/
+def InfoTree.blockAt (index : Nat) : List InfoTree.HighlightBlock → Option InfoTree.HighlightBlock
+  | .nil => .none
+  | .cons b rest => match Nat.beq b.index index with
+    | .true => .some b
+    | .false => InfoTree.blockAt index rest
+
+/-- A line of a block: its tokens clipped to `[start, start + len)`. A block that is not
+in the list (or was refused) is plain. -/
+def InfoTree.tokensForLine (blocks : List InfoTree.HighlightBlock) (index start len : Nat) :
+    List Highlight.Token :=
+  match InfoTree.blockAt index blocks with
+  | .none => []
+  | .some b => InfoTree.clipTokens start (start + len) b.tokens
+
+-- ## `wiz.hover/1`
+
+/-- A URL a card may show as a link: relative, or a scheme that is not executable. This
+is `Wiz.Doc.Markdown.safeUrl`'s rule on the runtime side (`javascript:`, `data:` and
+`vbscript:` are dropped). -/
+def InfoTree.safeUrl (u : String) : Bool :=
+  Bool.and (Bool.not (String.startsWith u "javascript:"))
+    (Bool.and (Bool.not (String.startsWith u "data:"))
+      (Bool.not (String.startsWith u "vbscript:")))
+
+/-- The `wiz.hover/1` payload (`docs-highlighting.md` §8.1). Strings are already capped
+by `ofJson` (type 2 KB, doc 4 KB, binders 64); `definitionUri` is empty when the URI is
+not safe to show. `goals` is kept as its JSON object: the goals pane's own decoders read
+it, and the card only needs its presence. -/
+structure InfoTree.Answer where
+  schema : String
+  uri : String
+  version : Nat
+  offset : Nat
+  kind : String
+  isHole : Bool
+  name : String
+  isLocal : Bool
+  typeText : String
+  expected : String
+  binders : List String
+  doc : String
+  definitionUri : String
+  definitionRange : String
+  goals : String
+  highlight : List InfoTree.HighlightBlock
+
+/-- The string at `path` or `""`. -/
+def InfoTree.fieldStr (j : Json) (path : List String) : String := InfoTree.strAt j path
+
+/-- The first `n` characters of a string. -/
+def InfoTree.cap (n : Nat) (s : String) : String := String.take n s
+
+/-- A definition target as `uri` and `LINE:CHAR-LINE:CHAR`; an unsafe URI is dropped. -/
+def InfoTree.definitionOf (j : Json) : String × String :=
+  match Json.get j "definition" with
+  | .none => ("", "")
+  | .some d =>
+    let uri := InfoTree.strAt d ["uri"];
+    let safe := match InfoTree.safeUrl uri with
+      | .true => uri
+      | .false => "";
+    let range := match Json.get d "range" with
+      | .some r => InfoTree.spanText r
+      | .none => "";
+    (safe, range)
+
+/-- A boolean field. -/
+def InfoTree.boolAt (j : Json) (key : String) : Bool :=
+  match Json.get j key with
+  | .some v => match Json.asBool v with
+    | .some b => b
+    | .none => .false
+  | .none => .false
+
+/-- The `wiz.hover/1` payload in a hover result (`result.data`), or `none`. A bare
+payload object is accepted too (a tool or a test may pass it directly); any schema other
+than `wiz.hover/1` is no answer. -/
+def InfoTree.Answer.ofJson (j : Json) : Option InfoTree.Answer :=
+  let data := match Json.get j "data" with
+    | .some d => match String.eq (Json.getStr d "schema") "wiz.hover/1" with
+      | .true => d
+      | .false => match String.eq (Json.getStr j "schema") "wiz.hover/1" with
+        | .true => j
+        | .false => Json.mkNull
+    | .none => match String.eq (Json.getStr j "schema") "wiz.hover/1" with
+      | .true => j
+      | .false => Json.mkNull;
+  match String.eq (Json.getStr data "schema") "wiz.hover/1" with
+  | .false => .none
+  | .true =>
+    let (defUri, defRange) := InfoTree.definitionOf data;
+    let hl := match Json.get data "wizHighlight" with
+      | .some h => InfoTree.highlightBlocks h
+      | .none => [];
+    .some (InfoTree.Answer.mk (Json.getStr data "schema") (Json.getStr data "uri")
+      (Json.getNat data "version") (Json.getNat data "offset") (Json.getStr data "kind")
+      (InfoTree.boolAt data "isHole") (Json.getStr data "name") (InfoTree.boolAt data "isLocal")
+      (InfoTree.cap 2048 (Json.getStr data "type"))
+      (InfoTree.cap 2048 (InfoTree.strAt data ["expected"]))
+      (List.take 64 (InfoTree.strings (Json.getList data "binders")))
+      (InfoTree.cap 4096 (Json.getStr data "doc")) defUri defRange
+      (match Json.get data "goals" with
+        | .some g => Json.render g
+        | .none => "")
+      hl)
+
+/-- The card label a payload carries: its name, else its kind. -/
+def InfoTree.Answer.label (a : InfoTree.Answer) : String :=
+  match String.isEmpty a.name with
+  | .true => match String.isEmpty a.kind with
+    | .true => ""
+    | .false => a.kind
+  | .false => a.name
+
+/-- The payload as the Markdown the card renders: a `wiz` fence for the name/type, the
+doc comment, and the expected type when the payload has one. This is the one ladder the
+design asks for (`docs-highlighting.md` §8.4): the card and any other Markdown reader see
+the same text. -/
+def InfoTree.Answer.markdown (a : InfoTree.Answer) : String :=
+  let sig := match String.isEmpty a.name with
+    | .true => a.typeText
+    | .false => match String.isEmpty a.typeText with
+      | .true => a.name
+      | .false => String.append a.name (String.append " : " a.typeText);
+  let sigBlock := match String.isEmpty sig with
+    | .true => ""
+    | .false => String.append "```wiz\n" (String.append sig "\n```");
+  let expected := match String.isEmpty a.expected with
+    | .true => ""
+    | .false => String.append "```wiz\n" (String.append a.expected "\n```");
+  let doc := match String.isEmpty a.doc with
+    | .true => ""
+    | .false => String.append "\n\n---\n\n" a.doc;
+  String.append sigBlock (match String.isEmpty expected with
+    | .true => doc
+    | .false => String.append "\n\n---\n\n" (String.append expected doc))

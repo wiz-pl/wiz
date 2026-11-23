@@ -96,7 +96,7 @@ with its `.expected` golden) and the `=scry-c2wil` spill fixtures.
 | `scry/src/Scry/CstOptics.wiz` (70) | a tuple column (`t.tuples`, by index) | Θ(#tuples) per column | the tuple table is a list in the CST store's public record |
 | `scry/src/Scry/Lower.wiz` (106–107, 125, 1636, 2477) | `blocks i`, `b.stmts p`, `pre.texts f` | Θ(#blocks) per terminator; Θ(#stmts) per position | the lowering pass holds the block/statement tables |
 | `lib/Scry/Analysis.wiz` `Scry.nthD` (91–94; used at `RuleTaint.wiz:746`, `Taint.wiz:255`) | row columns in taint transfer | Θ(arity) per column | a U64 row's arity is small and fixed by the relation |
-| `lib/Hdl/Display.wiz` `Display.romGo` | `List.take`/`List.drop` at each binary-search level | Θ(N) per level, Θ(N log N) | small circuit tables, and the result is a proof-carrying ROM |
+| `hdl/src/Hdl/Display.wiz` `Display.romGo` | `List.take`/`List.drop` at each binary-search level | Θ(N) per level, Θ(N log N) | small circuit tables, and the result is a proof-carrying ROM |
 | `lib/Plot.wiz` `Plot.thin` | `List.drop` per sampled point | Θ(N) per point, Θ(N²) for the pass | plotting only; the input is a sampled list |
 
 ## The benchmark modes

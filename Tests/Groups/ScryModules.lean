@@ -20,7 +20,7 @@ assertions were not run by anything here. This group runs both through the libra
 loader, so a change to either module runs the behavioural case.
 -/
 
-/-- `lib/Scry/Report.wiz`: the pure half of the HTML report. The assertions are the scry
+/-- `scry/src/Scry/Report.wiz`: the pure half of the HTML report. The assertions are the scry
 package's own `scry/tests/report-pure.wiz` (XSS escaping, no remote resource, stable
 bytes, anchors), evaluated through their definitions rather than by running `main`, so
 no C toolchain is needed. `report-pure.expected` is the same list as the file's `check`
@@ -50,7 +50,7 @@ def scryReportCase : Case :=
          ".false", ".true", ".true", ".true", ".true", ".true", ".true", ".true",
          ".true", ".true", ".false", ".false", ".true"] }
 
-/-- `lib/Scry/Optics.wiz`: the pure `Lens`/`Traversal` layer. The laws are proved in the
+/-- `scry/src/Scry/Optics.wiz`: the pure `Lens`/`Traversal` layer. The laws are proved in the
 module; this evaluates them on a `Wil.Stmt`, so `get`, `set` and `over` actually run. -/
 def scryOpticsCase : Case :=
   { name := "Scry.Optics: a statement's origin lens gets, sets and maps", run := fun _ =>
@@ -67,7 +67,7 @@ def scryOpticsCase : Case :=
 
 def scryModulesGroup : Group where
   name := "scry-modules"
-  exercise := "S1/S4: lib/Scry/Report.wiz and lib/Scry/Optics.wiz"
+  exercise := "S1/S4: scry/src/Scry/Report.wiz and scry/src/Scry/Optics.wiz"
   cases := [scryReportCase, scryOpticsCase]
 
 builtin_initialize registerGroup scryModulesGroup

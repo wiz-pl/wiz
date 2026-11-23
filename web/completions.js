@@ -4,17 +4,18 @@
 // the textarea's font metrics (the editor is monospace, so a character column is
 // `character * charWidth`).
 //
-// The decisions — which items match, the keyboard's index arithmetic, what an accepted
-// item replaces — are `lib/Web/EditorModel.wiz`'s pure functions, reached through
+// The decisions — which items match, the keyboard's command and index arithmetic, what an
+// accepted item replaces — are `lib/Web/EditorModel.wiz`'s pure functions, reached through
 // `options.rules` (the runtime's `wiz_loom_editor_*` queries). This file is the DOM and
 // the timers:
 //
 //   * **Triggers.** Ctrl/⌘-Space asks unconditionally; typing an identifier character
 //     asks after `debounce` ms (120 by default), outside a line comment. A non-identifier
 //     key closes the list.
-//   * **Keys.** Up/Down/PageUp/PageDown move (wrapping), Enter/Tab accept, Escape closes.
-//     While the list is open those keys belong to it, so the editor does not also insert
-//     a newline or a tab.
+//   * **Keys.** The runtime's `key` rule names the command for a keydown — move (and the
+//     index to select), accept, close, or ignore — so Up/Down/PageUp/PageDown and
+//     Enter/Tab/Escape are the model's table, not this file's. While the list is open
+//     those keys belong to it, so the editor does not also insert a newline or a tab.
 //   * **Insertion.** The accepted item's `textEdit` if the server sent one, else its
 //     `insertText`/`label` over the identifier prefix; the page sees a normal `input`
 //     event, so the document is re-sent to the server by the existing `didChange` path.
@@ -22,8 +23,6 @@
 //     error. Nothing here throws at the page: a server without completion is silent.
 "use strict";
 import { caretOffset } from "./framework/editor-text.js";
-
-const PAGE = 10;
 
 function attr(element, name, value) {
   if (!element) return;
@@ -35,15 +34,6 @@ function setStyle(element, property, value) {
   if (element && element.style && value !== undefined && value !== null) element.style[property] = value;
 }
 
-// The documentation as a tooltip (`markdown` is shown as it is: this is a popup, not a
-// documentation viewer).
-function itemTitle(item) {
-  const docs = item.documentation;
-  if (typeof docs === "string") return docs;
-  if (docs && typeof docs.value === "string") return docs.value;
-  return item.detail === undefined ? null : String(item.detail);
-}
-
 // The caret as `{line, character}` from the runtime's position rule.
 function caretPosition(rules, editor) {
   const value = typeof editor.value === "string" ? editor.value : "";
@@ -51,9 +41,9 @@ function caretPosition(rules, editor) {
 }
 
 // `mountCompletions({editor, rules, onRequest, document?, debounce?, autoTrigger?})`.
-// `rules` is the runtime's pure editor model (`items`, `popup`, `move`, `accept`,
-// `trigger`, `position`); `onRequest(position)` returns a `textDocument/completion`
-// result (a promise) or null.
+// `rules` is the runtime's pure editor model (`items`, `popup`, `key`, `accept`,
+// `trigger`, `itemTitle`, `askKey`, `position`); `onRequest(position)` returns a
+// `textDocument/completion` result (a promise) or null.
 export function mountCompletions(options = {}) {
   const editor = options.editor;
   const rules = options.rules;
@@ -137,7 +127,7 @@ export function mountCompletions(options = {}) {
       attr(row, "role", "option");
       attr(row, "data-index", i);
       attr(row, "aria-selected", i === index ? "true" : "false");
-      const title = itemTitle(item);
+      const title = rules.itemTitle(item);
       if (title) attr(row, "title", title);
       // Two spans: the label and the detail, styled apart (and never as markup).
       const label = doc.createElement("span");
@@ -169,15 +159,21 @@ export function mountCompletions(options = {}) {
     render();
   }
 
+  // Apply the runtime's popup state (the visible items, the selected index and the prefix
+  // the items were filtered by). A state with nothing visible closes the list.
+  function applyState(state) {
+    if (!state || !Array.isArray(state.items) || !state.items.length) return false;
+    filtered = state.items.slice();
+    prefix = { start: state.prefixStart, word: state.prefixWord };
+    index = state.index;
+    return true;
+  }
+
   function show(result) {
     items = rules.items(result) || [];
     if (!items.length) { close(); return []; }
-    const state = rules.popup(value(), caretOffset(editor), items, 0);
-    filtered = state.items.slice();
-    prefix = { start: state.prefixStart, word: state.prefixWord };
-    if (!filtered.length) { close(); return []; }
+    if (!applyState(rules.popup(value(), caretOffset(editor), items, 0))) { close(); return []; }
     open = true;
-    index = state.index < 0 ? 0 : state.index;
     render();
     place();
     return filtered.slice();
@@ -230,22 +226,15 @@ export function mountCompletions(options = {}) {
     return true;
   }
 
-  function move(delta) {
-    if (!open || !filtered.length) return;
-    index = rules.move(index, delta, filtered.length);
-    if (index < 0) index = 0;
-    render();
-  }
-
-  // Whether an event is Ctrl/⌘-Space (the editor's "ask now").
+  // Whether an event is Ctrl/⌘-Space (the editor's "ask now"): the runtime's rule.
   function isAskKey(event) {
     if (!event) return false;
-    const space = event.key === " " || event.key === "Spacebar" || event.code === "Space";
-    return !!(space && (event.ctrlKey || event.metaKey));
+    return rules.askKey(event.key, event.code, !!event.ctrlKey, !!event.metaKey);
   }
 
   // The editor's keydown handler. Returns true when the event belonged to the popup (and
-  // was prevented); the tests call it directly.
+  // was prevented); the tests call it directly. The key table is the runtime's
+  // (`rules.key`): this carries out the command it names and nothing else.
   function handleKey(event) {
     if (!event) return false;
     if (isAskKey(event)) {
@@ -254,28 +243,27 @@ export function mountCompletions(options = {}) {
       return true;
     }
     if (!open) return false;
-    switch (event.key) {
-      case "ArrowDown": move(1); break;
-      case "ArrowUp": move(-1); break;
-      case "PageDown": move(PAGE); break;
-      case "PageUp": move(-PAGE); break;
-      case "Enter":
-      case "Tab":
-        if (accept()) {
-          if (typeof event.preventDefault === "function") event.preventDefault();
-          if (typeof event.stopPropagation === "function") event.stopPropagation();
-          return true;
-        }
-        return false;
-      case "Escape":
-        close();
-        if (typeof event.preventDefault === "function") event.preventDefault();
-        return true;
-      default:
-        return false;
+    const command = typeof rules.key === "function"
+      ? rules.key(event.key, index, filtered.length) : null;
+    const action = command && command.action;
+    if (action === "move") {
+      if (typeof command.index === "number" && command.index >= 0) index = command.index;
+      render();
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      return true;
     }
-    if (typeof event.preventDefault === "function") event.preventDefault();
-    return true;
+    if (action === "accept") {
+      if (!accept()) return false;
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      if (typeof event.stopPropagation === "function") event.stopPropagation();
+      return true;
+    }
+    if (action === "close") {
+      close();
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      return true;
+    }
+    return false;
   }
 
   // The editor's input handler: re-filter at once (the popup follows the typing), then
@@ -288,12 +276,7 @@ export function mountCompletions(options = {}) {
     const typed = text.slice(Math.max(0, at - 1), at);
     if (!rules.trigger(text, at, typed)) { close(); return; }
     if (open && items.length) {
-      const state = rules.popup(text, at, items, index);
-      filtered = state.items.slice();
-      prefix = { start: state.prefixStart, word: state.prefixWord };
-      index = filtered.length ? state.index : -1;
-      if (index < 0) index = filtered.length ? 0 : -1;
-      if (!filtered.length) { close(); return; }
+      if (!applyState(rules.popup(text, at, items, index))) { close(); return; }
       render();
       place();
     }

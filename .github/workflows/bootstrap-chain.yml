@@ -68,7 +68,7 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
       - uses: cachix/install-nix-action@v31
-      - uses: cachix/cachix-action@v16
+      - uses: cachix/cachix-action@v17
         with:
           name: ${{ env.CACHIX_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -89,6 +89,21 @@ jobs:
             tar -xzOf "$tgz" "wizc-$sys/MANIFEST"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: The packed wizc behaves (a fixture with a known answer, and the seed pinned)
+        # R1/R2 of wiz-notes/sota-compiler-trust.md. Every other chain check compares C
+        # text, executable bytes or a tarball hash for one input, self.wiz; a compiler
+        # that quines self.wiz and miscompiles everything else passes all of them. This
+        # runs the packed tarball's bin/wizc on a frozen program (compile, run, compare),
+        # requires a deliberate one-byte change to disagree, and checks the checked-in
+        # seed pin (self.wiz, seed.c, and the chain's checked-in inputs) against the seed
+        # derivation. A failure fails the job, so the Cachix push below publishes nothing.
+        run: |
+          rel=$(nix path-info .#wizc-release)
+          seed=$(nix path-info .#wizc-seed)
+          sys=$(nix eval --raw --impure --expr builtins.currentSystem)
+          scripts/check-wizc-release.sh \
+            --tarball "$rel/wizc-$sys.tar.gz" --seed "$seed" --out .scratch/accept-wizc \
+            2>&1 | tee accept-wizc.log
       - name: Publish to Cachix
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -99,7 +114,7 @@ jobs:
           fi
           mapfile -t paths < <(nix path-info .#wizc-release .#wizc .#wizc-seed)
           nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" "${paths[@]}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wizc-release-${{ github.event.workflow_run.head_sha }}
           path: out/
@@ -118,7 +133,7 @@ jobs:
         with:
           fetch-depth: 0 # the flake is read at commits (git+file?rev=), the predecessor's too
       - uses: cachix/install-nix-action@v31
-      - uses: cachix/cachix-action@v16
+      - uses: cachix/cachix-action@v17
         with:
           name: ${{ env.CACHIX_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -141,7 +156,7 @@ jobs:
           mkdir -p nightly
           cp "$rel/wizc-$SYS.tar.gz" nightly/
           echo "$COMMIT" > nightly/commit
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && hashFiles('nightly/commit') != ''
         with:
           name: wizc-nightly

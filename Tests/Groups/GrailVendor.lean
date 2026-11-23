@@ -137,7 +137,34 @@ def grailVendorGroup : Group where
           IO.FS.removeDirAll (cache / "grail" / "downloads")
         if ← (cache / "grail" / "packages").pathExists then
           IO.FS.removeDirAll (cache / "grail" / "packages")
-        checkEq 0 (← run ["fetch", "--locked", "--offline", "--vendor", "vendor"]) }
+        checkEq 0 (← run ["fetch", "--locked", "--offline", "--vendor", "vendor"]) },
+    { name := "a wrong tree hash is refused before it enters the store", run := fun _ => do
+        let (root, dir, _sha, _tc) ← registryTree
+        let idx := root / "index"
+        let entryPath := idx / "greet.sexpr"
+        let entry ← IO.FS.readFile entryPath
+        let wrong := String.ofList (List.replicate 64 'f')
+        IO.FS.writeFile entryPath (entry.replace " (deps))" s!" (tree \"{wrong}\") (deps))")
+        let cache := root / "cache"
+        let std ← IO.FS.realPath "lib"
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString,
+            "--cache", cache.toString, "--index", idx.toString] ++ args)
+        -- update records the (wrong) tree; the archive is only unpacked by a fetch/build
+        checkEq 0 (← run ["update"])
+        checkEq 1 (← run ["fetch", "--locked"])
+        let .ok lock := Grail.Lock.parse (← IO.FS.readFile (dir / "grail.lock"))
+          | throw (IO.userError "bad grail.lock")
+        match ← Grail.Registry.fetch cache dir lock with
+        | .error e =>
+          check ((e.splitOn "unpacked tree").length > 1) e
+          check ((e.splitOn "the lock says").length > 1) e
+        | .ok _ => throw (IO.userError "fetched a package whose tree disagrees with the lock")
+        -- nothing was installed under the wrong tree identity
+        let stores ← if ← (cache / "grail" / "packages").pathExists then
+            pure (← (cache / "grail" / "packages").readDir).size
+          else pure 0
+        checkEq 0 stores }
   ]
 
 builtin_initialize registerGroup grailVendorGroup

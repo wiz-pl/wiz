@@ -36,6 +36,12 @@ def setPath (path : String) : IO Unit := do
 /-- Listen on the socket file `path` (replacing a stale one); the listening descriptor. -/
 def listen (path : String) : IO UInt32 := do setPath path; listenRaw
 
+@[extern "wiz_unix_mode"] opaque modeRaw : IO UInt32
+
+/-- The permission bits (`st_mode & 0777`) of the socket file `path`. The listener creates
+    it owner-only; this is for the test that checks the mode. -/
+def mode (path : String) : IO UInt32 := do setPath path; modeRaw
+
 /-- Wait for a connection (on a Unix or TCP socket): its descriptor (for `shutdown`), and its read and write handles. -/
 @[extern "wiz_unix_accept"] opaque accept (fd : UInt32) : IO (UInt32 × IO.FS.Handle × IO.FS.Handle)
 

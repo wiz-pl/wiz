@@ -73,9 +73,9 @@ of a committed candidate (with duplicate instances rejected, overlapping candida
 cannot arise; a candidate whose subgoals fail fails the command), **no default
 instances** (`attribute [default_instance]` is still an unsupported command), **no
 `binop`/`OfNat`** (a numeral at a non-`Nat` type is not a class problem; `import
-Prelude` still loads the self-hosted prelude, which has no classes), **no `outParam`**
-(the class's parameter types are not rewritten), and **no universe-polymorphic classes**
-(that is A15). A class with an instance parameter works, and its instance's own
+Prelude` still loads the self-hosted prelude, whose only class is `Append`, for `++`),
+**no `outParam`** (the class's parameter types are not rewritten), and **no
+universe-polymorphic classes** (that is A15). A class with an instance parameter works, and its instance's own
 parameters are solved by ordinary resolution (the `Commute` shape).
 
 ### Tests
@@ -131,15 +131,30 @@ The Lean toolchain's `deriving` is a **deriver**: a Wiz function
 which asks the elaborator for the type's shape (`MacroM.getInductive`) and returns the
 commands that make the instance. This frontend has no elaboration-time evaluation of Wiz
 code and no quotations (`wishful/selfhost-deriving.md`, items 1–3), so a Wiz deriver
-cannot be *run* here. It has the host's **table** instead: `Globals.derivers` maps a
+cannot be *run* here.
+
+The table is the host's, and so is the **runner**. `Frontend.wiz` now has the host's
+`Deriver`/`MacroM` interface and its reflection view: `runDeriver` answers
+`getInductive` from `Globals.view`, an `IndView` (parameters, constructors and fields;
+the host's shape, `Elab/Reflect.lean:17`) built from the already-elaborated `IndInfo`
+with the parameter types as syntax. The deriver returns ordinary commands, which
+`elabDerivedGo` elaborates through the normal `instance`/`def` path. `Inhabited`, the
+smallest of the five, is ported onto it (it is now a `Deriver` that reads the view and
+emits one `instance`, exactly as `lib/Deriving.wiz`'s `deriveInhabited` does); the other
+four are still hardcoded behind the same dispatch and are the remaining port. Running a
+deriver *written in Wiz source* still waits on the evaluator, and a field's type and a
+constructor's result indices are not reflected yet (`.missing`/count only), which is
+enough for the derivers here but not for `Lens`/`Bundle`.
+
+It has the host's **table**: `Globals.derivers` maps a
 class name to a deriver name, `attribute [deriver C] f` records a pair, and `deriving C`
 looks `C` up and dispatches on the registered name. The five derivers `lib/Deriving.wiz`
 registers in the Lean toolchain are implemented in `Frontend.wiz` under the same names
 (`deriveInhabited`, `deriveBEq`, `deriveRepr`, `deriveDecidableEq`, `deriveCompare`) and
 are pre-registered for the canonical class names, because the self-hosted prelude has no
-classes and no `import Deriving`. A deriver reads the type's shape from the
-already-elaborated `IndInfo` (the reflection counterpart) and **emits ordinary
-commands** — a `def` by structural recursion and an `instance` — which go through the
+class of its own beyond `Append` (for `++`) and no `import Deriving`. A deriver reads the
+type's shape from the already-elaborated `IndInfo` (the reflection counterpart) and
+**emits ordinary commands** — a `def` by structural recursion and an `instance` — which go through the
 same elaborator and kernel as a hand-written instance. The derived instance is a normal
 global: no axiom, no new kernel rule, no change to the trust ledger.
 
@@ -190,20 +205,24 @@ global: no axiom, no new kernel rule, no change to the trust ledger.
     and `String`.
 * **Rejected**, in the host's message shape (`deriving C for T: <reason>`): an indexed
   family (`indexed families are not supported`; the index is a constructor argument the
-  equations would have to generalise, and `lib/Deriving.wiz` rejects it for `BEq` too); a
-  member of a `mutual` block (`not an inductive type or structure: T`, as the host's
-  `MacroM.getInductive` says); an all-recursive type for `Inhabited` (`every constructor
-  of T is recursive or has a proof field`); a recursive type for `DecidableEq`
-  (`DecidableEq is derived for an enumeration or a single-constructor record only, and
-  T`); a class with no entry in the table (`no deriver for C (register one with
-  `attribute [deriver C] f`)`, the host's message); a class with the wrong arity; and a
-  registered deriver this frontend cannot run. A field with no `BEq` instance is rejected
+  equations would have to generalise). This is now a *pinned difference* for `BEq`: the
+  host derives it with a dependent motive (`lib/Deriving.wiz`'s `deriveBEq`), while this
+  frontend's equation-based deriver still refuses the family; `Inhabited` and
+  `DecidableEq` reject it in the host too. A member of a `mutual` block (`not an
+  inductive type or structure: T`, as the host's `MacroM.getInductive` says); an
+  all-recursive type for `Inhabited` (`every constructor of T is recursive or has a proof
+  field`); a recursive type for `DecidableEq` (`DecidableEq is derived for an enumeration
+  or a single-constructor record only, and T`); a class with no entry in the table (`no
+  deriver for C (register one with `attribute [deriver C] f`)`, the host's message); a
+  class with the wrong arity; and a registered deriver this frontend cannot run. A field
+  with no `BEq` instance is rejected
   through ordinary instance resolution when the generated `BEq.beq` cannot be solved.
   `deriving C` on a `mutual` block itself is refused with the command's span (`deriving C
   for T: a mutual inductive is not supported …`): the host
   derives for the joint family (`A_B t`, an indexed family, so one instance covers every
   member), which this frontend's equation-based derivers do not support; `deriving Repr`
-  on a mutual block is therefore a pinned difference (the host accepts it).
+  and `deriving BEq` on a mutual block are therefore pinned differences (the host accepts
+  both).
 * **Positions.** A derivation error is the command's line, so the driver's diagnostics
   position it (`file:line:col`); the checker's own output (`checkFile`) strips the offset
   like every other command's. The host positions the error at the class name inside the
@@ -231,7 +250,7 @@ reach.
 
 `lib/*.wiz` has `deriving` clauses for six names; this milestone implements the five
 that `lib/Deriving.wiz` registers. `Lens` (`lib/OpticDerive.wiz`) and `Bundle`/`BitPack`
-(`lib/Hdl/Core.wiz`, `drafts/hdl/`) are user derivers and need the pieces above.
+(`hdl/src/Hdl/Core.wiz`, `drafts/hdl/`) are user derivers and need the pieces above.
 
 ### Tests
 

@@ -42,9 +42,42 @@ instance : DecidableEq Nat := DecidableEq.mk Nat.beq
 instance : Repr Nat := Repr.mk (fun n _ => Nat.repr n)
 /-- The empty string. -/
 instance : Inhabited String := Inhabited.mk ""
-/-- The string in double quotes (no escaping). -/
+/-- A hexadecimal digit, lowercase: `String.hexDigit 13` is `d`. -/
+def String.hexDigit (d : Nat) : Char := match Nat.lt d 10 with
+  | .true => Char.mk (Nat.add 48 d)
+  | .false => Char.mk (Nat.add 87 d)
+/-- Two lowercase hexadecimal digits: `String.hex2 13` is `0d` (the escape `\x0d`). -/
+def String.hex2 (n : Nat) : String :=
+  String.ofChars (.cons (String.hexDigit (Nat.div n 16)) (.cons (String.hexDigit (Nat.mod n 16)) .nil))
+/-- One character as it is written in a string literal: the escapes of the lexer
+(`\n`, `\t`, `\"`, `\\`, `\xHH` for a control character), otherwise the character. -/
+def String.escapeChar (c : Char) : String :=
+  let n := Char.code c
+  if Nat.beq n 34 then "\\\"" else
+  if Nat.beq n 92 then "\\\\" else
+  if Nat.beq n 10 then "\\n" else
+  if Nat.beq n 9 then "\\t" else
+  if Nat.lt n 32 then String.append "\\x" (String.hex2 n) else
+  if Nat.beq n 127 then String.append "\\x" (String.hex2 n) else
+  String.singleton c
+/-- The body of a string literal: every character escaped as the lexer reads it back. -/
+def String.reprBody : String → String
+  | .mk cs => String.join (List.map String.escapeChar cs)
+/-- The string in double quotes, with the lexer's escapes (`"a\nb"`). Escaping matters
+now that `#eval` prints a `Repr` result directly: the text is Wiz source. -/
 instance : Repr String := Repr.mk (fun s _ =>
-  String.append (String.mk (.cons (Char.mk 34) .nil)) (String.append s (String.mk (.cons (Char.mk 34) .nil))))
+  String.append "\"" (String.append (String.reprBody s) "\""))
+/-- The elements of a list as `x, y, z` (no brackets), each at the top level. -/
+def List.reprItems {A : Type} [Repr A] : List A → String
+  | .nil => ""
+  | .cons x .nil => Repr.reprPrec x 0
+  | .cons x xs => String.append (Repr.reprPrec x 0) (String.append ", " (List.reprItems xs))
+/-- A list as `[x, y, z]`: the `Repr` instance's method for `List A` (so `#eval [1, 2, 3]`
+prints a list literal, not `List.cons 1 …`). -/
+def List.reprPrec {A : Type} [Repr A] (xs : List A) (_ : Nat) : String :=
+  String.append "[" (String.append (List.reprItems xs) "]")
+/-- Lists of showable elements, as `[1, 2, 3]`. -/
+instance {A : Type} [Repr A] : Repr (List A) := Repr.mk List.reprPrec
 /-- Componentwise equality of options (there is no deriver for a recursive type). -/
 def Option.decEq {A : Type} [DecidableEq A] (a b : Option A) : Bool := match a, b with
   | .none, .none => .true
@@ -115,6 +148,32 @@ def Derive.paramVars : List ParamView → List Syntax
 /-- `T Δ ξ`: the type applied to its parameters and indices. -/
 def Derive.typeApp (v : IndView) : Syntax :=
   Syntax.mkApp (Syntax.mkVar (IndView.name v)) (List.append (Derive.paramVars (IndView.params v)) (Derive.paramVars (IndView.indices v)))
+/-- `T Δ ξ` with the indices given as terms (for a motive that binds them itself). -/
+def Derive.typeAppAt (v : IndView) (idx : List Syntax) : Syntax :=
+  Syntax.mkApp (Syntax.mkVar (IndView.name v)) (List.append (Derive.paramVars (IndView.params v)) idx)
+/-- The indices as fresh variables of a dependent motive: `i✝0`, `i✝1`, … -/
+def Derive.indexVars : List ParamView → Nat → List Syntax
+  | .nil, _ => .nil
+  | .cons _ ps, i => .cons (Derive.var "i✝" i) (Derive.indexVars ps (i + 1))
+/-- The indices as fresh binder names of a dependent motive: `i✝0`, `i✝1`, … -/
+def Derive.indexIdents : List ParamView → Nat → List Syntax
+  | .nil, _ => .nil
+  | .cons _ ps, i => .cons (Syntax.mkIdent (Derive.name "i✝" i)) (Derive.indexIdents ps (i + 1))
+/-- `fun i✝0 => … => b`, one binder per index (then the value binder is added). -/
+def Derive.indexLams : List Syntax → Syntax → Syntax
+  | .nil, b => b
+  | .cons x xs, b =>
+    let r := Derive.indexLams xs b;
+    `(term| fun $x => $r)
+/-- The motive of a dependent elimination into `Sort` at the family `T Δ`: each index is
+bound, so the recursor's methods see the constructor's index refined (`0` in `nil`,
+`.succ n` in `cons`), and the value is ignored. A derived `BEq`, `fun ξ => T Δ ξ → Bool`,
+then matches the second value at that refined index. -/
+def Derive.depMotive (v : IndView) (result : Syntax) : Syntax :=
+  let vars := Derive.indexVars (IndView.indices v) 0;
+  let idents := Derive.indexIdents (IndView.indices v) 0;
+  let ty := Derive.typeAppAt v vars;
+  Derive.indexLams idents `(term| fun _ => $ty → $result)
 /-- The type of the instance of `cls` for `v`:
 `{Δ} → [cls A]… → {ξ} → cls (T Δ ξ)`. -/
 def Derive.instanceType (cls : String) (v : IndView) : Syntax :=
@@ -317,14 +376,18 @@ def Derive.beqMethod (v : IndView) (c : CtorView) : Syntax :=
     | .cons _ .nil => `(term| fun $y => match $yv with | $pat => $same)
     | _ => `(term| fun $y => match $yv with | $pat => $same | _ => Bool.false)
 
-/-- The deriver of `BEq`, by `Derive.elim` with `Derive.beqMethod`. -/
+/-- The deriver of `BEq`, by `Derive.elim` with `Derive.beqMethod`. For an indexed family
+the motive binds the indices (`Derive.depMotive`), so each constructor's method matches the
+second value at the constructor's own index; an unindexed type keeps the index-blind motive
+`fun _ => T → Bool`. -/
 def deriveBEq : Deriver := fun n => do
   v ← Derive.lookup "BEq" n;
-  Derive.noIndices "BEq" v;
   let x := Syntax.mkIdent "x✝";
   let xv := Syntax.mkVar "x✝";
-  let T := Derive.typeApp v;
-  let body := Derive.elim v `(term| fun _ => $T → Bool) (Derive.beqMethod v) xv;
+  let motive := match IndView.indices v with
+    | .nil => let T := Derive.typeApp v; `(term| fun _ => $T → Bool)
+    | _ => Derive.depMotive v `(term| Bool);
+  let body := Derive.elim v motive (Derive.beqMethod v) xv;
   let inst := Derive.instance (Derive.instanceType "BEq" v) `(term| BEq.mk (fun $x => $body));
   MacroM.pure (.cons inst .nil)
 attribute [deriver BEq] deriveBEq
@@ -397,6 +460,8 @@ def deriveDecidableEq : Deriver := fun n => do
   | .false => MacroM.throw (String.append "DecidableEq is derived for an enumeration or a single-constructor record only, and " n)
 attribute [deriver DecidableEq] deriveDecidableEq
 
--- The prelude's types.
-deriving instance Inhabited, BEq, Repr for Option, List
+-- The prelude's types. (`List` has a hand-written `Repr` above, so a list prints as
+-- `[1, 2, 3]` rather than `List.cons 1 …`; `Inhabited` and `BEq` stay derived.)
+deriving instance Inhabited, BEq for Option, List
+deriving instance Repr for Option
 deriving instance Inhabited, BEq, Repr, DecidableEq for Bool

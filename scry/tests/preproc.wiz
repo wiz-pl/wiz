@@ -3,6 +3,7 @@ import IO
 import Sys
 import Scry.CstStore
 import Scry.Native
+import Scry.NativeLink
 import Scry.Preproc
 import Scry.Lower
 import Scry.Wil

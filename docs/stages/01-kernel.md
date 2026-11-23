@@ -20,8 +20,11 @@ Tests/                   the exercise tests
 * **Terms** use de Bruijn **indices**: `var 0` is the nearest binder.
 * **Values** use de Bruijn **levels**: `Val.var 0` is the *outermost* binder.
   Converting in a context of size `l`: `index = l - level - 1`.
-* Environments, contexts and usage vectors are lists with the **innermost** binder at
-  the head, so `env[ix]` is the value of `var ix`.
+* Environments and usage vectors are lists with the **innermost** binder at the head,
+  so `env[ix]` is the value of `var ix`. The kernel's typing context (`Ctx`) stores its
+  names, quantities and types as arrays indexed by **level** (outermost first), so
+  `bind` appends and a de Bruijn lookup is `lvl - 1 - ix`. Usage vectors are sparse:
+  they stop after the last variable used, and `Usage.zeros n` is `[]`.
 
 ## Exercises
 

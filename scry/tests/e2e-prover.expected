@@ -1,0 +1,26 @@
+safe: exit 0: ok
+safe: schema scry-prover-report/1: ok
+safe: kind prover: ok
+safe: property no-flow: ok
+safe: verdict proved: ok
+safe: exit field 0: ok
+safe: a source row is present: ok
+safe: a sink row is present: ok
+safe: the invariant has one row: ok
+unsafe: exit 1: ok
+unsafe: verdict refuted: ok
+unsafe: exit field 1: ok
+unsafe: the witness names the sink: ok
+vacuous: exit 3: ok
+vacuous: verdict vacuous: ok
+vacuous: the reason names the empty sink set: ok
+nothing: a missing function exits 3: ok
+nothing: a missing spill exits 3: ok
+usage: no arguments exits 2: ok
+usage: the error names the usage: ok
+IO: a missing source exits 2: ok
+sarif-safe: version 2.1.0: ok
+sarif-safe: no result for a proof: ok
+sarif-unsafe: driver scry: ok
+sarif-unsafe: one result: ok
+sarif-unsafe: the result is an error with the no-flow rule: ok

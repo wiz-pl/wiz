@@ -48,6 +48,32 @@ def isSubscript (c : Char) : Bool := '₀' ≤ c && c ≤ '₉'
 def isIdRest (c : Char) : Bool :=
   isIdStart c || c.isDigit || c == '\'' || c == '!' || isSubscript c
 
+/-- The end of the line comment whose text starts at `j` (just after `--`): the offset
+after the newline, or the end of input. -/
+partial def lineEnd (input : Array Char) (j : Nat) : Nat :=
+  match input[j]? with
+  | none => j
+  | some '\n' => j + 1
+  | some _ => lineEnd input (j + 1)
+
+/-- The end of the block comment whose body starts at `j` (just after the opener), with
+the nesting depth so far. An unterminated comment runs to the end of the input. -/
+partial def blockEnd (input : Array Char) (j depth : Nat) : Nat :=
+  match input[j]?, input[j + 1]? with
+  | none, _ => j
+  | some '-', some '/' => if depth == 1 then j + 2 else blockEnd input (j + 2) (depth - 1)
+  | some '/', some '-' => blockEnd input (j + 2) (depth + 1)
+  | _, _ => blockEnd input (j + 1) depth
+
+/-- If a comment starts at `i`, the offset after it: a line comment to the end of the
+line, or a nested block comment. This is the one place the comment rules are written;
+`skipWs` and the documentation highlighter both use it. -/
+def commentEnd? (input : Array Char) (i : Nat) : Option Nat :=
+  match input[i]?, input[i + 1]? with
+  | some '-', some '-' => some (lineEnd input (i + 2))
+  | some '/', some '-' => some (blockEnd input (i + 2) 1)
+  | _, _ => none
+
 /-- **Exercise 2.1.** Skip whitespace and comments starting at offset `i`, returning
 the offset of the next significant character, or `input.size` at the end of input.
 
@@ -58,23 +84,12 @@ the offset of the next significant character, or `input.size` at the end of inpu
   end of the input. -/
 partial def skipWs (input : Array Char) (i : Nat) : Nat :=
   --<sol
-  match input[i]? with
-  | some ' ' | some '\t' | some '\r' | some '\n' => skipWs input (i + 1)
-  | some '-' => if input[i + 1]? == some '-' then skipWs input (lineEnd (i + 2)) else i
-  | some '/' => if input[i + 1]? == some '-' then skipWs input (blockEnd (i + 2) 1) else i
-  | _ => i
-where
-  lineEnd (j : Nat) : Nat :=
-    match input[j]? with
-    | none => j
-    | some '\n' => j + 1
-    | some _ => lineEnd (j + 1)
-  blockEnd (j depth : Nat) : Nat :=
-    match input[j]?, input[j + 1]? with
-    | none, _ => j
-    | some '-', some '/' => if depth == 1 then j + 2 else blockEnd (j + 2) (depth - 1)
-    | some '/', some '-' => blockEnd (j + 2) (depth + 1)
-    | _, _ => blockEnd (j + 1) depth
+  match commentEnd? input i with
+  | some j => skipWs input j
+  | none =>
+    match input[i]? with
+    | some ' ' | some '\t' | some '\r' | some '\n' => skipWs input (i + 1)
+    | _ => i
   --sol>
 
 /-- **Exercise 2.2a.** Read an identifier starting at `i` (where `isIdStart` holds).

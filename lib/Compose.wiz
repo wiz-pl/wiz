@@ -1,0 +1,41 @@
+import Prelude
+/-!
+# Composition (`∘`)
+
+`f ∘ g` is `fun x => f (g x)`, as a **class**: composition is the operator of a
+`Compose` instance, not a built-in on functions. An instance for functions is here, so
+`∘` works out of the box; a category, a lens or a morphism type can say what its own
+composition is by declaring an instance (as `Append` does for `++`, 13l).
+
+```
+import Compose
+#eval (Nat.succ ∘ Nat.succ) 0          -- 2
+def twice : Nat → Nat := Nat.succ ∘ Nat.succ
+```
+
+The laws are stated at functions (where `Compose` is the function instance). They are
+definitional: `rfl` proves them, and `#print axioms` lists none.
+-/
+
+/-- Types you can compose morphisms between: `compose g f` is first `f`, then `g`,
+written `g ∘ f` (`infixr`, precedence 90, as in Lean). -/
+class Compose (α β γ : Type) where
+  compose : (β → γ) → (α → β) → (α → γ)
+/-- `g ∘ f` is `g (f x)`. -/
+infixr:90 " ∘ " => Compose.compose
+
+/-- Composition of functions: apply `f`, then `g`. A type with its own composition (a
+category, a lens) declares its own instance; a later instance wins over this one
+(stage 7b). -/
+instance {α β γ : Type} : Compose α β γ := Compose.mk (fun g f x => g (f x))
+
+/-- The identity function. `id` is the identity morphism for `Compose` at functions. -/
+def id.{u} {A : Sort u} (a : A) : A := a
+
+/-- Composition is associative: `(f ∘ g) ∘ h = f ∘ (g ∘ h)`, definitionally. -/
+def Compose.assoc {α β γ δ : Type} (f : γ → δ) (g : β → γ) (h : α → β) :
+    (f ∘ g) ∘ h = f ∘ (g ∘ h) := rfl
+/-- `id` is a left identity: `id ∘ f = f`, definitionally. -/
+def Compose.id_left {α β : Type} (f : α → β) : id ∘ f = f := rfl
+/-- `id` is a right identity: `f ∘ id = f`, definitionally. -/
+def Compose.id_right {α β : Type} (f : α → β) : f ∘ id = f := rfl

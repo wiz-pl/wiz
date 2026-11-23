@@ -2,8 +2,8 @@ import Scry.Egraph
 -- Extraction (`scry-egraph-extract`): a cheapest term per e-class. The first class has
 -- `x`, `x + 0` and `(x + 0) * 1`; unit cost extracts `x`. The second has a leaf `k` and
 -- `0 + 1`; with a heavy weight on `k`, extraction picks the smaller `0 + 1` instead.
--- The same source runs against `Scry.EgraphNative`, so it reads the extracted terms and
--- not a `cost`, whose type differs between the backends. `main` is the digest.
+-- `Scry.EgraphNative` is the compatibility import of the same engine, so this source
+-- also runs through it. `main` is the digest.
 
 -- ops: 0 = x, 1 = add, 2 = zero, 3 = mul, 4 = one, 5 = k
 def ga : Scry.EGraph :=
@@ -29,8 +29,8 @@ def headD : List Nat → Nat
   | .nil => 99
   | .cons x _ => x
 
--- No `Scry.EGraph.inf` here: this example is one of the six that also runs against
--- `Scry.EgraphNative`, whose cost tables are `Option Nat` and have no `inf` field.
+-- No `Scry.EGraph.inf` here: the extracted terms are the observable part of the cost
+-- tables this example needs.
 
 def main : Nat :=
   let xcls := classOfD ga (Scry.ENode.leaf 0) 900;
@@ -38,10 +38,9 @@ def main : Nat :=
   let w := fun op => if Nat.beq op 5 then 100 else 0;
   let unit := Scry.EGraph.extract ga xcls;
   let weighted := Scry.EGraph.extractWith ga w kcls;
-  -- The cost tables are backend-specific (`Scry.Egraph`'s `Scry.EGraph.cost` is a
-  -- `Nat` with `Scry.EGraph.inf`, the native tables' is `Option Nat`), so this example,
-  -- which also runs against `Scry.EgraphNative`, reads the extracted terms instead:
-  -- `x` is one node and `0 + 1` is three under the heavy weight on `k`.
+  -- The extracted terms are what this example pins: `x` is one node and `0 + 1` is
+  -- three under the heavy weight on `k` (the cost-table form is `costs`/`cost` with
+  -- `inf`, or `costsOpt`/`costOpt` without a sentinel).
   match unit with
   | .none => 902
   | .some t1 =>

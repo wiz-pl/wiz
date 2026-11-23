@@ -3,8 +3,8 @@ import Word
 import Text
 import Json
 import Scry.Workflow
-import Storage
-import Durable
+import Scry.QuireStorage
+import Scry.QuireDurable
 import FindingsQuire
 /-!
 # The `scry findings` store on Quire: a runnable prototype
@@ -232,7 +232,7 @@ def quireBatch (path : String) (n : Nat) : EIO Nat := do
 
 /-- `N` creates, one commit each; pages written (data + registry) and the file size
 before and after the offline compaction. -/
-partial def quireIncrementalGo (h : Handle) (pages : Nat) : List Nat → EIO Nat
+partial def quireIncrementalGo (h : DurableHandle) (pages : Nat) : List Nat → EIO Nat
   | .nil => EIO.pure pages
   | .cons i rest => do
     s ← getDb h;

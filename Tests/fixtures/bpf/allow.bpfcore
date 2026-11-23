@@ -1,0 +1,38 @@
+; P0 fixture: the IPv4 allow-list of ebpf-target.md §5.5, as a typed `bpf-core/1` term.
+; [P0 fixture; run 2026-11-22] — manifest + checker + C emitter, 1/1 case green.
+;
+; `flow` = XDP entry: parse EtherType at 12, IPv4 source at 26, look it up in `allow`,
+; count hits in the per-CPU `hits` map, return pass/drop. The Option match is the null
+; test; `Map.add` is lookup + XADD; the packet loads are the checked accessors.
+;
+; Slot numbering is absolute (A-normal): a decl's parameters are 0…n-1, and each `let`
+; or `switch-option` binder is the next slot.
+(bpf-core/1
+  (ret (enum 5))
+
+  (decl "ipv4_src" (packet) (option u32)
+    (at "allow.wiz" 9 1
+      (ret
+        (switch-option (option u32)
+          (pkt-load (option u16) 16 be (var packet 0) (lit u32 12))
+          (mk-none (option u32))
+          1
+          (ite (option u32)
+            (cmp eq (var u16 1) (lit u16 2048))
+            (pkt-load (option u32) 32 be (var packet 0) (lit u32 26))
+            (mk-none (option u32)))))))
+
+  (decl "flow" ((ctx xdp)) (enum 5)
+    (at "allow.wiz" 16 1
+      (ret
+        (switch-option (enum 5)
+          (call (option u32) "ipv4_src" ((ctx-packet (var (ctx xdp) 0))))
+          (lit (enum 5) 2)
+          1
+          (switch-option (enum 5)
+            (map-lookup (option u8) "allow" (var u32 1))
+            (lit (enum 5) 1)
+            2
+            (let u64 3
+              (map-add u64 "hits" (var u32 1) (lit u64 1))
+              (lit (enum 5) 2))))))))

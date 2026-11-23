@@ -1,0 +1,703 @@
+import Sys
+import Text
+import Json
+import Scry.Report
+import Scry.ReportCmd
+import Scry.Workflow
+import Web.EditorModel
+import Web.Hover
+import Web.Loom
+import Web.Source.Facts
+import Web.Source.Model
+import Web.Source.Span
+import Web.Source.Static
+import Web.Source.View
+
+/-!
+# Scry.WebCmd: `scry web`
+
+The static export of the reader: one directory that a plain static server serves, with
+the source, the findings and the precomputed fact rows the browser needs.
+
+```
+scry web FILE.c|DIR --out BUNDLE [--rules FILE] [--allow-errors]
+                    [--timeout SECS] [--max-nodes N] [--max-rounds N]
+                    [--assets DIR] [--ui FILE]
+```
+
+**One pipeline.** The evidence is `scry report`'s: this command calls
+`Scry.reportFilesOf`/`Scry.reportFileOf`, the same functions `scry report` runs, so the
+reader's findings and the HTML report's findings cannot disagree. No analysis is added
+here; certificates and claims are deliberately absent (P1 fills them; see the design
+note §5).
+
+**One span conversion.** `Scry.Origin` is 1-based code-point line/column; the reader's
+core is UTF-16 (`Web.Source.Span`). `Scry.webSpanOfOrigin` is the only place that
+converts, and every JSON field below is already UTF-16. The browser host therefore never
+counts a code point.
+
+**One schema.** The bundle:
+
+```
+index.html                           first paint (the SSR of Web.Source.View) + app.js
+app.js, app.css, source-static.js    the host (copied from the checkout's web/)
+wiz-source-ui.mjs                    optional (--ui): the Loom runtime
+framework/{mount,driver,runtime}.js  optional: copied when the checkout has them
+data/manifest.json                   schema, tool, file table, hashes, counts
+data/files.json                      file metadata (no source)
+data/findings.json                   the finding index (semantic ids, spans)
+data/f/<fileId>.json                 one file: source, facts, its findings
+ui-trace.json                        the SSR and scripted patch trace (acceptance/test)
+```
+
+**Determinism.** Files come in the walk's sorted order; findings are sorted by semantic
+id; a fact's node id is its position; the manifest pins every file's FNV-1a-64 content
+hash and says the hash is not a signature. No timestamp, machine name or elapsed time is
+written, so two runs over the same input are byte-identical (`sha256sum data/*.json`).
+
+**Nothing private.** The bundle embeds exactly the source this run was asked to analyse.
+The command reads no rule pack, workspace note or private path.
+-/
+
+-- ## Options and usage
+
+structure Scry.WebOpts where
+  path : String
+  out : String
+  rules : Option String
+  allowErrors : Bool
+  timeoutSecs : Option Nat
+  maxNodes : Option Nat
+  maxRounds : Option Nat
+  assets : Option String
+  ui : Option String
+
+def Scry.emptyWebOpts : Scry.WebOpts :=
+  Scry.WebOpts.mk "" "web-bundle" .none .false (.some 300) (.some 2000000) .none .none .none
+
+def Scry.webUsage : String :=
+  "usage: scry web FILE.c|DIR --out BUNDLE [--rules FILE] [--allow-errors]\n"
+  ++ "                [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
+  ++ "                [--assets DIR] [--ui FILE]\n"
+  ++ "  writes a static source-reader bundle (index.html + data/*.json).\n"
+  ++ "  --assets DIR  the checkout's web/ directory (source-app.js, source.css,\n"
+  ++ "                source-static.js, framework/); default: the first web/ found here.\n"
+  ++ "  --ui FILE     copy a built wiz-source-ui.mjs into the bundle (web/build-source-ui.sh).\n"
+
+partial def Scry.webArgsGo (path : Option String) (o : Scry.WebOpts) :
+    List String → Except String Scry.WebOpts
+  | .nil => match path with
+    | .some p => .ok { o with path := p }
+    | .none => .error Scry.webUsage
+  | .cons a rest => match a with
+    | "--out" => match rest with
+      | .cons p more => Scry.webArgsGo path { o with out := p } more
+      | .nil => .error "--out needs an output directory"
+    | "--rules" => match rest with
+      | .cons p more => Scry.webArgsGo path { o with rules := .some p } more
+      | .nil => .error "--rules needs a file"
+    | "--allow-errors" => Scry.webArgsGo path { o with allowErrors := .true } rest
+    | "--assets" => match rest with
+      | .cons p more => Scry.webArgsGo path { o with assets := .some p } more
+      | .nil => .error "--assets needs a directory"
+    | "--ui" => match rest with
+      | .cons p more => Scry.webArgsGo path { o with ui := .some p } more
+      | .nil => .error "--ui needs a module file"
+    | "--timeout" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.webArgsGo path { o with timeoutSecs := .some n } more
+        | .none => .error ("--timeout needs a number of seconds, not \"" ++ p ++ "\"")
+      | .nil => .error "--timeout needs a number of seconds"
+    | "--max-nodes" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.webArgsGo path { o with maxNodes := .some n } more
+        | .none => .error ("--max-nodes needs a node count, not \"" ++ p ++ "\"")
+      | .nil => .error "--max-nodes needs a node count"
+    | "--max-rounds" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.webArgsGo path { o with maxRounds := .some n } more
+        | .none => .error ("--max-rounds needs a round count, not \"" ++ p ++ "\"")
+      | .nil => .error "--max-rounds needs a round count"
+    | "--help" => .error Scry.webUsage
+    | _ => match String.startsWith a "--" with
+      | .true => .error ("unknown flag " ++ a ++ "\n" ++ Scry.webUsage)
+      | .false => match path with
+        | .some _ => .error ("unexpected argument " ++ a ++ "\n" ++ Scry.webUsage)
+        | .none => Scry.webArgsGo (.some a) o rest
+
+def Scry.webArgs (args : List String) : Except String Scry.WebOpts :=
+  match Scry.webArgsGo .none Scry.emptyWebOpts args with
+  | .error e => .error e
+  | .ok o => match o.path, o.out with
+    | "", _ => .error Scry.webUsage
+    | _, "" => .error "--out needs an output directory"
+    | _, _ => .ok o
+
+/-- The `scry report` options for one file: the same pipeline, not a copy. -/
+def Scry.webReportOpts (o : Scry.WebOpts) (file : String) : Scry.ReportOpts :=
+  { Scry.emptyReportOpts with path := file, rules := o.rules,
+    allowErrors := o.allowErrors, timeoutSecs := o.timeoutSecs,
+    maxNodes := o.maxNodes, maxRounds := o.maxRounds }
+
+-- ## Small helpers
+
+/-- The language a path's extension names (only the front ends the analyser has). -/
+def Scry.webLanguage (path : String) : String :=
+  match String.endsWith path ".cs" with
+  | .true => "csharp"
+  | .false => match String.endsWith path ".c" with
+    | .true => "c"
+    | .false => match String.endsWith path ".h" with
+      | .true => "c"
+      | .false => "text"
+
+/-- The UTF-8 length of a code point. -/
+def Scry.webUtf8Len (c : Nat) : Nat :=
+  match Nat.lt c 0x80 with
+  | .true => 1
+  | .false => match Nat.lt c 0x800 with
+    | .true => 2
+    | .false => match Nat.lt c 0x10000 with
+      | .true => 3
+      | .false => 4
+
+/-- The UTF-8 size of a string (the `bytes` field of the file table). -/
+def Scry.webUtf8Size (s : String) : Nat :=
+  List.foldl (fun acc c => acc + Scry.webUtf8Len (Char.code c)) 0 (String.chars s)
+
+/-- A `Source.FactRow` column by name, or `""`. -/
+def Scry.webColumn (r : Source.FactRow) (key : String) : String :=
+  match List.find (fun p => String.eq p.1 key) r.columns with
+  | .some p => p.2
+  | .none => ""
+
+/-- The file with `id`, if the bundle has one. -/
+def Scry.webFileOf (files : List Source.File) (id : String) : Option Source.File :=
+  List.find (fun f => String.eq f.id id) files
+
+/-- The index of the file with `id`, if it is in the bundle. -/
+def Scry.webIndexOf (files : List Source.File) (id : String) :
+    Option EditorModel.PositionIndex :=
+  match Scry.webFileOf files id with
+  | .some f => .some (EditorModel.index f.text)
+  | .none => .none
+
+/-- Insert a finding into a list ordered by semantic id (stable for equal ids). -/
+def Scry.webInsertById (f : Source.Finding) : List Source.Finding → List Source.Finding
+  | .nil => [f]
+  | .cons g rest => match String.lt f.id g.id with
+    | .true => List.cons f (List.cons g rest)
+    | .false => List.cons g (Scry.webInsertById f rest)
+
+/-- Findings sorted by semantic id: the bundle's order, independent of line numbers. -/
+def Scry.webSortById (fs : List Source.Finding) : List Source.Finding :=
+  List.foldl (fun acc f => Scry.webInsertById f acc) [] fs
+
+/-- `[["key","value"], …]` for the JSON columns field. -/
+def Scry.webColumnsJson (cs : List (String × String)) : Json :=
+  Json.mkArr (List.map (fun p => Json.mkArr [Json.mkStr p.1, Json.mkStr p.2]) cs)
+
+/-- A span as `{"start","stop"}`. -/
+def Scry.webSpanJson (s : Source.Span) : Json :=
+  Json.mkObj [("start", Json.ofNat s.start), ("stop", Json.ofNat s.stop)]
+
+/-- The 1-based `LINE:COL` of an offset. -/
+def Scry.webLineColumn (i : EditorModel.PositionIndex) (n : Nat) : Nat × Nat :=
+  let p := Source.Span.positionOf i n;
+  (p.1 + 1, p.2 + 1)
+
+-- ## The models
+
+/-- A report origin (1-based code points) as a UTF-16 span; `line = 0` is unlocated and
+stays an empty span at the start (never a mark on the first character). -/
+def Scry.webSpanOfOrigin (i : EditorModel.PositionIndex)
+    (line column endLine endColumn : Nat) : Source.Span :=
+  match Nat.beq line 0 with
+  | .true => Source.Span.at 0
+  | .false => Source.Span.ofOrigin i line column endLine endColumn
+
+/-- The `flow` facts of a finding: one row per located path step. `n` is the next node
+number; the result is the rows (in path order) and the number after them. -/
+def Scry.webFlowFactsGo (i : EditorModel.PositionIndex) (fileId : String)
+    (f : Source.Finding) : List Scry.ReportStep → Nat → List Source.FactRow →
+    List Source.FactRow × Nat
+  | .nil, n, acc => (List.reverse acc, n)
+  | .cons s rest, n, acc => match Nat.beq s.line 0 with
+    | .true => Scry.webFlowFactsGo i fileId f rest n acc
+    | .false =>
+      let span := Scry.webSpanOfOrigin i s.line s.column s.endLine s.endColumn;
+      -- The path's last step is the sink itself: the `sink` row already carries that
+      -- span, so a second row there would make the info view show the same node twice.
+      match Bool.and (Nat.beq span.start f.span.start) (Nat.beq span.stop f.span.stop) with
+      | .true => Scry.webFlowFactsGo i fileId f rest n acc
+      | .false =>
+        let row := Source.FactRow.mk "flow" (String.append "n" (Nat.repr n)) fileId span
+          [ ("kind", s.kind)
+          , ("func", s.func)
+          , ("rule", f.rule)
+          , ("finding", f.id)
+          ];
+        Scry.webFlowFactsGo i fileId f rest (n + 1) (List.cons row acc)
+
+/-- The facts a finding contributes: one `sink` row and one `flow` row per located path
+step. `base` is the row's position in the file's table, so it is stable across a rebuild. -/
+def Scry.webFactsOf (i : EditorModel.PositionIndex) (fileId : String) (base : Nat)
+    (f : Source.Finding) (steps : List Scry.ReportStep) : List Source.FactRow × Nat :=
+  let sink := Source.FactRow.mk "sink" (String.append "n" (Nat.repr base)) fileId f.span
+    [ ("rule", f.rule)
+    , ("severity", f.severity)
+    , ("message", f.message)
+    , ("derivation", match f.checked with
+        | .true => "checked against this EDB"
+        | .false => "no certificate")
+    , ("finding", f.id)
+    ];
+  let rest := Scry.webFlowFactsGo i fileId f steps (base + 1) [];
+  (List.cons sink rest.1, rest.2)
+
+/-- Build one file's findings and facts, threading the fact node number. -/
+def Scry.webFindingsOf (i : EditorModel.PositionIndex) (fileId path : String) :
+    List Scry.ReportFinding → Nat → List Source.Finding × List Source.FactRow × Nat
+  | .nil, n => ([], [], n)
+  | .cons rf rest, n =>
+    let span := Scry.webSpanOfOrigin i rf.sinkLine rf.sinkColumn rf.endLine rf.endColumn;
+    let finding := Source.Finding.mk rf.id fileId path rf.rule rf.severity rf.message
+      span rf.sinkLine rf.sinkColumn rf.checked "";
+    let facts := Scry.webFactsOf i fileId n finding rf.steps;
+    let tail := Scry.webFindingsOf i fileId path rest facts.2;
+    (List.cons finding tail.1, List.append facts.1 tail.2.1, tail.2.2)
+
+/-- One file's reader model: the file, its findings and its facts. -/
+def Scry.webModelOf (rf : Scry.ReportFile) :
+    Source.File × List Source.Finding × List Source.FactRow :=
+  let i := EditorModel.index rf.source;
+  let file := Source.File.mk rf.anchor rf.path (Scry.webLanguage rf.path) rf.source
+    (EditorModel.lineCount i);
+  let built := Scry.webFindingsOf i rf.anchor rf.path rf.findings 0;
+  (file, built.1, built.2.1)
+
+/-- The whole bundle's models, in the file walk's order. -/
+partial def Scry.webModelsGo (o : Scry.WebOpts) :
+    List String → EIO (List Source.File × List Source.Finding × List Source.FactRow)
+  | .nil => EIO.pure (([] : List Source.File), ([] : List Source.Finding),
+      ([] : List Source.FactRow))
+  | .cons f rest => do
+    rf ← Scry.reportFileOf (Scry.webReportOpts o f) f;
+    let m := Scry.webModelOf rf;
+    more ← Scry.webModelsGo o rest;
+    EIO.pure (List.cons m.1 more.1,
+      List.append m.2.1 more.2.1, List.append m.2.2 more.2.2)
+
+-- ## JSON writers
+
+/-- A file's metadata row (`data/files.json`, the manifest's table). -/
+def Scry.webFileMetaJson (f : Source.File) : Json :=
+  Json.mkObj
+    [ ("id", Json.mkStr f.id)
+    , ("path", Json.mkStr f.path)
+    , ("language", Json.mkStr f.language)
+    , ("bytes", Json.ofNat (Scry.webUtf8Size f.text))
+    , ("lines", Json.ofNat f.lines)
+    , ("contentHash", Json.mkStr (Scry.wfHex (Scry.wfFnv f.text)))
+    ]
+
+/-- One finding as JSON. `spanText`/`line`/`column` are display fields, so the browser
+host needs no line arithmetic of its own. -/
+def Scry.webFindingJson (i : EditorModel.PositionIndex) (f : Source.Finding) : Json :=
+  let lc := Scry.webLineColumn i f.span.start;
+  Json.mkObj
+    [ ("id", Json.mkStr f.id)
+    , ("fileId", Json.mkStr f.fileId)
+    , ("path", Json.mkStr f.path)
+    , ("rule", Json.mkStr f.rule)
+    , ("severity", Json.mkStr f.severity)
+    , ("message", Json.mkStr f.message)
+    , ("span", Scry.webSpanJson f.span)
+    , ("spanText", Json.mkStr (Source.Span.show i f.span))
+    , ("line", Json.ofNat (match Nat.beq f.line 0 with | .true => lc.1 | .false => f.line))
+    , ("column", Json.ofNat (match Nat.beq f.column 0 with | .true => lc.2 | .false => f.column))
+    , ("checked", Json.mkBool f.checked)
+    , ("claimId", Json.mkStr f.claimId)
+    ]
+
+/-- One fact row as JSON. -/
+def Scry.webFactJson (i : EditorModel.PositionIndex) (r : Source.FactRow) : Json :=
+  let lc := Scry.webLineColumn i r.span.start;
+  Json.mkObj
+    [ ("kind", Json.mkStr r.kind)
+    , ("node", Json.mkStr r.node)
+    , ("fileId", Json.mkStr r.fileId)
+    , ("span", Scry.webSpanJson r.span)
+    , ("spanText", Json.mkStr (Source.Span.show i r.span))
+    , ("line", Json.ofNat lc.1)
+    , ("column", Json.ofNat lc.2)
+    , ("columns", Scry.webColumnsJson r.columns)
+    ]
+
+/-- The host's one-time payload (`scry.source.bundle-ui/1`): exactly the three tables the
+reader's decoder reads. The host assembles it from `data/*.json`; `scry web` builds it
+here too for the UI trace, so both sides decode the same shape. -/
+def Scry.webBundleUiJson (mode tool : String) (files : List Source.File)
+    (findings : List Source.Finding) (facts : List Source.FactRow)
+    (indexOf : String → Option EditorModel.PositionIndex) : Json :=
+  let fileJson : Source.File → Json := fun f =>
+    Json.mkObj
+      [ ("id", Json.mkStr f.id), ("path", Json.mkStr f.path)
+      , ("language", Json.mkStr f.language), ("text", Json.mkStr f.text)
+      , ("lines", Json.ofNat f.lines) ];
+  let emptyFinding : Source.Finding → Json := fun f =>
+    match indexOf f.fileId with
+    | .some i => Scry.webFindingJson i f
+    | .none => Json.mkObj [("id", Json.mkStr f.id), ("path", Json.mkStr f.path)];
+  let emptyFact : Source.FactRow → Json := fun r =>
+    match indexOf r.fileId with
+    | .some i => Scry.webFactJson i r
+    | .none => Json.mkObj [("kind", Json.mkStr r.kind)];
+  Json.mkObj
+    [ ("schema", Json.mkStr "scry.source.bundle-ui/1")
+    , ("mode", Json.mkStr mode)
+    , ("tool", Json.mkStr tool)
+    , ("files", Json.mkArr (List.map fileJson files))
+    , ("findings", Json.mkArr (List.map emptyFinding findings))
+    , ("facts", Json.mkArr (List.map emptyFact facts))
+    ]
+
+/-- An answer's `lines` array: `[{"text","code","rule","ellipsis"}]`. -/
+def Scry.webLinesJson (lines : List Hover.Line) : Json :=
+  Json.mkArr (List.map (fun l => Json.mkObj
+    [ ("text", Json.mkStr l.text), ("code", Json.mkBool l.code)
+    , ("rule", Json.mkBool l.rule), ("ellipsis", Json.mkBool l.ellipsis) ]) lines)
+
+/-- `scry.source.answer/1`, the one schema both transports produce. -/
+def Scry.webAnswerJson (request fileId : String) (span : Option Source.Span)
+    (spanText title rule severity findingId : String) (lines : List Hover.Line)
+    (rows : List Source.FactRow) (findings : List Source.Finding)
+    (indexOf : String → Option EditorModel.PositionIndex) : String :=
+  let rowJson : Source.FactRow → Json := fun r => match indexOf r.fileId with
+    | .some i => Scry.webFactJson i r
+    | .none => Json.mkObj [("kind", Json.mkStr r.kind)];
+  let findingJson : Source.Finding → Json := fun f => match indexOf f.fileId with
+    | .some i => Scry.webFindingJson i f
+    | .none => Json.mkObj [("id", Json.mkStr f.id), ("path", Json.mkStr f.path)];
+  Json.render (Json.mkObj
+    [ ("schema", Json.mkStr "scry.source.answer/1")
+    , ("request", Json.mkStr request)
+    , ("status", Json.mkStr "ok")
+    , ("fileId", Json.mkStr fileId)
+    , ("span", match span with
+        | .some s => Scry.webSpanJson s
+        | .none => Json.mkNull)
+    , ("spanText", Json.mkStr spanText)
+    , ("title", Json.mkStr title)
+    , ("rule", Json.mkStr rule)
+    , ("severity", Json.mkStr severity)
+    , ("findingId", Json.mkStr findingId)
+    , ("lines", Scry.webLinesJson lines)
+    , ("rows", Json.mkArr (List.map rowJson rows))
+    , ("findings", Json.mkArr (List.map findingJson findings))
+    ])
+
+/-- The hover answer for a finding: its rule, severity, derivation status, message and
+the sink text. This is what `web/source-static.js` produces in the browser. -/
+def Scry.webHoverAnswer (files : List Source.File) (facts : List Source.FactRow)
+    (f : Source.Finding) : String :=
+  let i := match Scry.webIndexOf files f.fileId with
+    | .some x => x
+    | .none => EditorModel.index "";
+  let sinkText := match Scry.webFileOf files f.fileId with
+    | .some file => EditorModel.slice (EditorModel.index file.text) f.span.start f.span.stop
+    | .none => "";
+  let checkedText := match f.checked with
+    | .true => "rule derivation checked against this EDB"
+    | .false => "no certificate (unchecked)";
+  let lines :=
+    [ Hover.textLine f.rule
+    , Hover.textLine (String.append "severity: " (String.append f.severity
+        (String.append " · " checkedText)))
+    , Hover.textLine f.message
+    , Hover.codeLine sinkText
+    ];
+  Scry.webAnswerJson "hover" f.fileId (.some f.span) (Source.Span.show i f.span)
+    (Source.View.title f) f.rule f.severity f.id lines [] [] (Scry.webIndexOf files)
+
+/-- The info answer for a finding's sink: the fact rows and the findings at that node. -/
+def Scry.webInfoAnswer (files : List Source.File) (facts : List Source.FactRow)
+    (findings : List Source.Finding) (f : Source.Finding) : String :=
+  let i := match Scry.webIndexOf files f.fileId with
+    | .some x => x
+    | .none => EditorModel.index "";
+  let rows := Source.factsAt facts f.fileId f.span.start;
+  let at := Source.findingsAt findings f.fileId f.span.start;
+  let title := String.append "Info at " (Source.Span.show i f.span);
+  Scry.webAnswerJson "info" f.fileId (.some f.span) (Source.Span.show i f.span)
+    title "" "" "" [] rows at (Scry.webIndexOf files)
+
+-- ## The UI trace
+
+/-- Apply an answer exactly as the runtime's `"answer"` effect does (decode, then store),
+so a trace that passes also checks the decoder. -/
+def Scry.webApplyAnswer (s : Source.Page) (json : String) : Source.Page :=
+  match Source.Static.decodeAnswer json with
+  | .some a => Source.Page.answer s a
+  | .none => s
+
+/-- The three trace steps for one finding (select, hover, info), threading the page. -/
+def Scry.webTraceStepsGo (app : Loom.LiveApp Source.Page Source.Msg) (files : List Source.File)
+    (facts : List Source.FactRow) (findings : List Source.Finding) :
+    Source.Page → List Source.Finding → List Json → Source.Page × List Json
+  | prev, .nil, acc => (prev, acc)
+  | prev, .cons f rest, acc =>
+    let selected := Source.Page.step prev (.select f.id);
+    let hovered := Scry.webApplyAnswer selected (Scry.webHoverAnswer files facts f);
+    let informed := Scry.webApplyAnswer hovered (Scry.webInfoAnswer files facts findings f);
+    let acc1 := List.append acc
+      [ Json.mkObj
+          [ ("name", Json.mkStr (String.append "select:" f.id))
+          , ("patches", Json.mkStr (Loom.LiveApp.patches app prev selected))
+          , ("html", Json.mkStr (Loom.LiveApp.html app selected)) ]
+      , Json.mkObj
+          [ ("name", Json.mkStr (String.append "hover:" f.id))
+          , ("patches", Json.mkStr (Loom.LiveApp.patches app selected hovered))
+          , ("html", Json.mkStr (Loom.LiveApp.html app hovered)) ]
+      , Json.mkObj
+          [ ("name", Json.mkStr (String.append "info:" f.id))
+          , ("patches", Json.mkStr (Loom.LiveApp.patches app hovered informed))
+          , ("html", Json.mkStr (Loom.LiveApp.html app informed)) ]
+      ];
+    Scry.webTraceStepsGo app files facts findings informed rest acc1
+
+/-- The `#/f/<id>` route step for one finding. -/
+def Scry.webTraceRoute (app : Loom.LiveApp Source.Page Source.Msg)
+    (s0 : Source.Page) (f : Source.Finding) : Json :=
+  let routed := Source.Page.route s0 (String.append "#/f/" f.id);
+  Json.mkObj
+    [ ("name", Json.mkStr (String.append "route:#/f/" f.id))
+    , ("patches", Json.mkStr (Loom.LiveApp.patches app s0 routed))
+    , ("html", Json.mkStr (Loom.LiveApp.html app routed)) ]
+
+/-- The UI trace (`data/ui.json`): the first paint and the patch lists for the scripted
+interactions the acceptance test replays. The patches are the real
+`Loom.LiveApp.patches` of `Web.Source.View.app`, and every answer is decoded with
+`Web.Source.Static.decodeAnswer` before it is applied. -/
+def Scry.webUiTraceJson (b : Source.Bundle) : String :=
+  let app := Source.View.app;
+  let s0 := Source.Page.loaded Source.Page.initial b.mode b.tool b.files b.findings b.facts;
+  let answers := List.concat (List.map (fun f =>
+      [ Json.mkObj
+          [ ("name", Json.mkStr (String.append "hover:" f.id))
+          , ("kind", Json.mkStr "hover")
+          , ("json", Json.mkStr (Scry.webHoverAnswer b.files b.facts f)) ]
+      , Json.mkObj
+          [ ("name", Json.mkStr (String.append "info:" f.id))
+          , ("kind", Json.mkStr "info")
+          , ("json", Json.mkStr (Scry.webInfoAnswer b.files b.facts b.findings f)) ]
+      ]) b.findings);
+  let walk := Scry.webTraceStepsGo app b.files b.facts b.findings s0 b.findings [];
+  let routes := List.map (Scry.webTraceRoute app s0) b.findings;
+  Json.render (Json.mkObj
+    [ ("schema", Json.mkStr "scry.source.ui/1")
+    , ("initial", Json.mkStr (Loom.LiveApp.html app s0))
+    , ("answers", Json.mkArr answers)
+    , ("steps", Json.mkArr (List.append walk.2 routes))
+    ])
+
+-- ## Writing the bundle
+
+/-- Create `p` when it does not exist. -/
+def Scry.webEnsureDir (p : String) : EIO Unit := do
+  present ← EIO.lift (FS.exists p);
+  match present with
+  | .true => do
+    isDir ← EIO.lift (FS.isDir p);
+    match isDir with
+    | .true => EIO.pure ()
+    | .false => EIO.fail (p ++ " exists and is not a directory")
+  | .false => FS.createDir p
+
+/-- Copy one file; `false` when the source does not exist. -/
+def Scry.webCopy (from to : String) : EIO Bool := do
+  present ← EIO.lift (FS.isFile from);
+  match present with
+  | .false => EIO.pure .false
+  | .true => do
+    text ← FS.readFile from;
+    FS.writeFile to text;
+    EIO.pure .true
+
+/-- The first `web/` directory that has the host's files, from the current directory up
+(or `--assets`). -/
+partial def Scry.webFindAssetsGo : List String → EIO (Option String)
+  | .nil => EIO.pure .none
+  | .cons d rest => do
+    present ← EIO.lift (FS.isFile (String.append d "/source-app.js"));
+    match present with
+    | .true => EIO.pure (.some d)
+    | .false => Scry.webFindAssetsGo rest
+
+def Scry.webFindAssets (o : Scry.WebOpts) : EIO (Option String) :=
+  match o.assets with
+  | .some d => do
+    present ← EIO.lift (FS.isDir d);
+    match present with
+    | .true => EIO.pure (.some d)
+    | .false => EIO.pure .none
+  | .none => Scry.webFindAssetsGo ["web", "../web", "../../web", "../../../web"]
+
+/-- Copy the host's files (`web/source-*` to the bundle root). -/
+def Scry.webCopyHostGo (assets out : String) :
+    List (String × String) → EIO (List String)
+  | .nil => EIO.pure []
+  | .cons p rest => do
+    ok ← Scry.webCopy (String.append assets (String.append "/" p.1))
+      (String.append out (String.append "/" p.2));
+    more ← Scry.webCopyHostGo assets out rest;
+    EIO.pure (match ok with
+      | .true => List.cons p.2 more
+      | .false => more)
+
+/-- Copy the framework modules the browser half needs. -/
+def Scry.webCopyFrameworkGo (assets out : String) : List String → EIO (List String)
+  | .nil => EIO.pure []
+  | .cons n rest => do
+    ok ← Scry.webCopy (String.append assets (String.append "/framework/" n))
+      (String.append out (String.append "/framework/" n));
+    more ← Scry.webCopyFrameworkGo assets out rest;
+    EIO.pure (match ok with
+      | .true => List.cons n more
+      | .false => more)
+
+/-- Write one `data/f/<id>.json`. -/
+def Scry.webWriteFileData (out : String) (findings : List Source.Finding)
+    (facts : List Source.FactRow) (f : Source.File) : EIO Unit := do
+  let i := EditorModel.index f.text;
+  let own := List.filter (fun x => String.eq x.fileId f.id) findings;
+  let fs := List.filter (fun r => String.eq r.fileId f.id) facts;
+  let j := Json.mkObj
+    [ ("schema", Json.mkStr "scry.source.file/1")
+    , ("id", Json.mkStr f.id)
+    , ("path", Json.mkStr f.path)
+    , ("language", Json.mkStr f.language)
+    , ("source", Json.mkStr f.text)
+    , ("lines", Json.ofNat f.lines)
+    , ("findings", Json.mkArr (List.map (Scry.webFindingJson i) own))
+    , ("facts", Json.mkArr (List.map (Scry.webFactJson i) fs))
+    ];
+  FS.writeFile (String.append out (String.append "/data/f/"
+    (String.append f.id ".json"))) (String.append (Json.render j) "\n")
+
+/-- Write every per-file JSON. -/
+def Scry.webWriteFilesGo (out : String) (findings : List Source.Finding)
+    (facts : List Source.FactRow) : List Source.File → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons f rest => do
+    Scry.webWriteFileData out findings facts f;
+    Scry.webWriteFilesGo out findings facts rest
+
+/-- `index.html`: the first paint is the reader's SSR; `app.js` mounts the Loom runtime
+on it. A missing runtime leaves the SSR in place and one plain reason, never a blank
+page. -/
+def Scry.webIndexHtml (ssr : String) : String :=
+  "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+  ++ "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+  ++ "<title>scry source</title><link rel=\"stylesheet\" href=\"app.css\"></head>"
+  ++ "<body><div id=\"app\" data-wiz-mode=\"static\">" ++ ssr ++ "</div>"
+  ++ "<script type=\"module\" src=\"app.js\"></script>"
+  ++ "<noscript><p>This reader needs JavaScript for its Loom runtime; the source is in "
+  ++ "<code>data/</code>.</p></noscript></body></html>\n"
+
+/-- `scry web`: analyse, build the models, write the bundle, say what it wrote. -/
+def Scry.webRun (o : Scry.WebOpts) : EIO Nat := do
+  found ← Scry.reportFilesOf o.path;
+  let files := found.1;
+  models ← Scry.webModelsGo o files;
+  let bundleFiles := models.1;
+  let bundleFindings := Scry.webSortById models.2.1;
+  let bundleFacts := models.2.2;
+  let tool := "scry 0.1.0-dev (S1)";
+  let payload := Json.render (Scry.webBundleUiJson "static" tool bundleFiles bundleFindings
+    bundleFacts (Scry.webIndexOf bundleFiles));
+  let bundle := match Source.Static.decodeBundle payload with
+    | .some b => b
+    | .none => Source.Bundle.mk "static" tool bundleFiles bundleFindings bundleFacts;
+  let trace := Scry.webUiTraceJson bundle;
+  let ssr := match Json.parse trace with
+    | .ok j => Json.getStr j "initial"
+    | .error _ => "";
+  -- Directories.
+  let out := o.out;
+  Scry.webEnsureDir out;
+  Scry.webEnsureDir (String.append out "/data");
+  Scry.webEnsureDir (String.append out "/data/f");
+  Scry.webEnsureDir (String.append out "/framework");
+  -- The host files and the framework.
+  assets ← Scry.webFindAssets o;
+  hostCopied ← (match assets with
+    | .none => EIO.pure ([] : List String)
+    | .some d => Scry.webCopyHostGo d out
+        [("source-app.js", "app.js"), ("source.css", "app.css"),
+         ("source-static.js", "source-static.js")]);
+  frameworkCopied ← (match assets with
+    | .none => EIO.pure ([] : List String)
+    | .some d => Scry.webCopyFrameworkGo d out
+        ["mount.js", "driver.js", "runtime.js", "adopt.js"]);
+  runtimeCopied ← (match o.ui with
+    | .none => EIO.pure Bool.false
+    | .some src => Scry.webCopy src (String.append out "/wiz-source-ui.mjs"));
+  -- Data files.
+  let fileMetas := List.map Scry.webFileMetaJson bundleFiles;
+  let revision := Scry.wfHex (Scry.wfFnv (String.append tool (String.join
+    (List.map (fun f => Scry.wfHex (Scry.wfFnv f.text)) bundleFiles))));
+  let manifest := Json.mkObj
+    [ ("schema", Json.mkStr "scry.web.bundle/1")
+    , ("tool", Json.mkStr tool)
+    , ("revision", Json.mkStr revision)
+    , ("mode", Json.mkStr "static")
+    , ("counts", Json.mkObj
+        [ ("files", Json.ofNat (List.length bundleFiles))
+        , ("findings", Json.ofNat (List.length bundleFindings)) ])
+    , ("files", Json.mkArr fileMetas)
+    , ("hash", Json.mkObj
+        [ ("hash", Json.mkStr "fnv1a64")
+        , ("note", Json.mkStr "a content identifier, not a signature") ])
+    , ("assets", Json.mkObj
+        [ ("host", Json.mkArr (List.map Json.mkStr hostCopied))
+        , ("framework", Json.mkArr (List.map Json.mkStr frameworkCopied))
+        , ("runtime", Json.mkBool runtimeCopied) ])
+    , ("panels", Json.mkArr
+        [ Json.mkObj [("name", Json.mkStr "findings"), ("kind", Json.mkStr "list")]
+        , Json.mkObj [("name", Json.mkStr "info"), ("kind", Json.mkStr "rows")]
+        ])
+    ];
+  let filesJson := Json.mkObj
+    [ ("schema", Json.mkStr "scry.source.files/1")
+    , ("files", Json.mkArr fileMetas)
+    ];
+  let findingRows := List.concat (List.map (fun f =>
+      match Scry.webIndexOf bundleFiles f.fileId with
+      | .some i => [Scry.webFindingJson i f]
+      | .none => []) bundleFindings);
+  let findingsJson := Json.mkObj
+    [ ("schema", Json.mkStr "scry.source.findings/1")
+    , ("findings", Json.mkArr findingRows)
+    ];
+  FS.writeFile (String.append out "/data/manifest.json")
+    (String.append (Json.render manifest) "\n");
+  FS.writeFile (String.append out "/data/files.json")
+    (String.append (Json.render filesJson) "\n");
+  FS.writeFile (String.append out "/data/findings.json")
+    (String.append (Json.render findingsJson) "\n");
+  Scry.webWriteFilesGo out bundleFindings bundleFacts bundleFiles;
+  -- The scripted patch trace is a test/first-paint artifact, not part of the data the
+  -- browser loads; it sits at the bundle root so `data/` stays the product.
+  FS.writeFile (String.append out "/ui-trace.json") (String.append trace "\n");
+  FS.writeFile (String.append out "/index.html") (Scry.webIndexHtml ssr);
+  EIO.lift (IO.println ("wrote source bundle: " ++ out ++ " ("
+    ++ Nat.repr (List.length bundleFiles) ++ " file(s), "
+    ++ Nat.repr (List.length bundleFindings) ++ " finding(s), "
+    ++ Nat.repr (List.length bundleFacts) ++ " fact(s); no timestamp, stable ids)"));
+  EIO.pure 0
+
+def Scry.webCmd (args : List String) : EIO Nat :=
+  match Scry.webArgs args with
+  | .ok o => Scry.webRun o
+  | .error e => EIO.fail e

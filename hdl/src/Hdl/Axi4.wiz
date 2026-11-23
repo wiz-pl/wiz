@@ -1,0 +1,510 @@
+import Hdl.Bus
+/-!
+# Hdl.Axi4
+
+The AXI4 burst subset of ARM IHI 0022, over `Hdl.Bus` (`import Hdl.Axi4`). `Hdl.AxiLite`
+gives the five AXI4-Lite channels the ARM names but stays at one beat per transfer;
+this module adds the burst fields and the burst adapters:
+
+* `Axi4.Aw`/`W`/`B` and `Axi4.Ar`/`R` are the full AXI4 write and read channels:
+  `AxLEN`, `AxSIZE`, `AxBURST` (FIXED/INCR/WRAP), `AxID`, `WLAST`/`RLAST` and the
+  response `BRESP`/`RRESP` with the ID echoed back.
+* `Axi4.SlaveIn`/`SlaveOut`/`MasterOut`/`MasterIn` put the five channels and their
+  `*READY` signals in the usual directions.
+* `Axi4.beatAddr` is the address of beat `k` of a burst: INCR adds `2^SIZE` per beat,
+  WRAP walks the aligned window of `(LEN + 1) * 2^SIZE` bytes and wraps at its end,
+  FIXED holds the address. `Axi4.beatSeq` is the whole address list.
+* `Axi4.wrC aw dw idw` is a write adapter: an AXI4 master's `AW`/`W` burst becomes one
+  `Bus.ReqW` write per beat, and one `B` response at the end. `Axi4.rdC aw dw idw` is
+  the read direction: an `AR` burst becomes one `Bus.ReqW` read per beat, and `R` beats
+  with `RLAST` on the last one. Both adapters hold the bus request (and the AXI beat)
+  while the bus slave stalls, so no beat is lost or duplicated under backpressure.
+
+The subset is deliberately the one a single-beat bus can serve. Each adapter is single
+outstanding (the next `AW`/`AR` is accepted after the previous response has been
+handed back), `AW` and `W` need not arrive together (`AWREADY` is high at rest), but
+the write adapter consumes one `W` beat per completed bus beat, and `AxSIZE` must not
+exceed the bus data width (`2^SIZE` bytes per beat). The attributes (`AxPROT`,
+`AxCACHE`, `AxLOCK`, `AxQOS`, `AxREGION`, and the user signals) and the exclusive
+accesses are not part of this subset. `Axi4.Burst`/`Axi4.orderOf` model multiple
+outstanding IDs at values: with several requests in flight the responses must be a
+permutation of the requests that preserves each ID's own order. The single-outstanding
+adapters are the special case where that order is the issue order.
+
+`examples/hdl-axi4.wiz` (test group `bus-protocol`) runs INCR and WRAP bursts in both
+directions, with a bus slave that stalls, and checks the `Hdl.Axi4Law` obligations
+(address progression, beat count, `WLAST`/`RLAST`, write strobes, response ID/order).
+The value simulation, `Netlist.simulate` and `Circuit.simFast` are compared cycle for
+cycle, and yosys `check -assert`/`synth_ice40` runs on the emitted Verilog when yosys is
+on PATH.
+-/
+
+/-- `BRESP`/`RRESP` width. -/
+def Axi4.respW : Nat := 2
+/-- `AxLEN` width (the burst length is `AxLEN + 1` beats). -/
+def Axi4.lenW : Nat := 8
+/-- `AxSIZE` width (bytes per beat are `2^AxSIZE`). -/
+def Axi4.sizeW : Nat := 3
+/-- `AxBURST` width. -/
+def Axi4.burstW : Nat := 2
+/-- The `OKAY` response. -/
+def Axi4.okay : Nat := 0
+/-- The `EXOKAY` response (unused by this subset, kept for the encoding). -/
+def Axi4.exokay : Nat := 1
+/-- The `SLVERR` response. -/
+def Axi4.slverr : Nat := 2
+/-- The `DECERR` response. -/
+def Axi4.decerr : Nat := 3
+/-- FIXED: every beat uses the burst's address. -/
+def Axi4.fixed : Nat := 0
+/-- INCR: each beat is `2^SIZE` bytes after the previous one. -/
+def Axi4.incr : Nat := 1
+/-- WRAP: the burst walks an aligned window and wraps at its end. -/
+def Axi4.wrap : Nat := 2
+
+/-- The number of beats a burst with `LEN = len` has. -/
+def Axi4.beats (len : Nat) : Nat := Nat.add len 1
+
+/-- The bytes in one beat (`2^SIZE`). -/
+def Axi4.bytes (size : Nat) : Nat := Nat.pow 2 size
+
+/-- A WRAP burst's window in bytes: `(LEN + 1) * 2^SIZE`. -/
+def Axi4.wrapBytes (len size : Nat) : Nat := Nat.mul (Axi4.beats len) (Axi4.bytes size)
+
+/-- WRAP is only defined for 2, 4, 8 or 16 beats (`LEN` 1, 3, 7 or 15). -/
+def Axi4.legalWrap (len : Nat) : Bool :=
+  Bool.or (Nat.beq len 1)
+    (Bool.or (Nat.beq len 3) (Bool.or (Nat.beq len 7) (Nat.beq len 15)))
+
+/-- The INCR address of beat `k`: `base + k * 2^SIZE`. -/
+def Axi4.incrAddr (base size k : Nat) : Nat :=
+  Nat.add base (Nat.mul k (Axi4.bytes size))
+
+/-- The WRAP address of beat `k`: the burst's aligned window starts at
+`base - (base % window)` and beat `k` is `k * 2^SIZE` bytes into it, modulo the window
+size. -/
+def Axi4.wrapAddr (base size len k : Nat) : Nat :=
+  let w := Axi4.wrapBytes len size;
+  let b := Nat.sub base (Nat.mod base w);
+  let off := Nat.mod (Nat.add (Nat.mod base w) (Nat.mul k (Axi4.bytes size))) w;
+  Nat.add b off
+
+/-- The address of beat `k` of a burst: FIXED holds `base`, INCR adds, WRAP walks its
+window (and anything else is treated as INCR, as AXI4 reserves burst code 3). -/
+def Axi4.beatAddr (burst base size len k : Nat) : Nat :=
+  match burst with
+  | 0 => base
+  | 2 => Axi4.wrapAddr base size len k
+  | _ => Axi4.incrAddr base size k
+
+/-- Every beat address of a burst, in order. -/
+def Axi4.beatSeq (burst base size len : Nat) : List Nat :=
+  Hdl.map (fun (k : Nat) => Axi4.beatAddr burst base size len k) (Hdl.upto (Axi4.beats len) 0)
+
+/-- `k` is the last beat of a burst with `LEN = len`. -/
+def Axi4.lastBeat (len k : Nat) : Bool := Nat.beq len k
+
+------------------------------------------------------------------------------------
+-- The channels
+
+/-- A write address channel: `AxID`, `AxADDR`, `AxLEN`, `AxSIZE`, `AxBURST` and
+`AWVALID`. -/
+structure Axi4.Aw (aw idw : Nat) (r : HwTy → Type) where
+  id : r (HwTy.bits idw)
+  addr : r (HwTy.bits aw)
+  len : r (HwTy.bits Axi4.lenW)
+  size : r (HwTy.bits Axi4.sizeW)
+  burst : r (HwTy.bits Axi4.burstW)
+  valid : r Bus.Bit
+  deriving Bundle
+
+/-- A write data channel: the data, its byte strobes, `WLAST` and `WVALID`. -/
+structure Axi4.W (dw : Nat) (r : HwTy → Type) where
+  data : r (HwTy.bits dw)
+  strb : r (HwTy.bits (Nat.div dw 8))
+  last : r Bus.Bit
+  valid : r Bus.Bit
+  deriving Bundle
+
+/-- A write response channel: `BRESP`, the echoed `BID` and `BVALID`. -/
+structure Axi4.B (idw : Nat) (r : HwTy → Type) where
+  id : r (HwTy.bits idw)
+  resp : r (HwTy.bits Axi4.respW)
+  valid : r Bus.Bit
+  deriving Bundle
+
+/-- A read address channel: `ARID`, `ARADDR`, `ARLEN`, `ARSIZE`, `ARBURST` and
+`ARVALID`. -/
+structure Axi4.Ar (aw idw : Nat) (r : HwTy → Type) where
+  id : r (HwTy.bits idw)
+  addr : r (HwTy.bits aw)
+  len : r (HwTy.bits Axi4.lenW)
+  size : r (HwTy.bits Axi4.sizeW)
+  burst : r (HwTy.bits Axi4.burstW)
+  valid : r Bus.Bit
+  deriving Bundle
+
+/-- A read response channel: the data, `RRESP`, the echoed `RID`, `RLAST` and `RVALID`. -/
+structure Axi4.R (dw idw : Nat) (r : HwTy → Type) where
+  id : r (HwTy.bits idw)
+  data : r (HwTy.bits dw)
+  resp : r (HwTy.bits Axi4.respW)
+  last : r Bus.Bit
+  valid : r Bus.Bit
+  deriving Bundle
+
+/-- The slave's input: the three request channels and the two response-ready signals. -/
+structure Axi4.SlaveIn (aw dw idw : Nat) (r : HwTy → Type) where
+  awch : Axi4.Aw aw idw r
+  wch : Axi4.W dw r
+  arch : Axi4.Ar aw idw r
+  bready : r Bus.Bit
+  rready : r Bus.Bit
+  deriving Bundle
+
+/-- The slave's output: the three request-ready signals and the two response channels. -/
+structure Axi4.SlaveOut (aw dw idw : Nat) (r : HwTy → Type) where
+  awready : r Bus.Bit
+  wready : r Bus.Bit
+  bch : Axi4.B idw r
+  arready : r Bus.Bit
+  rch : Axi4.R dw idw r
+  deriving Bundle
+
+/-- The master's output: the same five channels as `Axi4.SlaveIn`, named for the other
+side. -/
+structure Axi4.MasterOut (aw dw idw : Nat) (r : HwTy → Type) where
+  awch : Axi4.Aw aw idw r
+  wch : Axi4.W dw r
+  arch : Axi4.Ar aw idw r
+  bready : r Bus.Bit
+  rready : r Bus.Bit
+  deriving Bundle
+
+/-- The master's input: the same five channels as `Axi4.SlaveOut`. -/
+structure Axi4.MasterIn (aw dw idw : Nat) (r : HwTy → Type) where
+  awready : r Bus.Bit
+  wready : r Bus.Bit
+  bch : Axi4.B idw r
+  arready : r Bus.Bit
+  rch : Axi4.R dw idw r
+  deriving Bundle
+
+/-- A quiet write address (`valid` low, zero payload). -/
+def Axi4.noAw {r : HwTy → Type} [Hw r] {ω aw idw : Nat} : Axi4.Aw aw idw r :=
+  Axi4.Aw.mk (Hw.lit idw 0) (Hw.lit aw 0) (Hw.lit Axi4.lenW 0)
+    (Hw.lit Axi4.sizeW 0) (Hw.lit Axi4.burstW 0) (Hw.lit 1 0)
+
+/-- A quiet write data beat (`valid` low, no strobes, not last). -/
+def Axi4.noW {r : HwTy → Type} [Hw r] {ω dw : Nat} : Axi4.W dw r :=
+  Axi4.W.mk (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0) (Hw.lit 1 0) (Hw.lit 1 0)
+
+/-- A quiet write response. -/
+def Axi4.noB {r : HwTy → Type} [Hw r] {ω idw : Nat} : Axi4.B idw r :=
+  Axi4.B.mk (Hw.lit idw 0) (Hw.lit Axi4.respW 0) (Hw.lit 1 0)
+
+/-- A quiet read address (`valid` low, zero payload). -/
+def Axi4.noAr {r : HwTy → Type} [Hw r] {ω aw idw : Nat} : Axi4.Ar aw idw r :=
+  Axi4.Ar.mk (Hw.lit idw 0) (Hw.lit aw 0) (Hw.lit Axi4.lenW 0)
+    (Hw.lit Axi4.sizeW 0) (Hw.lit Axi4.burstW 0) (Hw.lit 1 0)
+
+/-- A quiet read response. -/
+def Axi4.noR {r : HwTy → Type} [Hw r] {ω dw idw : Nat} : Axi4.R dw idw r :=
+  Axi4.R.mk (Hw.lit idw 0) (Hw.lit dw 0) (Hw.lit Axi4.respW 0) (Hw.lit 1 0) (Hw.lit 1 0)
+
+/-- `SLVERR` for a bus error, `OKAY` otherwise. -/
+def Axi4.respOfErr {r : HwTy → Type} [Hw r] (err : r Bus.Bit) : r (HwTy.bits Axi4.respW) :=
+  Hw.mux err (Hw.lit Axi4.respW Axi4.slverr) (Hw.lit Axi4.respW Axi4.okay)
+
+------------------------------------------------------------------------------------
+-- Address arithmetic on signals. `Axi4.zext` pads (or truncates) a signal to `n` bits;
+-- `Axi4.stride` is `2^SIZE`; `Axi4.wrapMask` is the low `(LEN + 1) * 2^SIZE - 1` bits.
+
+/-- Zero-extend (or truncate) a signal to `n` bits, at elaboration time. The `slice`
+fixes the result width, so the `cat`'s `Nat.add` never has to reduce definitionally. -/
+def Axi4.zext {r : HwTy → Type} [Hw r] {ω m n : Nat} (x : r (HwTy.bits m)) :
+    r (HwTy.bits n) :=
+  Hw.slice 0 n (Hw.cat (Hw.lit (Nat.sub n m) 0) x)
+
+/-- `2^SIZE`, at the address width. -/
+def Axi4.stride {r : HwTy → Type} [Hw r] {ω aw : Nat}
+    (size : r (HwTy.bits Axi4.sizeW)) : r (HwTy.bits aw) :=
+  Hw.shlBy (Hw.lit aw 1) size
+
+/-- The WRAP window's low-bit mask: `(LEN + 1) * 2^SIZE - 1`. -/
+def Axi4.wrapMask {r : HwTy → Type} [Hw r] {ω aw : Nat}
+    (len : r (HwTy.bits Axi4.lenW)) (size : r (HwTy.bits Axi4.sizeW)) :
+    r (HwTy.bits aw) :=
+  let n := Axi4.zext (Hw.add len (Hw.lit Axi4.lenW 1));
+  Hw.sub (Hw.shlBy n size) (Hw.lit aw 1)
+
+/-- The next WRAP address: keep the aligned high bits of `cur` and add the stride into
+the low (window) bits, wrapping at the window end. -/
+def Axi4.wrapNext {r : HwTy → Type} [Hw r] {ω aw : Nat}
+    (cur stride mask : r (HwTy.bits aw)) : r (HwTy.bits aw) :=
+  Hw.or (Hw.and cur (Hw.not mask)) (Hw.and (Hw.add cur stride) mask)
+
+/-- The next beat address: `cur + stride` for INCR/FIXED, the windowed `wrapNext` for
+WRAP. -/
+def Axi4.nextAddr {r : HwTy → Type} [Hw r] {ω aw : Nat}
+    (burst : r (HwTy.bits Axi4.burstW)) (cur stride mask : r (HwTy.bits aw)) :
+    r (HwTy.bits aw) :=
+  Hw.mux (Hw.eq burst (Hw.lit Axi4.burstW Axi4.wrap))
+    (Axi4.wrapNext cur stride mask) (Hw.add cur stride)
+
+------------------------------------------------------------------------------------
+-- AXI4 master -> Bus write slave. The adapter is the slave on the AXI side and the
+-- master on the bus side.
+
+/-- The write adapter's state: the phase (0 idle, 1 burst, 2 B response), the current
+beat address, the burst fields, the beat index, the per-beat stride and WRAP mask, and
+the response code captured at the end of the burst. -/
+structure Axi4.WrSt (aw dw idw : Nat) (r : HwTy → Type) where
+  phase : r (HwTy.bits 2)
+  addr : r (HwTy.bits aw)
+  len : r (HwTy.bits Axi4.lenW)
+  size : r (HwTy.bits Axi4.sizeW)
+  burst : r (HwTy.bits Axi4.burstW)
+  id : r (HwTy.bits idw)
+  beat : r (HwTy.bits Axi4.lenW)
+  stride : r (HwTy.bits aw)
+  mask : r (HwTy.bits aw)
+  berr : r Bus.Bit
+  bresp : r (HwTy.bits Axi4.respW)
+  deriving Bundle
+
+/-- The write adapter at rest: idle, no burst, `OKAY` held. -/
+def Axi4.wrInit (aw dw idw : Nat) : Axi4.WrSt aw dw idw HwTy.El :=
+  Axi4.WrSt.mk (BitVec.ofNat 2 0) (BitVec.ofNat aw 0) (BitVec.ofNat Axi4.lenW 0)
+    (BitVec.ofNat Axi4.sizeW 0) (BitVec.ofNat Axi4.burstW 0) (BitVec.ofNat idw 0)
+    (BitVec.ofNat Axi4.lenW 0) (BitVec.ofNat aw 0) (BitVec.ofNat aw 0)
+    (BitVec.ofNat 1 0) (BitVec.ofNat Axi4.respW 0)
+
+/-- The write adapter's input: the AXI4 master's `AW`/`W` channels and `BREADY`, and the
+bus slave's response. -/
+structure Axi4.WriteIn (aw dw idw : Nat) (r : HwTy → Type) where
+  awch : Axi4.Aw aw idw r
+  wch : Axi4.W dw r
+  bready : r Bus.Bit
+  slave : Bus.Resp dw r
+  deriving Bundle
+
+/-- The write adapter's output: `AWREADY`/`WREADY` and `B`, and the bus write request. -/
+structure Axi4.WriteOut (aw dw idw : Nat) (r : HwTy → Type) where
+  awready : r Bus.Bit
+  wready : r Bus.Bit
+  bch : Axi4.B idw r
+  req : Bus.ReqW aw dw r
+  deriving Bundle
+
+/-- One cycle of the AXI4 write adapter. `AW` is accepted at rest (capturing the burst
+fields); each `W` beat is consumed exactly when the bus answers that beat's `Bus.ReqW`
+(the request address is the captured beat address), and the final beat moves to the `B`
+phase, where `BVALID` is held until `BREADY`. A bus error on any beat of the burst makes
+`BRESP` `SLVERR`. `WLAST` is not trusted to end the burst: `LEN` says how many beats
+there are (a mismatched `WLAST` is an input violation, checked by the laws). -/
+def Axi4.wrStep {r : HwTy → Type} [Hw r] {ω aw dw idw : Nat} (s : Axi4.WrSt aw dw idw r)
+    (i : Axi4.WriteIn aw dw idw r) :
+    r (HwTy.prod (Axi4.WrSt.code aw dw idw) (Axi4.WriteOut.code aw dw idw)) :=
+  let idle := Hw.eq s.phase (Hw.lit 2 0);
+  let run := Hw.eq s.phase (Hw.lit 2 1);
+  let bphase := Hw.eq s.phase (Hw.lit 2 2);
+  let start := Hw.and idle i.awch.valid;
+  let ack := Hw.or i.slave.ready i.slave.rvalid;
+  let done := Hw.and (Hw.and run i.wch.valid) ack;
+  let last := Hw.eq s.beat s.len;
+  let stride := Axi4.stride (aw := aw) i.awch.size;
+  let mask := Axi4.wrapMask (aw := aw) i.awch.len i.awch.size;
+  let nxt := Axi4.nextAddr (aw := aw) s.burst s.addr s.stride s.mask;
+  let phase' :=
+    Hw.mux idle (Hw.mux i.awch.valid (Hw.lit 2 1) (Hw.lit 2 0))
+      (Hw.mux run
+        (Hw.mux done (Hw.mux last (Hw.lit 2 2) (Hw.lit 2 1)) (Hw.lit 2 1))
+        (Hw.mux i.bready (Hw.lit 2 0) (Hw.lit 2 2)));
+  let s' := Axi4.WrSt.mk
+    phase'
+    (Hw.mux start i.awch.addr
+      (Hw.mux (Hw.and done (Hw.not last)) nxt s.addr))
+    (Hw.mux start i.awch.len s.len)
+    (Hw.mux start i.awch.size s.size)
+    (Hw.mux start i.awch.burst s.burst)
+    (Hw.mux start i.awch.id s.id)
+    (Hw.mux start (Hw.lit Axi4.lenW 0)
+      (Hw.mux (Hw.and done (Hw.not last))
+        (Hw.add s.beat (Hw.lit Axi4.lenW 1)) s.beat))
+    (Hw.mux start stride s.stride)
+    (Hw.mux start mask s.mask)
+    (Hw.mux start (Hw.lit 1 0) (Hw.mux done (Hw.or s.berr i.slave.err) s.berr))
+    (Hw.mux (Hw.and done last)
+      (Axi4.respOfErr (Hw.or s.berr i.slave.err)) s.bresp);
+  let o := Axi4.WriteOut.mk
+    idle
+    done
+    (Axi4.B.mk s.id s.bresp bphase)
+    (Bus.ReqW.mk (Hw.and run i.wch.valid) (Hw.lit 1 1) s.addr i.wch.data i.wch.strb);
+  Hw.pair (Axi4.WrSt.pack aw dw idw s') (Axi4.WriteOut.pack aw dw idw o)
+
+/-- The AXI4 write adapter as a circuit. -/
+def Axi4.wrC (aw dw idw : Nat) :
+    Circuit (Axi4.WriteIn.code aw dw idw) (Axi4.WriteOut.code aw dw idw) :=
+  Circuit.bundled (Axi4.WrSt.bundle aw dw idw) (Axi4.WriteIn.bundle aw dw idw)
+    (Axi4.WriteOut.bundle aw dw idw) (Axi4.wrInit aw dw idw)
+    (fun s i => Axi4.wrStep s i)
+
+------------------------------------------------------------------------------------
+-- AXI4 master -> Bus read slave
+
+/-- The read adapter's state: the phase (0 idle, 1 issue a bus read, 2 hold the `R`
+beat), the current beat address, the burst fields, the beat index, the stride and WRAP
+mask, and the `R` payload captured from the bus answer. -/
+structure Axi4.RdSt (aw dw idw : Nat) (r : HwTy → Type) where
+  phase : r (HwTy.bits 2)
+  addr : r (HwTy.bits aw)
+  len : r (HwTy.bits Axi4.lenW)
+  size : r (HwTy.bits Axi4.sizeW)
+  burst : r (HwTy.bits Axi4.burstW)
+  id : r (HwTy.bits idw)
+  beat : r (HwTy.bits Axi4.lenW)
+  stride : r (HwTy.bits aw)
+  mask : r (HwTy.bits aw)
+  rdata : r (HwTy.bits dw)
+  rresp : r (HwTy.bits Axi4.respW)
+  rlast : r Bus.Bit
+  deriving Bundle
+
+/-- The read adapter at rest. -/
+def Axi4.rdInit (aw dw idw : Nat) : Axi4.RdSt aw dw idw HwTy.El :=
+  Axi4.RdSt.mk (BitVec.ofNat 2 0) (BitVec.ofNat aw 0) (BitVec.ofNat Axi4.lenW 0)
+    (BitVec.ofNat Axi4.sizeW 0) (BitVec.ofNat Axi4.burstW 0) (BitVec.ofNat idw 0)
+    (BitVec.ofNat Axi4.lenW 0) (BitVec.ofNat aw 0) (BitVec.ofNat aw 0)
+    (BitVec.ofNat dw 0) (BitVec.ofNat Axi4.respW 0) (BitVec.ofNat 1 0)
+
+/-- The read adapter's input: the AXI4 master's `AR` channel and `RREADY`, and the bus
+slave's response. -/
+structure Axi4.ReadIn (aw dw idw : Nat) (r : HwTy → Type) where
+  arch : Axi4.Ar aw idw r
+  rready : r Bus.Bit
+  slave : Bus.Resp dw r
+  deriving Bundle
+
+/-- The read adapter's output: `ARREADY`, the `R` channel and the bus read request. -/
+structure Axi4.ReadOut (aw dw idw : Nat) (r : HwTy → Type) where
+  arready : r Bus.Bit
+  rch : Axi4.R dw idw r
+  req : Bus.ReqW aw dw r
+  deriving Bundle
+
+/-- One cycle of the AXI4 read adapter. `AR` is accepted at rest; each bus answer is
+captured as one `R` beat and held until `RREADY`, then the next beat is issued (so the
+bus never sees two reads at once and no read data is dropped under backpressure).
+`RLAST` is the beat index's `LEN`, and the ID is the captured `ARID`. -/
+def Axi4.rdStep {r : HwTy → Type} [Hw r] {ω aw dw idw : Nat} (s : Axi4.RdSt aw dw idw r)
+    (i : Axi4.ReadIn aw dw idw r) :
+    r (HwTy.prod (Axi4.RdSt.code aw dw idw) (Axi4.ReadOut.code aw dw idw)) :=
+  let idle := Hw.eq s.phase (Hw.lit 2 0);
+  let run := Hw.eq s.phase (Hw.lit 2 1);
+  let hold := Hw.eq s.phase (Hw.lit 2 2);
+  let start := Hw.and idle i.arch.valid;
+  let ack := Hw.or i.slave.ready i.slave.rvalid;
+  let got := Hw.and run ack;
+  let last := Hw.eq s.beat s.len;
+  let stride := Axi4.stride (aw := aw) i.arch.size;
+  let mask := Axi4.wrapMask (aw := aw) i.arch.len i.arch.size;
+  let nxt := Axi4.nextAddr (aw := aw) s.burst s.addr s.stride s.mask;
+  let phase' :=
+    Hw.mux idle (Hw.mux i.arch.valid (Hw.lit 2 1) (Hw.lit 2 0))
+      (Hw.mux run
+        (Hw.mux got (Hw.lit 2 2) (Hw.lit 2 1))
+        (Hw.mux i.rready (Hw.mux s.rlast (Hw.lit 2 0) (Hw.lit 2 1)) (Hw.lit 2 2)));
+  let s' := Axi4.RdSt.mk
+    phase'
+    (Hw.mux start i.arch.addr
+      (Hw.mux (Hw.and got (Hw.not last)) nxt s.addr))
+    (Hw.mux start i.arch.len s.len)
+    (Hw.mux start i.arch.size s.size)
+    (Hw.mux start i.arch.burst s.burst)
+    (Hw.mux start i.arch.id s.id)
+    (Hw.mux start (Hw.lit Axi4.lenW 0)
+      (Hw.mux (Hw.and got (Hw.not last))
+        (Hw.add s.beat (Hw.lit Axi4.lenW 1)) s.beat))
+    (Hw.mux start stride s.stride)
+    (Hw.mux start mask s.mask)
+    (Hw.mux got i.slave.rdata s.rdata)
+    (Hw.mux got (Axi4.respOfErr i.slave.err) s.rresp)
+    (Hw.mux got last s.rlast);
+  let o := Axi4.ReadOut.mk
+    idle
+    (Axi4.R.mk s.id s.rdata s.rresp s.rlast hold)
+    (Bus.ReqW.mk run (Hw.lit 1 0) s.addr (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0));
+  Hw.pair (Axi4.RdSt.pack aw dw idw s') (Axi4.ReadOut.pack aw dw idw o)
+
+/-- The AXI4 read adapter as a circuit. -/
+def Axi4.rdC (aw dw idw : Nat) :
+    Circuit (Axi4.ReadIn.code aw dw idw) (Axi4.ReadOut.code aw dw idw) :=
+  Circuit.bundled (Axi4.RdSt.bundle aw dw idw) (Axi4.ReadIn.bundle aw dw idw)
+    (Axi4.ReadOut.bundle aw dw idw) (Axi4.rdInit aw dw idw)
+    (fun s i => Axi4.rdStep s i)
+
+------------------------------------------------------------------------------------
+-- Multiple outstanding IDs, as a value model. `Axi4.Burst` is one issued burst: its ID
+-- and the beat addresses it asked for. `Axi4.orderOf` is the order in which responses
+-- with those IDs may complete: a permutation of the issued bursts that preserves the
+-- issue order of every ID (AXI4's ordering rule; different IDs may overtake each
+-- other).
+
+/-- One issued burst: its ID and its beat addresses, in order. -/
+structure Axi4.Burst where
+  id : Nat
+  addrs : List Nat
+
+/-- Remove the first burst with ID `id` from `xs`, returning whether it was found and the
+remainder. Recursion is on `fuel` (call it with `List.length xs`), because the remainder
+is rebuilt. -/
+def Axi4.removeId : (fuel : Nat) → List Axi4.Burst → Nat → (Bool × List Axi4.Burst)
+  | .zero, xs, _ => (.false, xs)
+  | .succ f, xs, id =>
+    match xs with
+    | .nil => (.false, [])
+    | .cons x rest =>
+      if Nat.beq x.id id then (.true, rest)
+      else
+        let r := Axi4.removeId f rest id;
+        (r.1, List.cons x r.2)
+
+/-- Remove the first burst with ID `id` from `xs` (the remainder). -/
+def Axi4.takeId (xs : List Axi4.Burst) (id : Nat) : List Axi4.Burst :=
+  (Axi4.removeId (List.length xs) xs id).2
+
+/-- Does `d` match the first burst with its ID in `xs`? (The same ID and the same beat
+addresses: a completion cannot be handed back ahead of an earlier burst with its ID.) -/
+def Axi4.matchFirst (xs : List Axi4.Burst) (d : Axi4.Burst) : Bool :=
+  match xs with
+  | .nil => .false
+  | .cons x rest =>
+    if Nat.beq x.id d.id then BEq.beq x.addrs d.addrs
+    else Axi4.matchFirst rest d
+
+/-- The Boolean check behind `Axi4.orderOf`: every response is the first remaining
+request with its ID (so each ID's own order is preserved and no response is duplicated),
+consumed in order. Recursion is on `fuel` (one step per response), because removing a
+request changes `issued`. -/
+def Axi4.orderGo : (fuel : Nat) → (issued done : List Axi4.Burst) → Bool
+  | .zero, .nil, .nil => .true
+  | .zero, .nil, .cons _ _ => .false
+  | .zero, .cons _ _, _ => .false
+  | .succ f, issued, done =>
+    match done with
+    | .nil => match issued with
+      | .nil => .true
+      | .cons _ _ => .false
+    | .cons d ds =>
+      if Axi4.matchFirst issued d then
+        let r := Axi4.removeId f issued d.id;
+        Bool.and r.1 (Axi4.orderGo f r.2 ds)
+      else .false
+
+/-- `done` is a completion order of `issued`: a permutation of the issued bursts that
+preserves the issue order of every ID (AXI4's ordering rule; different IDs may overtake
+each other). `Axi4.orderOf` is the Boolean check the example evaluates. -/
+def Axi4.orderOf (issued done : List Axi4.Burst) : Bool :=
+  Axi4.orderGo (Nat.succ (List.length done)) issued done

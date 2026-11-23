@@ -1,0 +1,39 @@
+#!/bin/sh
+# Keep .github/repo-subsets.json current, for the commit about to be made.
+#
+# The subset hashes are cache keys (CI's PR-only Lake cache, scripts/lake-cache.sh)
+# and a reviewed list of what each build reads; CI's docs_style job fails when they
+# are stale (scripts/check-companion-lists.py), but a hook is cheaper to satisfy.
+# It is one `--check` (~0.1 s on this tree); when that fails it regenerates the file
+# and stages it, so the commit carries it.
+#
+# Install (a checkout-wide setting, not a copy into .git/hooks):
+#     git config core.hooksPath .githooks
+# It never fails a commit: no python3, a checkout it cannot read, or a failed write
+# is a warning. A merge with unresolved conflicts is skipped (the tree is not a
+# build, and the merge commit's own content is not known yet).
+set -u
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$root" 2>/dev/null || exit 0
+
+if [ -n "$(git ls-files --unmerged)" ]; then
+  echo "pre-commit: merge with conflicts; skipped the repo-subsets check" >&2
+  exit 0
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "pre-commit: no python3; skipped the repo-subsets check (CI still enforces it)" >&2
+  exit 0
+fi
+
+out=$(python3 scripts/repo-subsets.py --check 2>&1) && exit 0
+
+stale=$(printf '%s\n' "$out" | sed -n 's/.*stale for \([^;]*\);.*/\1/p')
+if python3 scripts/repo-subsets.py --write >/dev/null 2>&1; then
+  git add .github/repo-subsets.json
+  echo "pre-commit: updated .github/repo-subsets.json (${stale:-unknown subsets}) and staged it"
+else
+  echo "pre-commit: warning: could not update .github/repo-subsets.json; CI will report it" >&2
+fi
+exit 0

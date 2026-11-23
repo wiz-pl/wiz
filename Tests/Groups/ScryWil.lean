@@ -4,7 +4,7 @@ import Tests.Harness
 /-!
 # Tests for `Scry.Wil` (the IR and its concrete semantics)
 
-The programs are hand-built in `lib/Scry/WilExamples.wiz`; each case evaluates a property
+The programs are hand-built in `scry/src/Scry/WilExamples.wiz`; each case evaluates a property
 of `Wil.runFunction` with `#eval` (so no C toolchain is needed) and compares the `Nat`
 it evaluates to with the expected list. The differential cases compare the IR's result
 with a direct Wiz computation of the same function: when the C frontend lands, the same
@@ -15,17 +15,9 @@ open Wiz
 
 namespace Tests.ScryWil
 
-/-- Every `lib/*.wiz` and `lib/*/*.wiz` (as `D.X`), by module name. -/
-def libLoader : IO (Name → Option String) := do
-  let mut m : List (Name × String) := []
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then
-      m := (e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then
-          m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
-  pure fun n => m.lookup n
+/-- Every `lib/*.wiz` and `lib/*/*.wiz` (as `D.X`), by module name: one loader for the
+suite (`Tests.libLoader`, which caches the load for the process). -/
+def libLoader : IO (Name → Option String) := Tests.libLoader
 
 /-- `body` elaborated against `imports`; the `#eval` messages, in order. -/
 def runWiz (imports body : String) : IO (List String) := do

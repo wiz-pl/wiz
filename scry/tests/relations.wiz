@@ -1,5 +1,6 @@
 -- test: check
 import Scry.Facts
+import Scry.NativeLink
 import Scry.CstStore
 -- Relation tuples survive the columns (regression: `relOff` held tuple counts while
 -- `relationsOf`/`relRows` read it as value offsets, so arity ≥ 2 came out truncated).

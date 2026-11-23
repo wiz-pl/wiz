@@ -60,7 +60,7 @@ def InfoviewPage.view (s : InfoviewPage) : Loom.VNode InfoviewPage.Msg :=
         InfoviewPage.Msg.key s.panel ];
   -- The widget host's pane (`web/widgets.js`, mounted by `web/infoview.js`). It is a
   -- grid child beside the editor and the goals, so a wide plot scrolls in its own
-  -- column; the goals panel leaves its widget items out (`widgetsInPane`).
+  -- column; the goals panel never renders a payload's markup.
   let widgets := Loom.el "aside" [Loom.id "widgets", Loom.class "widget-pane",
       Loom.attr "aria-label" "Widgets"]
     [ Loom.el "h3" [] [Loom.text "Widgets"]

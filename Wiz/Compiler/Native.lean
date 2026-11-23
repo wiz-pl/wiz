@@ -53,7 +53,7 @@ partial def nativeReadback (g : Globals R) (builtins : List (Name × Name)) (ty 
   let fuel := fuel - 1
   match whnf ty with
   | .mu l I D i _ hint prop =>
-    if isNatTy { g with builtins := builtins } ty && hint.map (·.1) == builtins.lookup "nat" && hint.isSome then
+    if isNatTy (g.setBuiltins builtins) ty && hint.map (·.1) == builtins.lookup "nat" && hint.isSome then
       match v with
       | .nat n => return .natLit n
       | v => match v.toNat? with
@@ -65,7 +65,7 @@ partial def nativeReadback (g : Globals R) (builtins : List (Name × Name)) (ty 
           if k == ri.r then .nat n else .erased)
       | v, _ => v
     let v ← match v with
-      | .nat n => if isNatTy { g with builtins := builtins } ty then pure (RVal.natView n) else throw "a number where data was expected"
+      | .nat n => if isNatTy (g.setBuiltins builtins) ty then pure (RVal.natView n) else throw "a number where data was expected"
       | .obj .. => unflat D v
       | _ => throw "data was expected"
     return .con (← rb (vInterp g l I D (muFamily l I D prop) i prop) v fuel)

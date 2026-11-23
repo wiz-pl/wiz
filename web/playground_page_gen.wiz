@@ -89,7 +89,7 @@ def fields : List (String × Json) :=
   , Json.field "examples" (Json.mkArr (List.map exampleJson Examples.examples))
   , Json.field "customDraft" (jstr (Draft.serializeDraft (Draft.State.mk custom "")))
   , Json.field "listsFragment" (jstr (Draft.encodeFragment listsState))
-  , Json.field "segments" (jstr (EditorModel.segmentsJson "def f : Nat := nope\n"
+  , Json.field "segments" (jstr (EditorModel.segmentsJsonText "def f : Nat := nope\n"
       "[{\"range\":{\"start\":{\"line\":0,\"character\":13},\"end\":{\"line\":0,\"character\":17}},\"severity\":1,\"message\":\"m\"}]" 0))
   ]
 

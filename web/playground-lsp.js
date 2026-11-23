@@ -7,7 +7,7 @@
 // the debounce, the underlines (`web/squiggles.js`) and the completion popup
 // (`web/completions.js`). The page's `update(kind, a, b)` is its runtime effect.
 "use strict";
-import { LspClient, endpointFromSearch } from "./lsp-client.js";
+import { LspClient, endpointFromSearch, mapOffset } from "./lsp-client.js";
 import { mountWidgets } from "./widgets.js";
 import { mountSquiggles, wantsSquiggles } from "./squiggles.js";
 import { mountCompletions, wantsCompletions } from "./completions.js";
@@ -21,39 +21,122 @@ function scratchUri() {
   return `file:///playground-${random}.wiz`;
 }
 
-// An LSP position for a JavaScript string index (UTF-16 code units).
-function positionAt(text, offset) {
-  const at = Math.max(0, Math.min(text ? text.length : 0, offset | 0));
-  const before = text ? text.slice(0, at) : "";
-  const line = (before.match(/\n/g) || []).length;
-  return { line, character: at - (before.lastIndexOf("\n") + 1) };
-}
-
-// A source span (`LINE:CHAR-LINE:CHAR`) as offsets in `text`, clamped.
-function parseSpan(text) {
-  const m = /^(\d+):(\d+)-(\d+):(\d+)$/.exec(String(text || ""));
-  if (!m) return null;
-  return { start: Number(m[1]), character: Number(m[2]), endLine: Number(m[3]), endCharacter: Number(m[4]) };
-}
-
-function offsetAt(text, line, character) {
-  let offset = 0;
-  for (let l = 0; l < line; l++) {
-    const newline = text.indexOf("\n", offset);
-    if (newline < 0) return text.length;
-    offset = newline + 1;
-  }
-  const newline = text.indexOf("\n", offset);
-  const lineEnd = newline < 0 ? text.length : newline;
-  return Math.min(lineEnd, offset + character);
+// The runtime's position index (`lib/Web/EditorModel.wiz`), read through `mount.ask`.
+// `ask(name, ...strings) -> string` invokes a `wiz_loom_*` export; `versionOf()` (when
+// given) is the document version the cache is keyed by. The line table is built once per
+// (version, text) and reused by every query: the previous keyup path rebuilt the whole
+// UTF-16 expansion on each call, and the selfhost index repeated it per caret.
+export function createIndexer(ask, versionOf = null) {
+  let cache = { text: null, version: undefined, index: "" };
+  const indexOf = (text) => {
+    const version = versionOf ? versionOf() : undefined;
+    if (cache.text === text && cache.version === version) return cache.index;
+    const index = ask("wiz_loom_editor_index", "0", text);
+    cache = { text, version, index };
+    return index;
+  };
+  return {
+    index: indexOf,
+    position: (text, offset) =>
+      JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(offset | 0))),
+    offset: (text, position) => {
+      const line = position && Number.isFinite(position.line) ? Math.trunc(position.line) : 0;
+      const character = position && Number.isFinite(position.character) ? Math.trunc(position.character) : 0;
+      return Number(ask("wiz_loom_editor_offset_index", indexOf(text),
+        String(line), String(character)));
+    },
+    lineEnd: (text, offset) =>
+      Number(ask("wiz_loom_editor_line_end_index", indexOf(text), String(offset | 0))),
+    range: (text, from, to) => ({
+      start: JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(from | 0))),
+      end: JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(to | 0))),
+    }),
+    utf16: (text, codePoints) => Number(ask("wiz_loom_editor_utf16", text, String(codePoints | 0))),
+    editorOffset: (text, prefix, codePoints) =>
+      Number(ask("wiz_loom_editor_editor_offset", text, prefix, String(codePoints | 0))),
+    segments: (text, diagnostics) =>
+      JSON.parse(ask("wiz_loom_editor_segments_index", indexOf(text), text,
+        JSON.stringify(diagnostics || []), "0")),
+    build: (text, entries, prefix) =>
+      ask("wiz_loom_index_build", text, prefix || "", JSON.stringify(entries || [])),
+    size: (index) => Number(ask("wiz_loom_index_size", index)),
+    term: (text, index, offset) =>
+      JSON.parse(ask("wiz_loom_index_term", text, index, String(offset | 0))),
+    goal: (text, index, offset) =>
+      JSON.parse(ask("wiz_loom_index_goal", text, index, String(offset | 0))),
+    declarations: (text, index) => JSON.parse(ask("wiz_loom_index_declarations", text, index)),
+    declarationNamed: (text, index, name) =>
+      JSON.parse(ask("wiz_loom_index_declaration", text, index, name)),
+    // The in-page server's pure rules (`Web.Selfhost.wiz`): the initialize capabilities,
+    // the engine's lines as diagnostics, the command splitter, the Prelude rule and the
+    // completion/hover/definition answers. The shim is the server around them.
+    initializeCapabilities: () => JSON.parse(ask("wiz_loom_lsp_capabilities")),
+    withPrelude: (text) => JSON.parse(ask("wiz_loom_lsp_prelude", text)),
+    splitCommands: (text) => JSON.parse(ask("wiz_loom_lsp_commands", text)),
+    outputLines: (output) => JSON.parse(ask("wiz_loom_lsp_output_lines", output)),
+    parseErrorOffset: (line) => {
+      const n = Number(ask("wiz_loom_lsp_parse_error", line));
+      return n < 0 ? null : n;
+    },
+    diagnosticsFromOutput: (text, output) =>
+      JSON.parse(ask("wiz_loom_lsp_diagnostics_output", text, output)),
+    parseCheck(json) {
+      const text = json === null || json === undefined ? ""
+        : (typeof json === "string" ? json : JSON.stringify(json));
+      return JSON.parse(ask("wiz_loom_lsp_parse_check", text));
+    },
+    diagnosticsFromCheck: (text, answer) =>
+      JSON.parse(ask("wiz_loom_lsp_diagnostics_check", text,
+        JSON.stringify(answer === null || answer === undefined ? {} : answer))),
+    completionPrefix: (text, offset) =>
+      JSON.parse(ask("wiz_loom_lsp_completion_prefix", text, String(offset | 0))),
+    wordAt: (text, offset) =>
+      JSON.parse(ask("wiz_loom_lsp_word_at", text, String(offset | 0))),
+    filterCompletions: (names, prefix, limit = 200) =>
+      JSON.parse(ask("wiz_loom_lsp_filter_completions", JSON.stringify(names || []),
+        String(prefix || ""), String(limit))),
+    completion: (text, index, position) =>
+      JSON.parse(ask("wiz_loom_lsp_completion", text, index || "",
+        JSON.stringify(position || {}))),
+    hover: (text, index, position) =>
+      JSON.parse(ask("wiz_loom_lsp_hover", text, index || "",
+        JSON.stringify(position || {}))),
+    definition: (text, index, position, uri) =>
+      JSON.parse(ask("wiz_loom_lsp_definition", text, index || "",
+        JSON.stringify(position || {}), uri || "")),
+    // The completion popup's rules (`Web.EditorModel`): the result's items, the popup's
+    // filtered items/selection/prefix, the key command and the accepted edit. The popup
+    // only paints them, so none of this is decided in `web/completions.js`.
+    items: (result) => JSON.parse(ask("wiz_loom_editor_items", JSON.stringify(result))),
+    popup: (text, offset, items, index) =>
+      JSON.parse(ask("wiz_loom_editor_popup", text, JSON.stringify(items || []),
+        String(index), String(offset))),
+    key: (key, index, count) =>
+      JSON.parse(ask("wiz_loom_editor_key", String(key || ""), String(index), String(count))),
+    accept: (item, text, offset) =>
+      JSON.parse(ask("wiz_loom_editor_accept", text, JSON.stringify(item), String(offset))),
+    trigger: (text, offset, c) => ask("wiz_loom_editor_trigger", text, c, String(offset)) === "1",
+    // The popup's tooltip and ask key, and the goals pane's source spans (`highlight`),
+    // so neither decides a rule.
+    itemTitle: (item) => ask("wiz_loom_editor_item_title", JSON.stringify(item || {})),
+    askKey: (key, code, ctrl, meta) =>
+      ask("wiz_loom_editor_ask_key", String(key || ""), String(code || ""),
+        ctrl ? "1" : "0", meta ? "1" : "0") === "1",
+    span: (text, span) => JSON.parse(ask("wiz_loom_editor_span", text, span)),
+    rangeText: (range) => ask("wiz_loom_editor_range_text", JSON.stringify(range || {})),
+    // A `textDocument/definition` answer's target, range and label (`Web.Hover`); the
+    // page only decides whether it can open the target's document.
+    target: (result) => JSON.parse(ask("wiz_loom_hover_target",
+      result === null || result === undefined ? "null" : JSON.stringify(result))),
+  };
 }
 
 // `config` is `{url}` (a `ws://` URL, or `null` for no server), an endpoint from
 // `endpointFromSearch`, or the page's in-page endpoint (`?lsp=selfhost`). `update(kind,
 // a, b)` is the runtime's effect (`view`, `info`, `hover`); a page that still passes a
 // `render` callback (the Node tests) gets the same events there. `widgetPane` is an
-// element for the widget host: when given, the cards are mounted there and the pane's
-// `widgetsInPane` tells the runtime to leave its own `Widgets` section out.
+// element for the widget host: the cards are mounted there by `mountWidgets`, never
+// rendered into the goals panel.
 export function startInfoview({
   editor, update, render, config, search, uri, follow = false,
   document: pageDocument, squiggles: wantSquigglesLayer, completions: wantCompletionsPopup,
@@ -90,16 +173,26 @@ export function startInfoview({
     items: [],
     position: null,
     canReconnect: false,
-    // The standalone page's widget pane is a grid child of its own: the panel then
-    // leaves the widget cards out, so there is one host, not two.
-    widgetsInPane: !!widgetPane,
     follow,
   };
 
+  // The widget pane is rebuilt only when the payload changed: `mountWidgets` clears the
+  // container and sanitises every card, and `publish` runs on every answer, diagnostics
+  // notification and cursor move (a plot's SVG is up to 2 MB). The key is the serialized
+  // payload, so identical items keep the mounted DOM (and its `<details open>`, scroll
+  // and focus) across publishes.
+  let lastWidgets = null;
+  const widgetKey = (items) => {
+    try { return JSON.stringify(items || []); } catch { return ""; }
+  };
   const publish = () => {
     send("view", JSON.stringify(view), "");
     if (widgetPane) {
-      mountWidgets(widgetPane, view.items, pageDocument || globalThis.document);
+      const key = widgetKey(view.items);
+      if (key !== lastWidgets) {
+        mountWidgets(widgetPane, view.items, pageDocument || globalThis.document);
+        lastWidgets = key;
+      }
     }
     if (typeof onRender === "function") {
       try { onRender(view); } catch (_) { /* the page's mirror must not break the pane */ }
@@ -109,9 +202,14 @@ export function startInfoview({
 
   // ## Hover
 
-  const hover = wantHover === false || !wantsHover(query) ? null : mountHover({
+  const hover = wantHover === false || !wantsHover(query) || !rules ||
+    typeof rules.position !== "function" ? null : mountHover({
     editor,
     document: pageDocument,
+    // The caret and the definition answer are the runtime's rules (`Web.EditorModel`,
+    // `Web.Hover`); this module supplies the browser's caret and the socket's answer.
+    position: (text, offset) => rules.position(text, offset),
+    target: typeof rules.target === "function" ? (result) => rules.target(result) : undefined,
     onHover: (position) => (client && client.state === "open" ? client.hover(documentUri, position) : null),
     onDefinition: (position) => (client && client.state === "open" ? client.definition(documentUri, position) : null),
     onJump: (target) => {
@@ -147,24 +245,19 @@ export function startInfoview({
 
   // ## Source highlighting (the textarea's native selection)
 
-  function spanText(range) {
-    if (!range || typeof range !== "object") return "";
-    const start = range.start || {};
-    const stop = range.end || start;
-    return `${start.line || 0}:${start.character || 0}-${stop.line || 0}:${stop.character || 0}`;
-  }
-
   function highlight(range) {
-    const span = parseSpan(typeof range === "string" ? range : spanText(range));
-    if (!span || !editor) return;
-    const start = offsetAt(editor.value, span.start, span.character);
-    const end = Math.max(start, offsetAt(editor.value, span.endLine, span.endCharacter));
+    if (!editor || !rules) return;
+    const span = rules.span(editor.value,
+      typeof range === "string" ? range : rules.rangeText(range || {}));
+    if (!span) return;
+    const start = span[0];
+    const end = Math.max(start, span[1]);
     suppressCursor = true;
     try { editor.focus({ preventScroll: true }); } catch (_) { try { editor.focus(); } catch (_) { /* no focus */ } }
     try { editor.setSelectionRange(start, end); } catch (_) { /* not a text field */ }
     try {
       const lineHeight = 21;
-      const top = span.start * lineHeight;
+      const top = rules.position(editor.value, start).line * lineHeight;
       if (top < editor.scrollTop || top + lineHeight > editor.scrollTop + editor.clientHeight) {
         editor.scrollTop = Math.max(0, top - lineHeight * 2);
       }
@@ -174,8 +267,103 @@ export function startInfoview({
 
   function currentPosition() {
     if (follow) return followPosition;
-    return rules ? rules.position(editor.value, caretOffset(editor))
-      : positionAt(editor.value, editor.selectionStart || 0);
+    return rules ? rules.position(editor.value, caretOffset(editor)) : null;
+  }
+
+  // ## Formatting (`wiz fmt` through the server)
+
+  // Positions for the edit applier: the runtime's offset rule when it has one (`Web.
+  // EditorModel`), else the client's UTF-16 default. The same function converts the
+  // returned `TextEdit` ranges and maps the caret.
+  const offsetOf = rules && typeof rules.offset === "function"
+    ? (text, position) => rules.offset(text, position)
+    : undefined;
+
+  function selectionOffsets() {
+    const text = typeof editor.value === "string" ? editor.value : "";
+    const start = caretOffset(editor);
+    const end = typeof editor.selectionEnd === "number"
+      ? Math.min(text.length, Math.max(start, editor.selectionEnd)) : start;
+    return { start, end };
+  }
+
+  // A normal `input` event after the host changed the textarea: the page's own listeners
+  // send `didChange` (one synchronisation path), refresh the goals and re-render. A
+  // stub editor without `dispatchEvent` falls back to the page's edit handler.
+  function dispatchInput() {
+    const doc = (editor && editor.ownerDocument) || (typeof document !== "undefined" ? document : null);
+    const EventImpl = (doc && doc.defaultView && doc.defaultView.Event) ||
+      (typeof Event === "function" ? Event : null);
+    if (!EventImpl || typeof editor.dispatchEvent !== "function") return false;
+    try { editor.dispatchEvent(new EventImpl("input", { bubbles: true })); return true; } catch (_) {
+      return false;
+    }
+  }
+
+  // `textDocument/formatting` (or `rangeFormatting` with a range of this document), the
+  // shared `WorkspaceEdit` applier, and the caret mapped through the same edits. The
+  // version captured before the request is the guard: typing while it is in flight
+  // refuses the edit (`ContentModified`) rather than replacing a newer text.
+  async function format(range) {
+    if (!client || client.state !== "open") return { ok: false, reason: "no language server" };
+    if (!documentUri) return { ok: false, reason: "no document" };
+    if (!rules) return { ok: false, reason: "no editor rules" };
+    const caps = client.capabilities || {};
+    const provider = range ? caps.documentRangeFormattingProvider : caps.documentFormattingProvider;
+    if (!provider) return { ok: false, reason: "this server has no formatter" };
+    const doc = client.docs.get(documentUri);
+    if (!doc) return { ok: false, reason: "the document is not open on the server" };
+    const version = doc.version;
+    const bounds = selectionOffsets();
+    let edits;
+    try {
+      edits = range
+        ? await client.rangeFormatting(documentUri, range, { tabSize: 2, insertSpaces: true })
+        : await client.formatting(documentUri, { tabSize: 2, insertSpaces: true });
+    } catch (e) {
+      return { ok: false, reason: e && e.message ? e.message : String(e), stale: !!(e && e.isStale) };
+    }
+    if (!Array.isArray(edits) || edits.length === 0) return { ok: true, applied: false, edits: [] };
+    const before = typeof editor.value === "string" ? editor.value : "";
+    let applied;
+    try {
+      applied = client.applyWorkspaceEdit({ changes: { [documentUri]: edits } },
+        { expectedVersion: version, offsetOf });
+    } catch (e) {
+      return { ok: false, reason: e && e.message ? e.message : String(e), stale: !!(e && e.isStale) };
+    }
+    const mine = applied.find((r) => r.uri === documentUri);
+    if (!mine || mine.text === before) return { ok: true, applied: false, edits };
+    const caret = mapOffset(edits, bounds.start, before, offsetOf);
+    const selectionEnd = Math.max(caret, mapOffset(edits, bounds.end, before, offsetOf));
+    editor.value = mine.text;
+    try { editor.setSelectionRange(caret, selectionEnd); } catch (_) {
+      editor.selectionStart = caret;
+      editor.selectionEnd = selectionEnd;
+    }
+    // the page's normal edit path: an `input` event where the host can dispatch one,
+    // else this module's own handler (a stub textarea in a test)
+    if (!dispatchInput()) onEdit();
+    return { ok: true, applied: true, edits };
+  }
+
+  // The selection as an LSP range (a plain caret formats the whole document).
+  function formatSelection() {
+    if (!rules) return format();
+    const text = typeof editor.value === "string" ? editor.value : "";
+    const bounds = selectionOffsets();
+    if (bounds.start === bounds.end) return format();
+    return format({ start: rules.position(text, bounds.start), end: rules.position(text, bounds.end) });
+  }
+
+  // Ctrl/⌘+Shift+F: the document (or the selection when there is one).
+  function onFormatKey(event) {
+    if (!event) return;
+    const key = typeof event.key === "string" ? event.key.toLowerCase() : "";
+    if (key === "f" && !!(event.ctrlKey || event.metaKey) && !!event.shiftKey && !event.altKey) {
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      formatSelection();
+    }
   }
 
   // ## Asking the server
@@ -236,9 +424,8 @@ export function startInfoview({
   function onCursor(closePopup = false) {
     if (suppressCursor) return;
     if (closePopup && completions) completions.close();
-    const position = rules
-      ? rules.position(editor.value, caretOffset(editor))
-      : positionAt(editor.value, caretOffset(editor));
+    if (!rules) return;
+    const position = rules.position(editor.value, caretOffset(editor));
     const where = position.line + ":" + position.character;
     if (where === lastCursor && view.goalsKind !== null) return;
     scheduleRefresh();
@@ -366,10 +553,13 @@ export function startInfoview({
     hover: () => hover,
     refresh,
     reconnect,
+    // `wiz fmt` through the server: `format()` formats the document, `format(range)`
+    // formats that LSP range, `formatSelection()` the textarea's selection (if any).
+    format,
+    formatSelection,
     // The caret as the page and the tests see it (UTF-16, line 0-based).
-    position: () => editor
-      ? (rules ? rules.position(editor.value, caretOffset(editor))
-        : positionAt(editor.value, caretOffset(editor)))
+    position: () => editor && rules
+      ? rules.position(editor.value, caretOffset(editor))
       : { line: 0, character: 0 },
     squiggles: () => squiggles,
     completions: () => completions,
@@ -392,6 +582,7 @@ export function startInfoview({
     editor.addEventListener("mouseup", () => onCursor(true));
     editor.addEventListener("select", () => onCursor(true));
     editor.addEventListener("focus", () => onCursor(false));
+    editor.addEventListener("keydown", onFormatKey);
   }
   if (typeof addEventListener === "function") addEventListener("pagehide", () => api.stop());
 

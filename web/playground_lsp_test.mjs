@@ -14,7 +14,8 @@
 import { readFileSync } from "node:fs";
 import { startMockServer, FIXTURE_TEXT } from "./mock_lsp_server.mjs";
 import { connectWebSocket } from "./ws_node_client.mjs";
-import { LspClient, LspError, parseEndpoint, endpointFromSearch, withToken, withoutToken } from "./lsp-client.js";
+import { LspClient, LspError, parseEndpoint, endpointFromSearch, withToken, withoutToken,
+  textOffset, textPosition, applyTextEdits, mapOffset, formattingOptions } from "./lsp-client.js";
 import {
   renderPanel, renderGoalResult, renderTermResult, renderInfoItems, readGoalState, offsetAt, positionAt, rangeOffsets,
   parseSpan, spanText, taggedTreeHtml, escapeHtml, plainText, renderSelection,
@@ -22,9 +23,11 @@ import {
 import { hoverContents, hoverLines } from "./framework/hover.mjs";
 import { encodeFrame, acceptKey, FrameReader, OPCODE } from "./ws_frames.mjs";
 import { document as minidoc } from "./framework/minidom.mjs";
-import { startInfoview } from "./playground-lsp.js";
+import { startInfoview, createIndexer } from "./playground-lsp.js";
 import { rules } from "./framework/editor-model.mjs";
-import { selfhostEndpoint, withPrelude } from "./selfhost-lsp-shim.js";
+import { index as indexOracle } from "./framework/index-oracle.mjs";
+import { selfhostEndpoint } from "./selfhost-lsp-shim.js";
+import { withPrelude } from "./framework/index-oracle.mjs";
 
 let failed = 0;
 function check(name, got, want) {
@@ -127,6 +130,63 @@ check("token: ?lsp= wins over the fallback", endpointFromSearch("?lsp=off&token=
 check("token: none, the URL unchanged", withToken("ws://h:1", ""), "ws://h:1");
 check("token: escaped", withToken("ws://h:1/", "a b&c"), "ws://h:1/?token=a+b%26c");
 check("token: withoutToken keeps the rest", withoutToken("ws://h:1/?a=1&token=t"), "ws://h:1/?a=1");
+
+// ## 1b. The runtime adapter: a definition answer is the runtime's question
+
+{
+  const asked = [];
+  const ask = (name, ...args) => {
+    asked.push([name, ...args]);
+    if (name === "wiz_loom_hover_target") {
+      return args[0] === "null" ? "null" : JSON.stringify({
+        uri: "file:///lib/Prelude.wiz",
+        range: { start: { line: 6, character: 0 }, end: { line: 6, character: 9 } },
+        label: "Prelude.wiz:7:1",
+      });
+    }
+    return "{}";
+  };
+  const index = createIndexer(ask);
+  const answer = { uri: "file:///lib/Prelude.wiz", range: { start: { line: 6, character: 0 } } };
+  check("adapter: a definition is the runtime's query", JSON.stringify(index.target(answer)), JSON.stringify({
+    uri: "file:///lib/Prelude.wiz",
+    range: { start: { line: 6, character: 0 }, end: { line: 6, character: 9 } },
+    label: "Prelude.wiz:7:1",
+  }));
+  check("adapter: the query carries the server's answer",
+    asked[0][0] === "wiz_loom_hover_target" && asked[0][1] === JSON.stringify(answer), true);
+  check("adapter: no answer is the JSON null", index.target(null), null);
+  check("adapter: null is sent as null", asked[1][0] === "wiz_loom_hover_target" && asked[1][1] === "null", true);
+}
+
+// ## 1c. The runtime adapter: the completion popup's rules are the runtime's questions
+
+{
+  const asked = [];
+  const ask = (name, ...args) => {
+    asked.push([name, ...args]);
+    if (name === "wiz_loom_editor_key") return JSON.stringify({ action: "move", index: 1 });
+    if (name === "wiz_loom_editor_items") return JSON.stringify([{ label: "Nat.add" }]);
+    if (name === "wiz_loom_editor_popup") {
+      return JSON.stringify({
+        items: [{ label: "Nat.add" }], index: 0, prefixStart: 9, prefixWord: "Nat.a",
+      });
+    }
+    return "{}";
+  };
+  const index = createIndexer(ask);
+  check("adapter: a key command is the runtime's",
+    JSON.stringify(index.key("ArrowDown", 0, 3)),
+    JSON.stringify({ action: "move", index: 1 }));
+  check("adapter: the key query carries the key and the popup state",
+    asked[0][0] === "wiz_loom_editor_key" && asked[0].slice(1).join("|") === "ArrowDown|0|3", true);
+  check("adapter: the result's items are the runtime's",
+    JSON.stringify(index.items({ items: [{ label: "Nat.add" }] })),
+    JSON.stringify([{ label: "Nat.add" }]));
+  check("adapter: the popup state is the runtime's",
+    JSON.stringify(index.popup("Nat.a", 14, [{ label: "Nat.add" }], 0)),
+    JSON.stringify({ items: [{ label: "Nat.add" }], index: 0, prefixStart: 9, prefixWord: "Nat.a" }));
+}
 
 // ## 2. The RFC 6455 frames (the mock server and the test client share them)
 
@@ -277,6 +337,65 @@ checkThat("panel: the severity", withDiagnostic.includes("sev-error"));
   const looseStored = loose.diagnostics.get(looseUri);
   check("diagnostics: unversioned publishes keep the last arrival",
     looseStored && looseStored.diagnostics ? looseStored.diagnostics.map((d) => d.message).join(",") : null, "second");
+}
+
+// ## 6d. `textDocument/formatting`, and the one `WorkspaceEdit` applier
+//
+// The server answers one `TextEdit`; the client's shared applier converts its UTF-16
+// ranges, applies the edits from the end, guards the document version, and maps a caret
+// through them. The page action built on this is tested in §10.
+{
+  check("formatting: advertised", client.capabilities.documentFormattingProvider, true);
+  check("formatting: range formatting advertised",
+    client.capabilities.documentRangeFormattingProvider, true);
+  const bad = "def  f :Nat:=1\n";
+  client.changeDocument(uri, bad);
+  const edits = await client.formatting(uri, { tabSize: 4, insertSpaces: true });
+  check("formatting: one edit", edits.length, 1);
+  check("formatting: the options are sent",
+    mock.stats.formattingArgs[mock.stats.formattingArgs.length - 1].options.tabSize, 4);
+  check("formatting: the edit's text", edits[0].newText, "def f : Nat := 1\n");
+  const [applied] = client.applyWorkspaceEdit({ changes: { [uri]: edits } },
+    { expectedVersion: client.docs.get(uri).version });
+  check("formatting: the applier's text", applied.text, "def f : Nat := 1\n");
+
+  // The applier: reverse offset order (a later edit does not invalidate an earlier one),
+  // UTF-16 positions, and the version guard.
+  const direct = new LspClient({ url: "ws://127.0.0.1:1" });
+  const dUri = "file:///a.wiz";
+  direct.docs.set(dUri, { uri: dUri, text: "abcdef", version: 3 });
+  const two = { documentChanges: [{ textDocument: { uri: dUri, version: 3 }, edits: [
+    { range: { start: { line: 0, character: 1 }, end: { line: 0, character: 2 } }, newText: "X" },
+    { range: { start: { line: 0, character: 4 }, end: { line: 0, character: 5 } }, newText: "YZ" },
+  ] }] };
+  check("applier: reverse order", direct.applyWorkspaceEdit(two)[0].text, "aXcdYZf");
+  check("applier: a caret before the edits stays", mapOffset(two.documentChanges[0].edits, 0, "abcdef"), 0);
+  check("applier: a caret after the edits shifts", mapOffset(two.documentChanges[0].edits, 6, "abcdef"), 7);
+  check("applier: a caret inside a replacement clamps", mapOffset([
+    { range: { start: { line: 0, character: 1 }, end: { line: 0, character: 5 } }, newText: "Z" },
+  ], 3, "abcdef"), 2);
+  let stale = null;
+  try {
+    direct.applyWorkspaceEdit({ changes: { [dUri]: two.documentChanges[0].edits } },
+      { expectedVersion: 2 });
+  } catch (e) { stale = e; }
+  check("applier: a version guard refuses stale text", stale && stale.code, -32801);
+  let overlap = null;
+  try {
+    applyTextEdits("abcdef", [
+      { range: { start: { line: 0, character: 1 }, end: { line: 0, character: 4 } }, newText: "X" },
+      { range: { start: { line: 0, character: 3 }, end: { line: 0, character: 5 } }, newText: "Y" },
+    ]);
+  } catch (e) { overlap = e; }
+  check("applier: overlapping edits are refused", overlap && overlap.code, -32602);
+  check("offset: UTF-16 in a JavaScript string index",
+    textOffset("a😀b\nc", { line: 0, character: 3 }), 3);
+  check("offset: the second line", textOffset("a😀b\nc", { line: 1, character: 1 }), 6);
+  check("offset: the inverse", textPosition("a😀b\nc", 6).line, 1);
+  check("options: tabSize passes through", formattingOptions({ tabSize: 8 }).tabSize, 8);
+  check("options: spaces by default", formattingOptions().insertSpaces, true);
+  // restore the fixture the later sections expect
+  client.changeDocument(uri, FIXTURE_TEXT);
 }
 
 // ## 6c. Malformed results: "nothing at the cursor", not "no goals" or an empty goal
@@ -539,6 +658,55 @@ check("wiring: the completion request's character", lastCompletion.position.char
 popup.handleKey({ key: "Enter", preventDefault() {}, stopPropagation() {} });
 check("wiring: the accepted item replaced the prefix", editor.value, "Nat.sub");
 check("wiring: the caret after accepting", editor.selectionStart, 7);
+
+// Formatting (`wiz fmt` through the server): the action applies one edit, maps the caret
+// through it, and the page's normal `input` path sends `didChange` with version+1.
+editor.value = "def  f :Nat:=1\n";
+editor.selectionStart = editor.selectionEnd = editor.value.length;
+for (const fn of editor.listeners.input || []) fn({ type: "input" });
+checkThat("wiring: the server has the unformatted text",
+  await waitUntil(() => {
+    const doc = wireMock.documents.get("file:///wire.wiz");
+    return doc && doc.text === "def  f :Nat:=1\n";
+  }), JSON.stringify(wireMock.documents.get("file:///wire.wiz")));
+const versionBeforeFormat = wireMock.documents.get("file:///wire.wiz").version;
+const formatResult = await app.format();
+check("wiring: format applied", formatResult.applied, true);
+check("wiring: one edit", formatResult.edits.length, 1);
+check("wiring: the textarea has the formatted text", editor.value, "def f : Nat := 1\n");
+checkThat("wiring: didChange sent the formatted text",
+  await waitUntil(() => {
+    const doc = wireMock.documents.get("file:///wire.wiz");
+    return doc && doc.text === "def f : Nat := 1\n";
+  }), JSON.stringify(wireMock.documents.get("file:///wire.wiz")));
+check("wiring: didChange used version+1",
+  wireMock.documents.get("file:///wire.wiz").version, versionBeforeFormat + 1);
+check("wiring: the caret stayed at the end", editor.selectionStart, "def f : Nat := 1\n".length);
+
+// A selection formats only the commands inside it (`textDocument/rangeFormatting`).
+const twoLines = "def  a :Nat:=1\ndef  b :Nat:=2\n";
+editor.value = twoLines;
+editor.selectionStart = editor.selectionEnd = 0;
+for (const fn of editor.listeners.input || []) fn({ type: "input" });
+checkThat("wiring: the server has the two commands",
+  await waitUntil(() => {
+    const doc = wireMock.documents.get("file:///wire.wiz");
+    return doc && doc.text === twoLines;
+  }));
+const line2Start = "def  a :Nat:=1\n".length;
+editor.selectionStart = line2Start;
+editor.selectionEnd = twoLines.length;
+const rangeResult = await app.formatSelection();
+check("wiring: range formatting applied", rangeResult.applied, true);
+check("wiring: only the selected command changed", editor.value,
+  "def  a :Nat:=1\ndef b : Nat := 2\n");
+const lastRange = wireMock.stats.rangeFormattingArgs[wireMock.stats.rangeFormattingArgs.length - 1];
+check("wiring: the request carried the selection",
+  JSON.stringify(lastRange.range),
+  JSON.stringify({ start: { line: 1, character: 0 }, end: { line: 2, character: 0 } }));
+check("wiring: the caret ends at the selection's start", editor.selectionStart, line2Start);
+check("wiring: the range request is a separate method", wireMock.stats.rangeFormatting, 1);
+
 app.stop();
 checkThat("wiring: stop closes the hover card", !app.hover().isOpen());
 await wireMock.close();
@@ -563,7 +731,7 @@ const selfPanel = fakePanel();
 const selfDocument = fakeDocument();
 const selfApp = startTestInfoview({
   editor: selfEditor, panel: selfPanel, uri: "file:///in-page.wiz", document: selfDocument,
-  config: selfhostEndpoint({ evaluate: () => "", check: selfCheck }),
+  config: selfhostEndpoint({ evaluate: () => "", check: selfCheck, index: indexOracle }),
 });
 checkThat("in-page: connected", await waitUntil(() => selfPanel.innerHTML.includes("connected")),
   selfPanel.innerHTML.slice(0, 300));
@@ -760,7 +928,7 @@ const widgetMock = await startMockServer({
 });
 const paneApp = startInfoview({
   editor: fakeEditor(FIXTURE_TEXT), panel: panePanel, uri: "file:///widgets.wiz",
-  config: { url: widgetMock.url }, document: paneDoc, widgetPane: pane,
+  config: { url: widgetMock.url }, document: paneDoc, widgetPane: pane, rules,
 });
 const paneWalk = (node, pred, out = []) => {
   if (pred(node)) out.push(node);
@@ -776,6 +944,12 @@ checkThat("widget pane: the scry claim is mounted",
   pane.textContent.includes("refuted") && pane.textContent.includes("beta.c"), pane.textContent);
 checkThat("widget pane: the panel does not duplicate the cards",
   !panePanel.innerHTML.includes("wiz-widget-grid"));
+// A publish with the same payload must not clear and re-sanitise the cards: the mounted
+// node (and its DOM state) survives a refresh whose `items` are unchanged.
+const firstCard = pane.childNodes[0];
+await paneApp.refresh();
+checkThat("widget pane: an unchanged payload keeps the mounted card",
+  pane.childNodes[0] === firstCard, `cards ${firstCard && firstCard.getAttribute("data-widget-kind")}`);
 checkThat("widget pane: no script element", paneTag("script").length === 0);
 paneApp.stop();
 await widgetMock.close();

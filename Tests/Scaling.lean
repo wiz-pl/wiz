@@ -1,5 +1,6 @@
 import Tests.ElabFix
 import Grail.Test
+import Tests.Grail
 
 /-!
 # Scaling (agent/mem-hunt)
@@ -262,7 +263,12 @@ def expr : P IR.Expr := do
   | "F" => let f ← tok; return .fap f (← nums)
   | "A" => let f ← tok; return .pap f (← nums)
   | "X" => let f ← num; return .ap f (← nums)
-  | "O" => let f ← tok; return .prim f (← nums)
+  | "O" =>
+    let f ← tok
+    let p := match IR.PrimOp.ofKey? f with
+      | some p => p
+      | none => .extern f
+    return .prim p (← nums)
   | "S" => return .reset (← num)
   | "Z" => let t ← num; let g ← num; return .reuse t g (← nums)
   | t => throw s!"bad expression {t}"
@@ -431,22 +437,29 @@ def hypsMismatches (g : Globals ZeroOneMany) (extra : List (Name × Level × Val
 
 /- `libApart`, `libSourceExcept` and `allLibSource` live in `Tests.Elab`, so every
 whole-library loader (this Desc sweep and the trust ledger) uses the same per-module
-exclusions. -/
+exclusions. `libApart` is empty since the e-graph collapse, so `allLibSource` is all of
+`lib/`. -/
 
 /-! The Desc sweep (direct induction hypotheses against the template, P2) is one check
-over three inputs: `lib/` imported at once, the `libApart` modules, and every example.
-It ran as one case (up to 31 min in CI, most of it the examples, each elaborating its
-imports from source), so it is split into cases that can run in different shards: one
-for `lib/`, one for `libApart`, and `descExampleChunks` for the examples, chunk `k`
-taking the sorted files at positions `k` mod `descExampleChunks`. Together they check
-the same inputs with the same assertions; `descSweepPartition` checks that the chunks
-cover every example exactly once. -/
-
-/-- The `.wiz` files directly in `examples/`, sorted by path. -/
+over two inputs: `lib/` imported at once, and every example. It ran as one case (up to
+31 min in CI, most of it the examples, each elaborating its imports from source), so it
+is split into cases that can run in different shards: one for `lib/`, and
+`descExampleChunks` for the examples, chunk `k` taking the sorted files at positions `k`
+mod `descExampleChunks`. (A third case loaded each `libApart` backend on its own; there
+are none now that `Scry.EgraphNative` is a compatibility import of `Scry.Egraph`.)
+Together they check the same inputs with the same assertions; `descSweepPartition` checks
+that the chunks cover every example exactly once. They are the group `desc-sweep`, which
+sets `parallel := true` so a shard's `--jobs N` runs them N at a time; they share no path
+and none asserts on wall time, so this is the safe way to use the shard's jobs on the
+sweep. -/
+/-- The `.wiz` files directly in `examples/` and the HDL package's `hdl/examples/`,
+sorted by path. The HDL examples moved with their package (`separate-repos.md` §1.2);
+the sweep still checks them, resolving `Hdl.*` from the root package's `root` setting. -/
 def exampleFiles : IO (Array System.FilePath) := do
   let mut fs := #[]
-  for e in ← System.FilePath.readDir "examples" do
-    if e.path.extension == some "wiz" then fs := fs.push e.path
+  for dir in ["examples", "hdl/examples"] do
+    for e in ← System.FilePath.readDir dir do
+      if e.path.extension == some "wiz" then fs := fs.push e.path
   pure (fs.qsort (·.toString < ·.toString))
 
 /-- Does `s` contain `frag` (the substring test the rest of the suite uses)? -/
@@ -526,8 +539,10 @@ def exampleChunk (fs : Array System.FilePath) (k : Nat) : Array System.FilePath 
 /-- The Desc sweep on `lib/` imported at once (all modules but the apart backends), with
 the stuck descriptions, and the check that a wrong variant is caught. The pre-split case
 asserted one bound over lib, the apart backends and the examples together (`> 1000`);
-since the parts run as separate cases, this part asserts its own floor: it compares 787
-descriptions (measured), and `> 700` catches a loader that stopped early. -/
+since the parts run as separate cases, this part asserts its own floor: before Hdl moved
+to its package the lib sweep compared 787 descriptions (measured); Hdl's 32 modules were
+about a quarter of that, so the lib-only floor is 500, which still catches a loader that
+stopped early. -/
 def descSweepLib : IO Unit := do
   let loader ← Tests.Elab.libLoader
   let lib := runFrontend (R := ZeroOneMany) (← Tests.Elab.allLibSource) { trustedModule := Tests.libModule, loader }
@@ -545,26 +560,7 @@ def descSweepLib : IO Unit := do
     ("rec then a variable", .zero, .unit 0, .drec w .tt (.darg w (.sort 0) (Val.var 0)), 1)]
   let (n, bad) := hypsMismatches lib.globals stuck
   unless bad.isEmpty do throw (IO.userError s!"lib: {bad.take 3}")
-  check (n > 700) s!"only {n} cases"
-
-/-- The Desc sweep on each alternative backend of `lib/` (`Tests.Elab.libApart`), loaded
-with every other module except the backends it replaces (`Tests.Elab.libSourceExcept`).
-Its reference family (`Scry.Egraph`) declares the same top-level names, so the two cannot
-be imported into one program. -/
-def descSweepApart : IO Unit := do
-  let loader ← Tests.Elab.libLoader
-  let ms ← Tests.Elab.libModuleNames
-  let mut seenApart : List (List String) := []
-  for (m, skip) in Tests.Elab.libApart do
-    if seenApart.contains skip then continue
-    seenApart := skip :: seenApart
-    check (ms.contains m) s!"{m} is not a module of lib/"
-    let st := runFrontend (R := ZeroOneMany) (← Tests.Elab.libSourceExcept skip) { trustedModule := Tests.libModule, loader }
-    unless st.messages.all (·.severity != .error) do
-      throw (IO.userError s!"lib/ with {m} (without {skip}) has errors")
-    let (n, bad) := hypsMismatches st.globals
-    unless bad.isEmpty do throw (IO.userError s!"{m}: {bad.take 3}")
-    check (n > 0) s!"{m}: no descriptions were compared"
+  check (n > 500) s!"only {n} cases"
 
 /-- The examples that deliberately show an error (their `.expected` golden holds it):
 `procmacro` throws from a macro, `syntax` prints the rejected-syntax diagnostic. The
@@ -578,18 +574,18 @@ cost). A new skip, or one of these that stops skipping, fails `descSweepModes`: 
 is a decision, not a way to hide a failure. -/
 def descSweepSkips : List String :=
   [ "examples/closed-table-bench.wiz"
-  , "examples/hdl-crc-link.wiz"
-  , "examples/hdl-sim-bench.wiz"
-  , "examples/hdl-verified-full.wiz"
-  , "examples/hdl-verified-native.wiz"
   , "examples/natives-bench.wiz"
   , "examples/plot.wiz"
-  , "examples/scry-datalog-bench.wiz" ]
+  , "examples/scry-datalog-bench.wiz"
+  , "hdl/examples/hdl-crc-link.wiz"
+  , "hdl/examples/hdl-sim-bench.wiz"
+  , "hdl/examples/hdl-verified-full.wiz"
+  , "hdl/examples/hdl-verified-native.wiz" ]
 
 /-- The example whose skip reason is an on-demand cost: the sweep records that it needs
 `--trust-native` (so its classification is complete) but skips it for the reason it
 names. It is verified separately, with `--trust-native` and enough memory. -/
-def descSweepOnDemandExamples : List String := ["examples/hdl-verified-full.wiz"]
+def descSweepOnDemandExamples : List String := ["hdl/examples/hdl-verified-full.wiz"]
 
 /-- The examples whose frontend path needs the C preprocessor (`import_c`). -/
 def descSweepPreprocessExamples : List String :=
@@ -602,18 +598,27 @@ def exampleModeAt (p : System.FilePath) : IO ExampleMode := do
   | .ok m => pure m
   | .error e => throw (IO.userError s!"{p}: {e}")
 
+/-- The toolchain with the root package's settings, and its module roots (`lib/` and
+`drafts/feral/lib/` for `feral-core`), as the examples group's runner gets them. -/
+def exampleEnv : IO (Toolchain × List System.FilePath) := do
+  let tc ← toolchain
+  match ← Grail.readConfig tc (← Tests.Grail.binId tc) "lib" "." with
+  | .ok (pkg, machine) =>
+    let tc ← Tests.Grail.withSettings tc pkg machine
+    -- `tc.searchPath` carries the manifest's `root` settings (for packages that left
+    -- `lib/`, like `scry/src` and `hdl/src`); an example imports those modules too.
+    pure (tc, ← Module.roots (Grail.libRootsOf "." pkg.targets ++ tc.searchPath))
+  | .error e => throw (IO.userError s!"cannot read grail.wiz: {e}")
+
 /-- Elaborate an example the way `wiz check`/`wiz run` does: the toolchain's library as
-the first module root, `import_c` headers preprocessed, `link_c`/`include_str` resolved
-relative to the example, and `--trust-native` for a file that needs it. (The old sweep
-passed only the library loader: `glue.wiz` failed as un-preprocessed and a
-`native_refl` example failed without the flag.) -/
+the first module root and the package's other roots, `import_c` headers preprocessed,
+`link_c`/`include_str` resolved relative to the example, and `--trust-native` for a file
+that needs it. (The old sweep passed only the library loader: `glue.wiz` failed as
+un-preprocessed, `resources.wiz` could not find `FeralCore`, and a `native_refl` example
+failed without the flag.) -/
 def elaborateExample (p : System.FilePath) (src : String) (trustNative : Bool) :
     IO (CommandState ZeroOneMany) := do
-  let tc ← toolchain
-  -- The package's library roots (`grail.wiz`'s `Package.lib "feral-core"
-  -- "drafts/feral/lib"`), after the toolchain's `lib/`: `examples/resources.wiz` imports
-  -- `FeralCore`, and a sweep that passes only `Module.roots []` cannot see it.
-  let roots ← Module.roots ["drafts/feral/lib"]
+  let (tc, roots) ← exampleEnv
   let closure ← Module.loadClosure roots src
   let lib : Std.HashMap Name String := closure.fold (fun m n (_, s) => m.insert n s) {}
   let headers ← Build.preprocessHeaders tc (String.join (src :: lib.values))
@@ -632,13 +637,16 @@ example's `.expected`, and return `false` only when the C toolchain is missing (
 skips the chunk, as the examples group does). A program that ran and failed is the
 example's failure. -/
 def runExample (p : System.FilePath) (st : CommandState ZeroOneMany) : IO Bool := do
+  -- The root package sets `libs "-lm"` (`grail.wiz`), and the examples group runs a
+  -- `run` test with its package's settings; `import_c.wiz` needs `-lm` for `pow`/`sqrt`.
+  let (tc, _) ← exampleEnv
   let dir ← IO.FS.createTempDir
-  let result ← Build.runGlobal (← toolchain) st "main" dir (timeout := some 300)
+  let result ← Build.runGlobal tc st "main" dir (timeout := some 300)
   IO.FS.removeDirAll dir
   match result with
   | .error e =>
     if e.isToolchain then
-      skip "no toolchain"
+      skipMissing "no toolchain"
       pure false
     else throw (IO.userError s!"{p}: run failed: {e.message}")
   | .ok out =>
@@ -687,7 +695,7 @@ def descSweepExamples (k : Nat) : IO Unit := do
     -- the case is on
     progress p.toString
     unless ← sweepExample p do
-      skip "no toolchain"
+      skipMissing "no toolchain"
       return
 
 /-- The sweep's classification agrees with the examples' markers: every example has a
@@ -749,7 +757,7 @@ def descSweepFixtures : IO Unit := do
   for f in ["check.wiz", "run.wiz", "skip.wiz", "trust.wiz", "import_c.wiz", "skip-trust.wiz",
       "skip-on-demand.wiz"] do
     unless ← sweepExample (dir / f) do
-      skip "no toolchain"
+      skipMissing "no toolchain"
       return
 
 /-- The example chunks cover `examples/` exactly once: their concatenation, sorted, is
@@ -849,6 +857,14 @@ def recordEqEta : String :=
   "def tSlow (xs : Trace (Bool × Bits8)) (t : Nat) :\n" ++
   "    Mealy.stateAt spec s0 xs (Nat.succ t) = (spec (Mealy.stateAt spec s0 xs t) (xs t)).1 := rfl\n"
 
+/-- (F25) A body with `n` nested join points, binding `2 n` distinct locals: the shape the
+C backend's local collection walks. -/
+def joinChain (n : Nat) : IR.Body := Id.run do
+  let mut b : IR.Body := .ret 0
+  for i in [0:n] do
+    b := .jdecl i #[2 * i, 2 * i + 1] (.ret 0) b
+  b
+
 def group : Group where
   name := "scaling"
   exercise := "super-linear time and memory"
@@ -868,7 +884,7 @@ def group : Group where
     -- argument for the codomain, which a non-dependent Π doesn't mention: O(n²) on a
     -- nested spine (4000 characters: 32 s to build)
     -- the kernel's first `.1` rule (Q1) evaluated the pair to find the second part's
-    -- fields, so `(Circuit.netlistS c).1` (lib/Hdl/Core.wiz) ran the netlist builder at
+    -- fields, so `(Circuit.netlistS c).1` (hdl/src/Hdl/Core.wiz) ran the netlist builder at
     -- check time and overflowed the stack; here the second part takes 2^40 steps to
     -- evaluate. (R1: the rule no longer looks at the components at all.)
     { name := "p.1 is checked without evaluating p", run := fun _ =>
@@ -878,6 +894,12 @@ def group : Group where
           "def y : N := big.1\n") },
     { name := "a 20000-character string literal is checked and erased in linear time", run := fun _ =>
         longLiteral 20000 60 },
+    -- the C backend collected a body's locals by appending each join's parameters to the
+    -- accumulator and de-duplicating the result as a list: quadratic in the locals (50000
+    -- joins: the old collector took about 30 s here, the linear one about 0.5 s)
+    { name := "a body with 50000 nested joins collects its locals in linear time (F25)", run := fun _ => do
+        let locals ← within 10 2000 fun _ => pure (C.bound (joinChain 50000))
+        checkEq 100000 locals.size },
     -- reuse across `case` (`reuseAcross`) tried a drop it could not pair again from each
     -- enclosing search, and the drop's parts with it: along the chain of projections
     -- that reads a structure's fields without rebuilding it (a bundle's `pack`),
@@ -1019,23 +1041,9 @@ def group : Group where
     { name := "a recursive call in every alternative of a match is computed once per element (C7)", run := fun _ => do
         let _ ← within 30 1000 fun _ => elabOk (matchAltsProgram 200)
         pure () },
-    -- (P2) the direct hypotheses are the template's, on every description of the library
-    -- and the examples, and on stuck descriptions (where the direct one falls back)
-    -- (split into the parts below, so that they can run in different shards: see
-    -- `descSweepLib`, `descSweepApart`, `descSweepExamples`)
-    { name := "direct induction hypotheses agree with the template on every Desc in lib/ (imported at once), and on stuck descriptions", run := fun _ =>
-        descSweepLib },
-    { name := "direct induction hypotheses agree with the template on every Desc in lib/ (each alternative backend loaded on its own)", run := fun _ =>
-        descSweepApart }] ++
-    (List.range descExampleChunks).map (fun k => ({
-        name := s!"direct induction hypotheses agree with the template on every Desc in examples/, part {k + 1} of {descExampleChunks}", run := fun _ =>
-          descSweepExamples k } : Case)) ++ [
-    { name := "the Desc sweep honours every example's `-- test:` marker, --trust-native and import_c", run := fun _ =>
-        descSweepModes },
-    { name := "the Desc sweep's classification branches are each exercised by a fixture", run := fun _ =>
-        descSweepFixtures },
-    { name := "the Desc sweep's parts of examples/ cover every example exactly once", run := fun _ =>
-        descSweepPartition },
+    -- (P2) the Desc sweep is the separate group `descGroup` below: its cases are
+    -- independent, so `--jobs` can run them together without putting a wall-clock-sensitive
+    -- `scaling` case in the same pool.
     -- (P3) a universe-polymorphic definition unfolds at the cached levels (0, 1, 2) and at
     -- others alike, and a wrong statement at a cached level is still rejected
     { name := "a polymorphic definition unfolds the same at cached and uncached levels", run := fun _ => do
@@ -1095,6 +1103,30 @@ def group : Group where
         let st := runFrontend (R := ZeroOneMany)
           "import Prelude\ndef w (h : Nat → Nat × Nat) (k : Nat × Nat → Type) (x : k (h 0)) : k (h 1) := x\n" { loader }
         check (st.messages.any (·.severity == .error)) "two different stuck pairs were taken as equal" }]
+
+/-- The Desc sweep: the direct induction hypotheses are the template's on every description
+of `lib/` (once with every module imported, once per alternative backend loaded on its
+own) and on the examples, in `descExampleChunks` cases, plus the check that the example
+chunks cover every example exactly once. The nine cases read the same library but write
+nothing and share no fixed path, and none of them asserts on wall time, so `parallel`
+lets a shard run them `--jobs N` at a time. It was the long tail of the `scaling` group
+(1330 s measured in `.github/test-timings.json`) with no way to use the shard's jobs. -/
+def descGroup : Group where
+  name := "desc-sweep"
+  exercise := "the Desc sweep: induction hypotheses over lib/ and examples/"
+  parallel := true
+  cases := [
+    { name := "direct induction hypotheses agree with the template on every Desc in lib/ (imported at once), and on stuck descriptions", run := fun _ =>
+        descSweepLib }] ++
+    (List.range descExampleChunks).map (fun k => ({
+        name := s!"direct induction hypotheses agree with the template on every Desc in examples/, part {k + 1} of {descExampleChunks}", run := fun _ =>
+          descSweepExamples k } : Case)) ++ [
+    { name := "the Desc sweep honours every example's `-- test:` marker, --trust-native and import_c", run := fun _ =>
+        descSweepModes },
+    { name := "the Desc sweep's classification branches are each exercised by a fixture", run := fun _ =>
+        descSweepFixtures },
+    { name := "the Desc sweep's parts of examples/ cover every example exactly once", run := fun _ =>
+        descSweepPartition }]
 
 
 /-! ### A probe (`tests --probe-checker [unbox] [rc]`): where building the self-hosted checker spends
@@ -1159,13 +1191,7 @@ of every definition of each `lib/` module, and of the self-hosted checker and co
 def probeReuse : IO UInt32 := do
   let loader ← Tests.Elab.libLoader
   let mut failures := 0
-  let mut mods : Array String := #[]
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then mods := mods.push (e.path.fileStem.getD "")
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then mods := mods.push (e.fileName ++ "." ++ f.path.fileStem.getD "")
-  for m in mods.qsort (· < ·) do
+  for m in ← Tests.Elab.libModuleNames do
     let st := runFrontend (R := ZeroOneMany) s!"import {m}\n" { trustedModule := Tests.libModule, loader }
     let mine := st.globals.order.toList.filter fun n =>
       st.globals.declModule[n]? == some m && ((st.globals.find? n).bind (·.value)).isSome
@@ -1188,9 +1214,13 @@ def probeReuse : IO UInt32 := do
 
 /-- This module's test groups, which `Tests/Main.lean` runs: one per line, in sorted
 order, so that branches adding groups rarely touch the same lines. A new group also
-needs a shard in `.github/test-shards.json` (CI checks). -/
+needs a selector in a shard's list in `.github/test-shards.json` (or an entry in
+`.github/test-shard-exclusions.json` that says why it runs nowhere); `check-shards`
+fails when it has neither. -/
 def groups : List Group :=
+  descGroup ::
   group ::
   []
 
 end Tests.Scaling
+

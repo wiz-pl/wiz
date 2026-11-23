@@ -1,0 +1,149 @@
+import Text
+import Word
+import Scry.Rules
+/-!
+# Scry.Identity: one hash, one semantic id
+
+The **one** place a finding's stable identity is computed, and the **one** 64-bit hash
+the rest of scry uses for its maps and content digests. `Scry.Sarif.semanticId` and
+`Scry.Workflow.wfId` are names over `Scry.semanticId` here; the boundary/memory id and
+the GitHub-compatible line hash are here too, so an id is never assembled twice.
+
+## The hash
+
+FNV's 64-bit offset basis and prime, mixed as `h * prime + w` modulo 2^64. That is the
+mixing the observable finding ids have always used; keeping it byte-for-byte is the
+whole point of the module. (Strict FNV-1a XORs the byte before multiplying; scry's
+identity hash does not. The constants are FNV's, the mix is scry's, and both are pinned
+by the `sarif-id`/`workflow` goldens.)
+
+The hash is a function of a list of **words**, so the three shapes the codebase hashes
+are cases of the same fold, not copies of the loop:
+
+* `fnvStr` / `fnv` — a string's code points (the finding identities, cache keys and
+  content digests);
+* `fnvWords` — a row of `U64`s (the Datalog store's bucket keys; a row element is one
+  word, not eight bytes);
+* `hex16` — the 16-digit lower-case rendering.
+
+No line, column, program point, timestamp or rule-array index is part of an id.
+
+## What an id is, and is not
+
+The id is a *stable handle for triage*, not a claim that two runs found the same bug in
+the sense of a proof. It includes the rule id, the normalized file path, the sink
+function/callee/argument and the path shape. A rename of the sink or a change from
+`source -> sink` to `source -> store -> load -> sink` is a new id: a deliberate review
+event, not a silent match.
+-/
+
+-- ## The hash
+
+/-- One FNV-style step over a word: `h * prime + w`, modulo 2^64. -/
+def Scry.fnvStep (h w : U64) : U64 :=
+  UIntN.add (UIntN.mul h (U64.ofNat 1099511628211)) w
+
+/-- Fold a row of words into a hash, starting from `seed`. -/
+def Scry.fnvWords (seed : U64) (ws : List U64) : U64 := List.foldl Scry.fnvStep seed ws
+
+/-- FNV's 64-bit offset basis. -/
+def Scry.fnvOffset : U64 := U64.ofNat 14695981039346656037
+
+/-- A string's code points, hashed with `fnvWords`. -/
+def Scry.fnvStr (s : String) : U64 :=
+  Scry.fnvWords Scry.fnvOffset
+    (List.map (fun c => U64.ofNat (Char.code c)) (String.chars s))
+
+/-- The 64-bit hash of a string, as a `Nat`. -/
+def Scry.fnv (s : String) : Nat := UIntN.toNat (Scry.fnvStr s)
+
+/-- One lower-case hex digit. -/
+def Scry.idHexDigit (d : Nat) : Char :=
+  match Nat.lt d 10 with
+  | .true => Char.mk (Nat.add 48 d)
+  | .false => Char.mk (Nat.add 87 d)
+
+/-- One hex digit off the low end of the value, newest digit first. -/
+def Scry.hexTick (st : Nat × List Char) (_ : Char) : Nat × List Char :=
+  (Nat.div st.1 16, List.cons (Scry.idHexDigit (Nat.mod st.1 16)) st.2)
+
+/-- 16 lower-case hex digits (64 bits), most significant first (each tick conses the
+next-more-significant digit, so the accumulated list is already in output order). -/
+def Scry.hex16 (n : Nat) : String :=
+  let st := List.foldl Scry.hexTick (n, (List.nil : List Char))
+    (String.chars "0123456789abcdef");
+  String.ofChars st.2
+
+-- ## Paths and key inputs
+
+/-- Normalize a path for identity: forward slashes, no leading `./`. Absolute paths are
+kept (the caller should pass a repository-relative path when it has one). -/
+def Scry.normPath (p : String) : String :=
+  let q := String.replace p "\\" "/";
+  match String.stripPrefix q "./" with
+  | .some r => r
+  | .none => q
+
+/-- The coarse role path (`source>flow>sink`): roles, not program points. -/
+def Scry.pathShape (path : List Scry.PathNode) : String :=
+  String.intercalate ">" (List.map (fun p => Scry.PathKind.show p.kind) path)
+
+def Scry.firstFunc : List Scry.PathNode → String
+  | .nil => ""
+  | .cons p _ => p.func
+
+def Scry.lastFunc : List Scry.PathNode → String
+  | .nil => ""
+  | .cons p .nil => p.func
+  | .cons _ ps => Scry.lastFunc ps
+
+/-- The semantic identity inputs: rule, normalized path, sink function/callee/argument,
+the path shape and its first/last function. No line, column, program point or timestamp,
+so a moved finding keeps its id and a renamed sink/path gets a new one. -/
+def Scry.semanticKey (f : Scry.RuleFinding) (file : String) : String :=
+  String.intercalate "|"
+    [ String.append "scry/c/" f.rule
+    , Scry.normPath file
+    , f.func
+    , f.name
+    , Nat.repr f.arg
+    , Scry.pathShape f.path
+    , Scry.firstFunc f.path
+    , Scry.lastFunc f.path ]
+
+/-- `f_<16 hex>`: the stable baseline id used in `partialFingerprints.scry/v1` and as
+the workflow record's identity. -/
+def Scry.semanticId (f : Scry.RuleFinding) (file : String) : String :=
+  String.append "f_" (Scry.hex16 (Scry.fnv (Scry.semanticKey f file)))
+
+/-- `b_<16 hex>`: the stable id of a boundary/memory warning. -/
+def Scry.boundaryId (rule file func message : String) : String :=
+  String.append "b_" (Scry.hex16 (Scry.fnv
+    (String.intercalate "|" [rule, Scry.normPath file, func, message])))
+
+-- ## The GitHub-compatible line identity
+
+/-- One character of the primary-line normalization: `(last was space, reversed so far)`. -/
+def Scry.normLineStep (st : Bool × List Char) (c : Char) : Bool × List Char :=
+  match Char.isSpace c with
+  | .true =>
+    match st.1 with
+    | .true => st
+    | .false => (Bool.true, List.cons (Char.mk 32) st.2)
+  | .false => (Bool.false, List.cons c st.2)
+
+/-- The normalized primary line: whitespace runs collapsed, trimmed. -/
+def Scry.normLine (s : String) : String :=
+  let st := List.foldl Scry.normLineStep (Bool.false, (List.nil : List Char))
+    (String.chars s);
+  String.trim (String.ofChars (List.reverse st.2))
+
+/-- The GitHub-compatible line identity: rule + normalized primary line + function. A
+whitespace-only change keeps it; a line move keeps it (there is no line number); a
+changed sink creates a new one. -/
+def Scry.lineKey (f : Scry.RuleFinding) (lineText : String) : String :=
+  String.intercalate "|"
+    [ String.append "scry/c/" f.rule, f.func, Scry.normLine lineText ]
+
+def Scry.lineHash (f : Scry.RuleFinding) (lineText : String) : String :=
+  Scry.hex16 (Scry.fnv (Scry.lineKey f lineText))
