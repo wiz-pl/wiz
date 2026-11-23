@@ -259,6 +259,15 @@ decodes one character to the right, past the name; one character of drift inside
 Heavy is held behind train11 at the time of writing, so the built-host runs (the Node
 live test and the browser smoke with `WIZ_BIN=<built wiz>`) are not yet claimed here.
 
+A light probe is not a substitute for that run: a *store* `wiz` ships its own
+`lib/Web/Hover.wiz`, `Web/EditorModel.wiz`, `Web/Loom.wiz`, … and refuses to let `-I`
+replace them ("module Web.Hover is the toolchain's own"), so `View.wiz`, `Static.wiz` and
+`web/source-ui.wiz` check against master's older Hover/EditorModel and fail on
+`Hover.cardLines`/`EditorModel.popupKeyJson` — spurious. (`Facts.wiz` and `Model.wiz` do
+check clean that way, which is what confirms the 😀 fixture edit parses and types.) The
+compiler oracle is the branch's own binary: `grail build scry` and
+`web/build-source-ui.sh` in the heavy job.
+
 ## Honesty ledger
 
 | what | how it ran | verdict |
