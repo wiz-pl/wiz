@@ -168,29 +168,64 @@ WIZ_API wiz_val wiz_sys_list_dir(const char *p) {
   wiz_sys_err = 0;
   return l;
 }
-/* remove a file, or a directory and everything in it (links are not followed) */
-static int wiz_sys_rm_rf(const char *p) {
+/* remove a file, or a directory and everything in it, without ever following a link
+
+   Guarantee: the walk is descriptor-relative and never resolves a symbolic link.
+   Each entry is opened once with `openat(parent, name, O_DIRECTORY | O_NOFOLLOW)` and
+   the listing and every child operation then use that descriptor (`fdopendir`, and
+   `openat`/`unlinkat` relative to it), so a directory that is swapped for a symlink
+   after it was seen is opened as the symlink it now is: `openat` fails (ENOTDIR or
+   ELOOP) and the entry is removed with `unlinkat(…, 0)` instead of being recursed
+   into. The final `unlinkat(…, AT_REMOVEDIR)` also refuses a non-directory, so a
+   component that is not a real directory at the moment it is opened is never
+   traversed, and nothing outside the tree is removed. (A different *empty* directory
+   swapped in for an entry can be removed, but it is still a child of this tree.)
+   Non-directories, links included, are removed themselves (`rm -rf` semantics): the
+   link goes, its target is not touched.
+
+   The starting path is resolved by the OS as usual — a directory reached through a
+   symlinked path component (e.g. /tmp on systems where it is a link) is still
+   removed — but its final component is not followed: trailing slashes are dropped
+   before the open, so `removeAll "link/"` removes the link, not the tree it names. */
+static int wiz_sys_rm_rf_at(int parent, const char *name) {
   struct stat st;
-  if (lstat(p, &st) < 0) return -1;
-  if (!S_ISDIR(st.st_mode)) return unlink(p);
-  DIR *d = opendir(p);
-  if (!d) return -1;
+  int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) {
+    /* not a real directory now: a file, or a link (ENOTDIR/ELOOP). Remove the entry
+       itself, never what it points at. A directory we cannot open (EACCES) is an
+       error, as `opendir` was. */
+    if (errno == ENOTDIR || errno == ELOOP)
+      return unlinkat(parent, name, 0);
+    if (fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) == 0 && !S_ISDIR(st.st_mode))
+      return unlinkat(parent, name, 0);
+    return -1;
+  }
+  DIR *d = fdopendir(fd);
+  if (!d) { int saved = errno; close(fd); errno = saved; return -1; }
+  int dfd = dirfd(d);
   struct dirent *e;
-  int r = 0;
-  size_t n = strlen(p);
+  int r = 0, saved = 0;
   while (r == 0 && (e = readdir(d))) {
     if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-    char *q = (char *)wiz_xmalloc(n + strlen(e->d_name) + 2);
-    sprintf(q, "%s/%s", p, e->d_name);
-    r = wiz_sys_rm_rf(q);
-    free(q);
+    r = wiz_sys_rm_rf_at(dfd, e->d_name);
   }
-  int saved = errno;
+  if (r < 0) saved = errno;
   closedir(d);
   if (r < 0) { errno = saved; return -1; }
-  return rmdir(p);
+  return unlinkat(parent, name, AT_REMOVEDIR);
 }
-WIZ_API uint64_t wiz_sys_remove_all(const char *p) { return wiz_sys_status(wiz_sys_rm_rf(p)); }
+WIZ_API uint64_t wiz_sys_remove_all(const char *p) {
+  size_t n = strlen(p);
+  while (n > 1 && p[n - 1] == '/') n--;
+  char *q = (char *)wiz_xmalloc(n + 1);
+  memcpy(q, p, n);
+  q[n] = 0;
+  int r = wiz_sys_rm_rf_at(AT_FDCWD, q);
+  int saved = errno;
+  free(q);
+  errno = saved;
+  return wiz_sys_status(r);
+}
 
 static int wiz_sys_write_all(int fd, const char *s, size_t n) {
   while (n > 0) {

@@ -1,0 +1,39 @@
+emit: exit 0 without a gate: ok
+emit: two findings in the JSON: ok
+emit: two results in the SARIF: ok
+emit: ids match across JSON and SARIF: ok
+emit: ids are distinct: ok
+emit: report counts match the arrays: ok
+emit: schema names the pipeline: ok
+emit: sarif is 2.1.0: ok
+emit: sarif rule id is namespaced: ok
+determinism: exit 0: ok
+determinism: JSON is byte-identical: ok
+determinism: SARIF is byte-identical: ok
+stdout: exit 0: ok
+stdout: parses and has one finding: ok
+stdout: the summary went to stderr: ok
+baseline: update exits 0: ok
+baseline: schema: ok
+baseline: one id: ok
+baseline: the id is f_-prefixed: ok
+baseline: only known findings exits 0: ok
+baseline: the known finding is suppressed: ok
+baseline: the suppressed count is explicit: ok
+baseline: a new finding exits 1: ok
+baseline: the new finding is the only result: ok
+baseline: the new id differs from the known id: ok
+baseline: the new finding is named on stderr: ok
+baseline: SARIF marks it new: ok
+budget: over the total exits 1: ok
+budget: the message names the count: ok
+budget: at the cap exits 0: ok
+budget: severity cap exits 1: ok
+budget: severity message names the count: ok
+budget: another severity is within its cap: ok
+fail-on: no flag exits 0: ok
+fail-on: the flag exits 1: ok
+web: bundle exit 0: ok
+web: one finding: ok
+web: id is the emit JSON id: ok
+web: id is a SARIF fingerprint id: ok

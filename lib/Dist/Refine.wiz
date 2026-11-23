@@ -1,0 +1,144 @@
+import Temporal
+/-!
+# Dist.Refine
+
+Refinement between labelled transition systems (`import Dist.Refine`), the P1 layer of
+`wiz-notes/distributed-proofs.md` §5.
+
+* `Refines I A f` is a **function** refinement map: every implementation initial state
+  maps to an abstract initial state, and every implementation step either stutters in the
+  abstraction (`f s' = f s`) or is matched by one abstract step. There is no relation and
+  no choice, so the proof is constructive.
+* `Refines.safety` maps an implementation run to an abstract run: the abstract behaviour
+  is `Trace.map f σ`, with stuttering.
+* `Refines.safetyInv` transfers an abstract invariant to the implementation.
+* `Refines.comp` composes two refinements; the composed map is the function composition.
+* `Refines.liveness_fails` is the P1 counterexample: forward simulation preserves safety,
+  not liveness. The implementation is a stutter loop whose map is constant; it is fair,
+  but its abstract image never reaches the abstract goal, while every fair abstract run
+  does (`Refine.CounterAbsLive`). The missing ingredient is the fairness link of
+  `RefinesLive`, which is a P3 deliverable.
+The finite companion is the `Dist.Bridge` interface: a `RefineCheck` Boolean check of the
+two obligations over a finite carrier was scoped in the design note, but the P1 bridge is
+the state-typed `Bridge.SpecModel` (the checker is already generic over the state type),
+so a separate `encode`/`decode` checker is not needed here.
+-/
+
+/-- `f` refines the implementation `I` to the abstract `A`: initial states map to initial
+states, and each implementation step stutters or is matched by one abstract step. -/
+def Refines {SI AI SA AA : Type} (I : LTS SI AI) (A : LTS SA AA) (f : SI → SA) : Prop :=
+  ((s : SI) → I.init s → A.init (f s)) ∧ ((s : SI) → (a : AI) → (s' : SI) → I.step a s s' → f s' = f s ∨ (∃ b, A.step b (f s) (f s')))
+
+/-- The first obligation: initial states map to initial states. -/
+def Refines.init {SI AI SA AA : Type} (I : LTS SI AI) (A : LTS SA AA) (f : SI → SA) (h : Refines I A f) (s : SI) (hi : I.init s) : A.init (f s) :=
+  h.1 s hi
+
+/-- The second obligation: a step stutters or is matched by an abstract step. -/
+def Refines.step {SI AI SA AA : Type} (I : LTS SI AI) (A : LTS SA AA) (f : SI → SA) (h : Refines I A f) (s : SI) (a : AI) (s' : SI) (hs : I.step a s s') : f s' = f s ∨ (∃ b, A.step b (f s) (f s')) :=
+  h.2 s a s' hs
+
+/-- Safety refinement: every run of the implementation maps to a run of the abstract
+machine. The abstract trace is `Trace.map f σ`; a stuttering implementation step is a
+stuttering abstract step. -/
+def Refines.safety {SI AI SA AA : Type} (I : LTS SI AI) (A : LTS SA AA) (f : SI → SA) (h : Refines I A f) (σ : Trace SI) (hr : I.Run σ) : A.Run (Trace.map f σ) :=
+  And.intro (h.1 (σ 0) hr.1) (fun (t : Nat) =>
+    Or.elim (hr.2 t) (fun (e : σ (Nat.succ t) = σ t) =>
+      Or.inl (Eq.congrArg f e)) (fun (w : ∃ a, I.step a (σ t) (σ (Nat.succ t))) =>
+        Ex.elim w (fun (a : AI) (hs : I.step a (σ t) (σ (Nat.succ t))) =>
+          Or.elim (h.2 (σ t) a (σ (Nat.succ t)) hs) (fun (e : f (σ (Nat.succ t)) = f (σ t)) =>
+            Or.inl e) (fun (wb : ∃ b, A.step b (f (σ t)) (f (σ (Nat.succ t)))) => Or.inr wb))))
+
+/-- An abstract invariant transfers along a refinement: if `P` holds of every abstract
+run, then `P ∘ f` holds of every implementation run. -/
+def Refines.safetyInv {SI AI SA AA : Type} (I : LTS SI AI) (A : LTS SA AA) (f : SI → SA) (h : Refines I A f) (P : SA → Prop) (hP : (τ : Trace SA) → A.Run τ → TL.always (TL.now P) τ 0) (σ : Trace SI) (hr : I.Run σ) : TL.always (TL.now (fun (s : SI) =>
+  P (f s))) σ 0 :=
+    hP (Trace.map f σ) (Refines.safety I A f h σ hr)
+
+/-- Composition of refinements: `I` refines `B` by `g ∘ f` when `I` refines `A` by `f`
+and `A` refines `B` by `g`. -/
+def Refines.comp {SI AI SA AA SB AB : Type} (I : LTS SI AI) (A : LTS SA AA) (B : LTS SB AB) (f : SI → SA) (g : SA → SB) (h1 : Refines I A f) (h2 : Refines A B g) : Refines I B (fun (s : SI) =>
+  g (f s)) :=
+    And.intro (fun (s : SI) (hi : I.init s) =>
+      h2.1 (f s) (h1.1 s hi)) (fun (s : SI) (a : AI) (s' : SI) (hs : I.step a s s') =>
+        Or.elim (h1.2 s a s' hs) (fun (e : f s' = f s) =>
+          Or.inl (Eq.congrArg g e)) (fun (w : ∃ b, A.step b (f s) (f s')) =>
+            Ex.elim w (fun (b : AA) (hb : A.step b (f s) (f s')) =>
+              Or.elim (h2.2 (f s) b (f s') hb) (fun (e : g (f s') = g (f s)) =>
+                Or.inl e) (fun (wb : ∃ c, B.step c (g (f s)) (g (f s'))) => Or.inr wb))))
+
+--------------------------------------------------------------------------------
+-- The liveness counterexample
+
+/-- `b = false` from `¬ b = true` (Boolean case analysis). -/
+def Refine.boolFalseOfNeTrue (b : Bool) (h : ¬ b = .true) : b = .false :=
+  Or.elim (Bool.cases b) (fun (ht : b = .true) => False.elim (h ht)) (fun (hf : b = .false) => hf)
+
+/-- The abstract machine of the counterexample: state `Bool`, one action, and a step
+that always goes to `true`. Its liveness goal `◇ true` holds of every **fair** run; a run
+that stutters at `false` forever is also a run (cf. `Refine.CounterImpl`). -/
+def Refine.CounterAbs : LTS Bool Bool :=
+  LTS.mk (fun (s : Bool) => s = Bool.false) (fun (_ : Bool) (_ : Bool) (s' : Bool) => s' = .true)
+
+/-- The abstract liveness claim: every fair abstract run eventually reaches `true`. This
+is the property a forward simulation of safety would need to preserve. -/
+def Refine.CounterAbsLive : (τ : Trace Bool) → Refine.CounterAbs.Run τ → Refine.CounterAbs.WF .false τ 0 → TL.eventually (TL.now (fun (s : Bool) =>
+  s = .true)) τ 0 :=
+    fun (τ : Trace Bool) (hr : Refine.CounterAbs.Run τ) (hwf : Refine.CounterAbs.WF .false τ 0) =>
+      -- The action is enabled at every state (its successor is `true`), so `◇□enabled`
+      -- holds with witness 0. Fairness gives a time where the action is taken; a taken
+      -- step always ends at `true`.
+      let hen : TL.eventually (TL.always (TL.now (Refine.CounterAbs.enabled .false))) τ 0 := Ex.intro (fun (k : Nat) =>
+        TL.always (TL.now (Refine.CounterAbs.enabled .false)) τ (Nat.add k 0)) 0 (fun (j : Nat) =>
+          Ex.intro (fun (s' : Bool) =>
+            Refine.CounterAbs.step .false (τ (Nat.add j 0)) s') Bool.true rfl)
+      let hinf : TL.always (TL.eventually (Refine.CounterAbs.taken .false)) τ 0 := hwf hen
+      Ex.elim (hinf 0) (fun (k : Nat) (hk : Refine.CounterAbs.taken .false τ (Nat.add k 0)) =>
+        let htrue : τ (Nat.succ (Nat.add k 0)) = .true := hk
+        Ex.intro (fun (j : Nat) =>
+          τ (Nat.add j 0) = .true) (Nat.succ (Nat.add k 0)) (Eq.mpr' (fun (z : Nat) =>
+            τ (Nat.succ z) = .true) (Nat.add_zero (Nat.add k 0)) htrue))
+
+/-- The implementation: state `Bool`, one action, every step is a stutter (`s' = s`). -/
+def Refine.CounterImpl : LTS Bool Bool :=
+  LTS.mk (fun (s : Bool) => s = Bool.false) (fun (_ : Bool) (s : Bool) (s' : Bool) => s' = s)
+
+/-- The refinement map: everything maps to `false`. -/
+def Refine.CounterMap : Bool → Bool := fun (_ : Bool) => Bool.false
+
+/-- The implementation refines the abstract machine: every implementation step stutters
+in the abstraction. -/
+def Refine.CounterRefines : Refines Refine.CounterImpl Refine.CounterAbs Refine.CounterMap :=
+  And.intro (fun (s : Bool) (_ : s = Bool.false) =>
+    rfl) (fun (s : Bool) (_ : Bool) (s' : Bool) (hs : s' = s) =>
+      Or.inl (Eq.congrArg Refine.CounterMap hs))
+
+/-- The implementation's stutter loop: the constant `false` trace. Every step is a real
+implementation action (`false → false`). -/
+def Refine.CounterTrace : Trace Bool := Trace.const Bool.false
+
+/-- The implementation trace is a run. -/
+def Refine.CounterRun : Refine.CounterImpl.Run Refine.CounterTrace :=
+  And.intro rfl (fun (t : Nat) =>
+    Or.inr (Ex.intro (fun (a : Bool) =>
+      Refine.CounterImpl.step a (Refine.CounterTrace t) (Refine.CounterTrace (Nat.succ t))) Bool.false rfl))
+
+/-- The implementation is weakly fair for every action: its only step is a self-loop, so
+the action is taken at every time. -/
+def Refine.CounterImplFair : Refine.CounterImpl.WFair (fun (_ : Bool) =>
+  Bool.true) Refine.CounterTrace :=
+    fun (a : Bool) (_ : (fun (_ : Bool) => Bool.true) a = .true) =>
+      fun (_ : TL.eventually (TL.always (TL.now (Refine.CounterImpl.enabled a))) Refine.CounterTrace 0) =>
+        fun (u : Nat) =>
+          Ex.intro (fun (k : Nat) =>
+            Refine.CounterImpl.taken a Refine.CounterTrace (Nat.add k u)) 0 rfl
+
+/-- The P1 counterexample: `Refines` holds and the implementation trace is a fair run,
+but the abstract liveness goal fails on the mapped trace. Forward simulation alone does
+not preserve liveness; `RefinesLive` (P3) must add the fairness link. -/
+def Refines.liveness_fails : Refines Refine.CounterImpl Refine.CounterAbs Refine.CounterMap ∧ Refine.CounterImpl.Run Refine.CounterTrace ∧ Refine.CounterImpl.WFair (fun (_ : Bool) =>
+  Bool.true) Refine.CounterTrace ∧ ¬ TL.eventually (TL.now (fun (s : Bool) =>
+    s = .true)) (Trace.map Refine.CounterMap Refine.CounterTrace) 0 :=
+      And.intro Refine.CounterRefines (And.intro Refine.CounterRun (And.intro Refine.CounterImplFair (fun (h : TL.eventually (TL.now (fun (s : Bool) =>
+        s = .true)) (Trace.map Refine.CounterMap Refine.CounterTrace) 0) =>
+          Ex.elim h (fun (k : Nat) (hk : Refine.CounterMap (Refine.CounterTrace k) = .true) =>
+            Bool.trueNeFalse hk))))

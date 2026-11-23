@@ -108,7 +108,7 @@ def borrowGroup : Group where
         let exe := dir / "proj"
         match ← Build.compileC (← toolchain) (C.program projOfNumber) exe with
         | .error e =>
-          if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+          if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
         | .ok () =>
           let out ← IO.Process.output { cmd := exe.toString }
           checkEq 3 out.exitCode

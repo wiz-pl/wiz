@@ -1,0 +1,22 @@
+-- # Line doc fixture
+--
+-- A file without `/-!` documents its leading `--` block, fences included:
+--
+-- ```wiz
+-- def line_doc_good : Nat := 1
+-- ```
+--
+-- ```wiz no-check
+-- def line_doc_fragment : Nat := defined_elsewhere
+-- ```
+--
+-- ---
+--
+-- The `---` line above is a rule, not a fence.
+import Prelude
+
+def line_doc_good : Nat := 1
+
+-- ```wiz
+-- FAIL_NOT_A_DOC_FENCE
+-- ```

@@ -1,0 +1,36 @@
+# The first tracing fixture: one `execve` sensor, the shape of
+# `wiz-notes/ebpf-dynamic.md` §6.1. The context is declared from the tracepoint's
+# format file (`syscalls:sys_enter_execve`), not from `vmlinux.h`; there is no CO-RE.
+#
+# The event transport is the perf event array. The descriptor written beside the C is
+# `execve.probe.json` (`wiz-probe/1`); attach/read/detach are a local `CAP_BPF` gate.
+
+[program.execve]
+entry = "execve"
+section = "tracepoint/syscalls/sys_enter_execve"
+type = "tracepoint"
+license = "GPL"
+version = 1
+transport = "perf"
+core = "execve.bpfcore"
+
+[map.events]
+kind = "perf_event_array"
+key = "u32"
+value = "u32"
+max_entries = 64
+
+# The `sched_process_fork` probe fills this in the next slice; this fixture's `ppid` is 0,
+# and a later policy reads the map (absent = 0) instead of walking `task_struct`.
+[map.ppids]
+kind = "hash"
+key = "u32"
+value = "u32"
+max_entries = 4096
+
+# `lost` is a per-CPU counter: a failed output is counted, never retried unbounded.
+[map.lost]
+kind = "percpu_array"
+key = "u32"
+value = "u64"
+max_entries = 1

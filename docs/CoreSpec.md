@@ -135,13 +135,18 @@ also carry a *display hint* (the nominal name to print) that conversion ignores.
 ⊢ l ≡ l'             level equivalence                                               (Level.equiv, Level.lean:291)
 ```
 
-**Contexts** (`Ctx`, `Check.lean:169`): a list of entries `x :p A` (a quantity polynomial
+**Contexts** (`Ctx`, `Check.lean:169`): entries `x :p A` (a quantity polynomial
 `p` and a type value `A`) or `x :p A := v` (a `let`), together with a flag `erased`
-(written `Γ⁰` when set). Index 0 is the innermost entry.
+(written `Γ⁰` when set). The names, quantities and types are arrays indexed by **level**
+(the outermost entry is index `0`); a de Bruijn index `ix` is read at `lvl - 1 - ix`
+(`Ctx.nameAt?`, `Ctx.qtyAt?`, `Ctx.typeAt?`). The evaluator's environment is the list the
+closures take, with the innermost entry at its head.
 
-**Usage vectors** `U` (`Usage.lean`) have one quantity polynomial per context entry. `0ₙ`
-is the zero vector, `𝟙ₓ` is "x used once" (`Usage.single`), `U + V` is pointwise sum,
-`p·U` is pointwise scaling. The rules below write `⊣ 0` for `⊣ 0ₙ`.
+**Usage vectors** `U` (`Usage.lean`) have one quantity polynomial per context entry. They
+are **sparse**: a vector stops after the last entry the term uses, and every entry after
+the end is `0`, so `0ₙ` is `[]` (`Usage.zeros` ignores the context's size). `𝟙ₓ` is
+"x used once" (`Usage.single`), `U + V` is pointwise sum (a shorter vector is extended by
+zeros), `p·U` is pointwise scaling. The rules below write `⊣ 0` for `⊣ 0ₙ`.
 
 **Erased mode** `Γ⁰` is a light version of Atkey's σ = 0 (§5.4). It is switched on for
 type positions, proofs and sizes, and for every position whose usage is scaled by a
@@ -1873,23 +1878,29 @@ linear variable): a possible later stage.
      ───────────────────────────────────── coit                                              Check.lean:594–606
      Γ ⊢ coit S step i t ⇒ ν D i ^∞ ⊣ ω·(U_st + U_t)
 
-     Γ ⊢ A ⇐ (ω i : I) → Sort (l+1)
-     Γ ⊢ f ⇐ (0 s : Size) → (ω rec : (ω i : I) → A i → ν^s D i) → (ω i : I) → A i → ν^{↑s} D i   ⊣ U_f
-     Γ⁰ ⊢ s ⇐ Size    Γ ⊢ i ⇐ I    Γ ⊢ a ⇐ A i ⊣ U_a
+     Γ ⊢ A ⇐ (0 j : Size) → (ω i : I) → Sort (l+1)
+     Γ ⊢ f ⇐ (ω j : Size) → (ω rec : (ω i : I) → A j i → ν^j D i) →
+              (ω i : I) → A (↑j) i → ν^{↑j} D i   ⊣ U_f
+     Γ⁰ ⊢ s ⇐ Size    Γ ⊢ i ⇐ I    Γ ⊢ a ⇐ A s i ⊣ U_a
      ───────────────────────────────────── scofix                     Check.lean:566–578, scofixFunTy Conv.lean:180
      Γ ⊢ scofix A f s i a ⇒ ν D i ^s ⊣ ω·(U_f + U_a)
 
      out (cocon xs)               ⟶  xs                                                     vOut, Eval.lean:468–487
      out (coit S step i t)        ⟶  map D S (ν D) (λj s. coit S step j s) i (step i t)
-     out (scofix A f s i a)       ⟶  out (f ∞ (λi a. scofix A f ∞ i a) i a)
+     out (scofix A f s i a)       ⟶  out (f j (λi a. scofix A f j i a) i a)   (s = ↑j or ∞)
 ```
 
 * `coit`, `scofix` are **values** (`Val.coit`, `Val.scofix`): they unfold only under `out`
   (the guard against infinite unfolding). [std: Abel's sized coinduction; the
   "unfold under observation" strategy is standard (unverified which paper exactly)]
 * `ν` is contravariant in its size (§11.5): `ν^∞ ≤ ν^s`.
-* `out` requires the size to be visibly a successor or `∞`. Inside `f`, `rec` returns
-  `ν^s` for the generic `s`, which can't be observed; this is the productivity check.
+* `out` requires the size to be visibly a successor or `∞`. The state of `scofix`
+  depends on the size, `A : Size → I → Type`: the body is at `A (↑j)` and its observation
+  at `↑j`; the recursive argument is the value at the predecessor `j`, `A j → ν^j`. Inside
+  `f`, `rec` returns `ν^j` for a generic `j`, which can't be observed; this is the
+  productivity check, and it is what makes a combinational feedback loop a size error.
+  (Sizes are erased bounds: the compiled paths unfold at `∞`, the limit of the same
+  infinite value.)
 
 ---
 
@@ -2035,7 +2046,12 @@ proved**, and the D1 experiment shows checking can loop (Status.md).
   instantiations (`Lvl.Good us`: every parameter is instantiated by a level that is never
   zero). The kernels avoid the issue by forming `a =_A b` only at a sort that is never
   `Prop` (§8.1: `isNeverZero`), which *is* preserved; the restriction is on the
-  declarative spec's `¬ IsZero`, not a kernel rule.
+  declarative spec's `¬ IsZero`, not a kernel rule. **As written this hypothesis is
+  uninhabited** for a finite `us` (the entry past the end is `0`, and `Lvl.not_good`
+  proves it), so the level-instantiation theorems are vacuous and O6 remains open; the
+  substitution lemmas (`Tprog_subst`, `DescEq_subst`) are not affected. A usable
+  statement bounds the parameters the judgment actually mentions instead of quantifying
+  over every index (`WizMeta/Spec/LevelSubstitution.lean`, module note).
 * **No recursion in the kernel:** a declaration is checked against the environment
   *without* itself, so a value cannot mention its own name.
 * **Axioms** (`value = none`) are accepted with any well-formed type, including `False`.

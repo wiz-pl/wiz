@@ -150,7 +150,7 @@ def grailCommandsGroup : Group where
                           ("hello.wiz", "import IO\ndef main : IO Unit := IO.println \"hello from grail\"\n")]
         let (s, ok, log) ← buildLog dir tc ["say"]
         if !ok && (has log "obj") then
-          skip "no toolchain"
+          skipMissing "no toolchain"
           return
         check ok log
         checkEq 4 s.ran
@@ -197,7 +197,7 @@ def grailCommandsGroup : Group where
         let tc ← toolchain
         let (c4, _, err4) ← grail (tc.toFlags ++ ["-C", demo.toString, "build"])
         if c4 != 0 && (has err4 "could not execute external process" || has err4 "gmp.h") then
-          skip "no toolchain"
+          skipMissing "no toolchain"
           return
         checkEq 0 c4
         let (c5, out5, _) ← grail (tc.toFlags ++ ["-C", demo.toString, "run", "demo"])

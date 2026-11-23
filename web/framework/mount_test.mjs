@@ -188,6 +188,17 @@ catch (e) { rejected = e; }
 ok(rejected instanceof TypeError && /does not export/.test(rejected.message),
   "a module without the Loom ABI is refused", rejected && rejected.message);
 
+// ## A page's loader resolves to the ES module namespace, not the instance
+// `() => import("./x-ui.mjs")` hands back `{ default: factory }`; `mount` must
+// instantiate that default (the playground's "does not export" start failure).
+const namespaceRoot = parse("");
+const namespace = stubModule(SSR);
+const namespaceApp = await mount(namespaceRoot, {
+  module: async () => namespace, env, parse,
+});
+eq("a loader's namespace default is instantiated", SSR, serialize(namespaceRoot));
+eq("and its state starts at wiz_loom_init", 7, namespaceApp.state());
+
 // ## The element may be an element (the browser's document.body, a test's root)
 const direct = parse("");
 const app2 = await mount(direct, { module: stubModule(SSR), env, parse });

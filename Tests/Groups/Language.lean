@@ -293,10 +293,16 @@ def languageGroup : Group where
           "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.succ (Cursor.length c')\n" ++
           "partial def Cursor.lengthAdd {a : Type} (1 c : Cursor a) : Nat :=\n" ++
           "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => 1 + Cursor.lengthAdd c'\n" ++
-          -- a pair's first component is at ω: the result `(Nat × Nat) × Nat` has no
-          -- `Cursor` in it
-          "partial def Cursor.lengthPair {a : Type} (1 c : Cursor a) : (Nat × Nat) × Nat :=\n" ++
-          "  match Cursor.next c with\n  | .done => ((0, 0), 0)\n  | .more _ c' => (Cursor.lengthPair c', 0)\n" ++
+          -- a pair of ω types: the recursive call is bound at ω by `let`, and the pair
+          -- components are read from it
+          "partial def Cursor.pairCount {a : Type} (1 c : Cursor a) : Nat × Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => (0, 0)\n" ++
+          "  | .more _ c' =>\n    let r := Cursor.pairCount c';\n    (r.1 + 1, r.2)\n" ++
+          -- a constructor field at ω is the same shape as a pair component; `Wrap` is
+          -- recursive, so the call's result type really can be the field's type
+          "inductive Wrap where\n  | base\n  | next (w : Wrap)\n" ++
+          "partial def Cursor.wrap {a : Type} (1 c : Cursor a) : Wrap :=\n" ++
+          "  match Cursor.next c with\n  | .done => Wrap.base\n  | .more _ c' => Wrap.next (Cursor.wrap c')\n" ++
           -- a `Bool` result and an `Option Nat` scrutinee are ω too
           "partial def Cursor.allMore {a : Type} (1 c : Cursor a) : Bool :=\n" ++
           "  match Cursor.next c with\n  | .done => Bool.true\n  | .more _ c' => Bool.and (Cursor.allMore c') Bool.true\n" ++
@@ -309,10 +315,11 @@ def languageGroup : Group where
           ["2", "3"] },
     { name := "... but a result type that contains the linear parameter stays rejected", run := fun _ =>
         failsLib (cursorHeader ++
-          -- the result is `Cursor a × Nat`, and its first component is checked at ω; the
-          -- call's result contains `Cursor a`, so it cannot be copied
+          -- the result is `Cursor a × Nat`; the recursive result is bound at ω and
+          -- returned, so it is copied, and it contains `Cursor a`
           "partial def Cursor.keep {a : Type} (1 c : Cursor a) (d : Cursor a) : Cursor a × Nat :=\n" ++
-          "  match Cursor.next c with\n  | .done => (d, 0)\n  | .more _ c' => (Cursor.keep c' d, 0)")
+          "  match Cursor.next c with\n  | .done => (d, 0)\n" ++
+          "  | .more _ c' =>\n    let r := Cursor.keep c' d;\n    r")
           "quantity 1 but used ω" },
     { name := "... and the four bad recursive consumers are still rejected", run := fun _ => do
         -- drop the continuation
@@ -392,6 +399,12 @@ def languageGroup : Group where
           "#eval sum3 (1, 2, 3)\n#eval firstZero (0, 5)\n#eval firstZero (2, 5)") ["6", ".true", ".false"] },
     { name := "the pipe operator", run := fun _ =>
         okLib "import Prelude\n#eval 3 |> Nat.succ |> Nat.succ" ["5"] },
+    -- (`String ++`) the host side of the selfhost regression: `++` is `HAppend.hAppend`,
+    -- whose default instance is `Append.append`, so the operands pick `String.append` or
+    -- `List.append`; a string append is not a list append.
+    { name := "`++` is resolved by its operands: String.append for strings, List.append for lists", run := fun _ => do
+        okLib "import Prelude\ndef s : String := \"a\" ++ \"b\"\ndef xs : List Nat := [1] ++ [2]\n"
+        failsLib "import Prelude\ndef bad : List Nat := \"a\" ++ \"b\"\n" "type mismatch" },
     -- 13g
     { name := "as-patterns: x@p binds the matched value, and recursion on it is structural", run := fun _ =>
         okLib ("import Prelude\ndef last (A : Type) (d : A) : List A → A\n  | .nil => d\n  | .cons x .nil => x\n" ++
@@ -755,6 +768,27 @@ def languageGroup : Group where
           ["fun x xs => x :: xs : Nat → List Nat → List Nat", "fun a b => a &&& b : String → String → String"] },
     { name := "... an unexpander that is not an Unexpander is rejected", run := fun _ =>
         failsLib "import Prelude\ndef notOne : Nat := 1\nattribute [app_unexpander List.nil] notOne" "is not an unexpander" },
+    -- the import header (13u): imports first, top level only, not producible by an extension
+    { name := "13u: the header is comments and imports, then declarations (accepted)", run := fun _ =>
+        okLib ("-- a leading comment\n/- a block comment /- nested -/ -/\nimport Prelude\n-- between imports\nimport Logic\n" ++
+          "def two : Nat := 1 + 1\n#eval two") ["2"] },
+    { name := "13u: an import after a declaration is an error", run := fun _ =>
+        failsLoc "def locVal : Nat := 1\n"
+          "import Prelude\ndef two : Nat := 1 + 1\nimport Loc\n#eval two" "imports must precede declarations" },
+    { name := "13u: an import inside `mutual` is an error naming the block", run := fun _ =>
+        failsLoc "def locVal : Nat := 1\n"
+          "import Prelude\nmutual\nimport Loc\ndef two : Nat := 1 + 1\nend"
+          "not allowed inside a `mutual` block" },
+    { name := "13u: a command macro that builds an `import` node is rejected", run := fun _ =>
+        failsLoc "def locVal : Nat := 1\n"
+          ("import Prelude\nsyntax (name := evil) \"evil_import\" : command\n" ++
+           "def evilM : CommandMacro := fun _ =>\n" ++
+           "  MacroM.pure (.cons (Syntax.mkNode \"command.import\" (.cons (.atom \"import\") (.cons (.ident \"Loc\") .nil))) .nil)\n" ++
+           "attribute [macro command.evil] evilM\nevil_import") "only allowed at the top level" },
+    { name := "13u: `(command| import M)` does not parse (a quotation cannot write one)", run := fun _ =>
+        failsLib ("import Prelude\nsyntax (name := steal) \"steal\" : command\n" ++
+          "macro_rules\n  | `(command| steal) => `(command| import Prelude)\n")
+          "expected" },
     -- 13t: `<|`, `|>.` and `·` sections
     { name := "13t: `f <| x` is `f x` (right associative), `x |> f` is `f x` (left associative)", run := fun _ => do
         okLib ("import Prelude\n#eval Nat.succ <| 4\n#eval Nat.succ <| Nat.succ <| 5\n" ++

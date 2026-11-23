@@ -57,7 +57,9 @@ structure InstanceInfo where
 
 
 
-/-- The local context. As in `Ctx`, the lists are aligned and index 0 is innermost. -/
+/-- The local context for elaboration. The lists are aligned and index 0 is innermost
+(the kernel's `Ctx` stores its names, quantities and types by level, outermost first; the
+elaborator builds a kernel context at the boundary, reversing these once). -/
 structure LocalCtx (R : Type) where
   env : Env R := []
   names : List Name := []
@@ -246,6 +248,11 @@ structure SimpLemma where
   name : Name
   priority : Nat := 1000
   rtl : Bool := false
+  /-- (P0) a `[hint]` entry shares the registration array with `[simp]`: the set is one
+  record, but the two attributes are independent (`simp` uses `hint = false` only) -/
+  hint : Bool := false
+  /-- the hint's kind: `apply` (default), `intro` or `elim` (the Wiz driver's policy) -/
+  kind : String := "apply"
   deriving Repr, Inhabited
 
 structure ElabState (R : Type) where

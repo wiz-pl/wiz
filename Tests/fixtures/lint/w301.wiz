@@ -1,0 +1,6 @@
+import Prelude
+
+def undocumented (x : Nat) : Nat := x
+
+/-- A documented public value. -/
+def documented : Nat := 1

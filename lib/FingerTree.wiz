@@ -58,11 +58,20 @@ class Monoid (M : Type) where
   /-- The operation. -/
   mul : M → M → M
 
-/-- The monoid laws: associativity and both unit laws. -/
+/-- The monoid laws: associativity and both unit laws.
+
+The projections are written `@Monoid.mul M m`/`@Monoid.one M m` rather than
+`m.mul`/`m.one`: a class method's `self` is an instance binder, and the self-hosted
+frontend's dot projection inserts that instance and then applies `m` again (to the
+carrier), which is the `FingerTree.wiz:57 Monoid.Lawful` real selfhost bug in
+`wiz-notes/libdiff-classification.md`. The `@` form supplies the dictionary
+explicitly, so the two frontends agree. The value is definitionally the same
+projection and the law's users (`law.1`, `law.2.1`) are unchanged. -/
 def Monoid.Lawful {M : Type} (m : Monoid M) : Prop :=
-  ((a b c : M) → m.mul (m.mul a b) c = m.mul a (m.mul b c)) ×
-  ((a : M) → m.mul m.one a = a) ×
-  ((a : M) → m.mul a m.one = a)
+  ((a b c : M) →
+    @Monoid.mul M m (@Monoid.mul M m a b) c = @Monoid.mul M m a (@Monoid.mul M m b c)) ×
+  ((a : M) → @Monoid.mul M m (@Monoid.one M m) a = a) ×
+  ((a : M) → @Monoid.mul M m a (@Monoid.one M m) = a)
 
 /-- A measurement of `A` in the monoid `M`: each element's contribution to the
 aggregate. -/

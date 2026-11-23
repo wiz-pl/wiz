@@ -55,7 +55,7 @@ def mirror (l : List Movement) : List Movement := List.map Movement.mirror l
 def forTx (l : List Movement) (t : Nat) : List Movement := List.filter (fun m => Nat.beq m.tx t) l
 
 -- The kernel as a state machine, cut down from a private model to what
--- ACCOUNT-001's floor is about: each `Op` is one save, and `apply` returns `.none` when
+-- ACCOUNT-001's floor is about: each `Op` is one save, and `applyOp` returns `.none` when
 -- the save is refused. Kept: the chart (Held or Mirrored accounts), movements, draw holds,
 -- transactions with a status and a movement set, and the operations create, the two
 -- status-only begins, authorize (with the funds gate), complete (with the re-check and
@@ -295,7 +295,7 @@ def reverseTx (c : Chart) (s : State) (t : Nat) (tx : Tx) : Option State :=
   guard (Bool.and (Status.canReverse (Tx.status tx)) (reverseOk c s t))
     (State.save s t tx .reversed (List.append (State.ledger s) (mirror (forTx (State.ledger s) t))) (State.holds s))
 
-def apply (c : Chart) (s : State) : Op → Option State
+def applyOp (c : Chart) (s : State) : Op → Option State
   | .create plan =>
     .some (State.mk (upd (State.txs s) (State.next s) (Tx.mk .created plan)) (Nat.succ (State.next s))
       (State.ledger s) (State.holds s))
@@ -313,7 +313,7 @@ def apply (c : Chart) (s : State) : Op → Option State
 -- in `Type`: FINDINGS G2.)
 inductive Reachable (c : Chart) : State → Type where
   | init : Reachable c State.init
-  | step (s s' : State) (op : Op) (r : Reachable c s) (h : apply c s op = .some s') : Reachable c s'
+  | step (s s' : State) (op : Op) (r : Reachable c s) (h : applyOp c s op = .some s') : Reachable c s'
 
 def chart2 : Chart := fun a => match Nat.beq a 1 with
   | .true => AccountInfo.mk 710 .held
@@ -321,7 +321,7 @@ def chart2 : Chart := fun a => match Nat.beq a 1 with
 
 def run2 : State → List Op → Option State
   | s, .nil => .some s
-  | s, .cons op ops => Option.bind (apply chart2 s op) (fun s' => run2 s' ops)
+  | s, .cons op ops => Option.bind (applyOp chart2 s op) (fun s' => run2 s' ops)
 
 def fund2 : List Posting := .cons (Posting.mk 2 (-500)) (.cons (Posting.mk 1 500) .nil)
 def life2 (t : Nat) : List Op := .cons (.create fund2) (.cons (.beginAuthorize t)

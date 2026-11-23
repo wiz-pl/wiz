@@ -29,6 +29,7 @@ import Wiz.Elab.ProcMacro
 import Wiz.Elab.Tactic
 import Wiz.Elab.Reflect
 import Wiz.Elab.Command
+import Wiz.Lint
 import Wiz.Frontend.Frontend
 import Wiz.Compiler.Erase
 import Wiz.Compiler.Inline
@@ -43,6 +44,7 @@ import Wiz.Compiler.Borrow
 import Wiz.Compiler.IRRun
 import Wiz.Compiler.C
 import Wiz.Compiler.LLVM
+import Wiz.Compiler.Bpf
 import Wiz.Compiler.Build
 import Wiz.FFI.CParse
 import Wiz.FFI.CGlue

@@ -1,3 +1,4 @@
+import Wiz.Doc.Registry
 import Wiz.Doc.Site
 import Wiz.Doc.Reference
 
@@ -79,7 +80,7 @@ def pieceOf (o : Options) (mods : Array Module) (names : List String) (wasm : Bo
   let tElab ← IO.monoMsNow
   let errors := st.messages.filter (·.severity == .error) |>.map (·.text)
   for e in errors do IO.eprintln s!"{m.name}: {e}"
-  let c : Ctx := { st, modules := names, current := m.name }
+  let c : Ctx := { st, modules := names, current := m.name, highlight := o.highlight, registry := o.registry }
   let es := entries c m.src
   let decls := es.foldl (fun n e => n + 1 + e.children.size) 0
   if o.verbose > 1 then
@@ -149,6 +150,9 @@ partial def mapWindow (jobs : Nat) (xs : Array α) (f : α → IO β) : IO (Arra
 
 def run (elabMod : String → IO (St × Nat)) (mods : Array Module) (o : Options) : IO RunResult := do
   let tAll ← IO.monoMsNow
+  -- the language registry: built-ins, then `--languages` files, then the host hook
+  let registry ← Wiz.Doc.Registry.loadFiles o.languages
+  let o : Options := { o with registry := registry }
   IO.FS.createDirAll o.out
   let names := mods.toList.map (·.name)
   -- the Wasm module and the site's scripts
@@ -158,7 +162,7 @@ def run (elabMod : String → IO (St × Nat)) (mods : Array Module) (o : Options
       for f in ["wiz-infoview.mjs", "wiz-infoview.wasm"] do
         discard <| copyFirst [w] f o.out
       wasm := true
-  for f in ["scroll.css", "scroll.js", "scroll-search.js"] do
+  for f in ["scroll.css", "highlight.css", "scroll.js", "scroll-search.js"] do
     discard <| copyFirst o.assets f o.out
   -- The pages' runtimes: the search's and, with --serve, the live panel's. They are
   -- optional, like the Wasm module: a page without them stays static (the search box

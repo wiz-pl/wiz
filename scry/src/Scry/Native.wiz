@@ -34,11 +34,9 @@ recovery nodes).
 The shim is sequential: one parser, one tree, one file. Threads are S1's next step.
 -/
 
-link_c "../../native/ts_shim.c"
-link_c "../../native/tree-sitter/lib/src/lib.c"
-link_c "../../native/tree-sitter-c/src/parser.c"
-link_c "../../native/tree-sitter-c-sharp/src/parser.c"
-link_c "../../native/tree-sitter-c-sharp/src/scanner.c"
+-- The C sources behind these externs are declared by `Scry.NativeLink`, which an
+-- executable that actually parses imports. A program that only lowers or analyses a
+-- checked-in `scry-cst` store does not link the native grammar.
 
 /-- A parsed file's native store. The shim returns one `calloc` block, so the finalizer
 is plain `free` (no prototype of our own needed in the generated C). -/
@@ -203,7 +201,15 @@ def Scry.Native.toCstStoreIn (lang : String) (path : String) (st : ScryStore) : 
   nextSib ← Scry.Native.nextSiblingColumn st;
   childOff ← Scry.Native.childOffColumn st;
   children ← Scry.Native.childrenColumn st;
-  childField ← Scry.Native.childFieldColumn st;
+  childField0 ← Scry.Native.childFieldColumn st;
+  -- The child CSR's field column uses the same convention as `edgeLabel`: an arc with
+  -- no field is the interned `child` field, never id 0. `CstStore.finish` (the cache/spill
+  -- loader) derives `childField` from the edge rows, so leaving 0 here made a cache hit's
+  -- CST differ from a cold parse's in this column.
+  let childField := U32Array.foldl (fun acc x =>
+    U32Array.push acc (match UIntN.beq x (U32.ofNat 0) with
+      | .true => childId
+      | .false => x)) U32Array.empty childField0;
   edgeSrc ← Scry.Native.edgeSrcColumn st;
   edgeDst ← Scry.Native.edgeDstColumn st;
   edgeLabel0 ← Scry.Native.edgeLabelColumn st;

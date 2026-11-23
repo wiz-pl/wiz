@@ -13,8 +13,8 @@ yosys is on PATH: an unmapped cell or a combinational loop in the write or read 
 fails here. -/
 def hdlAxi4Synthesis : IO Unit := do
   let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-  unless ys do skip "no yosys"; return
-  let src ← IO.FS.readFile "examples/hdl-axi4.wiz"
+  unless ys do skipMissing "no yosys"; return
+  let src ← Tests.hdlRead "examples/hdl-axi4.wiz"
   let body := "import Hdl.Core\nimport Hdl.Axi4\nimport Hdl.Axi4Law\n" ++ src ++
     "\n#eval Verilog.emit (Circuit.netlist \"axi4_wr\" (Axi4.wrC 8 16 4))\n" ++
     "#eval Verilog.emit (Circuit.netlist \"axi4_rd\" (Axi4.rdC 8 16 4))\n"
@@ -34,8 +34,8 @@ def hdlAxi4Synthesis : IO Unit := do
 yosys is on PATH: the register slice, both width converters and the source/sink pair. -/
 def hdlStreamSynthesis : IO Unit := do
   let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-  unless ys do skip "no yosys"; return
-  let src ← IO.FS.readFile "examples/hdl-stream.wiz"
+  unless ys do skipMissing "no yosys"; return
+  let src ← Tests.hdlRead "examples/hdl-stream.wiz"
   let body := "import Hdl.Core\nimport Hdl.AxiStream\nimport Hdl.AxiStreamLaw\n" ++ src ++
     "\n#eval Verilog.emit (Circuit.netlist \"stream_slice\" (AxiStream.sliceC 8))\n" ++
     "#eval Verilog.emit (Circuit.netlist \"stream_up\" (AxiStream.upC 8 2))\n" ++
@@ -56,8 +56,8 @@ def hdlStreamSynthesis : IO Unit := do
 `synth_ice40`) when yosys is on PATH. -/
 def hdlSpiSynthesis : IO Unit := do
   let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-  unless ys do skip "no yosys"; return
-  let src ← IO.FS.readFile "examples/hdl-spi.wiz"
+  unless ys do skipMissing "no yosys"; return
+  let src ← Tests.hdlRead "examples/hdl-spi.wiz"
   let body := "import Hdl.Core\nimport Hdl.Spi\nimport Hdl.SpiLaw\n" ++ src ++
     "\n#eval Verilog.emit (Circuit.netlist \"spi_mode0\" (Spi.masterModeCW 8 Spi.cntW 1 0 2))\n" ++
     "#eval Verilog.emit (Circuit.netlist \"spi_mode3\" (Spi.masterModeCW 8 Spi.cntW 1 3 2))\n" ++
@@ -86,7 +86,7 @@ def hdlProtocolGroup : Group where
   parallel := true
   cases := [
     { name := "Hdl protocol bridges: APB/Wishbone stability, response order, strobes and the three simulations", run := fun _ => do
-        cRunLibs (← IO.FS.readFile "examples/hdl-protocols.wiz")
+        cRunLibs (← Tests.hdlRead "examples/hdl-protocols.wiz")
           ("apb bus->slave: generated matches yes, value = simulate = simFast yes, 96 cycles\n" ++
            "apb bus->slave: stable yes, source stable yes, responses match yes, one ack per transfer yes (32 acks, 32 setups), order yes\n" ++
            "apb master->bus: generated matches yes, value = simulate = simFast yes, apb stable yes, bus stable yes, responses match yes\n" ++
@@ -96,28 +96,28 @@ def hdlProtocolGroup : Group where
            "axi-lite bundles: slave-in yes, slave-out yes, write view yes, read view yes, resp yes\n" ++
            "well formed yes\n") },
     { name := "Hdl AXI4 bursts: INCR/WRAP writes and reads, address progression, beat count, WLAST/RLAST, strobes and response IDs/order", run := fun _ => do
-        cRunLibs (← IO.FS.readFile "examples/hdl-axi4.wiz")
+        cRunLibs (← Tests.hdlRead "examples/hdl-axi4.wiz")
           ("axi4 addr model: incr/wrap yes, legal wrap yes, bad yes\n" ++
-           "axi4 write incr: beats/strobes/b yes, value = simulate = simFast yes, 4 beats, stalled 3\n" ++
-           "axi4 write wrap: beats/strobes/b yes, value = simulate = simFast yes, 4 beats, stalled 2\n" ++
-           "axi4 write err: bresp yes\n" ++
-           "axi4 read incr: beats/r/rlast yes, value = simulate = simFast yes, 4 beats, backpressure\n" ++
-           "axi4 read wrap: beats/r/rlast yes, value = simulate = simFast yes, 4 beats, backpressure\n" ++
-           "axi4 read err: rresp yes\n" ++
+           "axi4 write incr: laws yes, beats/strobes/b yes, value = simulate = simFast yes, 4 beats, stalled 3\n" ++
+           "axi4 write wrap: laws yes, beats/strobes/b yes, value = simulate = simFast yes, 4 beats, stalled 2\n" ++
+           "axi4 write err: laws yes, bresp yes\n" ++
+           "axi4 read incr: laws yes, beats/r/rlast yes, value = simulate = simFast yes, 4 beats, backpressure\n" ++
+           "axi4 read wrap: laws yes, beats/r/rlast yes, value = simulate = simFast yes, 4 beats, backpressure\n" ++
+           "axi4 read err: laws yes, rresp yes\n" ++
            "axi4 outstanding id order yes\n" ++
            "axi4 bundles yes\n" ++
            "axi4 well formed yes\n")
         hdlAxi4Synthesis },
     { name := "Hdl AxiStream: source/sink backpressure, tlast, register slice and 8<->16 width conversion", run := fun _ => do
-        cRunLibs (← IO.FS.readFile "examples/hdl-stream.wiz")
+        cRunLibs (← Tests.hdlRead "examples/hdl-stream.wiz")
           ("stream pair: 8 beats period 1 yes, period 3 yes, period 2 yes, stable yes, value = simulate = simFast yes\n" ++
-           "stream slice: order/no loss period 3 yes, period 2 yes, value = simulate = simFast yes\n" ++
-           "stream upsize 8->16: grouping/keep/last yes, period 1 yes, value = simulate = simFast yes\n" ++
-           "stream downsize 16->8: grouping/keep/last yes, period 1 yes, value = simulate = simFast yes\n" ++
+           "stream slice: Order period 3 yes, period 2 yes, value = simulate = simFast yes\n" ++
+           "stream upsize 8->16: Order/grouping/keep/last yes, period 1 yes, value = simulate = simFast yes\n" ++
+           "stream downsize 16->8: Order/grouping/keep/last yes, period 1 yes, value = simulate = simFast yes\n" ++
            "stream bundles yes, well formed yes\n")
         hdlStreamSynthesis },
     { name := "Hdl SPI: all four CPOL/CPHA modes, divider sweep, sclk/mosi timing, mock slave and loopback", run := fun _ => do
-        cRunLibs (← IO.FS.readFile "examples/hdl-spi.wiz")
+        cRunLibs (← Tests.hdlRead "examples/hdl-spi.wiz")
           ("spi modes: names 0 (CPOL=0, CPHA=0) | 1 (CPOL=0, CPHA=1) | 2 (CPOL=1, CPHA=0) | 3 (CPOL=1, CPHA=1)\n" ++
            "spi round-trip: mode 0 yes, mode 1 yes, mode 2 yes, mode 3 yes\n" ++
            "spi divider sweep div 1..8, all modes yes\n" ++

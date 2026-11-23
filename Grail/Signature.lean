@@ -11,7 +11,7 @@ signature, `index/snapshot.sexpr.sig`, signs those bytes with
 `ssh-keygen -Y sign -n grail-index`.
 
     (snapshot
-      (name "wiz-pl/grail-index")
+      (name "wiz-pl/fate-index")
       (seq 7)
       (updated "2026-11-15T00:00:00Z")
       (key "SHA256:…")
@@ -43,6 +43,14 @@ structure SnapshotEntry where
   version : String
   sha256 : String
   size : Nat := 0
+  /-- (P0) the tree identity the signed entry binds -/
+  tree : String := ""
+  /-- (P0) the release commit the signed entry binds; a tag is never a pin -/
+  commit : String := ""
+  /-- (P0) `Index.entryDigest` over the canonical version node -/
+  entry : String := ""
+  /-- (P0) the yank reason (`""` when live); a yank is a signed state change -/
+  yanked : String := ""
   deriving Repr, Inhabited, BEq
 
 /-- `index/snapshot.sexpr`: the signed state of an index. -/
@@ -88,7 +96,11 @@ def render (s : Snapshot) : String :=
   let field (tag val : String) : Sx := node tag [str val]
   let pkg (e : SnapshotEntry) : Sx :=
     node "package" ([str e.name, str e.version, str e.sha256] ++
-      (if e.size == 0 then [] else [node "size" [nat e.size]]))
+      (if e.size == 0 then [] else [node "size" [nat e.size]]) ++
+      (if e.tree.isEmpty then [] else [node "tree" [str e.tree]]) ++
+      (if e.commit.isEmpty then [] else [node "commit" [str e.commit]]) ++
+      (if e.entry.isEmpty then [] else [node "entry" [str e.entry]]) ++
+      [node "yanked" [str e.yanked]])
   "(snapshot\n  " ++ "\n  ".intercalate
     ([ (field "name" s.name).render,
        (node "seq" [nat s.seq]).render,
@@ -119,14 +131,23 @@ def parse (text : String) : Except String Snapshot := do
       match ys.toList with
       | .a "package" :: .a name :: .a version :: .a sha :: rest =>
         let mut size : Nat := 0
+        let mut tree : String := ""
+        let mut commit : String := ""
+        let mut entry : String := ""
+        let mut yanked : String := ""
         for r in rest do
           match r with
           | .l #[.a "size", .a n] =>
             match n.toNat? with
             | some k => size := k
             | none => throw s!"snapshot.sexpr: size {n} is not a number"
+          | .l #[.a "tree", .a t] => tree := t
+          | .l #[.a "commit", .a c] => commit := c
+          | .l #[.a "entry", .a d] => entry := d
+          | .l #[.a "yanked", .a y] => yanked := y
           | _ => pure ()
-        s := { s with packages := s.packages ++ [{ name, version, sha256 := sha, size }] }
+        s := { s with packages := s.packages ++
+          [{ name, version, sha256 := sha, size, tree, commit, entry, yanked }] }
       | _ => pure ()
     | _ => pure ()
   pure s
@@ -147,6 +168,23 @@ def covers (s : Snapshot) (pkgs : Std.HashMap String IxPackage) : Except String 
       | some e =>
         if e.sha256 != v.sha256 then
           throw s!"the signed snapshot has {name} {ver} sha256 {e.sha256}, the index says {v.sha256}"
+        -- (P0) the entry digest binds every field of the canonical version node. A
+        -- snapshot made before the digest existed still verifies a minimal entry (only
+        -- the archive hash), but never one carrying an extra integrity or naming claim.
+        let digest := Index.entryDigest v
+        if e.entry.isEmpty then
+          let extended := !v.tree.isEmpty || !v.commands.isEmpty || !v.commit.isEmpty ||
+            !v.modules.isEmpty || !v.prefixes.isEmpty || !v.deps.isEmpty
+          if extended then
+            throw s!"the signed snapshot has no entry digest for {name} {ver}; regenerate it with `grail index snapshot` (the signature does not cover its tree, commit, modules or deps)"
+        else if e.entry != digest then
+          throw s!"the signed snapshot has {name} {ver} entry {e.entry}, the index entry digest is {digest} (a field of the entry changed)"
+        if !e.tree.isEmpty && e.tree != v.tree then
+          throw s!"the signed snapshot has {name} {ver} tree {e.tree}, the index says {v.tree}"
+        if !e.commit.isEmpty && e.commit != v.commit then
+          throw s!"the signed snapshot has {name} {ver} commit {e.commit}, the index says {v.commit}"
+        if e.yanked != v.yanked then
+          throw s!"the signed snapshot has {name} {ver} yanked \"{e.yanked}\", the index says \"{v.yanked}\""
   for e in s.packages do
     match pkgs[e.name]? with
     | none => throw s!"the signed snapshot lists {e.name} {e.version}, which is not in the index"
@@ -241,6 +279,26 @@ def nowUtc : IO (Except String String) := do
     pure (.error s!"cannot read the current UTC time (date: {o.stderr.trimAscii})")
   catch e => pure (.error s!"cannot read the current UTC time: {e}")
 
+/-- One year after a `YYYY-MM-DDTHH:MM:SSZ` stamp: the default expiry for a signed
+publish. A pure string edit of the year, so the format stays valid. -/
+def addOneYear (utc : String) : String :=
+  if !validUtc utc then utc
+  else
+    match (utc.take 4).toString.toNat? with
+    | some y => toString (y + 1) ++ (utc.drop 4).toString
+    | none => utc
+
+/-- The public key line (`ssh-ed25519 AAAA…`, comment dropped) for a private key file. -/
+def publicKeyOf (key : System.FilePath) : IO (Except String String) := do
+  try
+    let o ← IO.Process.output { cmd := "ssh-keygen", args := #["-y", "-f", key.toString] }
+    if o.exitCode != 0 then
+      return .error s!"ssh-keygen -y -f {key}: {o.stderr.trimAscii}"
+    let body := Signature.keyBody o.stdout.trimAscii.toString
+    if body.isEmpty then return .error s!"ssh-keygen -y -f {key}: no public key in its output"
+    pure (.ok body)
+  catch e => pure (.error s!"ssh-keygen: {e}")
+
 /-- `index/snapshot.sexpr` (the documented layout) or `snapshot.sexpr` at the root. -/
 def snapshotFile (root : System.FilePath) : IO (Option System.FilePath) := do
   for f in [root / "index" / "snapshot.sexpr", root / "snapshot.sexpr"] do
@@ -249,6 +307,20 @@ def snapshotFile (root : System.FilePath) : IO (Option System.FilePath) := do
 
 def sigFile (snap : System.FilePath) : System.FilePath :=
   System.FilePath.mk (snap.toString ++ ".sig")
+
+/-- Sign `snap` with `key` (`ssh-keygen -Y sign -n grail-index`), replacing an old
+detached signature so a stale one cannot survive a new snapshot. -/
+def signSnapshot (key snap : System.FilePath) : IO (Except String Unit) := do
+  let sig := sigFile snap
+  if ← sig.pathExists then IO.FS.removeFile sig
+  let args := #["-Y", "sign", "-q", "-n", "grail-index", "-f", key.toString, snap.toString]
+  try
+    let o ← IO.Process.output { cmd := "ssh-keygen", args := args }
+    if o.exitCode != 0 then
+      return .error s!"ssh-keygen -Y sign -f {key} {snap}: {o.stderr.trimAscii}"
+    unless ← sig.pathExists do return .error s!"ssh-keygen -Y sign wrote no {sig}"
+    pure (.ok ())
+  catch e => pure (.error s!"ssh-keygen: {e}")
 
 /-- Quote one word for `sh` (single quotes; an embedded quote is `'\''`). -/
 def shellQuote (s : String) : String :=
@@ -300,6 +372,21 @@ def allowedLine (line : String) : Option (List String × String) := do
 def allowedKeys (file : System.FilePath) : IO (Except String (List (List String × String))) := do
   let text ← IO.FS.readFile file
   pure (.ok (text.splitOn "\n" |>.filterMap allowedLine))
+
+/-- Write or update the `identity` line of an `allowed_signers` file: replace the line for
+`identity` (or one with the same key) and keep every other identity. This is the trust
+root a fresh consumer passes to `--allowed-signers`, so publishing it alongside the
+snapshot means first use needs no out-of-band key exchange. -/
+def updateAllowedSigners (file : System.FilePath) (identity key : String) :
+    IO (Except String Unit) := do
+  let body := Signature.keyBody key
+  let old ← if ← file.pathExists then IO.FS.readFile file else pure ""
+  let keep := (old.splitOn "\n" |>.filter (!·.isEmpty)).filter fun l =>
+    match allowedLine l with
+    | some (ids, k) => !ids.contains identity && Signature.keyBody k != body
+    | none => true
+  Cache.writeAtomic file (String.intercalate "\n" (keep ++ [s!"{identity} {body}"]) ++ "\n")
+  pure (.ok ())
 
 /-- The fingerprint `ssh-keygen -lf` reports for a public key line. -/
 def fingerprintOf (key : String) : IO (Except String String) := do
@@ -468,7 +555,9 @@ def ofIndex (root : System.FilePath) (name : String)
         | some md => size := md.byteSize.toNat
         | none => pure ()
       entries := entries ++ [{ name := pname, version := Version.render v.version,
-                               sha256 := v.sha256, size }]
+                               sha256 := v.sha256, size, tree := v.tree,
+                               commit := v.commit, entry := Index.entryDigest v,
+                               yanked := v.yanked }]
   pure { name, seq, updated, key, expires, packages := entries }
 
 /-- The index's name from `registry.sexpr` (empty when there is no such file). -/
@@ -509,6 +598,10 @@ def checkResolved (s : Snapshot) (rs : List Resolved) : Except String Unit := do
     | some e =>
       if e.sha256 != r.sha256 then
         throw s!"{r.name} {ver}: the signed snapshot has sha256 {e.sha256}, the index says {r.sha256}"
+      if !e.tree.isEmpty && e.tree != r.tree then
+        throw s!"{r.name} {ver}: the signed snapshot has tree {e.tree}, the index says {r.tree}"
+      if !e.commit.isEmpty && e.commit != r.commit then
+        throw s!"{r.name} {ver}: the signed snapshot has commit {e.commit}, the index says {r.commit}"
 
 end Snapshot
 

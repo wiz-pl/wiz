@@ -148,9 +148,11 @@ def Cursor.next {a : Type} (1 c : Cursor a) : Step a := match c with
 partial def Cursor.keep {a : Type} (1 c : Cursor a) (d : Cursor a) : Cursor a × Nat :=
   match Cursor.next c with
   | .done => (d, 0)
-  | .more _ c' => (Cursor.keep c' d, 0)
+  | .more _ c' =>
+    let r := Cursor.keep c' d;
+    r
 -- error: variable c' declared with quantity 1 but used ω
---   (the pair's first component is ω, and the recursive result contains `Cursor a`)
+--   (the `let` binds the recursive result at ω and it contains `Cursor a`)
 ```
 
 A `partial` definition's **witness** (the term that shows its type is inhabited) is

@@ -14,12 +14,13 @@
 // (`startInfoview` with a stub textarea), and no unhandled rejection anywhere.
 "use strict";
 import {
-  isSelfhostSearch, wantsSelfhost, withPrelude, splitCommands, diagnosticsFromOutput, outputLines,
-  parseErrorOffset, selfhostSocketClass, selfhostEndpoint, SelfhostServer, SELFHOST_URL,
-  parseCheck, diagnosticsFromCheck, completionPrefix, filterCompletions, wordAt,
+  isSelfhostSearch, wantsSelfhost, selfhostSocketClass, selfhostEndpoint, SelfhostServer,
+  SELFHOST_URL,
 } from "./selfhost-lsp-shim.js";
 import {
-  PositionIndex, offsetOf, positionOf, utf16OfCodePoints, splitGoals, index,
+  PositionIndex, offsetOf, positionOf, utf16OfCodePoints, splitGoals, index, withPrelude,
+  splitCommands, diagnosticsFromOutput, outputLines, parseErrorOffset, parseCheck,
+  diagnosticsFromCheck, completionPrefix, filterCompletions, wordAt,
 } from "./framework/index-oracle.mjs";
 import { LspClient, LspError } from "./lsp-client.js";
 import { readGoalState, renderPanel } from "./framework/goals.mjs";

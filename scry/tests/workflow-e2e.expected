@@ -5,6 +5,15 @@ refine: exit 0: ok
 refine: C candidate is triaged with a derived env plan: ok
 refine: C# candidate's plan is stdin (Console.ReadLine): ok
 refine: candidate.json is written: ok
+f_edbaeb86bcfed108: still-reported
+  static: still reported
+  repro: not-run
+  poc marker: not observed
+verify static-only: exit 1 (the finding is still reported): ok
+verify static-only: verdict still-reported: ok
+verify static-only: no dynamic run: ok
+verify static-only: comparison.reproRan is false: ok
+verify static-only: the claim is explicit: ok
 f_edbaeb86bcfed108: repro ran (address+undefined) exit exited 0
   marker: observed
 repro: exit 0: ok
@@ -22,3 +31,4 @@ verify: poc.markerObserved is true: ok
 verify: candidate.stage is verified: ok
 bundle: candidate.stage is verified: ok
 bundle: evidence has a poc item with the marker observed: ok
+csharp-repro: skip (needs the .NET SDK; scan/refine asserted above)

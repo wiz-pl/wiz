@@ -1,0 +1,4 @@
+import Prelude
+
+/-- A plain value with no effect of its own. -/
+def plain : Nat := 1

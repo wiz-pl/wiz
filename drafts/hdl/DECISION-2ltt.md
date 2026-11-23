@@ -15,11 +15,11 @@ Checked against `627b48f6` (file:line below are that tree).
 
 | the entry's claim | today |
 |---|---|
-| "static synthesisability" needs a stage check | **Already by construction.** `Comb i o := {r : HwTy → Type} → [Hw r] → r i → r o` (`lib/Hdl/Core.wiz:1772`) and `Circuit.step` (`:1697`) are polymorphic in `r`; `Hw` (`:396`) has no eliminator, so no `Nat`, `Bool` or constructor can come out of a wire. docs/libraries.md H14 S0 states the consequence ("synthesisable by construction"). The dynamic path H14 was to replace (`Sym`, hdl-plan §3.2) does not exist in the tree: `grep -rn "Sym\." lib →` nothing, no `lib/Sym.wiz`, no `Sym.lean`. H14's exit criterion ("E1–E4 with no dynamic errors possible") is vacuous when there is no dynamic synthesizer. |
-| "meta computation at staging time" (widths, ROMs, unrolling) | **Works.** Widths are meta `Nat`s in `HwTy.bits n`; `Crc.hwIter` (`lib/Hdl/Crc.wiz:45`) is `Nat` recursion that unrolls eight CRC bits into hardware; `Display.seqC` (`lib/Hdl/Display.wiz:574`) turns a meta `List Byte` into a ROM, an index width and a circuit. `deriving BitPack` (`docs/libraries.md:611`) computes enum/bundle widths at meta time. |
+| "static synthesisability" needs a stage check | **Already by construction.** `Comb i o := {r : HwTy → Type} → [Hw r] → r i → r o` (`hdl/src/Hdl/Core.wiz:1772`) and `Circuit.step` (`:1697`) are polymorphic in `r`; `Hw` (`:396`) has no eliminator, so no `Nat`, `Bool` or constructor can come out of a wire. docs/libraries.md H14 S0 states the consequence ("synthesisable by construction"). The dynamic path H14 was to replace (`Sym`, hdl-plan §3.2) does not exist in the tree: `grep -rn "Sym\." lib →` nothing, no `lib/Sym.wiz`, no `Sym.lean`. H14's exit criterion ("E1–E4 with no dynamic errors possible") is vacuous when there is no dynamic synthesizer. |
+| "meta computation at staging time" (widths, ROMs, unrolling) | **Works.** Widths are meta `Nat`s in `HwTy.bits n`; `Crc.hwIter` (`hdl/src/Hdl/Crc.wiz:45`) is `Nat` recursion that unrolls eight CRC bits into hardware; `Display.seqC` (`hdl/src/Hdl/Display.wiz:574`) turns a meta `List Byte` into a ROM, an index width and a circuit. `deriving BitPack` (`docs/libraries.md:611`) computes enum/bundle widths at meta time. |
 | "`match` on a wire should be a mux tree" | **Still missing** — the only real gap. Probe: `match p with …` on `r Phase.code` errors `cannot match on a value of type r Phase.code`. The workaround is an `if` chain on `Phase.lit` (`docs/libraries.md:620`), verified below. |
 | "L2 is implicit; quote/splice sugar" | **Delivered by S2 without staging.** `if c then a else b` on a signal is `Hw.mux` via `ifMux?` (`Wiz/Elab/Term.lean:3096`); `+ - * &&& \|\|\| ~~~ === <ᵤ` are instance methods (`docs/libraries.md` H14 S2). Probe 1 below is the entry's own `clampedInc`/`addK`, written quote-free. |
-| "sized signals" (`Signal d A` at the object level) | **Not the blocker.** SD2 chose `Circuit`/Mealy + combinators, and those landed (`Circuit.seq/par/loop/delay`, `lib/Hdl/Pipe.wiz`). Sized `Signal.fix` is a separate kernel item (`wishful/sized-signal-fix.md`), not something L3 would supply. |
+| "sized signals" (`Signal d A` at the object level) | **Not the blocker.** SD2 chose `Circuit`/Mealy + combinators, and those landed (`Circuit.seq/par/loop/delay`, `hdl/src/Hdl/Pipe.wiz`). Sized `Signal.fix` is a separate kernel item (`wishful/sized-signal-fix.md`), not something L3 would supply. |
 | "`#netlist`/`#verilog` generation" | Independent of staging. `wishful/hdl-commands.md` is still wanted and covers it: today `Verilog.emit (Circuit.netlist "c" c)`. `hdl-let-names` is also separate (a `ShareLet.shareNamed` hook). |
 
 The entry's own "workaround today" (explicit `Hw.mux`/`Hw.share`, no `match` on wires) is
@@ -27,7 +27,7 @@ now only half true: `Hw.mux` chains are gone where S2 notation is used (98 `Hw.m
 remaining, mostly in older modules), `Hw.share` is automatic for `let` (S0 `ShareLet`),
 and hash-consing keeps netlists linear. Only `match` remains.
 
-Probe transcript (canonical build `bea4396e`; `lib/Hdl/Core.wiz` is byte-identical to
+Probe transcript (canonical build `bea4396e`; `hdl/src/Hdl/Core.wiz` is byte-identical to
 `627b48f6`, `git diff` empty, so the results apply to this tree). The three files are in
 `drafts/hdl/2ltt-probe/`:
 
@@ -66,7 +66,7 @@ that already holds. That is why (a) is dropped rather than "started small".
 * Survives, as ordinary elaborator work: `match` on a signal (new wishful entry),
   `hdl-commands`, `hdl-let-names`.
 * Survives as research, no dependency on this entry: the PHOAS `HwExp` instance and the
-  netlist-vs-values theorem (S6) — `lib/Hdl/Netlist.wiz` already proves it for the Mealy
+  netlist-vs-values theorem (S6) — `hdl/src/Hdl/Netlist.wiz` already proves it for the Mealy
   core without a staging layer; a third `Hw` instance can be added whenever it pays.
 * `drafts/hdl/Staged.wiz` stays as a historical sketch; `STATUS.md` now says so.
 

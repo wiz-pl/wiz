@@ -17,8 +17,6 @@
 # module (wiz-infoview.mjs) is unchanged and can live in the same OUT directory.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-# without emcc on the PATH, run again with Emscripten from nixpkgs
-if ! command -v emcc >/dev/null; then exec nix shell --inputs-from "$ROOT" nixpkgs#emscripten -c "$0" "$@"; fi
 GMPSRC=
 FROM=${WIZ_PLAYGROUND_FROM:-}
 OPT=

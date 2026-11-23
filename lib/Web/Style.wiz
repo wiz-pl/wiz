@@ -1,0 +1,620 @@
+import Text
+/-!
+# Web.Style
+
+The typed style DSL behind Loom's static classes. A view carries only `Style.Class`
+values; the declarations live in `Style.Styled` values that a build-time profile
+compiles into one stylesheet. The browser sees a sorted `class` attribute (and, on a
+state change, one `setAttr "class"` patch) and never an inline style or a second HTML
+string protocol.
+
+The model is canonical in the CSS DSL design note (`loom-css-dsl.md`, in the workspace
+notes); the host / runtime / SSR-shell split, the validation table and the adopt contract
+are canonical in `docs/notes/loom-wire-protocol.md`. This file implements the CSS generator row of that
+table (row 11) and nothing from the wire's rows 3–7 and 10. `web/framework/style.js` is
+the browser-free reference encoder and `web/framework/style_test.mjs` pins it; the
+golden vectors below (`lz-button-root-362f3fa2`, …) are the same ones.
+
+P0 is deliberately a closed vocabulary: no theme engine, no vendor-prefix pass, no
+arbitrary selector, no descendant combinator, no `@supports` and no `url()`.
+
+`Style.Class` has two constructors:
+
+* `Style.Class.of key` — a scoped name, where `key` is `pkg/component/slot[/state]` and
+  the rendered name is `lz-<component>-<slot>-<FNV-1a-32(key)>` (lower-case eight hex
+  digits). The hash depends on the key, never on the declarations.
+* `Style.Class.fixed name` — one of the eight `hl-*` names or a `wz-*` payload name.
+  `wz-*` is open (a package payload may carry its own style); `lz-*` and `wiz-*` are not.
+
+`Style.sheetOk` is the generator gate: key shape and package prefix, slug length, public
+names, raw-declaration shape and the collision check. `Style.sheet` assumes that gate and
+emits the canonical bytes.
+-/
+
+-- ## Keywords
+
+/-- The closed keyword set. A typo is a type error, not a dead rule. -/
+inductive Style.Keyword where
+  | inherit
+  | initial
+  | unset
+  | flex
+  | grid
+  | block
+  | inlineFlex
+  | none
+  | auto
+  | default
+  | fixed
+  | absolute
+  | relative
+  | static
+  | sticky
+  | pointer
+  | column
+  | row
+  | wrap
+  | nowrap
+  | preWrap
+  | semibold
+  | bold
+  | italic
+  | solid
+  | dashed
+  | dotted
+  | hidden
+  | visible
+
+/-- The CSS spelling of a keyword. `semibold`/`bold` are the font weights the framework
+uses; the token table owns the family. -/
+def Style.keywordCss : Style.Keyword → String
+  | .inherit => "inherit"
+  | .initial => "initial"
+  | .unset => "unset"
+  | .flex => "flex"
+  | .grid => "grid"
+  | .block => "block"
+  | .inlineFlex => "inline-flex"
+  | .none => "none"
+  | .auto => "auto"
+  | .default => "default"
+  | .fixed => "fixed"
+  | .absolute => "absolute"
+  | .relative => "relative"
+  | .static => "static"
+  | .sticky => "sticky"
+  | .pointer => "pointer"
+  | .column => "column"
+  | .row => "row"
+  | .wrap => "wrap"
+  | .nowrap => "nowrap"
+  | .preWrap => "pre-wrap"
+  | .semibold => "600"
+  | .bold => "700"
+  | .italic => "italic"
+  | .solid => "solid"
+  | .dashed => "dashed"
+  | .dotted => "dotted"
+  | .hidden => "hidden"
+  | .visible => "visible"
+
+-- ## Values
+
+/-- A typed value. `var` is a full token name (`lz-fg`, `hl-kw`); `seq` and `comma` are
+the space/comma combinators (`padding:4px 16px`, `border:1px solid …`); `raw` is the
+checked escape hatch. -/
+inductive Style.Value where
+  | kw (k : Style.Keyword)
+  | px (n : Nat)
+  | rem (n : Nat)
+  | number (n : Nat)
+  | var (name : String)
+  | shadow (v : String)
+  | seq (a b : Style.Value)
+  | comma (a b : Style.Value)
+  | raw (text : String)
+
+/-- The CSS spelling of a value. -/
+def Style.valueCss : Style.Value → String
+  | .kw k => Style.keywordCss k
+  | .px n => String.append (Nat.repr n) "px"
+  | .rem n => String.append (Nat.repr n) "rem"
+  | .number n => Nat.repr n
+  | .var name => String.append "var(--" (String.append name ")")
+  | .shadow v => v
+  | .seq a b => String.append (Style.valueCss a) (String.append " " (Style.valueCss b))
+  | .comma a b => String.append (Style.valueCss a) (String.append "," (Style.valueCss b))
+  | .raw text => text
+
+-- ## Properties
+
+/-- The property vocabulary, in emitter order. `raw` is the one escape hatch. -/
+inductive Style.Prop where
+  | display
+  | position
+  | inset
+  | zIndex
+  | flexDirection
+  | flexWrap
+  | flex
+  | gap
+  | margin
+  | padding
+  | alignItems
+  | justifyContent
+  | width
+  | height
+  | minWidth
+  | maxWidth
+  | overflow
+  | overflowX
+  | overflowY
+  | color
+  | background
+  | backgroundColor
+  | border
+  | borderColor
+  | borderLeft
+  | radius
+  | shadow
+  | font
+  | fontSize
+  | fontWeight
+  | lineHeight
+  | whiteSpace
+  | textAlign
+  | textDecoration
+  | opacity
+  | pointerEvents
+  | cursor
+  | outline
+  | outlineOffset
+  | transition
+  | transform
+  | content
+  | userSelect
+  | raw (name : String)
+
+/-- The CSS spelling of a property. -/
+def Style.propCss : Style.Prop → String
+  | .display => "display"
+  | .position => "position"
+  | .inset => "inset"
+  | .zIndex => "z-index"
+  | .flexDirection => "flex-direction"
+  | .flexWrap => "flex-wrap"
+  | .flex => "flex"
+  | .gap => "gap"
+  | .margin => "margin"
+  | .padding => "padding"
+  | .alignItems => "align-items"
+  | .justifyContent => "justify-content"
+  | .width => "width"
+  | .height => "height"
+  | .minWidth => "min-width"
+  | .maxWidth => "max-width"
+  | .overflow => "overflow"
+  | .overflowX => "overflow-x"
+  | .overflowY => "overflow-y"
+  | .color => "color"
+  | .background => "background"
+  | .backgroundColor => "background-color"
+  | .border => "border"
+  | .borderColor => "border-color"
+  | .borderLeft => "border-left"
+  | .radius => "border-radius"
+  | .shadow => "box-shadow"
+  | .font => "font"
+  | .fontSize => "font-size"
+  | .fontWeight => "font-weight"
+  | .lineHeight => "line-height"
+  | .whiteSpace => "white-space"
+  | .textAlign => "text-align"
+  | .textDecoration => "text-decoration"
+  | .opacity => "opacity"
+  | .pointerEvents => "pointer-events"
+  | .cursor => "cursor"
+  | .outline => "outline"
+  | .outlineOffset => "outline-offset"
+  | .transition => "transition"
+  | .transform => "transform"
+  | .content => "content"
+  | .userSelect => "user-select"
+  | .raw name => name
+
+-- ## Declarations, rules and styles
+
+/-- One `property: value` pair. -/
+structure Style.Decl where
+  prop : Style.Prop
+  value : Style.Value
+
+/-- The closed media set. A new query is a deliberate addition, not a passthrough. -/
+inductive Style.Media where
+  | colorScheme
+  | reducedMotion
+  | moreContrast
+  | hoverNone
+  | maxWidth (px : Nat)
+
+/-- The CSS media condition (without `@media`). -/
+def Style.mediaCss : Style.Media → String
+  | .colorScheme => "(prefers-color-scheme:dark)"
+  | .reducedMotion => "(prefers-reduced-motion:reduce)"
+  | .moreContrast => "(prefers-contrast:more)"
+  | .hoverNone => "(hover:none)"
+  | .maxWidth px => String.append "(max-width:" (String.append (Nat.repr px) "px)")
+
+/-- A pseudo-class or a media condition attached to a rule. The list is outer-to-inner. -/
+inductive Style.Attach where
+  | pseudo (name : String)
+  | media (q : Style.Media)
+
+/-- A declaration block and its attachments. -/
+structure Style.Rule where
+  attaches : List Style.Attach
+  decls : List Style.Decl
+
+/-- A class's style: the rules are concatenated (`Style.merge`) and canonicalised by the
+emitter, so source order is not part of the identity. -/
+structure Style where
+  rules : List Style.Rule
+
+-- ## Combinators
+
+/-- No rules. -/
+def Style.empty : Style := Style.mk []
+
+/-- One base declaration. -/
+def Style.set (p : Style.Prop) (v : Style.Value) : Style :=
+  Style.mk [Style.Rule.mk [] [Style.Decl.mk p v]]
+
+/-- Concatenate rules; the emitter keeps the last declaration per property and emits
+the block in `Style.Prop` order. -/
+def Style.merge (a b : Style) : Style :=
+  Style.mk (List.append a.rules b.rules)
+
+/-- `s` when `ok`, otherwise no rules. -/
+def Style.when (ok : Bool) (s : Style) : Style := match ok with
+  | .true => s
+  | .false => Style.empty
+
+/-- Add a pseudo-class inside the existing attachments (so `hover` is the innermost). -/
+def Style.pseudo (name : String) (s : Style) : Style :=
+  Style.mk (List.map (fun r => Style.Rule.mk (List.append r.attaches [Style.Attach.pseudo name]) r.decls) s.rules)
+
+def Style.hover (s : Style) : Style := Style.pseudo "hover" s
+def Style.focusVisible (s : Style) : Style := Style.pseudo "focus-visible" s
+def Style.active (s : Style) : Style := Style.pseudo "active" s
+def Style.disabled (s : Style) : Style := Style.pseudo "disabled" s
+
+/-- Add a media condition outside the existing attachments. -/
+def Style.media (q : Style.Media) (s : Style) : Style :=
+  Style.mk (List.map (fun r => Style.Rule.mk (List.cons (Style.Attach.media q) r.attaches) r.decls) s.rules)
+
+/-- The escape hatch: a raw declaration. The property must be a lower-case CSS
+identifier and the value may not contain `;`, `{`, `}`, `@`, `\\`, `url(` or a control
+character; `Style.propOk`/`Style.valueOk` (through `Style.sheetOk`) refuse it before the
+generator writes bytes. -/
+def Style.raw (prop value : String) : Style :=
+  Style.mk [Style.Rule.mk [] [Style.Decl.mk (.raw prop) (.raw value)]]
+
+-- ## Validation (row 11)
+
+/-- A lower-case ASCII letter. -/
+def Style.isLower (c : Char) : Bool :=
+  Bool.and (Nat.le 97 (Char.code c)) (Nat.le (Char.code c) 122)
+
+/-- An ASCII digit. -/
+def Style.isDigit (c : Char) : Bool :=
+  Bool.and (Nat.le 48 (Char.code c)) (Nat.le (Char.code c) 57)
+
+/-- A character a key segment or CSS identifier may contain. -/
+def Style.identChar (c : Char) : Bool :=
+  Bool.or (Style.isLower c) (Bool.or (Style.isDigit c) (Nat.beq (Char.code c) 45))
+
+/-- A lower-case CSS identifier (`[a-z][a-z-]*`). -/
+def Style.identOk (s : String) : Bool :=
+  match String.chars s with
+  | .nil => .false
+  | .cons c rest => Bool.and (Style.isLower c) (List.all (fun x => Bool.or (Style.isLower x) (Nat.beq (Char.code x) 45)) rest)
+
+/-- A key segment: `[a-z0-9]([a-z0-9-]*[a-z0-9])?`, never empty and never hyphen-edged. -/
+def Style.segmentOk (s : String) : Bool :=
+  match String.chars s with
+  | .nil => .false
+  | .cons c rest =>
+    Bool.and (Style.identChar c)
+      (Bool.and (List.all Style.identChar rest)
+        (Bool.and (Bool.not (String.startsWith s "-")) (Bool.not (String.endsWith s "-"))))
+
+/-- Any of `needles` occurs in `s`. -/
+def Style.hasAny (needles : List String) (s : String) : Bool :=
+  List.any (fun n => String.contains s n) needles
+
+/-- A raw value is a single declaration value: no structural token and no `url(`. -/
+def Style.rawTextOk (s : String) : Bool :=
+  Bool.and (Bool.not (String.isEmpty s))
+    (Bool.not (Style.hasAny [";", "{", "}", "@", "\\", "url(", "URL("] s))
+
+/-- A typed value is legal when its token prefix is known and its raw parts are checked. -/
+def Style.valueOk : Style.Value → Bool
+  | .kw _ => .true
+  | .px _ => .true
+  | .rem _ => .true
+  | .number _ => .true
+  | .var name => Bool.or (String.startsWith name "lz-") (String.startsWith name "hl-")
+  | .shadow v => Style.rawTextOk v
+  | .seq a b => Bool.and (Style.valueOk a) (Style.valueOk b)
+  | .comma a b => Bool.and (Style.valueOk a) (Style.valueOk b)
+  | .raw text => Style.rawTextOk text
+
+/-- A property is legal: a known constructor, or a checked raw identifier. -/
+def Style.propOk : Style.Prop → Bool
+  | .raw name => Style.identOk name
+  | _ => .true
+
+/-- A declaration is legal. -/
+def Style.declOk (d : Style.Decl) : Bool :=
+  Bool.and (Style.propOk d.prop) (Style.valueOk d.value)
+
+/-- A rule is legal. -/
+def Style.ruleOk (r : Style.Rule) : Bool :=
+  Bool.and (List.all (fun a => match a with
+    | .pseudo name => Style.identOk name
+    | .media _ => .true) r.attaches)
+    (List.all Style.declOk r.decls)
+
+/-- A style is legal. -/
+def Style.styleOk (s : Style) : Bool := List.all Style.ruleOk s.rules
+
+-- ## Class names
+
+/-- The UTF-8 bytes of one code point (a character is one code point in Wiz). -/
+def Style.utf8Char (c : Char) : List Nat :=
+  let n := Char.code c;
+  if Nat.lt n 128 then [n] else if Nat.lt n 2048 then [192 + (n >>> 6), 128 + (n &&& 63)] else if Nat.lt n 65536 then [224 + (n >>> 12), 128 + ((n >>> 6) &&& 63), 128 + (n &&& 63)] else [240 + (n >>> 18), 128 + ((n >>> 12) &&& 63), 128 + ((n >>> 6) &&& 63), 128 + (n &&& 63)]
+
+/-- The UTF-8 bytes of a string. -/
+def Style.utf8Encode (s : String) : List Nat :=
+  List.concat (List.map Style.utf8Char (String.chars s))
+
+/-- FNV-1a 32 over bytes, reducing modulo 2^32 at every step. -/
+def Style.fnv1a : List Nat → Nat → Nat
+  | .nil, h => h
+  | .cons b rest, h => Style.fnv1a rest (Nat.mod (Nat.mul (Nat.xor h b) 16777619) 4294967296)
+
+/-- One lower-case hexadecimal digit. -/
+def Style.hexDigit (n : Nat) : Char :=
+  if Nat.lt n 10 then Char.mk (48 + n) else Char.mk (87 + n)
+
+/-- Eight lower-case hex digits. -/
+def Style.hex8 (n : Nat) : String :=
+  .mk [Style.hexDigit (Nat.mod (Nat.div n 268435456) 16),
+    Style.hexDigit (Nat.mod (Nat.div n 16777216) 16),
+    Style.hexDigit (Nat.mod (Nat.div n 1048576) 16),
+    Style.hexDigit (Nat.mod (Nat.div n 65536) 16),
+    Style.hexDigit (Nat.mod (Nat.div n 4096) 16),
+    Style.hexDigit (Nat.mod (Nat.div n 256) 16),
+    Style.hexDigit (Nat.mod (Nat.div n 16) 16),
+    Style.hexDigit (Nat.mod n 16)]
+
+/-- The `component-slot` part of a key (package and state are not in the slug). -/
+def Style.slug (key : String) : String :=
+  match String.splitOn key "/" with
+  | .cons _ (.cons comp (.cons slot _)) => String.append comp (String.append "-" slot)
+  | _ => key
+
+/-- The stable identity of a styled slot. `literal` means a public name (`hl-*`/`wz-*`),
+which is not hashed. -/
+structure Style.Class where
+  key : String
+  literal : Bool
+
+/-- A scoped class key, `pkg/component/slot[/state]`. The generator checks its shape,
+its package prefix and its slug length; the name derivation is pure. -/
+def Style.Class.of (key : String) : Style.Class := Style.Class.mk key .false
+
+/-- A public name: exactly one of the eight `hl-*` classes or a `wz-*` payload name. -/
+def Style.Class.fixed (name : String) : Style.Class := Style.Class.mk name .true
+
+/-- FNV-1a-32 of a key. The build generator and the runtime use this same function. -/
+def Style.Class.hash (key : String) : Nat :=
+  Style.fnv1a (Style.utf8Encode key) 2166136261
+
+/-- The string in the HTML: the key's class for a literal name, otherwise
+`lz-<slug>-<hex8(hash(key))>`. -/
+def Style.Class.name (c : Style.Class) : String := match c.literal with
+  | .true => c.key
+  | .false => String.append "lz-" (String.append (Style.slug c.key)
+      (String.append "-" (Style.hex8 (Style.Class.hash c.key))))
+
+/-- Insert `name` into `acc`, dropping a duplicate and keeping ascending order. -/
+def Style.insertName (name : String) : List String → List String
+  | .nil => [name]
+  | .cons x xs => match String.eq name x with
+    | .true => .cons x xs
+    | .false => match String.lt name x with
+      | .true => .cons name (.cons x xs)
+      | .false => .cons x (Style.insertName name xs)
+
+/-- The one `class` attribute: dedupe by key, sort the rendered names. A state change
+therefore produces one `setAttr "class"` with exactly the SSR value. -/
+def Style.Class.attr (cs : List Style.Class) : String × String :=
+  ("class", String.intercalate " "
+    (List.foldl (fun acc c => Style.insertName (Style.Class.name c) acc) [] cs))
+
+/-- The base class followed by the optional extras. -/
+def Style.Class.all (base : Style.Class) (extra : List Style.Class) : List Style.Class :=
+  List.cons base extra
+
+/-- The class in a list only when `ok` (a state class that is present only in that state). -/
+def Style.Class.if (ok : Bool) (c : Style.Class) : List Style.Class := match ok with
+  | .true => [c]
+  | .false => []
+
+/-- The eight fixed `hl-*` names. This is a contract with the Lean highlighter and the
+  runtime, not a place to add a class. -/
+def Style.hlNames : List String :=
+  ["hl-kw", "hl-com", "hl-str", "hl-num", "hl-op", "hl-const", "hl-var", "hl-sort"]
+
+/-- Whether `s` is in `xs`. -/
+def Style.member (s : String) : List String → Bool
+  | .nil => .false
+  | .cons x xs => match String.eq s x with
+    | .true => .true
+    | .false => Style.member s xs
+
+/-- A public name is one of the eight `hl-*` or a non-empty `wz-[a-z0-9-]+`. -/
+def Style.publicOk (name : String) : Bool :=
+  match String.startsWith name "hl-" with
+  | .true => Style.member name Style.hlNames
+  | .false => match String.startsWith name "wz-" with
+    | .true => Style.segmentOk (String.drop 3 name)
+    | .false => .false
+
+/-- A key is `pkg/component/slot[/state]`, every segment a checked segment. -/
+def Style.keyOk (key : String) : Bool :=
+  match String.splitOn key "/" with
+  | .cons pkg (.cons comp (.cons slot rest)) =>
+    Bool.and (Style.segmentOk pkg) (Bool.and (Style.segmentOk comp)
+      (Bool.and (Style.segmentOk slot) (match rest with
+        | .nil => .true
+        | .cons state .nil => Style.segmentOk state
+        | _ => .false)))
+  | _ => .false
+
+-- ## The sheet
+
+/-- The build-time pair: the stable class and the declarations. A runtime imports the
+keys, not the `Styled` values. -/
+structure Style.Styled where
+  cls : Style.Class
+  style : Style
+
+def Style.Styled.of (c : Style.Class) (s : Style) : Style.Styled := Style.Styled.mk c s
+
+def Style.Styled.fixed (name : String) (s : Style) : Style.Styled :=
+  Style.Styled.mk (Style.Class.fixed name) s
+
+/-- A stable key for an attachment chain, for grouping merged rules. -/
+def Style.attachesKey : List Style.Attach → String
+  | .nil => ""
+  | .cons a rest => match a with
+    | .pseudo name => String.append "p:" (String.append name (String.append "|" (Style.attachesKey rest)))
+    | .media q => String.append "m:" (String.append (Style.mediaCss q) (String.append "|" (Style.attachesKey rest)))
+
+/-- Add `r` to `acc`, merging its declarations into an existing same-attachment rule. -/
+def Style.collectRule (r : Style.Rule) : List Style.Rule → List Style.Rule
+  | .nil => [r]
+  | .cons x xs =>
+    match String.eq (Style.attachesKey x.attaches) (Style.attachesKey r.attaches) with
+    | .true => List.cons (Style.Rule.mk x.attaches (List.append x.decls r.decls)) xs
+    | .false => List.cons x (Style.collectRule r xs)
+
+/-- Group a style's rules by attachment chain, preserving first occurrence. -/
+def Style.groupRules (rules : List Style.Rule) : List Style.Rule :=
+  List.foldl (fun acc r => Style.collectRule r acc) [] rules
+
+/-- The CSS names of properties, in emitter order. -/
+def Style.propOrder : List String :=
+  ["display", "position", "inset", "z-index", "flex-direction", "flex-wrap", "flex",
+    "gap", "margin", "padding", "align-items", "justify-content", "width", "height",
+    "min-width", "max-width", "overflow", "overflow-x", "overflow-y", "color",
+    "background", "background-color", "border", "border-color", "border-left",
+    "border-radius", "box-shadow", "font", "font-size", "font-weight", "line-height",
+    "white-space", "text-align", "text-decoration", "opacity", "pointer-events",
+    "cursor", "outline", "outline-offset", "transition", "transform", "content",
+    "user-select"]
+
+/-- The rank of a property's CSS name in `Style.propOrder`. -/
+def Style.rankGo (i : Nat) (name : String) : List String → Nat
+  | .nil => i
+  | .cons x xs => match String.eq x name with
+    | .true => i
+    | .false => Style.rankGo (i + 1) name xs
+
+def Style.propRank (p : Style.Prop) : Nat := Style.rankGo 0 (Style.propCss p) Style.propOrder
+
+/-- Insert a declaration by property rank. -/
+def Style.insertDecl (d : Style.Decl) : List Style.Decl → List Style.Decl
+  | .nil => [d]
+  | .cons x xs => match Nat.le (Style.propRank d.prop) (Style.propRank x.prop) with
+    | .true => List.cons d (List.cons x xs)
+    | .false => List.cons x (Style.insertDecl d xs)
+
+/-- Last-wins by property, then `Style.Prop` order. Two merges that differ only in
+source order emit the same bytes. -/
+def Style.canonicalDecls (decls : List Style.Decl) : List Style.Decl :=
+  let last := List.foldl (fun acc d =>
+    List.append (List.filter (fun x => Bool.not (String.eq (Style.propCss x.prop) (Style.propCss d.prop))) acc)
+      [d]) ([] : List Style.Decl) decls;
+  List.foldl (fun acc d => Style.insertDecl d acc) ([] : List Style.Decl) last
+
+/-- `property:value` pairs, in canonical order. -/
+def Style.declsCss (decls : List Style.Decl) : String :=
+  String.intercalate ";" (List.map (fun d => String.append (Style.propCss d.prop)
+    (String.append ":" (Style.valueCss d.value))) (Style.canonicalDecls decls))
+
+/-- The pseudo suffix of a selector (`:hover:focus-visible`), ignoring media attaches. -/
+def Style.pseudoSuffix : List Style.Attach → String
+  | .nil => ""
+  | .cons a rest => match a with
+    | .pseudo name => String.append ":" (String.append name (Style.pseudoSuffix rest))
+    | .media _ => Style.pseudoSuffix rest
+
+/-- The selector of one class/rule. -/
+def Style.selector (name : String) (attaches : List Style.Attach) : String :=
+  String.append "." (String.append name (Style.pseudoSuffix attaches))
+
+/-- Wrap `body` in the media conditions, first attachment outermost. -/
+def Style.wrapMedia : List Style.Attach → String → String
+  | .nil, body => body
+  | .cons a rest, body =>
+    let inner := Style.wrapMedia rest body;
+    match a with
+    | .media q => String.append "@media " (String.append (Style.mediaCss q) (String.append "{" (String.append inner "}")))
+    | .pseudo _ => inner
+
+/-- One rule line. -/
+def Style.ruleCss (name : String) (r : Style.Rule) : String :=
+  let body := String.append (Style.selector name r.attaches)
+    (String.append "{" (String.append (Style.declsCss r.decls) "}"));
+  Style.wrapMedia r.attaches body
+
+/-- A `Styled` value's rules, grouped and sorted by class name. -/
+def Style.styledCss (s : Style.Styled) : String :=
+  String.intercalate "\n" (List.map (Style.ruleCss (Style.Class.name s.cls))
+    (Style.groupRules s.style.rules))
+
+/-- Whether a styled value is owned by `pkg` and legal. -/
+def Style.styledOk (pkg : String) (s : Style.Styled) : Bool :=
+  Bool.and (Style.styleOk s.style) (match s.cls.literal with
+    | .true => Style.publicOk s.cls.key
+    | .false => Bool.and (Style.keyOk s.cls.key)
+        (Bool.and (Nat.le (String.length (Style.slug s.cls.key)) 16)
+          (String.startsWith s.cls.key (String.append pkg "/"))))
+
+/-- Every class name in a profile, for the collision gate. -/
+def Style.namesOf (pkgs : List (String × List Style.Styled)) : List String :=
+  List.concat (List.map (fun p => List.map (fun s => Style.Class.name s.cls) p.2) pkgs)
+
+/-- Whether a list has a repeated name. -/
+def Style.hasDup : List String → Bool
+  | .nil => .false
+  | .cons x xs => Bool.or (Style.member x xs) (Style.hasDup xs)
+
+/-- The generator gate. A profile is legal when every key is owned and legal, every
+public name is in its registry, and no two distinct keys produce the same class name. -/
+def Style.sheetOk (pkgs : List (String × List Style.Styled)) : Bool :=
+  Bool.and (List.all (fun p => List.all (Style.styledOk p.1) p.2) pkgs)
+    (Bool.not (Style.hasDup (Style.namesOf pkgs)))
+
+/-- The generated sheet. Callers run `Style.sheetOk` first; this is the deterministic
+emitter (header, one line per class/rule, no minifier).
+The JS reference `web/framework/style.js#Style.sheet` is the P0 executable form; this
+Wiz emitter is the build-time generator's surface. -/
+def Style.sheet (pkgs : List (String × List Style.Styled)) : String :=
+  let body := String.intercalate "\n" (List.concat
+    (List.map (fun p => List.map Style.styledCss p.2) pkgs));
+  String.append "/* generated by lib/Web/Style.wiz schema=1 */\n" body

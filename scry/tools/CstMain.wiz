@@ -1,5 +1,6 @@
 import Sys
 import Scry.Native
+import Scry.NativeLink
 import Scry.CstStore
 import Scry.Preproc
 /-!

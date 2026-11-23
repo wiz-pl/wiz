@@ -1,3 +1,4 @@
+import Scry.NativeLink
 import Sys
 import Text
 import Scry.Wil

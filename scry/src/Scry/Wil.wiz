@@ -1,0 +1,1357 @@
+import Text
+import Functor
+import Scry.Index
+/-!
+# Scry's common IR: Wil
+
+Wil is the small three-address IR the `scry` analyser (design:
+`wiz-notes/code-analysis-design.md`, §4.3) lowers C, C# and Python into. It is
+deliberately smaller than a compiler IR: enough to state a concrete semantics, so the
+abstract domains of stage S5 can be proved sound against it, and enough for the graph
+layers (CFG, dominators, CDG, def-use) of S2/S4.
+
+This module has **no parser and no C lowering**. It fixes the grammar of Wil and gives it
+a concrete, fuel-bounded semantics over a block memory:
+
+* `Wil.Ty` — the types (integers of a width and signedness, pointers, function types,
+  records, `dyn` and `unknown`);
+* `Wil.Val` — concrete values (an integer bit pattern, a pointer into a block, null,
+  undefined);
+* `Wil.Rhs` and `Wil.Stmt` — three-address right-hand sides and statements, and the
+  terminators (`Wil.Term`) of a basic block;
+* `Wil.Block`, `Wil.Func`, `Wil.Program` — basic blocks, functions (an entry block and a
+  list of blocks) and a program (a list of functions);
+* `Wil.step`, `Wil.Step`, `Wil.run` — the small-step concrete semantics and its
+  fuel-bounded driver. Memory is CompCert style (blocks × offsets), so `lib/Hoare.wiz`'s
+  heap predicates can be given to a function's Wil form later.
+
+Every statement and terminator carries an *origin* (`Wil.Span`: file, byte range and CST
+node), so findings point at source and CST queries can join Wil facts. The builder
+stamps `Wil.noSpan`; S2's C lowering (`scry/src/Scry/Lower.wiz`) stamps the exact node.
+
+## What is deliberately not here yet
+
+* Dominators/post-dominators/CDG, points-to and the rest of the C frontend (S2/S4/S7);
+* indirect calls and function pointers (`Callee.direct` is implemented; `.indirect`
+  faults);
+* floating point, aggregates and unions (`dyn` carries an unknown value);
+* nondeterministic `havoc` (the concrete interpreter picks the type's zero);
+* C undefined behaviour as alarms: an out-of-bounds or dangling access faults the
+  machine, and a division by zero follows `lib/Word.wiz` (x/0 = 0).
+-/
+
+-- ## Typed identifiers
+
+-- An entity kind. Block, function and statement ids are *indexed* by it, so an id of
+-- one kind cannot be passed where another is expected (the index is phantom: erased at
+-- run time, like `UIntN`'s width).
+inductive Wil.Entity where
+  | block
+  | func
+  | stmt
+
+structure Wil.Id (e : Wil.Entity) where
+  index : Nat
+
+def Wil.BlockId : Type := Wil.Id .block
+def Wil.FuncId : Type := Wil.Id .func
+def Wil.StmtId : Type := Wil.Id .stmt
+
+def Wil.mkBlockId (n : Nat) : Wil.BlockId := Wil.Id.mk n
+def Wil.mkFuncId (n : Nat) : Wil.FuncId := Wil.Id.mk n
+def Wil.mkStmtId (n : Nat) : Wil.StmtId := Wil.Id.mk n
+
+-- ## Origins
+
+/-- Where a Wil statement or terminator comes from: the byte range `[start, stop)` in
+file `file` (an index into the translation unit's source files), the CST node it was
+lowered from (`node`, 0 when unknown), and the original source position of `start`
+(`line`, `col`, both 1-based; 0 when unknown or synthetic).
+
+The byte range and the line/column are in the *original* file even when the unit went
+through `cc -E`: the preprocessor's line markers (parsed by `scry/src/Scry/Preproc.wiz`)
+map a preprocessed offset back to its file, line and column, so a macro expansion still
+reports the call site. Every statement and terminator carries one, so a finding names
+source (S4's SARIF) and Wil facts join back to CST facts. -/
+structure Wil.Span where
+  /-- The source file's index in the translation unit. -/
+  file : Nat
+  /-- The first byte of the range (inclusive). -/
+  start : Nat
+  /-- One past the last byte of the range (exclusive). -/
+  stop : Nat
+  /-- The CST node the statement came from (0 when the origin is synthetic). -/
+  node : Nat
+  /-- The 1-based line of `start` in the original file (0 when unknown). -/
+  line : Nat
+  /-- The 1-based column of `start` in the original file (0 when unknown). -/
+  col : Nat
+
+/-- No origin: what a hand-built (builder or test) statement carries. -/
+def Wil.noSpan : Wil.Span := Wil.Span.mk 0 0 0 0 0 0
+
+/-- A synthetic origin in file `f` spanning `[start, stop)` (line and column unknown). -/
+def Wil.spanAt (f start stop : Nat) : Wil.Span := Wil.Span.mk f start stop 0 0 0
+
+-- ## Types and values
+
+inductive Wil.Ty where
+  /-- an integer of `w` bits; `signed` selects two's complement interpretation -/
+  | int (w : Nat) (signed : Bool)
+  | ptr (pointee : Wil.Ty)
+  | fn (arity : Nat) (ret : Wil.Ty)
+  | record (id : Nat)
+  | dyn
+  | unknown
+
+def Wil.i8 : Wil.Ty := .int 8 .true
+def Wil.u8 : Wil.Ty := .int 8 .false
+def Wil.i16 : Wil.Ty := .int 16 .true
+def Wil.u16 : Wil.Ty := .int 16 .false
+def Wil.i32 : Wil.Ty := .int 32 .true
+def Wil.u32 : Wil.Ty := .int 32 .false
+def Wil.i64 : Wil.Ty := .int 64 .true
+def Wil.u64 : Wil.Ty := .int 64 .false
+
+-- A variable: an index into the frame's register file, and its declared type. The type
+-- is what `assign` normalises an integer to, and what a load/store transfers; the
+-- register file itself is untyped, so the semantics stays total.
+structure Wil.Var where
+  index : Nat
+  ty : Wil.Ty
+
+def Wil.var (index : Nat) (ty : Wil.Ty) : Wil.Var := Wil.Var.mk index ty
+
+/-- A concrete value. An integer carries its width and signedness, so `add` knows where
+to wrap; a pointer is a (block, offset) pair in `Wil.Mem`; `undef` is what a register
+holds before it is assigned (reading it is not an error: it is an unknown value). -/
+inductive Wil.Val where
+  | int (w : Nat) (signed : Bool) (bits : Nat)
+  | ptr (block : Nat) (offset : Nat)
+  | nul
+  | undef
+
+def Wil.Val.ofNat (w : Nat) (signed : Bool) (n : Nat) : Wil.Val :=
+  .int w signed (Nat.mod n (Nat.pow 2 w))
+
+def Wil.Val.ofNeg (w : Nat) (signed : Bool) (n : Nat) : Wil.Val :=
+  .int w signed (Nat.mod (Nat.sub (Nat.pow 2 w) (Nat.mod n (Nat.pow 2 w))) (Nat.pow 2 w))
+
+def Wil.Val.zero (w : Nat) (signed : Bool) : Wil.Val := .int w signed 0
+
+def Wil.Val.width : Wil.Val → Nat
+  | .int w _ _ => w
+  | _ => 0
+
+def Wil.Val.signed : Wil.Val → Bool
+  | .int _ s _ => s
+  | _ => .false
+
+/-- The raw bit pattern of an integer, at width `w` (0 for non-integers). -/
+def Wil.Val.bitsAt (w : Nat) (v : Wil.Val) : Nat :=
+  match v with
+  | .int _ _ b => Nat.mod b (Nat.pow 2 w)
+  | _ => 0
+
+def Wil.Val.isNeg (v : Wil.Val) : Bool :=
+  match v with
+  | .int w s b => Bool.and s (Nat.testBit b (Nat.sub w 1))
+  | _ => .false
+
+/-- The magnitude of a signed value (for division and printing). -/
+def Wil.Val.mag (v : Wil.Val) : Nat :=
+  match v with
+  | .int w s b => match Bool.and s (Nat.testBit b (Nat.sub w 1)) with
+    | .true => Nat.sub (Nat.pow 2 w) b
+    | .false => b
+  | _ => 0
+
+/-- Signed comparison of two width-`w` bit patterns. -/
+def Wil.Val.signedLt (w : Nat) (a b : Nat) : Bool :=
+  match Nat.testBit a (Nat.sub w 1), Nat.testBit b (Nat.sub w 1) with
+  | .true, .false => .true
+  | .false, .true => .false
+  | _, _ => Nat.lt a b
+
+/-- An integer value normalised to `w` bits (this is the only place arithmetic wraps). -/
+def Wil.Val.norm (w : Nat) (signed : Bool) (bits : Nat) : Wil.Val :=
+  .int w signed (Nat.mod bits (Nat.pow 2 w))
+
+def Wil.Val.default (t : Wil.Ty) : Wil.Val :=
+  match t with
+  | .int w s => .int w s 0
+  | .ptr _ => .nul
+  | _ => .undef
+
+/-- Coerce a value to a declared type: integers are truncated/extended to its width, and
+everything else is left alone (a well-typed Wil never relies on this). -/
+def Wil.Val.fit (t : Wil.Ty) (v : Wil.Val) : Wil.Val :=
+  match t with
+  | .int w s => match v with
+    | .int _ _ b => .int w s (Nat.mod b (Nat.pow 2 w))
+    | _ => .int w s 0
+  | _ => v
+
+def Wil.Val.beq (a b : Wil.Val) : Bool :=
+  match a, b with
+  | .int w s x, .int w' s' y => Bool.and (Nat.beq w w') (Nat.beq x y)
+  | .ptr p o, .ptr p' o' => Bool.and (Nat.beq p p') (Nat.beq o o')
+  | .nul, .nul => .true
+  | .undef, .undef => .true
+  | _, _ => .false
+
+/-- An integer as a signed decimal (the raw bits for non-integers are not printed). -/
+def Wil.Val.show (v : Wil.Val) : String :=
+  match v with
+  | .int _ s _ => match s, Wil.Val.isNeg v with
+    | .true, .true => String.append "-" (Nat.repr (Wil.Val.mag v))
+    | _, _ => Nat.repr (Wil.Val.bitsAt (Wil.Val.width v) v)
+  | .ptr b o => String.append "&" (String.append (Nat.repr b) (String.append "+" (Nat.repr o)))
+  | .nul => "null"
+  | .undef => "undef"
+
+-- ## Operations
+
+inductive Wil.Op where
+  | add | sub | mul | div | rem
+  | and | or | xor | shl | shr
+  | eq | ne | lt | le | gt | ge
+  | neg | not
+
+def Wil.Op.isCmp : Wil.Op → Bool
+  | .eq => .true
+  | .ne => .true
+  | .lt => .true
+  | .le => .true
+  | .gt => .true
+  | .ge => .true
+  | _ => .false
+
+def Wil.Val.udiv (a b : Nat) : Nat := Nat.div a b
+def Wil.Val.urem (a b : Nat) : Nat := Nat.mod a b
+
+/-- The magnitude of a two's-complement pattern. -/
+def Wil.Val.snegMag (w : Nat) (a : Nat) : Nat :=
+  match Nat.testBit a (Nat.sub w 1) with
+  | .true => Nat.sub (Nat.pow 2 w) a
+  | .false => a
+
+def Wil.Val.sdiv (w : Nat) (a b : Nat) : Nat :=
+  match Nat.beq b 0 with
+  | .true => 0
+  | .false =>
+    let q := Nat.div (Wil.Val.snegMag w a) (Wil.Val.snegMag w b);
+    match Bool.xor (Nat.testBit a (Nat.sub w 1)) (Nat.testBit b (Nat.sub w 1)) with
+    | .true => Nat.mod (Nat.sub (Nat.pow 2 w) (Nat.mod q (Nat.pow 2 w))) (Nat.pow 2 w)
+    | .false => Nat.mod q (Nat.pow 2 w)
+
+def Wil.Val.srem (w : Nat) (a b : Nat) : Nat :=
+  match Nat.beq b 0 with
+  | .true => a
+  | .false =>
+    let r := Nat.mod (Wil.Val.snegMag w a) (Wil.Val.snegMag w b);
+    match Nat.testBit a (Nat.sub w 1) with
+    | .true => Nat.mod (Nat.sub (Nat.pow 2 w) (Nat.mod r (Nat.pow 2 w))) (Nat.pow 2 w)
+    | .false => r
+
+def Wil.Val.shrBits (w : Nat) (signed : Bool) (bits k : Nat) : Nat :=
+  match signed, Nat.testBit bits (Nat.sub w 1) with
+  | .true, .true => Nat.sub (Nat.pow 2 w) 1 - Nat.shiftRight (Nat.sub (Nat.pow 2 w) 1 - bits) k
+  | _, _ => Nat.shiftRight bits k
+
+def Wil.Val.cmp (op : Wil.Op) (a b : Wil.Val) : Except String Bool :=
+  match op, a, b with
+  | .eq, _, _ => .ok (Wil.Val.beq a b)
+  | .ne, _, _ => .ok (Bool.not (Wil.Val.beq a b))
+  | .lt, .int w s x, .int _ s' y =>
+    match Bool.or s s' with
+    | .true => .ok (Wil.Val.signedLt w x y)
+    | .false => .ok (Nat.lt x y)
+  | .le, .int w s x, .int _ s' y =>
+    match Bool.or s s' with
+    | .true => .ok (Bool.not (Wil.Val.signedLt w y x))
+    | .false => .ok (Bool.not (Nat.lt y x))
+  | .gt, .int w s x, .int _ s' y =>
+    match Bool.or s s' with
+    | .true => .ok (Wil.Val.signedLt w y x)
+    | .false => .ok (Nat.lt y x)
+  | .ge, .int w s x, .int _ s' y =>
+    match Bool.or s s' with
+    | .true => .ok (Bool.not (Wil.Val.signedLt w x y))
+    | .false => .ok (Bool.not (Nat.lt x y))
+  | _, _, _ => .error "ordering comparison on non-integers"
+
+/-- A boolean as Wil's 1-bit integer (so a comparison is a `Rhs` too). -/
+def Wil.Val.bool (b : Bool) : Wil.Val := .int 1 .false (match b with | .true => 1 | .false => 0)
+
+/-- Total arithmetic on two values. Integer width and signedness come from the left
+operand (`a`); `b` is reduced to that width, which is what a C frontend makes explicit
+with conversions. Division and remainder follow `lib/Word.wiz`: by zero gives 0 (div)
+and the dividend (rem). -/
+def Wil.Val.bin (op : Wil.Op) (a b : Wil.Val) : Except String Wil.Val :=
+  match op with
+  | .eq => .ok (Wil.Val.bool (Wil.Val.beq a b))
+  | .ne => .ok (Wil.Val.bool (Bool.not (Wil.Val.beq a b)))
+  | .lt => do b' ← Wil.Val.cmp .lt a b; .ok (Wil.Val.bool b')
+  | .le => do b' ← Wil.Val.cmp .le a b; .ok (Wil.Val.bool b')
+  | .gt => do b' ← Wil.Val.cmp .gt a b; .ok (Wil.Val.bool b')
+  | .ge => do b' ← Wil.Val.cmp .ge a b; .ok (Wil.Val.bool b')
+  | .neg => match a with
+    | .int w s x => .ok (Wil.Val.norm w s (Nat.sub (Nat.pow 2 w) (Nat.mod x (Nat.pow 2 w))))
+    | _ => .error "negation of a non-integer"
+  | .not => match a with
+    | .int w s x => .ok (Wil.Val.norm w s (Nat.sub (Nat.sub (Nat.pow 2 w) 1) (Nat.mod x (Nat.pow 2 w))))
+    | _ => .error "bitwise not of a non-integer"
+  | _ =>
+    match a, b with
+    | .int w s x, .int _ _ y =>
+      let m := Nat.pow 2 w;
+      let x' := Nat.mod x m;
+      let y' := Nat.mod y m;
+      match op with
+      | .add => .ok (Wil.Val.norm w s (Nat.add x' y'))
+      | .sub => .ok (Wil.Val.norm w s (Nat.add x' (Nat.sub m y')))
+      | .mul => .ok (Wil.Val.norm w s (Nat.mul x' y'))
+      | .div => .ok (Wil.Val.norm w s (match s with
+          | .true => Wil.Val.sdiv w x' y'
+          | .false => Wil.Val.udiv x' y'))
+      | .rem => .ok (Wil.Val.norm w s (match s with
+          | .true => Wil.Val.srem w x' y'
+          | .false => Wil.Val.urem x' y'))
+      | .and => .ok (Wil.Val.norm w s (Nat.land x' y'))
+      | .or => .ok (Wil.Val.norm w s (Nat.lor x' y'))
+      | .xor => .ok (Wil.Val.norm w s (Nat.xor x' y'))
+      | .shl => .ok (Wil.Val.norm w s (Nat.shiftLeft x' y'))
+      | .shr => .ok (Wil.Val.norm w s (Wil.Val.shrBits w s x' y'))
+      | _ => .error "comparison reaching arithmetic"
+    | _, _ => .error "arithmetic on non-integers"
+
+/-- Conditions, as a small expression language over variables. A `Rhs` comparison also
+produces a 1-bit integer; `Cond` is the form branch terminators use. -/
+inductive Wil.Cond where
+  | const (b : Bool)
+  | cmp (op : Wil.Op) (a : Wil.Var) (b : Wil.Var)
+  | not (c : Wil.Cond)
+  | and (a : Wil.Cond) (b : Wil.Cond)
+  | or (a : Wil.Cond) (b : Wil.Cond)
+
+def Wil.condEq (a b : Wil.Var) : Wil.Cond := .cmp .eq a b
+def Wil.condLt (a b : Wil.Var) : Wil.Cond := .cmp .lt a b
+
+-- ## The three-address grammar
+
+/-- A right-hand side. `use` is a register copy; `cst` a literal; `bin`/`un` arithmetic;
+`load`/`gep` memory; `alloc` a fresh block of `cells` words; `havoc` a value of a type
+that the lowering could not determine (the concrete semantics picks its zero).
+
+Four constructors exist for memory analysis (S7's points-to, `Scry.PointsTo`) and for
+the C constructs that need a memory location:
+
+* `slot` is a **stack slot**: a fresh block, exactly like `alloc` in the concrete
+  semantics, but the abstract location is a stack cell, not a heap object. The C lowering
+  uses it for an address-taken local (`&x`) and for an aggregate local (a `struct` or an
+  array), which it then reads and writes through a pointer.
+* `globalRef` is a pointer to a module-level global slot. Globals are **analysis-only**:
+  the concrete semantics has no translation-unit memory, so it yields `undef`.
+* `fnptr` is the address of a function as a value (a function pointer). The concrete
+  semantics yields `undef` (an indirect call faults), but points-to resolves it to the
+  function.
+* `gepVar` is `p + i * scale`: a subscript or a pointer step with a **variable** index.
+  The points-to layer keeps the base object and says "some offset in it", while a
+  constant `gep` stays exact. -/
+inductive Wil.Rhs where
+  | use (v : Wil.Var)
+  | cst (v : Wil.Val)
+  | bin (op : Wil.Op) (a : Wil.Var) (b : Wil.Var)
+  | un (op : Wil.Op) (a : Wil.Var)
+  | load (p : Wil.Var)
+  | gep (p : Wil.Var) (offset : Nat)
+  | alloc (cells : Nat)
+  | havoc (t : Wil.Ty)
+  | slot (cells : Nat)
+  | globalRef (name : String)
+  | fnptr (name : String)
+  | gepVar (p : Wil.Var) (i : Wil.Var) (scale : Nat)
+
+/-- A callee: a function by name, or a computed function value (not implemented by the
+concrete semantics yet: `.indirect` faults, and S2's call graph records it as unknown). -/
+inductive Wil.Callee where
+  | direct (name : String)
+  | indirect (v : Wil.Var)
+
+/-- A statement. These are the only effects: a register assignment, an assumption, a
+memory store/free, and a call. `nop` exists so a block can carry a label. Every
+constructor's last argument is its origin (a `Wil.Span`), added in S2. -/
+inductive Wil.Stmt where
+  | assign (x : Wil.Var) (e : Wil.Rhs) (origin : Wil.Span)
+  | assume (c : Wil.Cond) (origin : Wil.Span)
+  | store (p : Wil.Var) (v : Wil.Var) (origin : Wil.Span)
+  | free (p : Wil.Var) (origin : Wil.Span)
+  | call (r : Option Wil.Var) (callee : Wil.Callee) (args : List Wil.Var) (origin : Wil.Span)
+  | nop (origin : Wil.Span)
+
+/-- A block's terminator: `goto`, a two-way branch, a return, or `unreachable`. Every
+constructor's last argument is its origin (a `Wil.Span`). -/
+inductive Wil.Term where
+  | goto (b : Wil.BlockId) (origin : Wil.Span)
+  | br (c : Wil.Cond) (t : Wil.BlockId) (f : Wil.BlockId) (origin : Wil.Span)
+  | ret (v : Option Wil.Var) (origin : Wil.Span)
+  | unreachable (origin : Wil.Span)
+
+structure Wil.Block where
+  stmts : List Wil.Stmt
+  term : Wil.Term
+
+structure Wil.Func where
+  name : String
+  params : List Wil.Var
+  locals : List Wil.Var
+  entry : Wil.BlockId
+  blocks : List Wil.Block
+  /-- Where the function was defined (`Wil.noSpan` when hand-built). -/
+  origin : Wil.Span
+
+structure Wil.Program where
+  funcs : List Wil.Func
+
+/-- One definition and its index in `Wil.Program.funcs`. -/
+structure Wil.FuncEntry where
+  index : Nat
+  func : Wil.Func
+
+/-- A program's function table: source name -> every definition, in program order. The
+table is derived data (`Scry.NameMap`); like the program itself it is pure and can be
+built once and passed through a whole analysis. -/
+structure Wil.ProgramIndex where
+  byName : Scry.NameMap Wil.FuncEntry
+
+partial def Wil.funcEntriesGo (i : Nat) :
+    List Wil.Func → List (String × Wil.FuncEntry)
+  | .nil => .nil
+  | .cons f rest =>
+    List.cons (f.name, Wil.FuncEntry.mk i f) (Wil.funcEntriesGo (Nat.succ i) rest)
+
+/-- Build the function table once. A caller that looks several names up (the points-to
+and summary loops) should build this and use `Wil.findFuncIn`; `Wil.findFunc` is the
+compatibility spelling for a one-off lookup. -/
+def Wil.indexProgram (p : Wil.Program) : Wil.ProgramIndex :=
+  Wil.ProgramIndex.mk (Scry.NameMap.fromList (Wil.funcEntriesGo 0 p.funcs))
+
+/-- The first definition of `name`, exactly as `Wil.findFunc`. -/
+def Wil.ProgramIndex.findFunc (ix : Wil.ProgramIndex) (name : String) :
+    Option Wil.Func :=
+  match Scry.NameMap.find ix.byName name with
+  | .none => .none
+  | .some e => .some e.func
+
+/-- The first entry for `name`, with its global index. -/
+def Wil.ProgramIndex.findEntry (ix : Wil.ProgramIndex) (name : String) :
+    Option Wil.FuncEntry :=
+  Scry.NameMap.find ix.byName name
+
+/-- Every definition of `name`, in program order. -/
+def Wil.ProgramIndex.findAll (ix : Wil.ProgramIndex) (name : String) :
+    List Wil.FuncEntry :=
+  Scry.NameMap.findAll ix.byName name
+
+/-- Indexed spelling of `Wil.findFunc`. -/
+def Wil.findFuncIn (ix : Wil.ProgramIndex) (name : String) : Option Wil.Func :=
+  Wil.ProgramIndex.findFunc ix name
+
+/-- Compatibility lookup: one linear scan. Hot callers build `Wil.indexProgram` once
+and use `Wil.findFuncIn`; this wrapper keeps the old public signature for one-offs. -/
+def Wil.findFunc (p : Wil.Program) (name : String) : Option Wil.Func :=
+  List.find (fun f => String.eq f.name name) p.funcs
+
+def Wil.Ty.width : Wil.Ty → Nat
+  | .int w _ => w
+  | _ => 0
+
+def Wil.Ty.signed : Wil.Ty → Bool
+  | .int _ s => s
+  | _ => .false
+
+-- ## The builder
+
+-- The helpers below are what the tests (and the C lowering later) use to write a
+-- program by hand: they are ordinary Wiz constructors, and a function's blocks are a
+-- list indexed by `BlockId`.
+
+def Wil.assign (x : Wil.Var) (e : Wil.Rhs) : Wil.Stmt := .assign x e Wil.noSpan
+def Wil.copy (x : Wil.Var) (y : Wil.Var) : Wil.Stmt := .assign x (.use y) Wil.noSpan
+def Wil.cst (x : Wil.Var) (v : Wil.Val) : Wil.Stmt := .assign x (.cst v) Wil.noSpan
+def Wil.num (x : Wil.Var) (n : Nat) : Wil.Stmt := .assign x (.cst (Wil.Val.ofNat (Wil.Ty.width x.ty) (Wil.Ty.signed x.ty) n)) Wil.noSpan
+def Wil.binop (x : Wil.Var) (op : Wil.Op) (a b : Wil.Var) : Wil.Stmt := .assign x (.bin op a b) Wil.noSpan
+def Wil.unop (x : Wil.Var) (op : Wil.Op) (a : Wil.Var) : Wil.Stmt := .assign x (.un op a) Wil.noSpan
+def Wil.load (x : Wil.Var) (p : Wil.Var) : Wil.Stmt := .assign x (.load p) Wil.noSpan
+def Wil.gep (x : Wil.Var) (p : Wil.Var) (offset : Nat) : Wil.Stmt := .assign x (.gep p offset) Wil.noSpan
+def Wil.alloc (x : Wil.Var) (cells : Nat) : Wil.Stmt := .assign x (.alloc cells) Wil.noSpan
+def Wil.slot (x : Wil.Var) (cells : Nat) : Wil.Stmt := .assign x (.slot cells) Wil.noSpan
+def Wil.globalRef (x : Wil.Var) (name : String) : Wil.Stmt := .assign x (.globalRef name) Wil.noSpan
+def Wil.fnptr (x : Wil.Var) (name : String) : Wil.Stmt := .assign x (.fnptr name) Wil.noSpan
+def Wil.gepVar (x : Wil.Var) (p i : Wil.Var) (scale : Nat) : Wil.Stmt :=
+  .assign x (.gepVar p i scale) Wil.noSpan
+def Wil.havoc (x : Wil.Var) : Wil.Stmt := .assign x (.havoc x.ty) Wil.noSpan
+def Wil.store (p : Wil.Var) (v : Wil.Var) : Wil.Stmt := .store p v Wil.noSpan
+def Wil.free (p : Wil.Var) : Wil.Stmt := .free p Wil.noSpan
+def Wil.assume (c : Wil.Cond) : Wil.Stmt := .assume c Wil.noSpan
+def Wil.call (r : Option Wil.Var) (name : String) (args : List Wil.Var) : Wil.Stmt :=
+  .call r (.direct name) args Wil.noSpan
+def Wil.callIndirect (r : Option Wil.Var) (f : Wil.Var) (args : List Wil.Var) : Wil.Stmt :=
+  .call r (.indirect f) args Wil.noSpan
+def Wil.jump (b : Wil.BlockId) : Wil.Term := .goto b Wil.noSpan
+def Wil.branch (c : Wil.Cond) (t f : Wil.BlockId) : Wil.Term := .br c t f Wil.noSpan
+def Wil.ret (v : Option Wil.Var) : Wil.Term := .ret v Wil.noSpan
+def Wil.retV (v : Wil.Var) : Wil.Term := .ret (.some v) Wil.noSpan
+def Wil.block (stmts : List Wil.Stmt) (term : Wil.Term) : Wil.Block := Wil.Block.mk stmts term
+def Wil.func (name : String) (params locals : List Wil.Var) (blocks : List Wil.Block) : Wil.Func :=
+  Wil.Func.mk name params locals (Wil.mkBlockId 0) blocks Wil.noSpan
+def Wil.funcAt (name : String) (params locals : List Wil.Var) (blocks : List Wil.Block)
+    (origin : Wil.Span) : Wil.Func :=
+  Wil.Func.mk name params locals (Wil.mkBlockId 0) blocks origin
+def Wil.program (funcs : List Wil.Func) : Wil.Program := Wil.Program.mk funcs
+
+-- ## Origins of a statement or terminator
+
+/-- `s` with its origin replaced (the builder's default is `Wil.noSpan`; the C lowering
+stamps each statement with the CST node it came from). -/
+def Wil.withOrigin (s : Wil.Stmt) (o : Wil.Span) : Wil.Stmt :=
+  match s with
+  | .assign x e _ => .assign x e o
+  | .assume c _ => .assume c o
+  | .store p v _ => .store p v o
+  | .free p _ => .free p o
+  | .call r c args _ => .call r c args o
+  | .nop _ => .nop o
+
+/-- `t` with its origin replaced. -/
+def Wil.withTermOrigin (t : Wil.Term) (o : Wil.Span) : Wil.Term :=
+  match t with
+  | .goto b _ => .goto b o
+  | .br c tb fb _ => .br c tb fb o
+  | .ret v _ => .ret v o
+  | .unreachable _ => .unreachable o
+
+/-- A statement's origin. -/
+def Wil.stmtOrigin (s : Wil.Stmt) : Wil.Span :=
+  match s with
+  | .assign _ _ o => o
+  | .assume _ o => o
+  | .store _ _ o => o
+  | .free _ o => o
+  | .call _ _ _ o => o
+  | .nop o => o
+
+/-- A terminator's origin. -/
+def Wil.termOrigin (t : Wil.Term) : Wil.Span :=
+  match t with
+  | .goto _ o => o
+  | .br _ _ _ o => o
+  | .ret _ o => o
+  | .unreachable o => o
+
+-- ## The CFG
+--
+-- The CFG is derived from terminators, so it cannot disagree with the blocks: a `goto`
+-- has one successor, a `br` two, and `ret`/`unreachable` none. `Wil.Func.cfg` is the
+-- edge list S2's graph passes (and S4's report) consume.
+
+/-- A block's successor blocks, from its terminator. -/
+def Wil.Block.succs (b : Wil.Block) : List Wil.BlockId :=
+  match b.term with
+  | .goto t _ => .cons t .nil
+  | .br _ t f _ => .cons t (.cons f .nil)
+  | .ret _ _ => .nil
+  | .unreachable _ => .nil
+
+/-- `(block id, block)` for every block, in index order. -/
+partial def Wil.indexedBlocks : Nat → List Wil.Block → List (Wil.BlockId × Wil.Block)
+  | _, .nil => .nil
+  | i, .cons b rest => .cons (Wil.mkBlockId i, b) (Wil.indexedBlocks (Nat.succ i) rest)
+
+/-- A function's CFG edges: every block paired with each of its successors. -/
+def Wil.Func.cfg (fn : Wil.Func) : List (Wil.BlockId × Wil.BlockId) :=
+  List.concat (List.map (fun p => List.map (fun t => (p.1, t)) (Wil.Block.succs p.2))
+    (Wil.indexedBlocks 0 fn.blocks))
+
+/-- Every CFG target names a block of the function. -/
+def Wil.Func.cfgValid (fn : Wil.Func) : Bool :=
+  List.all (fun e => Nat.lt e.2.index (List.length fn.blocks)) (Wil.Func.cfg fn)
+
+-- ## Register files and block memory
+
+-- Memory: a list of blocks, each a fixed number of one-word cells. A pointer is a
+-- (block index, cell offset). `alloc` appends a block; `free` flips its live bit, so a
+-- later access faults (a use-after-free is not silently defined).
+structure Wil.MemBlock where
+  alive : Bool
+  cells : List Wil.Val
+
+def Wil.Mem : Type := List Wil.MemBlock
+
+def Wil.listNth {A : Type} : List A → Nat → Option A
+  | .nil, _ => .none
+  | .cons x _, .zero => .some x
+  | .cons _ xs, .succ n => Wil.listNth xs n
+
+def Wil.listSetAt {A : Type} : List A → Nat → A → List A
+  | .nil, _, _ => .nil
+  | .cons _ xs, .zero, v => .cons v xs
+  | .cons x xs, .succ n, v => .cons x (Wil.listSetAt xs n v)
+
+def Wil.replicate {A : Type} : Nat → A → List A
+  | .zero, _ => .nil
+  | .succ n, v => .cons v (Wil.replicate n v)
+
+def Wil.memGetBlock (m : Wil.Mem) (i : Nat) : Option Wil.MemBlock := Wil.listNth m i
+
+def Wil.memPutBlock (m : Wil.Mem) (i : Nat) (b : Wil.MemBlock) : Wil.Mem := Wil.listSetAt m i b
+
+def Wil.memAlloc (m : Wil.Mem) (cells : Nat) : Wil.Mem × Wil.Val :=
+  let b := Wil.MemBlock.mk .true (Wil.replicate cells .undef);
+  let i := List.length m;
+  (List.append m (.cons b .nil), .ptr i 0)
+
+def Wil.memLoad (m : Wil.Mem) (p : Wil.Val) : Except String Wil.Val :=
+  match p with
+  | .nul => .error "null dereference"
+  | .ptr b o => match Wil.memGetBlock m b with
+    | .none => .error (String.append "load: no block " (Nat.repr b))
+    | .some blk => match blk.alive with
+      | .false => .error (String.append "load: freed block " (Nat.repr b))
+      | .true => match Wil.listNth blk.cells o with
+        | .none => .error (String.append "load: out of bounds at " (String.append (Nat.repr b) (String.append "+" (Nat.repr o))))
+        | .some v => .ok v
+  | _ => .error "load: not a pointer"
+
+def Wil.memStore (m : Wil.Mem) (p : Wil.Val) (v : Wil.Val) : Except String Wil.Mem :=
+  match p with
+  | .nul => .error "null dereference"
+  | .ptr b o => match Wil.memGetBlock m b with
+    | .none => .error (String.append "store: no block " (Nat.repr b))
+    | .some blk => match blk.alive with
+      | .false => .error (String.append "store: freed block " (Nat.repr b))
+      | .true => match Wil.listNth blk.cells o with
+        | .none => .error (String.append "store: out of bounds at " (String.append (Nat.repr b) (String.append "+" (Nat.repr o))))
+        | .some _ => .ok (Wil.memPutBlock m b (Wil.MemBlock.mk .true (Wil.listSetAt blk.cells o v)))
+  | _ => .error "store: not a pointer"
+
+def Wil.memFree (m : Wil.Mem) (p : Wil.Val) : Except String Wil.Mem :=
+  match p with
+  | .nul => .error "free: null"
+  | .ptr b _ => match Wil.memGetBlock m b with
+    | .none => .error (String.append "free: no block " (Nat.repr b))
+    | .some blk => match blk.alive with
+      | .false => .error (String.append "free: double free of block " (Nat.repr b))
+      | .true => .ok (Wil.memPutBlock m b (Wil.MemBlock.mk .false blk.cells))
+  | _ => .error "free: not a pointer"
+
+/-- The type a load through `p` yields (and a store fixes its value to). -/
+def Wil.pointee (t : Wil.Ty) : Wil.Ty :=
+  match t with
+  | .ptr t' => t'
+  | _ => .unknown
+
+def Wil.fitPointee (t : Wil.Ty) (v : Wil.Val) : Wil.Val := Wil.Val.fit (Wil.pointee t) v
+
+-- ## The state
+
+/-- A call frame: the function being run, the current block and program counter, its
+registers, and (for a callee) the caller's destination variable. `pc` indexes
+`block.stmts`; when it runs past the end, the block's terminator is executed. -/
+structure Wil.Frame where
+  code : Wil.Func
+  block : Wil.BlockId
+  pc : Nat
+  regs : List (Nat × Wil.Val)
+  retTo : Option Wil.Var
+
+/-- A configuration: the program, the heap, and the call stack (head = current frame).
+A configuration is *terminal* when `step` says `done` or `fault`. -/
+structure Wil.Config where
+  prog : Wil.Program
+  mem : Wil.Mem
+  frames : List Wil.Frame
+
+-- Registers: a list of (index, value) pairs. A lookup that misses is an error, not
+-- `undef`: an unbound register means the program is ill-formed, and the concrete
+-- semantics should not hide it.
+def Wil.lookupReg (i : Nat) : List (Nat × Wil.Val) → Option Wil.Val
+  | .nil => .none
+  | .cons (j, v) rest => match Nat.beq i j with
+    | .true => .some v
+    | .false => Wil.lookupReg i rest
+
+def Wil.getReg (fr : Wil.Frame) (x : Wil.Var) : Except String Wil.Val :=
+  match Wil.lookupReg x.index fr.regs with
+  | .some v => .ok v
+  | .none => .error (String.append "unbound register " (Nat.repr x.index))
+
+def Wil.setReg (i : Nat) (v : Wil.Val) (regs : List (Nat × Wil.Val)) : List (Nat × Wil.Val) :=
+  match regs with
+  | .nil => .cons (i, v) .nil
+  | .cons (j, w) rest => match Nat.beq i j with
+    | .true => .cons (i, v) rest
+    | .false => .cons (j, w) (Wil.setReg i v rest)
+
+inductive Wil.StepResult where
+  | next (c : Wil.Config)
+  | done (v : Wil.Val)
+  | fault (msg : String)
+
+inductive Wil.Result where
+  | ok (v : Wil.Val)
+  | fault (msg : String)
+  | outOfFuel
+
+def Wil.Result.show : Wil.Result → String
+  | .ok v => String.append "ok " (Wil.Val.show v)
+  | .fault m => String.append "fault " m
+  | .outOfFuel => "out-of-fuel"
+
+-- ## Evaluation helpers
+
+def Wil.evalCond (fr : Wil.Frame) : Wil.Cond → Except String Bool
+  | .const b => .ok b
+  | .cmp op a b => do
+    av ← Wil.getReg fr a;
+    bv ← Wil.getReg fr b;
+    Wil.Val.cmp op av bv
+  | .not c => do
+    b ← Wil.evalCond fr c;
+    .ok (Bool.not b)
+  | .and a b => do
+    x ← Wil.evalCond fr a;
+    match x with
+    | .true => Wil.evalCond fr b
+    | .false => .ok .false
+  | .or a b => do
+    x ← Wil.evalCond fr a;
+    match x with
+    | .true => .ok .true
+    | .false => Wil.evalCond fr b
+
+def Wil.evalArg (fr : Wil.Frame) (v : Wil.Var) : Except String Wil.Val := Wil.getReg fr v
+
+def Wil.evalArgs (fr : Wil.Frame) : List Wil.Var → Except String (List Wil.Val)
+  | .nil => .ok .nil
+  | .cons v vs => do
+    x ← Wil.evalArg fr v;
+    rest ← Wil.evalArgs fr vs;
+    .ok (.cons x rest)
+
+def Wil.evalRhs (fr : Wil.Frame) (mem : Wil.Mem) : Wil.Rhs → Except String Wil.Val
+  | .use v => Wil.getReg fr v
+  | .cst v => .ok v
+  | .bin op a b => do
+    av ← Wil.getReg fr a;
+    bv ← Wil.getReg fr b;
+    Wil.Val.bin op av bv
+  | .un op a => do
+    av ← Wil.getReg fr a;
+    Wil.Val.bin op av .undef
+  | .load p => do
+    pv ← Wil.getReg fr p;
+    Wil.memLoad mem pv
+  | .gep p off => do
+    pv ← Wil.getReg fr p;
+    match pv with
+    | .ptr b o => .ok (.ptr b (Nat.add o off))
+    | _ => .error "gep: not a pointer"
+  | .alloc _ => .error "alloc is a statement-level effect (execStmt handles it)" 
+  | .slot _ => .error "slot is a statement-level effect (execStmt handles it)"
+  | .globalRef _ => .ok .undef
+  | .fnptr _ => .ok .undef
+  | .gepVar p i scale => do
+    pv ← Wil.getReg fr p;
+    iv ← Wil.getReg fr i;
+    match pv with
+    | .ptr b o => match iv with
+      | .int _ _ bits => .ok (.ptr b (Nat.add o (Nat.mul bits scale)))
+      | _ => .error "gepVar: index is not an integer"
+    | _ => .error "gepVar: not a pointer"
+  | .havoc t => .ok (Wil.Val.default t)
+
+/-- What a statement does: continue in a frame, call a direct callee, or return. -/
+inductive Wil.Act where
+  | cont (fr : Wil.Frame) (mem : Wil.Mem)
+  | invoke (fr : Wil.Frame) (mem : Wil.Mem) (callee : Wil.Func) (args : List Wil.Val) (dest : Option Wil.Var)
+  | ret (fr : Wil.Frame) (v : Wil.Val) (mem : Wil.Mem)
+
+def Wil.execStmt (prog : Wil.Program) (fr : Wil.Frame) (mem : Wil.Mem) : Wil.Stmt → Except String Wil.Act
+  -- `alloc` and `slot` are the right-hand sides that change memory, so they are handled
+  -- here (the other right-hand sides are pure). A stack slot is a block exactly like a
+  -- heap object; only the abstract analysis distinguishes them.
+  | .assign x (.alloc cells) _ =>
+    let r := Wil.memAlloc mem cells;
+    let v := Wil.Val.fit x.ty r.2;
+    .ok (.cont { fr with regs := Wil.setReg x.index v fr.regs, pc := Nat.succ fr.pc } r.1)
+  | .assign x (.slot cells) _ =>
+    let r := Wil.memAlloc mem cells;
+    let v := Wil.Val.fit x.ty r.2;
+    .ok (.cont { fr with regs := Wil.setReg x.index v fr.regs, pc := Nat.succ fr.pc } r.1)
+  | .assign x e _ => do
+    v ← Wil.evalRhs fr mem e;
+    let v' := Wil.Val.fit x.ty v;
+    .ok (.cont { fr with regs := Wil.setReg x.index v' fr.regs, pc := Nat.succ fr.pc } mem)
+  | .assume c _ => do
+    b ← Wil.evalCond fr c;
+    match b with
+    | .true => .ok (.cont { fr with pc := Nat.succ fr.pc } mem)
+    | .false => .error "infeasible: assumption is false"
+  | .store p v _ => do
+    pv ← Wil.getReg fr p;
+    vv ← Wil.getReg fr v;
+    mem' ← Wil.memStore mem pv (Wil.fitPointee p.ty vv);
+    .ok (.cont { fr with pc := Nat.succ fr.pc } mem')
+  | .free p _ => do
+    pv ← Wil.getReg fr p;
+    mem' ← Wil.memFree mem pv;
+    .ok (.cont { fr with pc := Nat.succ fr.pc } mem')
+  | .call r callee args _ => do
+    vals ← Wil.evalArgs fr args;
+    match callee with
+    | .direct name => match Wil.findFunc prog name with
+      | .none => .error (String.append "no such function: " name)
+      | .some fn => match Nat.beq (List.length vals) (List.length fn.params) with
+        | .true => .ok (.invoke fr mem fn vals r)
+        | .false => .error (String.append "arity mismatch calling " name)
+    | .indirect _ => .error "indirect call: not implemented (S2)"
+  | .nop _ => .ok (.cont { fr with pc := Nat.succ fr.pc } mem)
+
+def Wil.execTerm (fr : Wil.Frame) (mem : Wil.Mem) : Wil.Term → Except String Wil.Act
+  | .goto b _ => .ok (.cont { fr with block := b, pc := 0 } mem)
+  | .br c t f _ => do
+    b ← Wil.evalCond fr c;
+    match b with
+    | .true => .ok (.cont { fr with block := t, pc := 0 } mem)
+    | .false => .ok (.cont { fr with block := f, pc := 0 } mem)
+  | .ret v _ => match v with
+    | .none => .ok (.ret fr .undef mem)
+    | .some x => do
+      xv ← Wil.getReg fr x;
+      .ok (.ret fr xv mem)
+  | .unreachable _ => .error "unreachable block executed"
+
+def Wil.advance (fr : Wil.Frame) : Wil.Frame := { fr with pc := Nat.succ fr.pc }
+
+def Wil.bindParams : List Wil.Var → List Wil.Val → List (Nat × Wil.Val)
+  | .nil, _ => .nil
+  | .cons p ps, .cons v vs => .cons (p.index, Wil.Val.fit p.ty v) (Wil.bindParams ps vs)
+  | .cons _ _, .nil => .nil
+
+def Wil.initLocals : List Wil.Var → List (Nat × Wil.Val)
+  | .nil => .nil
+  | .cons v vs => .cons (v.index, Wil.Val.default v.ty) (Wil.initLocals vs)
+
+def Wil.initRegs (params : List Wil.Var) (args : List Wil.Val) (locals : List Wil.Var) : List (Nat × Wil.Val) :=
+  List.append (Wil.bindParams params args) (Wil.initLocals locals)
+
+def Wil.route (prog : Wil.Program) (fr : Wil.Frame) (rest : List Wil.Frame) : Wil.Act → Wil.StepResult
+  | .cont fr' mem => .next (Wil.Config.mk prog mem (.cons fr' rest))
+  | .invoke fr' mem callee args dest =>
+    let caller := Wil.advance fr';
+    let frame := Wil.Frame.mk callee callee.entry 0 (Wil.initRegs callee.params args callee.locals) dest;
+    .next (Wil.Config.mk prog mem (.cons frame (.cons caller rest)))
+  | .ret fr' v mem => match rest with
+    | .nil => .done v
+    | .cons caller rest' =>
+      let caller' := match fr'.retTo with
+        | .none => caller
+        | .some x => { caller with regs := Wil.setReg x.index (Wil.Val.fit x.ty v) caller.regs };
+      .next (Wil.Config.mk prog mem (.cons caller' rest'))
+
+/-- One concrete step. It is total: a missing block, an unbound register, a bad memory
+access or an unimplemented indirect call is a `fault`, never a stuck function. -/
+def Wil.step (c : Wil.Config) : Wil.StepResult :=
+  match c.frames with
+  | .nil => .fault "no frame"
+  | .cons fr rest => match Wil.listNth fr.code.blocks fr.block.index with
+    | .none => .fault "block id out of range"
+    | .some blk => match Wil.listNth blk.stmts fr.pc with
+      | .some s => match Wil.execStmt c.prog fr c.mem s with
+        | .error msg => .fault msg
+        | .ok act => Wil.route c.prog fr rest act
+      | .none => match Wil.execTerm fr c.mem blk.term with
+        | .error msg => .fault msg
+        | .ok act => Wil.route c.prog fr rest act
+
+/-- The concrete one-step relation: `c` steps to `c'` when the step function says so.
+`Wil.step` is the executable form; `Wil.Step` is the proposition S5's soundness
+statements are about (`Transfer.sound : … → Wil.StepStmt s σ σ' → …`). -/
+def Wil.Step (c c' : Wil.Config) : Prop := Wil.step c = Wil.StepResult.next c'
+
+/-- Run a configuration for at most `fuel` steps. Fuel is consumed by every step
+(statement, terminator, call and return), so recursion and loops both end in
+`outOfFuel`. -/
+def Wil.run : Nat → Wil.Config → Wil.Result
+  | .zero, _ => .outOfFuel
+  | .succ fuel, c => match Wil.step c with
+    | .next c' => Wil.run fuel c'
+    | .done v => .ok v
+    | .fault m => .fault m
+
+/-- The initial configuration of `name` applied to `args`: parameters are bound (and
+coerced to their declared types), locals start at their type's default, and memory is
+empty. -/
+def Wil.entry (p : Wil.Program) (name : String) (args : List Wil.Val) : Except String Wil.Config :=
+  match Wil.findFunc p name with
+  | .none => .error (String.append "no such function: " name)
+  | .some fn => match Nat.beq (List.length args) (List.length fn.params) with
+    | .false => .error (String.append "arity mismatch calling " name)
+    | .true =>
+      let frame := Wil.Frame.mk fn fn.entry 0 (Wil.initRegs fn.params args fn.locals) .none;
+      .ok (Wil.Config.mk p .nil (.cons frame .nil))
+
+/-- `Wil.run` a whole function call. -/
+def Wil.runFunction (p : Wil.Program) (fuel : Nat) (name : String) (args : List Wil.Val) : Wil.Result :=
+  match Wil.entry p name args with
+  | .error m => .fault m
+  | .ok c => Wil.run fuel c
+
+-- ## Threads, regions and synchronisation primitives
+--
+-- Everything above this line is the sequential machine and is *unchanged*: `Wil.step`,
+-- `Wil.Step` and `Wil.run` are the same functions, so every existing program and every
+-- existing analysis result is untouched. What follows is a concurrent machine layered
+-- over `Wil.step`: a thread is its own call stack, the store is shared, and a
+-- synchronisation primitive is a call to one of a small table of reserved names (so no
+-- `Wil.Stmt` constructor is added and the exhaustive matches in the analyses still
+-- compile). The design is `wiz-notes/scry-wil-concurrency.md`.
+
+/-- Which thread owns a block. `shared` blocks are visible to every thread (the root's
+allocations); `local owner` blocks belong to one thread. A `local` block may only be
+loaded, stored or freed by its owner: another thread's access faults, so thread locality
+is part of the step relation, not a comment. -/
+inductive Wil.Region where
+  | shared
+  | local (owner : Nat)
+
+/-- Why a thread cannot move: it is waiting for a thread to finish, or for a lock. A
+blocked thread retries the same instruction once the wait ends, so no instruction is
+lost and no bookkeeping is needed. -/
+inductive Wil.Wait where
+  | thread (tid : Nat)
+  | lock (id : Nat)
+
+/-- A thread's status: it can move, it is waiting for `why`, or it has returned `value`. -/
+inductive Wil.TStatus where
+  | runnable
+  | blocked (why : Wil.Wait)
+  | done (value : Wil.Val)
+
+/-- A thread: its own call stack (`frames`, head = current frame, as in `Wil.Config`),
+the locks it holds, and its status. The registers and the stack are thread-local; the
+store is `Wil.CConfig.mem`. -/
+structure Wil.Thread where
+  id : Nat
+  frames : List Wil.Frame
+  held : List Nat
+  status : Wil.TStatus
+
+/-- A concurrent configuration: the program, the ONE shared store (sequentially
+consistent), the region table, the lock table (lock id -> owner thread), the threads in
+ascending id order (thread 0 is the root), and the next id to hand out. -/
+structure Wil.CConfig where
+  prog : Wil.Program
+  mem : Wil.Mem
+  regions : List (Nat × Wil.Region)
+  locks : List (Nat × Nat)
+  threads : List Wil.Thread
+  nextTid : Nat
+
+/-- A synchronisation primitive: what a reserved callee name means. The table is shared
+by the concurrent machine and by the static race analysis, so they cannot disagree about
+what a `lock` is. -/
+inductive Wil.SyncOp where
+  | spawn (fn : String)
+  | joinOp
+  | lockOp
+  | unlockOp
+  | atomicAdd
+  | fenceOp
+
+/-- The reserved callee names. `spawn:<f>` starts a thread running `f` on the call's
+arguments; the other names are the primitives of the memory model (`atomic_add` is one
+step, `fence` is a no-op under sequential consistency). A sequential `Wil.run` of a
+program that calls one of these faults (`no such function`), exactly as before. -/
+def Wil.syncOf (name : String) : Option Wil.SyncOp :=
+  if String.eq name "lock" then .some .lockOp
+  else if String.eq name "unlock" then .some .unlockOp
+  else if String.eq name "join" then .some .joinOp
+  else if String.eq name "atomic_add" then .some .atomicAdd
+  else if String.eq name "fence" then .some .fenceOp
+  else if String.startsWith name "spawn:" then .some (.spawn (String.drop 6 name))
+  else .none
+
+-- ## Thread and configuration helpers
+
+def Wil.threadOf (c : Wil.CConfig) (tid : Nat) : Option Wil.Thread :=
+  List.find (fun t => Nat.beq t.id tid) c.threads
+
+def Wil.setThread (ts : List Wil.Thread) (t : Wil.Thread) : List Wil.Thread :=
+  List.map (fun u => match Nat.beq u.id t.id with
+    | .true => t
+    | .false => u) ts
+
+def Wil.regionOf (c : Wil.CConfig) (b : Nat) : Wil.Region :=
+  match List.find (fun p => Nat.beq p.1 b) c.regions with
+  | .none => Wil.Region.shared
+  | .some p => p.2
+
+/-- The new region entries for blocks `start … start+count-1`. -/
+def Wil.regionRange : Nat → Nat → Wil.Region → List (Nat × Wil.Region)
+  | .zero, _, _ => .nil
+  | .succ k, start, r => .cons (start, r) (Wil.regionRange k (Nat.succ start) r)
+
+/-- Record the region of the blocks a step appended to the store. A block the root
+allocates is shared; a block a spawned thread allocates is local to it. `oldLen` and
+`newLen` are the store's length before and after the step. -/
+def Wil.grownRegions (regions : List (Nat × Wil.Region)) (oldLen newLen owner : Nat) :
+    List (Nat × Wil.Region) :=
+  match Nat.sub newLen oldLen with
+  | .zero => regions
+  | .succ n =>
+    let r := match Nat.beq owner 0 with
+      | .true => Wil.Region.shared
+      | .false => Wil.Region.local owner;
+    List.append regions (Wil.regionRange (Nat.succ n) oldLen r)
+
+def Wil.resultOf (c : Wil.CConfig) (tid : Nat) : Option Wil.Val :=
+  match Wil.threadOf c tid with
+  | .none => .none
+  | .some t => match t.status with
+    | .done v => .some v
+    | _ => .none
+
+/-- The runnable thread ids, in ascending order (the threads list is ascending). -/
+def Wil.runnableIds (c : Wil.CConfig) : List Nat :=
+  List.map (fun t => t.id) (List.filter (fun t => match t.status with
+    | .runnable => .true
+    | _ => .false) c.threads)
+
+def Wil.allFinished (c : Wil.CConfig) : Bool :=
+  List.all (fun t => match t.status with
+    | .done _ => .true
+    | _ => .false) c.threads
+
+/-- Whether a wait can end in `c`: the joined thread has returned, or the lock is free. -/
+def Wil.waitOver (c : Wil.CConfig) (w : Wil.Wait) : Bool :=
+  match w with
+  | .thread tid => match Wil.threadOf c tid with
+    | .none => .true
+    | .some t => match t.status with
+      | .done _ => .true
+      | _ => .false
+  | .lock id => match List.find (fun p => Nat.beq p.1 id) c.locks with
+    | .none => .true
+    | .some _ => .false
+
+/-- Wake every blocked thread whose wait is over. Waking is not a step: it only changes
+a status, and the driver does it before choosing a thread. -/
+def Wil.wake (c : Wil.CConfig) : Wil.CConfig :=
+  { c with threads := List.map (fun t => match t.status with
+      | .blocked w => match Wil.waitOver c w with
+        | .true => { t with status := .runnable }
+        | .false => t
+      | _ => t) c.threads }
+
+-- ## Accessing the current instruction
+
+def Wil.curStmt (fr : Wil.Frame) : Option Wil.Stmt :=
+  match Wil.listNth fr.code.blocks fr.block.index with
+  | .none => .none
+  | .some blk => Wil.listNth blk.stmts fr.pc
+
+/-- The pointer a statement dereferences, if it dereferences one. -/
+def Wil.memAccessOf (fr : Wil.Frame) : Option Wil.Var :=
+  match Wil.curStmt fr with
+  | .none => .none
+  | .some s => match s with
+    | .assign _ (.load p) _ => .some p
+    | .store p _ _ => .some p
+    | .free p _ => .some p
+    | _ => .none
+
+/-- The reserved call at the thread's `pc`, if the current instruction is one. -/
+def Wil.syncAt (t : Wil.Thread) : Option (Wil.SyncOp × Option Wil.Var × List Wil.Var) :=
+  match t.frames with
+  | .nil => .none
+  | .cons fr _ => match Wil.curStmt fr with
+    | .some (.call r (.direct name) args _) => match Wil.syncOf name with
+      | .some op => .some (op, r, args)
+      | .none => .none
+    | _ => .none
+
+def Wil.advanceHead (t : Wil.Thread) : Wil.Thread :=
+  match t.frames with
+  | .nil => t
+  | .cons fr rest => { t with frames := .cons (Wil.advance fr) rest }
+
+def Wil.advanceHeadReg (t : Wil.Thread) (x : Wil.Var) (v : Wil.Val) : Wil.Thread :=
+  match t.frames with
+  | .nil => t
+  | .cons fr rest =>
+    let fr' := { fr with regs := Wil.setReg x.index (Wil.Val.fit x.ty v) fr.regs,
+                        pc := Nat.succ fr.pc };
+    { t with frames := .cons fr' rest }
+
+/-- The frame a thread would step, if it has one. -/
+def Wil.threadConfig (c : Wil.CConfig) (t : Wil.Thread) : Wil.Config :=
+  Wil.Config.mk c.prog c.mem t.frames
+
+-- ## The step relation
+
+inductive Wil.CStepResult where
+  | next (c : Wil.CConfig)
+  | fault (msg : String)
+
+/-- The lock a value names: the block of a pointer, or an integer id. -/
+def Wil.lockIdOf (v : Wil.Val) : Option Nat :=
+  match v with
+  | .ptr b _ => .some b
+  | .int _ _ bits => .some bits
+  | _ => .none
+
+/-- A thread's pointer must name a block its region allows: `shared` for everyone, a
+`local` block only for its owner. -/
+def Wil.ptrCheck (c : Wil.CConfig) (t : Wil.Thread) (fr : Wil.Frame) (p : Wil.Var) :
+    Except String Unit :=
+  match Wil.getReg fr p with
+  | .error _ => .ok ()            -- let the sequential step report the unbound register
+  | .ok v => match v with
+    | .ptr b _ => match Wil.regionOf c b with
+      | .shared => .ok ()
+      | .local o => match Nat.beq o t.id with
+        | .true => .ok ()
+        | .false => .error ("cross-thread access to a block local to thread " ++ Nat.repr o)
+    | _ => .ok ()
+
+/-- The region check for the instruction at the thread's `pc`: the sequential accesses
+(`load`, `store`, `free`) and `atomic_add`'s pointer. -/
+def Wil.regionCheck (c : Wil.CConfig) (t : Wil.Thread) (fr : Wil.Frame) : Except String Unit :=
+  match Wil.memAccessOf fr with
+  | .some p => Wil.ptrCheck c t fr p
+  | .none => match Wil.curStmt fr with
+    | .some (.call _ (.direct name) args _) => match Wil.syncOf name with
+      | .some .atomicAdd => match args with
+        | .cons p _ => Wil.ptrCheck c t fr p
+        | .nil => .ok ()
+      | _ => .ok ()
+    | _ => .ok ()
+
+/-- One synchronisation step of thread `t`. `fr` is its current frame, `dest` and `args`
+are the reserved call's destination and arguments. -/
+def Wil.syncStep (c : Wil.CConfig) (t : Wil.Thread) (fr : Wil.Frame) (op : Wil.SyncOp)
+    (dest : Option Wil.Var) (args : List Wil.Var) : Wil.CStepResult :=
+  match op with
+  | .spawn fn => match Wil.evalArgs fr args with
+    | .error m => .fault m
+    | .ok vals => match Wil.findFunc c.prog fn with
+      | .none => .fault ("spawn: no such function: " ++ fn)
+      | .some f => match Nat.beq (List.length vals) (List.length f.params) with
+        | .false => .fault ("spawn: arity mismatch in " ++ fn)
+        | .true =>
+          let nf := Wil.Frame.mk f f.entry 0 (Wil.initRegs f.params vals f.locals) .none;
+          let nt := Wil.Thread.mk c.nextTid (.cons nf .nil) .nil .runnable;
+          let t' := match dest with
+            | .none => Wil.advanceHead t
+            | .some x => Wil.advanceHeadReg t x (.int 64 .false c.nextTid);
+          .next { c with threads := List.append (Wil.setThread c.threads t') (.cons nt .nil),
+                          nextTid := Nat.succ c.nextTid }
+  | .joinOp => match args with
+    | .nil => .fault "join: missing argument"
+    | .cons a _ => match Wil.getReg fr a with
+      | .error m => .fault m
+      | .ok v => match v with
+        | .int _ _ bits => match Wil.threadOf c bits with
+          | .none => .fault ("join: no thread " ++ Nat.repr bits)
+          | .some u => match u.status with
+            | .done rv =>
+              let t' := match dest with
+                | .none => Wil.advanceHead t
+                | .some x => Wil.advanceHeadReg t x rv;
+              .next { c with threads := Wil.setThread c.threads t' }
+            | _ => .next { c with threads := Wil.setThread c.threads
+                { t with status := .blocked (.thread bits) } }
+        | _ => .fault "join: not an integer thread id"
+  | .lockOp => match args with
+    | .nil => .fault "lock: missing argument"
+    | .cons a _ => match Wil.getReg fr a with
+      | .error m => .fault m
+      | .ok v => match Wil.lockIdOf v with
+        | .none => .fault "lock: not a lock handle"
+        | .some l => match List.find (fun p => Nat.beq p.1 l) c.locks with
+          | .none =>
+            .next { c with locks := List.cons (l, t.id) c.locks,
+                            threads := Wil.setThread c.threads
+                              (Wil.advanceHead { t with held := List.cons l t.held }) }
+          | .some p => match Nat.beq p.2 t.id with
+            | .true => .fault "lock: already held by this thread (not reentrant)"
+            | .false => .next { c with threads := Wil.setThread c.threads
+                { t with status := .blocked (.lock l) } }
+  | .unlockOp => match args with
+    | .nil => .fault "unlock: missing argument"
+    | .cons a _ => match Wil.getReg fr a with
+      | .error m => .fault m
+      | .ok v => match Wil.lockIdOf v with
+        | .none => .fault "unlock: not a lock handle"
+        | .some l => match List.find (fun p => Nat.beq p.1 l) c.locks with
+          | .none => .fault "unlock: not held"
+          | .some p => match Nat.beq p.2 t.id with
+            | .false => .fault "unlock: not held by this thread"
+            | .true =>
+              let t' := Wil.advanceHead { t with held := List.filter (fun k => Bool.not (Nat.beq k l)) t.held };
+              .next { c with locks := List.filter (fun q => Bool.not (Nat.beq q.1 l)) c.locks,
+                              threads := Wil.setThread c.threads t' }
+  | .atomicAdd => match args with
+    | .cons p (.cons v _) => match Wil.getReg fr p, Wil.getReg fr v with
+      | .ok pv, .ok vv => match Wil.memLoad c.mem pv with
+        | .error m => .fault m
+        | .ok old => match Wil.Val.bin .add old vv with
+          | .error m => .fault m
+          | .ok nv => match Wil.memStore c.mem pv nv with
+            | .error m => .fault m
+            | .ok mem' =>
+              let t' := match dest with
+                | .none => Wil.advanceHead t
+                | .some x => Wil.advanceHeadReg t x old;
+              .next { c with mem := mem', threads := Wil.setThread c.threads t' }
+      | .error m, _ => .fault m
+      | _, .error m => .fault m
+    | _ => .fault "atomic_add: expected (pointer, value)"
+  | .fenceOp => .next { c with threads := Wil.setThread c.threads (Wil.advanceHead t) }
+
+/-- **One concurrent micro-step**: thread `tid` either takes one sequential step
+(statement, terminator, call, return) or performs one synchronisation step of the
+reserved call at its `pc`. The store is read and written whole, so the model is
+sequentially consistent. -/
+def Wil.cstep (c : Wil.CConfig) (tid : Nat) : Wil.CStepResult :=
+  match Wil.threadOf c tid with
+  | .none => .fault ("no thread " ++ Nat.repr tid)
+  | .some t => match t.status with
+    | .done _ => .fault "step: thread has finished"
+    | .blocked _ => .fault "step: thread is blocked"
+    | .runnable => match t.frames with
+      | .nil => .fault "step: runnable thread with no frame"
+      | .cons fr _ => match Wil.regionCheck c t fr with
+        | .error m => .fault m
+        | .ok _ => match Wil.syncAt t with
+          | .some (op, dest, args) => Wil.syncStep c t fr op dest args
+          | .none => match Wil.step (Wil.threadConfig c t) with
+            | .next c' =>
+              let oldLen := List.length c.mem;
+              .next { c with mem := c'.mem,
+                              regions := Wil.grownRegions c.regions oldLen (List.length c'.mem) t.id,
+                              threads := Wil.setThread c.threads { t with frames := c'.frames } }
+            | .done v => .next { c with threads := Wil.setThread c.threads
+                { t with frames := .nil, status := .done v } }
+            | .fault m => .fault m
+
+/-- The concurrent one-step relation: `c` goes to `c'` when thread `tid` moves. The
+counterpart of `Wil.Step`, for a soundness statement about a concurrent analysis. -/
+def Wil.CStep (c c' : Wil.CConfig) (tid : Nat) : Prop :=
+  Wil.cstep c tid = Wil.CStepResult.next c'
+
+-- ## Schedulers and the fuel-bounded interleaving driver
+
+/-- A scheduler: the step number, the id chosen last, and the runnable ids in ascending
+order, to one of those ids. It is a pure function of the state, so an interleaving is
+reproducible. -/
+def Wil.Sched : Type := Nat → Nat → List Nat → Nat
+
+def Wil.schedFirst : Wil.Sched := fun _ _ ids => match ids with
+  | .cons i _ => i
+  | .nil => 0
+
+def Wil.schedRoundRobin : Wil.Sched := fun _ last ids =>
+  match List.find (fun i => Nat.lt last i) ids with
+  | .some i => i
+  | .none => match ids with
+    | .cons i _ => i
+    | .nil => 0
+
+/-- `k` wrapped into the list (the head when empty). -/
+def Wil.nthWrap {A : Type} (xs : List A) (k : Nat) : Option A :=
+  match xs with
+  | .nil => .none
+  | _ => Wil.listNth xs (Nat.mod k (List.length xs))
+
+/-- A pinned schedule: choice `script[step]` (modulo the ready set). When the script runs
+out, the first runnable thread moves. -/
+def Wil.schedScript (script : List Nat) : Wil.Sched := fun step _ ids =>
+  match Wil.nthWrap script step with
+  | .some k => match Wil.nthWrap ids k with
+    | .some i => i
+    | .none => 0
+  | .none => match ids with
+    | .cons i _ => i
+    | .nil => 0
+
+inductive Wil.COut where
+  | allDone
+  | deadlock
+  | outOfFuel
+  | fault (tid : Nat) (msg : String)
+  | badEntry (msg : String)
+
+def Wil.COut.show : Wil.COut → String
+  | .allDone => "all-done"
+  | .deadlock => "deadlock"
+  | .outOfFuel => "out-of-fuel"
+  | .fault tid m => "fault t" ++ Nat.repr tid ++ ": " ++ m
+  | .badEntry m => "bad-entry: " ++ m
+
+/-- The outcome of a bounded run, the ids that moved in order, and the configuration it
+stopped at (also on `outOfFuel`, so a test can inspect the cut). -/
+structure Wil.CRun where
+  out : Wil.COut
+  trace : List Nat
+  final : Wil.CConfig
+
+def Wil.CRun.valueOf (r : Wil.CRun) (tid : Nat) : Option Wil.Val := Wil.resultOf r.final tid
+
+/-- The run's trace as `"0,1,1,0"`. -/
+def Wil.showIds (xs : List Nat) : String := String.intercalate "," (List.map Nat.repr xs)
+
+partial def Wil.crunAux (sched : Wil.Sched) (fuel last : Nat) (c : Wil.CConfig)
+    (acc : List Nat) : Wil.CRun :=
+  match fuel with
+  | .zero => Wil.CRun.mk .outOfFuel (List.reverse acc) c
+  | .succ k =>
+    let c0 := Wil.wake c;
+    match Wil.allFinished c0 with
+    | .true => Wil.CRun.mk .allDone (List.reverse acc) c0
+    | .false => match Wil.runnableIds c0 with
+      | .nil => Wil.CRun.mk .deadlock (List.reverse acc) c0
+      | ids =>
+        let tid := sched (List.length acc) last ids;
+        match Wil.cstep c0 tid with
+        | .next c' => Wil.crunAux sched k tid c' (List.cons tid acc)
+        | .fault m => Wil.CRun.mk (.fault tid m) (List.reverse acc) c0
+
+/-- Run `c` for at most `fuel` micro-steps, letting `sched` choose a runnable thread at
+every step. **One interleaving**, not all of them: a different scheduler may return a
+different value. -/
+def Wil.crun (sched : Wil.Sched) (fuel : Nat) (c : Wil.CConfig) : Wil.CRun :=
+  Wil.crunAux sched fuel 0 c .nil
+
+/-- The initial concurrent configuration of `name` applied to `args`: one root thread
+(thread 0), an empty store, and no locks. Region and lock ids stay empty until a thread
+allocates or locks. -/
+def Wil.centry (p : Wil.Program) (name : String) (args : List Wil.Val) : Except String Wil.CConfig :=
+  match Wil.findFunc p name with
+  | .none => .error (String.append "no such function: " name)
+  | .some fn => match Nat.beq (List.length args) (List.length fn.params) with
+    | .false => .error (String.append "arity mismatch calling " name)
+    | .true =>
+      let fr := Wil.Frame.mk fn fn.entry 0 (Wil.initRegs fn.params args fn.locals) .none;
+      let t := Wil.Thread.mk 0 (.cons fr .nil) .nil .runnable;
+      .ok (Wil.CConfig.mk p .nil .nil .nil (.cons t .nil) 1)
+
+/-- `Wil.crun` a whole function call, from `Wil.centry`. -/
+def Wil.crunFunction (p : Wil.Program) (fuel : Nat) (sched : Wil.Sched) (name : String)
+    (args : List Wil.Val) : Wil.CRun :=
+  match Wil.centry p name args with
+  | .error m => Wil.CRun.mk (.badEntry m) .nil (Wil.CConfig.mk p .nil .nil .nil .nil 1)
+  | .ok c => Wil.crun sched fuel c

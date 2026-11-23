@@ -1,0 +1,44 @@
+import Prelude
+import Text
+import Lint
+
+/-!
+A fixture that reports, as one string, what `lib/Lint.wiz` thinks the registry's names
+are and what it reads from a stable view. The `wiz-lint` test compares the string with
+`Wiz/Lint/Basic.lean` and `Wiz/Lint.lean`'s `CommandView`, so the mirror cannot drift
+from the host.
+-/
+
+def capKeys : String := String.intercalate "," (List.map Lint.Capability.key Lint.Capability.all)
+
+def stableLabel (c : Lint.Capability) : String :=
+  String.append (String.append (Lint.Capability.key c) "=")
+    (match Lint.Capability.stable c with
+    | .true => "true"
+    | .false => "false")
+
+def capStable : String := String.intercalate "," (List.map stableLabel Lint.Capability.all)
+
+def catKeys : String := String.intercalate "," (List.map Lint.Category.key Lint.Category.all)
+def sevKeys : String := String.intercalate "," (List.map Lint.Severity.key Lint.Severity.all)
+def scopeKeys : String := String.intercalate "," (List.map Lint.Scope.key Lint.Scope.all)
+
+def probe (view : String) : String :=
+  let c := Lint.Command.parse view;
+  let spanText := match c.span with
+    | .some s => String.append (Nat.repr s.start) (String.append "," (Nat.repr s.stop))
+    | .none => "nospan";
+  let declText := match c.decls with
+    | .cons d _ => String.append d.name (match d.hasDoc with | .true => "!" | .false => "?")
+    | .nil => "nodecl";
+  let msgCode := match c.messages with
+    | .cons m _ => m.code
+    | .nil => "nomsg";
+  let finding := Lint.Finding.render (Lint.Finding.mk 7 9 "a#1" "msg");
+  String.intercalate "|"
+    (.cons capKeys (.cons capStable (.cons catKeys (.cons sevKeys (.cons scopeKeys
+      (.cons (match Lint.Command.has c .facts with | .true => "facts" | .false => "nofacts")
+      (.cons spanText (.cons declText (.cons msgCode (.cons finding
+      (.cons (match Lint.packageCode "W501" with | .true => "pkg" | .false => "nopkg")
+      (.cons (match Lint.Capability.ofKey "facts" with | .some .facts => "ok" | _ => "bad")
+      .nil))))))))))))
