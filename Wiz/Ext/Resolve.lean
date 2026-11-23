@@ -39,6 +39,16 @@ gets a package path; a backend is `[a-z][a-z0-9-]*` in practice. -/
 def nameOk (n : String) : Bool :=
   !n.isEmpty && !n.any (fun c => c.isWhitespace || c == '/' || c == '\\')
 
+/-- Is any element of `xs` repeated? Sorts a copy and compares neighbours, so it is
+O(n log n) rather than the O(n²) of `eraseDups.length != length` (the aliases list is
+short, but the complexity check refuses the quadratic idiom on purpose). The order of
+`xs` itself is never changed - only the presence of a duplicate matters here. -/
+private def hasDuplicate (xs : List String) : Bool :=
+  let rec adjacentEqual : List String → Bool
+    | a :: b :: rest => a == b || adjacentEqual (b :: rest)
+    | _ => false
+  adjacentEqual (xs.mergeSort (· ≤ ·))
+
 /-- `a, b or c`: one spelling for the choices a refusal lists. -/
 def choicesText (names : List String) : String :=
   match names.reverse with
@@ -73,7 +83,7 @@ def Table.register (t : Table) (e : Entry) : Except Diagnostic Table := do
       throw { code := s!"invalid-{k}-payload",
               message := s!"{k} {e.name}: provider '{e.provider}' cannot register host code (a .core payload)" }
   | _ => pure ()
-  if e.aliases.eraseDups.length != e.aliases.length then
+  if hasDuplicate e.aliases then
     throw { code := s!"invalid-{k}-alias", message := s!"{k} {e.name}: an alias is listed twice" }
   for a in e.aliases do
     unless nameOk a do
