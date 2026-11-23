@@ -15,7 +15,11 @@ elaboration cache's containment boundary (commit `bd6a330df`):
 * the generation index only expires a layer, it never selects an entry (I8);
 * a manifest cannot name a file outside its layer (I4);
 * the write cache is integrity, not authenticity (I11): a self-consistent rewrite is
-  served, and that is the documented limit, not a bug to "fix" by weakening the default.
+  served, and that is the documented limit, not a bug to "fix" by weakening the default;
+* region repair converges (K1): after a tamper, a further run hits, and two writes of one
+  artifact give one SHA-256 (T4/T4b);
+* poison is global per key (I12 option a, T11);
+* per-layer `--cache-ro-unsigned` is the pending task 11 contract (T12, skipped until K3).
 
 The cases are independent of `=toolchain`/`=modules`; those groups keep their own
 end-to-end coverage. This group is the spec's executable form.
@@ -81,6 +85,16 @@ def invCold (cache : System.FilePath) (src : String) (init : CommandState ZeroOn
   let opts := if opts.rig.isEmpty then { opts with rig := rig } else opts
   pure (← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
     (verify := verify) (rig := rig)).1
+
+/-- The number before `label` on the stats line that starts with `pfx` in `err`
+(none: no such line). Exact field, so "10 modules" is not "0 modules". -/
+def invStat (err pfx label : String) : Option Nat := do
+  let line : String ← (err.splitOn "\n").find? (·.startsWith pfx)
+  let parts : List String := (line.drop pfx.length).toString.splitOn ", "
+  let field : String ← parts.find? (fun (p : String) =>
+    let words := p.splitOn " "
+    (" ".intercalate (words.drop 1)).startsWith label)
+  (field.splitOn " ").head?.bind String.toNat?
 
 def cacheInvariantsGroup : Group where
   name := "cache-invariants"
@@ -219,17 +233,18 @@ def cacheInvariantsGroup : Group where
           s!"the read-only layer was not refused: {refused.stderr}"
         check ((refused.stderr.splitOn "--cache-ro-unsigned").length > 1)
           s!"no opt-in named: {refused.stderr}"
-        check ((refused.stderr.splitOn "0 modules from a region").length > 1)
-          s!"a region was served by default: {refused.stderr}"
+        checkEq (some 0) (invStat refused.stderr "region cache: " "modules from a region")
         checkEq beforeCli (← snapshot ro)
         let served ← run (base ++ #["--cache-ro", ro.toString, "--cache-ro-unsigned",
                                     "--region-stats", "--cache-verify-stats"])
         checkEq 0 served.exitCode
         checkEq coldCli.stdout served.stdout
-        check ((served.stderr.splitOn "0 modules from a region").length == 1)
-          s!"no region was served by the opt-in: {served.stderr}"
-        check ((served.stderr.splitOn "cache verify: 0 manifests").length == 1)
-          s!"no manifest was loaded by the opt-in: {served.stderr}"
+        let some sHits := invStat served.stderr "region cache: " "modules from a region"
+          | throw (IO.userError s!"no region stats line: {served.stderr}")
+        check (sHits > 0) s!"no region was served by the opt-in: {served.stderr}"
+        let some sMan := invStat served.stderr "cache verify: " "manifests"
+          | throw (IO.userError s!"no verify stats line: {served.stderr}")
+        check (sMan > 0) s!"no manifest was loaded by the opt-in: {served.stderr}"
         checkEq beforeCli (← snapshot ro) },
     /- I2/I3/I10 — digest checks are at the file boundary. -/
     { name := "a tampered manifest or region is a miss (the text path answers)", run := fun _ => do
@@ -254,6 +269,12 @@ def cacheInvariantsGroup : Group where
         let s1 ← invCold cache src init rig opts
         checkEq good (s1.messages.toList.map (·.render src))
         check ((← stats.get).misses > m0.misses) "a flipped region byte was not a miss"
+        -- (the repair must converge: one more run serves the region again)
+        let r1 ← stats.get
+        let s1b ← invCold cache src init rig opts
+        checkEq good (s1b.messages.toList.map (·.render src))
+        check ((← stats.get).hits > r1.hits)
+          "the repaired region was not served on the next run (§6.5)"
         -- (the sidecar is not the manifest: recompute it after a flip, and the SHA-256
         -- in the module manifest must still reject the bytes. A fresh cache keeps this
         -- independent of the first tamper's dropped region.)
@@ -274,6 +295,11 @@ def cacheInvariantsGroup : Group where
         checkEq good (s2.messages.toList.map (·.render src))
         check ((← stats2.get).misses > m1.misses)
           "a region with a recomputed sidecar but a stale manifest digest was served"
+        let r2 ← stats2.get
+        let s2b ← invCold cache2 src init rig opts2
+        checkEq good (s2b.messages.toList.map (·.render src))
+        check ((← stats2.get).hits > r2.hits)
+          "the repaired region was not served on the next run (§6.5)"
         -- (a tampered manifest root: its keys are poisoned, the text path answers)
         let some mf ← manifestFor cache2 "M"
           | throw (IO.userError "no manifest for M")
@@ -286,7 +312,32 @@ def cacheInvariantsGroup : Group where
           | throw (IO.userError "the manifest was not rewritten")
         check (man.valid { fast := man.key, strong := man.keySha,
                            toolchain := man.toolchainTag, target := man.targetTag }
-          man.binary "" "") "the rewritten manifest is not valid" },
+          man.binary "" "") "the rewritten manifest is not valid"
+        let r3 ← stats2.get
+        let s3b ← invCold cache2 src init rig opts2
+        checkEq good (s3b.messages.toList.map (·.render src))
+        check ((← stats2.get).hits > r3.hits)
+          "the manifest repair did not converge to a region hit" },
+    /- I10 — the determinism question behind §6.5 (K1). -/
+    { name := "a module region's bytes are deterministic (two writes, one SHA-256)", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 1 + 1\n")]
+        let ms ← Module.loadAll ["lib", dir]
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let c1 ← IO.FS.createTempDir
+        let _ ← invCold c1 "import M\n" init rig
+        let binary ← Cache.binaryId (some c1)
+        let k := invModuleKey ms "M"
+        let some a ← Cache.readModuleRegion (R := ZeroOneMany) c1 binary rig k
+          | throw (IO.userError "M has no region")
+        let c2 ← IO.FS.createTempDir
+        let some e1 ← Cache.writeModuleRegion (R := ZeroOneMany) c2 binary rig k "M"
+          a.effects a.keys a.complete a.rerun
+          | throw (IO.userError "write 1 failed")
+        let some e2 ← Cache.writeModuleRegion (R := ZeroOneMany) c2 binary rig k "M"
+          a.effects a.keys a.complete a.rerun
+          | throw (IO.userError "write 2 failed")
+        checkEq e1.sha256 e2.sha256 },
     /- I6/I9 — pruning is write-cache-only. -/
     { name := "prune never rewrites or prunes a read-only layer (command and pre-run)", run := fun _ => do
         let wiz ← invWiz
@@ -533,7 +584,8 @@ def cacheInvariantsGroup : Group where
         checkEq "main.wiz:2:1: info: 2\n" coldCli.stdout
         let regs ← regionFiles roCli
         check (regs.size > 0) "the CLI cold run wrote no region"
-        let _ ← flipByte regs[0]!
+        for r in regs do
+          let _ ← flipByte r
         let bad ← snapshot roCli
         let v2 ← IO.Process.output { cmd := wiz, args := #["cache", "verify", "--no-cache",
           "--cache-ro", roCli.toString] }
@@ -546,8 +598,10 @@ def cacheInvariantsGroup : Group where
                     "--region-stats"] }
         checkEq 0 w.exitCode
         checkEq "main.wiz:2:1: info: 2\n" w.stdout
-        check ((w.stderr.splitOn "0 without").length == 1)
-          s!"the corrupt read-only region was not a miss: {w.stderr}"
+        let some without := invStat w.stderr "region cache: " "without"
+          | throw (IO.userError s!"no region stats line: {w.stderr}")
+        check (without > 0) s!"the corrupt read-only region was not a miss: {w.stderr}"
+        checkEq (some 0) (invStat w.stderr "region cache: " "modules from a region")
         checkEq bad (← snapshot roCli) },
     /- I11 — the documented limit: a self-consistent rewrite in the write cache is served. -/
     { name := "a self-consistent rewrite is served: integrity is not authenticity (write cache)", run := fun _ => do
@@ -588,7 +642,81 @@ def cacheInvariantsGroup : Group where
         checkEq (some 3) (invNatValue? warm "x")
         let c ← Cache.verifyLayer cache
         checkEq 0 c.mismatches
-        check (c.regions > 0) "the forged region was not scanned" }
+        check (c.regions > 0) "the forged region was not scanned" },
+    /- I12 (§1.4 option a) — poison is global per key. -/
+    { name := "a poisoned read layer hides a valid write-cache region (global poison)", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 1 + 1\n"),
+                          ("main.wiz", "import M\n#eval x\n")]
+        let ms ← Module.loadAll ["lib", dir]
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let opts : Cache.RegionOptions := { rig }
+        let w ← IO.FS.createTempDir
+        let ro ← IO.FS.createTempDir
+        let src := "import M\n#eval x\n"
+        let coldW ← invCold w src init rig opts
+        let coldRo ← invCold ro src init rig opts
+        check (!coldW.messages.any (·.severity == .error)) s!"write cold: {coldW.messages.toList.map (·.text)}"
+        check (!coldRo.messages.any (·.severity == .error)) s!"read cold: {coldRo.messages.toList.map (·.text)}"
+        let expected := coldW.messages.toList.map (·.render src)
+        let some mf ← manifestFor ro "M"
+          | throw (IO.userError "no manifest for M in the read layer")
+        invTamperRoot mf
+        let before ← snapshot ro
+        let binary ← Cache.binaryId (some w)
+        let k := invModuleKey ms "M"
+        check (← Cache.readModuleRegion (R := ZeroOneMany) w binary rig k).isSome
+          "the write layer's own region is not valid"
+        let store ← Cache.Store.layeredRegion (R := ZeroOneMany) (some w) [ro] binary opts
+          .warn rig (roUnsigned := true)
+        check (← store.getRegion k).isNone
+          "a poisoned read layer did not hide the write cache's valid region"
+        let (s, _) ← Cache.elaborateCached (some w) [ro] src init 0 (region := some opts)
+          (verify := .warn) (rig := rig) (roUnsigned := true)
+        checkEq expected (s.messages.toList.map (·.render src))
+        checkEq before (← snapshot ro) },
+    /- K3 pending (task 11): the opt-in must cover only the layer before it. -/
+    { name := "per-layer --cache-ro-unsigned: a later layer is still refused (pending task 11)", run := fun _ => do
+        let dir ← mkTree [("A.wiz", "import Prelude\ndef a : Nat := 1\n"),
+                          ("B.wiz", "import Prelude\ndef b : Nat := 2\n"),
+                          ("mainA.wiz", "import A\n#eval a\n"),
+                          ("mainB.wiz", "import B\n#eval b\n"),
+                          ("main.wiz", "import A\nimport B\n#eval a + b\n")]
+        let wiz ← invWiz
+        let roA ← IO.FS.createTempDir
+        let roB ← IO.FS.createTempDir
+        let coldA ← IO.Process.output {
+          cmd := wiz, cwd := some dir,
+          args := #["check", "mainA.wiz", "-I", dir.toString, "--cache", roA.toString,
+                    "--region-cache"] }
+        checkEq 0 coldA.exitCode
+        let coldB ← IO.Process.output {
+          cmd := wiz, cwd := some dir,
+          args := #["check", "mainB.wiz", "-I", dir.toString, "--cache", roB.toString,
+                    "--region-cache"] }
+        checkEq 0 coldB.exitCode
+        let beforeA ← snapshot roA
+        let beforeB ← snapshot roB
+        let out ← IO.Process.output {
+          cmd := wiz, cwd := some dir,
+          args := #["check", "main.wiz", "-I", dir.toString, "--no-cache",
+                    "--cache-ro", roA.toString, "--cache-ro-unsigned",
+                    "--cache-ro", roB.toString, "--region-cache", "--region-stats"] }
+        checkEq 0 out.exitCode
+        checkEq "main.wiz:3:1: info: 3\n" out.stdout
+        let warnedB := (out.stderr.splitOn "refusing an unauthenticated layer").length > 1 &&
+                       (out.stderr.splitOn roB.toString).length > 1
+        if warnedB then
+          let some hits := invStat out.stderr "region cache: " "modules from a region"
+            | throw (IO.userError s!"no region stats line: {out.stderr}")
+          check (hits == 2) s!"expected roA's A+Prelude only, got {hits}: {out.stderr}"
+          let some without := invStat out.stderr "region cache: " "without"
+            | throw (IO.userError s!"no region stats line: {out.stderr}")
+          check (without > 0) s!"roB's module was served: {out.stderr}"
+        else
+          skip "pending task 11: --cache-ro-unsigned is global; roB was served unsigned"
+        checkEq beforeA (← snapshot roA)
+        checkEq beforeB (← snapshot roB) }
   ]
 
 builtin_initialize registerGroup cacheInvariantsGroup

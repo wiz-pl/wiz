@@ -2047,7 +2047,15 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
             { a with binary := binary, textSalt := salt, rig := opts.rig }
           for ent in e.toList do
             let id := Key.id key
-            ms.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (ent, dir))
+            -- (K1) replace the write layer's entries for this id: the failed old entry
+            -- and the fresh one name the same file, and the post-pass `getRegion` walks
+            -- the list old-first. Read-layer entries are kept (they may answer other
+            -- layers), but the write layer must not leave its own stale entry ahead of
+            -- the bytes it just wrote.
+            ms.regions.modify fun mp =>
+              let kept := ((mp[id]?).getD #[]).filter (fun (_, d) => !(ms.inWrite d))
+              -- (the write layer stays first in the lookup order)
+              mp.insert id (#[(ent, dir)] ++ kept)
           pure e
         catch _ => pure none
       | _, _ => pure none
