@@ -160,6 +160,12 @@ so run it from the checkout root.
   `EditorModel.slice : EditorModel.PositionIndex → Nat → Nat → String` plus the doc
   comment after **51.4 s**; the definition 60 ms later was
   `file://…/lib/Web/EditorModel.wiz` range 168:0–173:62 (the whole declaration).
+* Two bundle-job attempts failed on the *node's* environment before the code was reached:
+  (a) the `scry` link failed with `cannot find -lgmp`, because a `grail.local.wiz` copied
+  from the controller names controller store paths — `nix develop` on the node rewrites
+  it; (b) the tree-sitter grammar copied from the store is read-only (`0555`
+  directories), so replacing it needs `chmod -R u+w` first. Both are job-environment
+  fixes, not code changes; the scry compile itself had checked all 66 modules.
 * Why the check/probe used a repointed binary: the heavy build ran on `win3`, so the
   copied-back `.lake/build/bin/wiz` has `win3`'s glibc as its ELF interpreter
   (`glibc-2.44-25`), which this controller does not have. For local probes only, a copy
