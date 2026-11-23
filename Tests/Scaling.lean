@@ -646,7 +646,7 @@ def runExample (p : System.FilePath) (st : CommandState ZeroOneMany) : IO Bool :
   match result with
   | .error e =>
     if e.isToolchain then
-      skip "no toolchain"
+      skipMissing "no toolchain"
       pure false
     else throw (IO.userError s!"{p}: run failed: {e.message}")
   | .ok out =>
@@ -695,7 +695,7 @@ def descSweepExamples (k : Nat) : IO Unit := do
     -- the case is on
     progress p.toString
     unless ← sweepExample p do
-      skip "no toolchain"
+      skipMissing "no toolchain"
       return
 
 /-- The sweep's classification agrees with the examples' markers: every example has a
@@ -757,7 +757,7 @@ def descSweepFixtures : IO Unit := do
   for f in ["check.wiz", "run.wiz", "skip.wiz", "trust.wiz", "import_c.wiz", "skip-trust.wiz",
       "skip-on-demand.wiz"] do
     unless ← sweepExample (dir / f) do
-      skip "no toolchain"
+      skipMissing "no toolchain"
       return
 
 /-- The example chunks cover `examples/` exactly once: their concatenation, sorted, is

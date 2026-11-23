@@ -325,7 +325,7 @@
    "Proc.runLinked: the model is `link` and starts no thread; compiled code runs one (differential: the fork count must be 1)": {"seconds": 3.94},
    "Ref: cells owned by linear points-to tokens; a function's type is its triple": {"seconds": 4.239},
    "WIZ_NO_THREADS (R2): forking, and the waits only another thread could end (empty MVar, full MVar, held lock), stop with a clear message; MVars and locks that never wait work": {"seconds": 8.272},
-   "a build that cannot find the compiler is still a 'no toolchain' skip": {"seconds": 5.311},
+   "a build that cannot find the compiler fails by default, and is a skip only with --allow-missing-deps": {"seconds": 6.2},
    "a chain of 51 threads; endpoints move into children": {"seconds": 3.358},
    "a closure that captured an endpoint is linear itself": {"seconds": 2.264},
    "a dependent protocol: the pure semantics `link` runs it": {"seconds": 2.402},
@@ -2620,6 +2620,7 @@
    "--rerun runs recorded passes again and records the new result": {"seconds": 17.154},
    "--update never records a failure: a program that doesn't build, fails or times out": {"seconds": 29.161},
    "a failing test without a `-- test:` line says it was a check (icestick-cpu C8)": {"seconds": 18.635},
+   "a missing dependency fails by default, skips with --allow-missing-deps / WIZ_ALLOW_MISSING_DEPS, and a declared skip still skips": {"seconds": 8.0},
    "a nested package under the tests root is not a test": {"seconds": 16.383},
    "a wrong output fails, with the first difference": {"seconds": 15.499},
    "tests --run: a failing case exits 1 with its output, a skipped one 3, a bad selector 2": {"seconds": 36.885},
@@ -2643,7 +2644,7 @@
    "wiz cache prune: --days/--dry-run, and a --cache-ro layer is never pruned": {"seconds": 0.357},
    "wiz cache verify/manifest, and a --cache-ro layer is strict by default": {"seconds": 71.95},
    "wiz check --region-cache: a warm run comes from regions, and corrupt ones are misses": {"seconds": 12.664},
-   "wiz, grail and the test driver read no environment variables": {"seconds": 0.122},
+   "wiz and grail read no environment variables; the test driver reads only WIZ_ALLOW_MISSING_DEPS": {"seconds": 0.122},
    "wiz: an unknown flag or command is an error (exit 2), the usage alone is not": {"seconds": 0.284}
   },
   "tooling": {

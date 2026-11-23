@@ -46,8 +46,8 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 
 * HDL laws: the trace obligation sets in `Hdl.AxiStreamLaw`, `Hdl.SpiLaw`, `Hdl.BusLaw`
   and `Hdl.Axi4Law` are Boolean checks over the finite traces the examples generate, and
-  every one is called by `examples/hdl-stream.wiz`, `examples/hdl-spi.wiz`,
-  `examples/hdl-bus-law.wiz` and `examples/hdl-axi4.wiz`, so a law that fails fails the
+  every one is called by `hdl/examples/hdl-stream.wiz`, `hdl/examples/hdl-spi.wiz`,
+  `hdl/examples/hdl-bus-law.wiz` and `hdl/examples/hdl-axi4.wiz`, so a law that fails fails the
   `bus-protocol` or `bus-law` case. The unused (and, for a correct register slice,
   false) `AxiStream.Law.NoLoss`/`NoDup`/`Backpressure`/`SliceNoLoss`/`ConvertNoLoss`
   predicates, the `Axi4.Law.AddressProgression`/`BeatCount` props and the tautological
@@ -57,18 +57,24 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 * HDL signal laws (P2.1): `hdl/src/Hdl/Signal.wiz` proves the knot's algebra
   (`fix_unfold`, `register_fixed_unique`, `fix_pure`, `fix_delay_eq_circuit`), the sized
   register (`registerS_head`, `registerS_eq_register`), the counter's `0, 1, 2, …` in both
-  the `Signal.fix` and `Circuit.loop` spellings, and `Signal.Eqv` congruence for
-  `map`/`zipWith`/`zipWith3`/`register`/`registerS`/`mealy`/`ofCircuit`. The
-  *sized-observation* laws (`mapS_at`, `zipWithS_at`, `mapS_id`, `mapS_comp`, the
-  `mapS_head`/`mapS_tail` forms and the `Eqv` congruences for the sized operators) are
-  documented as blocked, with the three body shapes that fail and the one-line
-  elaborator change that unblocks them (docs/stages/34-hdl-signals.md §34c): a split of a
-  neutral payload is stuck, two projections make a `Signal.fix` knot exponential (the L3
-  example stops finishing), and a single `let p := out a` is rejected by the kernel for a
-  sized `cocon` because surface `out` erases the payload's size and index. All proved laws
-  are pinned by `#check` and `#print axioms` in the `hdl-signal` group (the thirteen
-  algebraic ones list no axioms; the four that mention a `Circuit` or compute `BitVec`
-  literals inherit the library's trusted `Hw HwTy.El`/`UIntN` natives).
+  the `Signal.fix` and `Circuit.loop` spellings, `Signal.Eqv` congruence for
+  `map`/`zipWith`/`zipWith3`/`register`/`registerS`/`mealy`/`ofCircuit`, and the
+  *sized-observation* laws: `mapS_head`, `mapS_tail`, `mapS_at`, `mapS_id`, `mapS_comp`,
+  `zipWithS_head`, `zipWithS_at` and `zipWith3S_at` are `rfl` (pointwise for the `Eqv`
+  ones). All proved laws are pinned by `#check` and `#print axioms` in the `hdl-signal`
+  group (the algebraic ones list no axioms; the four that mention a `Circuit` or compute
+  `BitVec` literals inherit the library's trusted `Hw HwTy.El`/`UIntN` natives).
+
+* elab: surface `out` types its payload at the **predecessor** size, as the kernel has
+  it — `out x : Desc.interp D (ν^{s'}) i` for `x : ν^{↑s} D i`, `s' = sizePred? s`
+  (`∞ ↦ ∞`), in `Wiz/Elab/Term.lean`'s builtin `out` case and in the
+  `selfhost/Frontend.wiz` mirror. Before, the elaborator used the `ν^∞` family, so a
+  `let`-bound observation of a sized value carried a size the kernel's sized `cocon`
+  check rejects (`expected … ν (Signal.desc d A) … inferred … ν^j …`); a value at `∞`
+  was unaffected. This is what makes the sized-signal body `let p := out a` (one
+  observation per cycle, projected) check, so the laws above hold while a `Signal.fix`
+  knot stays linear; a value at a size *variable* is still not observable (the kernel's
+  rule, now reported by the elaborator too). No kernel change.
 
 * selfhost: the driver's `run` POSIX-quotes every component it puts in its `system(3)`
   command (`--cc`, `--llc`, `--rt`, each `--cflags`/`--ldflags` word, input/output
@@ -90,6 +96,21 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   (F10), so `selfhost/Frontend.wiz` documenting the syntax yielded the header `…`,
   which the header-name check (F09) rightly rejects; the playground build failed on a
   comment. Block comments are still scanned (the remaining F10 gap). Tests: `=modules`.
+
+* cache (security): three containment fixes at the elaboration cache's trust boundary.
+  A `.wizr` region is now served only when a module manifest lists it and the bytes match
+  — the unmanifested fallback is gone in every mode, because a region is a type-erased
+  image and its `.wizs` sidecar is written by the same writer (`--region-cache` with
+  `--cache-verify off` now reads and writes no regions). A `--cache-ro` layer is
+  **refused by default**: a manifest is a self-signed digest, so it does not authenticate
+  a foreign layer; `--cache-ro-unsigned` is the explicit opt-in for unauthenticated data
+  (the Nix wrappers pass it for their own store cache). `--cache-verify strict` is now
+  described as manifest-presence, not authenticity. The fast-only legacy key fallback is
+  deleted: an unmanifested `.wizc` is a miss in `warn` (only `--cache-verify off` keeps
+  the old unverified lookup). Compatibility: existing `--cache-ro` users must add
+  `--cache-ro-unsigned` (or `--cache-verify off`); write caches need one cold pass to
+  acquire manifests. A regression fixture plants a forged `.wizc` + `.wizmf` (a claim of
+  `False` and a forged `builtin`) and shows it is refused under the defaults.
 * release: a deterministic source tarball (`nix build .#release-tarball`, or
   `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
   SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes

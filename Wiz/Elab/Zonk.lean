@@ -31,7 +31,7 @@ subterm (under binders at `l + 1`) and instantiating level metas in `sort` and
 `const` (`instLevel`). Unsolved metas stay. -/
 partial def zonk (l : Lvl) (t : Term R) : ElabM R (Term R) := do
   --<sol
-  let (h, args) := Term.spine t
+  let (h, args) := Stats.countedSpine Stats.cells.zonk (Term.spine t)
   match h with
   | .mvar m =>
     match (← lookupMeta m).solution with

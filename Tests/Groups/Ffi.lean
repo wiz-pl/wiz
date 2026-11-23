@@ -109,7 +109,7 @@ def ffiGroup : Group where
     { name := "machine integers and floats", run := fun _ =>
         ioRun ("import IO\ndef main : IO Unit := do\n" ++
           "  IO.println (Nat.toString (UInt64.toNat (UInt64.mul (UInt64.ofNat 1000000) (UInt64.ofNat 1000000))));\n" ++
-          "  IO.println (Float64.toString (Float64.div (Float64.ofNat 1) (Float64.ofNat 4)))") "1000000000000\n0.25\n" },
+          "  IO.println (Float64.toString (Float64.div (Float64.ofNat 1) (Float64.ofNat 4)))") "1000000000000\n2.5E-1\n" },
     -- `wiz_u64_id` takes a `uint64_t` (the marshalling is `wiz_in_nat`), so
     -- `UInt64.ofNat` has to reduce mod 2^64 in Wiz: a Nat at or above 2^64 used to
     -- reach the C side and panic ("a number is too big for a C integer").

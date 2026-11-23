@@ -14,7 +14,8 @@
 import { readFileSync } from "node:fs";
 import { startMockServer, FIXTURE_TEXT } from "./mock_lsp_server.mjs";
 import { connectWebSocket } from "./ws_node_client.mjs";
-import { LspClient, LspError, parseEndpoint, endpointFromSearch, withToken, withoutToken } from "./lsp-client.js";
+import { LspClient, LspError, parseEndpoint, endpointFromSearch, withToken, withoutToken,
+  textOffset, textPosition, applyTextEdits, mapOffset, formattingOptions } from "./lsp-client.js";
 import {
   renderPanel, renderGoalResult, renderTermResult, renderInfoItems, readGoalState, offsetAt, positionAt, rangeOffsets,
   parseSpan, spanText, taggedTreeHtml, escapeHtml, plainText, renderSelection,
@@ -338,6 +339,65 @@ checkThat("panel: the severity", withDiagnostic.includes("sev-error"));
     looseStored && looseStored.diagnostics ? looseStored.diagnostics.map((d) => d.message).join(",") : null, "second");
 }
 
+// ## 6d. `textDocument/formatting`, and the one `WorkspaceEdit` applier
+//
+// The server answers one `TextEdit`; the client's shared applier converts its UTF-16
+// ranges, applies the edits from the end, guards the document version, and maps a caret
+// through them. The page action built on this is tested in §10.
+{
+  check("formatting: advertised", client.capabilities.documentFormattingProvider, true);
+  check("formatting: range formatting advertised",
+    client.capabilities.documentRangeFormattingProvider, true);
+  const bad = "def  f :Nat:=1\n";
+  client.changeDocument(uri, bad);
+  const edits = await client.formatting(uri, { tabSize: 4, insertSpaces: true });
+  check("formatting: one edit", edits.length, 1);
+  check("formatting: the options are sent",
+    mock.stats.formattingArgs[mock.stats.formattingArgs.length - 1].options.tabSize, 4);
+  check("formatting: the edit's text", edits[0].newText, "def f : Nat := 1\n");
+  const [applied] = client.applyWorkspaceEdit({ changes: { [uri]: edits } },
+    { expectedVersion: client.docs.get(uri).version });
+  check("formatting: the applier's text", applied.text, "def f : Nat := 1\n");
+
+  // The applier: reverse offset order (a later edit does not invalidate an earlier one),
+  // UTF-16 positions, and the version guard.
+  const direct = new LspClient({ url: "ws://127.0.0.1:1" });
+  const dUri = "file:///a.wiz";
+  direct.docs.set(dUri, { uri: dUri, text: "abcdef", version: 3 });
+  const two = { documentChanges: [{ textDocument: { uri: dUri, version: 3 }, edits: [
+    { range: { start: { line: 0, character: 1 }, end: { line: 0, character: 2 } }, newText: "X" },
+    { range: { start: { line: 0, character: 4 }, end: { line: 0, character: 5 } }, newText: "YZ" },
+  ] }] };
+  check("applier: reverse order", direct.applyWorkspaceEdit(two)[0].text, "aXcdYZf");
+  check("applier: a caret before the edits stays", mapOffset(two.documentChanges[0].edits, 0, "abcdef"), 0);
+  check("applier: a caret after the edits shifts", mapOffset(two.documentChanges[0].edits, 6, "abcdef"), 7);
+  check("applier: a caret inside a replacement clamps", mapOffset([
+    { range: { start: { line: 0, character: 1 }, end: { line: 0, character: 5 } }, newText: "Z" },
+  ], 3, "abcdef"), 2);
+  let stale = null;
+  try {
+    direct.applyWorkspaceEdit({ changes: { [dUri]: two.documentChanges[0].edits } },
+      { expectedVersion: 2 });
+  } catch (e) { stale = e; }
+  check("applier: a version guard refuses stale text", stale && stale.code, -32801);
+  let overlap = null;
+  try {
+    applyTextEdits("abcdef", [
+      { range: { start: { line: 0, character: 1 }, end: { line: 0, character: 4 } }, newText: "X" },
+      { range: { start: { line: 0, character: 3 }, end: { line: 0, character: 5 } }, newText: "Y" },
+    ]);
+  } catch (e) { overlap = e; }
+  check("applier: overlapping edits are refused", overlap && overlap.code, -32602);
+  check("offset: UTF-16 in a JavaScript string index",
+    textOffset("a😀b\nc", { line: 0, character: 3 }), 3);
+  check("offset: the second line", textOffset("a😀b\nc", { line: 1, character: 1 }), 6);
+  check("offset: the inverse", textPosition("a😀b\nc", 6).line, 1);
+  check("options: tabSize passes through", formattingOptions({ tabSize: 8 }).tabSize, 8);
+  check("options: spaces by default", formattingOptions().insertSpaces, true);
+  // restore the fixture the later sections expect
+  client.changeDocument(uri, FIXTURE_TEXT);
+}
+
 // ## 6c. Malformed results: "nothing at the cursor", not "no goals" or an empty goal
 
 // A result that is not the protocol's shape is not the positive claim `goals: []` makes
@@ -598,6 +658,55 @@ check("wiring: the completion request's character", lastCompletion.position.char
 popup.handleKey({ key: "Enter", preventDefault() {}, stopPropagation() {} });
 check("wiring: the accepted item replaced the prefix", editor.value, "Nat.sub");
 check("wiring: the caret after accepting", editor.selectionStart, 7);
+
+// Formatting (`wiz fmt` through the server): the action applies one edit, maps the caret
+// through it, and the page's normal `input` path sends `didChange` with version+1.
+editor.value = "def  f :Nat:=1\n";
+editor.selectionStart = editor.selectionEnd = editor.value.length;
+for (const fn of editor.listeners.input || []) fn({ type: "input" });
+checkThat("wiring: the server has the unformatted text",
+  await waitUntil(() => {
+    const doc = wireMock.documents.get("file:///wire.wiz");
+    return doc && doc.text === "def  f :Nat:=1\n";
+  }), JSON.stringify(wireMock.documents.get("file:///wire.wiz")));
+const versionBeforeFormat = wireMock.documents.get("file:///wire.wiz").version;
+const formatResult = await app.format();
+check("wiring: format applied", formatResult.applied, true);
+check("wiring: one edit", formatResult.edits.length, 1);
+check("wiring: the textarea has the formatted text", editor.value, "def f : Nat := 1\n");
+checkThat("wiring: didChange sent the formatted text",
+  await waitUntil(() => {
+    const doc = wireMock.documents.get("file:///wire.wiz");
+    return doc && doc.text === "def f : Nat := 1\n";
+  }), JSON.stringify(wireMock.documents.get("file:///wire.wiz")));
+check("wiring: didChange used version+1",
+  wireMock.documents.get("file:///wire.wiz").version, versionBeforeFormat + 1);
+check("wiring: the caret stayed at the end", editor.selectionStart, "def f : Nat := 1\n".length);
+
+// A selection formats only the commands inside it (`textDocument/rangeFormatting`).
+const twoLines = "def  a :Nat:=1\ndef  b :Nat:=2\n";
+editor.value = twoLines;
+editor.selectionStart = editor.selectionEnd = 0;
+for (const fn of editor.listeners.input || []) fn({ type: "input" });
+checkThat("wiring: the server has the two commands",
+  await waitUntil(() => {
+    const doc = wireMock.documents.get("file:///wire.wiz");
+    return doc && doc.text === twoLines;
+  }));
+const line2Start = "def  a :Nat:=1\n".length;
+editor.selectionStart = line2Start;
+editor.selectionEnd = twoLines.length;
+const rangeResult = await app.formatSelection();
+check("wiring: range formatting applied", rangeResult.applied, true);
+check("wiring: only the selected command changed", editor.value,
+  "def  a :Nat:=1\ndef b : Nat := 2\n");
+const lastRange = wireMock.stats.rangeFormattingArgs[wireMock.stats.rangeFormattingArgs.length - 1];
+check("wiring: the request carried the selection",
+  JSON.stringify(lastRange.range),
+  JSON.stringify({ start: { line: 1, character: 0 }, end: { line: 2, character: 0 } }));
+check("wiring: the caret ends at the selection's start", editor.selectionStart, line2Start);
+check("wiring: the range request is a separate method", wireMock.stats.rangeFormatting, 1);
+
 app.stop();
 checkThat("wiring: stop closes the hover card", !app.hover().isOpen());
 await wireMock.close();

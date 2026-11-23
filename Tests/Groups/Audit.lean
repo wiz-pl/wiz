@@ -425,7 +425,7 @@ def compiled (src : String) (llvm : Bool) : IO (Option String) := do
   match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 300) with
   | .ok v => pure (some v)
   | .error e =>
-    if e.isToolchain then IO.println "    (skipped: no toolchain)"; pure none
+    if e.isToolchain then skipMissing "no toolchain"; pure none
     else throw (IO.userError e.message)
 
 /-- What `#eval main` prints. -/
