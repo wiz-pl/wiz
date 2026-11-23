@@ -12424,7 +12424,6 @@ goals_gen	main	bare	web/goals_gen.wiz	24
 goals_gen	model	bare	web/goals_gen.wiz	20
 goals_gen	viewJson	bare	web/goals_gen.wiz	18
 grail	package	bare	tower/grail.wiz	4
-grail.local	settings	bare	tower/grail.local.wiz	3
 infoview-ui	Js.patch	other-dotted	web/infoview-ui.wiz	17
 infoview-ui	loomConsume	bare	web/infoview-ui.wiz	30
 infoview-ui	loomEffect	bare	web/infoview-ui.wiz	27
