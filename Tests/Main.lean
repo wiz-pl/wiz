@@ -306,7 +306,7 @@ def mainImpl (args : List String) : IO UInt32 := do
       | _ => do
         IO.eprintln s!"--selfhost-source: 'compiler' or 'checker', not '{name}'"
         return 2
-    let srcs ← files.mapM (fun f => IO.FS.readFile f)
+    let srcs ← files.mapM (fun (f : String) => IO.FS.readFile f)
     IO.print (render srcs)
     pure 0
   | "--run" :: rest => runOne rest
