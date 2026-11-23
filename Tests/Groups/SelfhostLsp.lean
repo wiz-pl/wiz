@@ -321,8 +321,12 @@ def selfhostLspGroup : Group where
         -- Run one document through the self-hosted server and the in-process host, compare
         -- `wiz/plainGoal` at every caret field by field (a failure names the caret), and
         -- return the self-hosted answers. The two servers print a Pi the same way
-        -- (`Nat → Nat`: the self-hosted goal printer hides a nondependent binder too).
-        let query (name doc : String) (qs : List (Nat × Nat)) : IO (List Lean.Json) := do
+        -- (`Nat → Nat`: the self-hosted goal printer hides a nondependent ω binder too).
+        -- `checkHost` is off where the two cannot agree yet: a binder inside a type has no
+        -- name in the kernel, so its binder form prints a synthetic one (`x1` against the
+        -- host's `x`).
+        let query (name doc : String) (qs : List (Nat × Nat)) (checkHost : Bool) :
+            IO (List Lean.Json) := do
           let uri := s!"file:///tmp/selfhost-nested-{name}.wiz"
           let params (l c : Nat) : Lean.Json := Lean.Json.mkObj [
             ("textDocument", Lean.Json.mkObj [("uri", uri)]),
@@ -351,11 +355,12 @@ def selfhostLspGroup : Group where
             let (srv', hostOut) ← LSP.handle srv (lspReq (200 + qi) "wiz/plainGoal" (params l c))
             srv := srv'
             let self := (jpath (← lspAt got (2 + qi)) ["result"]).getD .null
-            let host := match hostOut.find? (fun m => (jpath m ["id"] |>.bind (·.getNat?.toOption)) == some (200 + qi)) with
-              | some m => (jpath m ["result"]).getD .null
-              | none => .null
-            checkEq (s!"{name} {l}:{c}", lspStrs host ["goals"]) (s!"{name} {l}:{c}", lspStrs self ["goals"])
-            checkEq (s!"{name} {l}:{c}", lspStr host ["rendered"]) (s!"{name} {l}:{c}", lspStr self ["rendered"])
+            if checkHost then
+              let host := match hostOut.find? (fun m => (jpath m ["id"] |>.bind (·.getNat?.toOption)) == some (200 + qi)) with
+                | some m => (jpath m ["result"]).getD .null
+                | none => .null
+              checkEq (s!"{name} {l}:{c}", lspStrs host ["goals"]) (s!"{name} {l}:{c}", lspStrs self ["goals"])
+              checkEq (s!"{name} {l}:{c}", lspStr host ["rendered"]) (s!"{name} {l}:{c}", lspStr self ["rendered"])
             selfs := selfs ++ [self]
             qi := qi + 1
           pure selfs
@@ -387,9 +392,20 @@ def selfhostLspGroup : Group where
           [ (3, 18)   -- the first inner `by`
           , (3, 31)   -- the second inner `by`
           , (3, 28) ] -- the end of the first inner `exact x`
-        let ns ← query "n" n nq
-        let gs ← query "g" g gq
-        let ss ← query "s" s sq
+        -- D1 (`Wiz/Core/Pretty.lean:462`): an arrow over a Pi domain keeps the domain's
+        -- parens — `f : (Nat → Nat) → Nat`, not `Nat → Nat → Nat`.
+        let d1 := "import Prelude\ndef g (f : (Nat → Nat) → Nat) : Nat := by\n  exact f (fun y => y)\n"
+        -- D2 (`:461`): a non-ω binder keeps the binder form and its quantity, so `:0` is
+        -- never dropped from a goal. The source writes the quantity before the name
+        -- (`(0 x : Nat)`); the printed form is `(x :0 Nat)`.
+        let d2 := "import Prelude\ndef g (h : (0 x : Nat) → Nat) : Nat := by\n  exact h 1\n"
+        -- at `exact`: the goal lists the hypothesis the caret is under (`2:2`)
+        let dq : List (Nat × Nat) := [(2, 2)]
+        let ns ← query "n" n nq true
+        let gs ← query "g" g gq true
+        let ss ← query "s" s sq true
+        let d1s ← query "d1" d1 dq true
+        let d2s ← query "d2" d2 dq false
         -- the concrete answers (so a host change shows here too)
         checkEq ["n : Nat\n⊢ Nat"] (lspStrs ns[0]! ["goals"])   -- n 2:9: the inner block, not the outer step
         checkEq ["n : Nat\n⊢ Nat"] (lspStrs ns[1]! ["goals"])   -- n 2:11: the narrowest block
@@ -401,11 +417,16 @@ def selfhostLspGroup : Group where
         checkEq ["x : Nat\n⊢ Nat"] (lspStrs ss[0]! ["goals"])   -- s 3:18: the first inner `by`
         checkEq ["x : Nat\n⊢ Nat"] (lspStrs ss[1]! ["goals"])   -- s 3:31: the second inner `by`
         -- the function-typed carets: the block's own goal, never the enclosing step's
-        -- "no goals", and the Pi prints without its binder — the host's `Nat → Nat`
-        -- (the self-hosted printer's `(_ : Nat) → Nat` is task 26)
+        -- "no goals", and the Pi prints without its binder as the host does (`Nat → Nat`)
         checkEq ["⊢ Nat → Nat"] (lspStrs gs[0]! ["goals"])      -- g 2:9: the inner `by`
         checkEq ["⊢ Nat → Nat"] (lspStrs gs[1]! ["goals"])      -- g 2:11: the narrowest block
         checkEq ["⊢ Nat → Nat"] (lspStrs gs[5]! ["goals"])      -- g 1:21: the outer block
+        checkEq ["f : (Nat → Nat) → Nat\n⊢ Nat"] (lspStrs d1s[0]! ["goals"])
+        -- the erased binder's name is synthetic here (the kernel stores none); its
+        -- quantity and the binder form are what this pins
+        let erased := (lspStrs d2s[0]! ["goals"]).headD ""
+        check ((erased.splitOn ":0 ").length > 1) "an erased binder keeps its quantity"
+        check ((erased.splitOn ") → Nat").length > 1) "an erased binder keeps the binder form"
         -- a diagnostic inside an `exact` term, for the span-threading pin
         let bad := "import Prelude\ndef bad : Nat := by\n  exact (Nat.add 1 true)\n"
         let badUri := "file:///tmp/selfhost-nested-diag.wiz"

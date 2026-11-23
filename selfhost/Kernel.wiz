@@ -2616,20 +2616,34 @@ def showFieldQ (names : List String) (l : Nat) (q : Tm) : String := match q with
   | _ => String.append (String.append "%" (show names l q)) " "
 end
 
--- A goal's type as the host's `GoalView.show` writes it: a nondependent Pi hides its
--- binder (`Nat → Nat`, where `show` writes `(x0 : Nat) → Nat`) and a dependent one keeps
--- it (`(x0 : Nat) → Vec x0`). `Tm.pi` carries no binder name (`Kernel.wiz`, the `pi`
--- constructor), so the test is the bound variable's occurrence in the codomain — which is
--- the host's own criterion. Everything that is not a Pi delegates to `show`, so this is
--- the goal-text (language server) printer only: `#check` and diagnostics keep `show`.
+-- A goal's type as the host's `GoalView.show` writes it (`Wiz/Core/Pretty.lean:457-470`):
+--   * the arrow form (`Nat → Nat`, not `show`'s `(x0 : Nat) → Nat`) only for the ordinary
+--     ω binder whose variable is unused (:469), and there a Pi domain keeps its parens
+--     (`(Nat → Nat) → Nat`, :462);
+--   * otherwise the binder form keeps the quantity (`(x :0 Nat) → Nat`, :461), so a
+--     non-ω or dependent binder never loses it.
+-- `Tm.pi` carries no binder name (`Kernel.wiz`, the `pi` constructor), so dependence is the
+-- bound variable's occurrence in the codomain — the host's own criterion. Everything that
+-- is not a Pi delegates to `show`, so this is the goal-text (language server) printer
+-- only: `#check` and diagnostics keep `show`.
 def showGoal (names : List String) (l : Nat) (t : Tm) : String :=
   match t with
-  | .pi q _ _ a b => match usesVar 0 b with
-    | .true => String.append (String.append (String.append "(" (nameAt names l))
-        (String.append (showQ q) (showGoal names l a)))
-        (String.append ") → " (showGoal names (l + 1) b))
-    | .false => String.append (String.append (showGoal names l a) " → ")
-        (showGoal names (l + 1) b)
+  | .pi q _ _ a b =>
+    let dom := showGoal names l a;
+    let cod := showGoal names (l + 1) b;
+    -- an arrow's domain: a Pi under it needs the parens the host's `sub 26` gives it
+    let domArrow := match a with
+      | .pi _ _ _ _ _ => String.append (String.append "(" dom) ")"
+      | _ => dom;
+    -- the binder form, with the quantity (`showQ` is ` : ` at ω, so the ordinary binder
+    -- reads `(x : Nat) → ` as `show` writes it)
+    let binder := String.append (String.append (String.append "(" (nameAt names l))
+      (String.append (showQ q) dom)) (String.append ") → " cod);
+    match q with
+    | .qw => match usesVar 0 b with
+      | .false => String.append (String.append domArrow " → ") cod
+      | .true => binder
+    | _ => binder
   | t => show names l t
 
 -- the typing context: values of the variables, their types, the depth
