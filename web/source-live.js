@@ -90,7 +90,10 @@ export async function mountLive(el, { module, bundle, endpoint, token, root, env
     rootUri: root ? fileUri("", root) : null,
     clientInfo: { name: "scry-source" },
     languageId: "wiz",
-    requestTimeout: 30000,
+    // The Wiz server elaborates a document with term info on `didOpen`; on this machine
+    // the first answer on a reader source took ~51 s (the second, 60 ms). The default
+    // 10 s would report "no answer" while the server is still working.
+    requestTimeout: 180000,
   });
 
   let handle = null;
@@ -98,6 +101,7 @@ export async function mountLive(el, { module, bundle, endpoint, token, root, env
   let seq = 0;                 // the latest request; a stale LSP answer is dropped
   let hoverTimer = null;
   let lastHover = "";
+  const opened = new Set();
 
   const setState = (state) => {
     try { el.setAttribute("data-lsp", state); } catch (_) { /* no attribute support */ }
@@ -165,6 +169,16 @@ export async function mountLive(el, { module, bundle, endpoint, token, root, env
     return { at, meta };
   };
 
+  // Lazy `didOpen`: the server elaborates a document (with term info) the first time it
+  // sees it, so opening every Wiz file in the bundle up front would pay that cost for
+  // files nobody asks about. The first request for a file opens it; a definition's
+  // target needs no document, only its text (the bundle has it).
+  const ensureOpen = (meta) => {
+    if (opened.has(meta.id)) return;
+    opened.add(meta.id);
+    client.openDocument(fileUri(root, meta.path), meta.text, { languageId: "wiz" });
+  };
+
   const liveHover = async (payload) => {
     const v = visible(payload);
     const mine = ++seq;
@@ -178,6 +192,7 @@ export async function mountLive(el, { module, bundle, endpoint, token, root, env
       return;
     }
     try {
+      ensureOpen(v.meta);
       const result = await client.hover(fileUri(root, v.meta.path), pos);
       if (mine !== seq) return;              // a newer hover/definition superseded this
       handle.call("wiz_loom_effect", "hover-lsp", payload,
@@ -202,6 +217,7 @@ export async function mountLive(el, { module, bundle, endpoint, token, root, env
       return;
     }
     try {
+      ensureOpen(v.meta);
       const result = await client.definition(fileUri(root, v.meta.path), pos);
       // `Web.Hover`'s rule, through the runtime: the first usable location, its label
       // and range. A server may answer `null` (nothing there): "no answer", not an error.
@@ -293,9 +309,6 @@ export async function mountLive(el, { module, bundle, endpoint, token, root, env
   // ## The connection
 
   setState("connecting");
-  // Open the Wiz documents before connecting: the client sends `didOpen` for each on
-  // `initialized`, so the server's copy is the bundle's text, not a disk read.
-  for (const f of wiz) client.openDocument(fileUri(root, f.path), f.text, { languageId: "wiz" });
   note("live: connecting to " + label + "…");
   try {
     await client.connect();

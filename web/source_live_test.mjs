@@ -1,7 +1,10 @@
 // The real-server half of the live reader's proof, without a browser: start
 // `wiz lsp --ws`, open the bundle's Wiz files with the bundle's text, and ask the exact
 // two questions the page asks (`textDocument/hover`, `textDocument/definition`) at the
-// exact token the browser smoke uses (`Source.Span.show` in `lib/Web/Source/Model.wiz`).
+// exact token the browser smoke uses (`EditorModel.slice` in `lib/Web/Source/Span.wiz`).
+// Span.wiz is the lighter of the reader's files to elaborate (`wiz check` 3.6 s, where
+// `lib/Web/Source/Model.wiz` is 52 s); the server's term-info elaboration is the larger
+// cost, and the first hover on the probe took 51 s with a 60 ms definition after it.
 //
 // The page's position rules are `Web.EditorModel`'s through `wiz_loom_editor_position`;
 // this test has no runtime, so the few lines of line/character arithmetic below are the
@@ -37,37 +40,37 @@ const readJson = (p) => JSON.parse(readFileSync(p, "utf-8"));
 const files = readJson(join(bundle, "data", "files.json")).files || [];
 const bySuffix = (suffix) =>
   files.find((f) => String(f.path).replace(/\\/g, "/").endsWith(suffix));
-const model = bySuffix("Web/Source/Model.wiz");
-const span = bySuffix("Web/Source/Span.wiz");
-if (!model || !span) {
-  console.error("source live: the bundle has no Web/Source/{Model,Span}.wiz (--source them)");
+const source = bySuffix("Web/Source/Span.wiz");
+const target = bySuffix("Web/EditorModel.wiz");
+if (!source || !target) {
+  console.error("source live: the bundle has no Web/Source/Span.wiz + Web/EditorModel.wiz (--source them)");
   process.exit(2);
 }
-const modelData = readJson(join(bundle, "data", "f", model.id + ".json"));
-const spanData = readJson(join(bundle, "data", "f", span.id + ".json"));
-const text = modelData.source;
+const sourceData = readJson(join(bundle, "data", "f", source.id + ".json"));
+const targetData = readJson(join(bundle, "data", "f", target.id + ".json"));
+const text = sourceData.source;
 
 // The bundle's own paths, as the checkout sees them (the same rule `source-live.js` is
 // given by `?lspRoot=`).
 const uriOf = (meta) => fileUri(root, meta.path);
 
 // A UTF-16 offset as an LSP position (0-based line, UTF-16 character). Test-local.
-function positionOf(source, offset) {
-  const before = source.slice(0, offset);
+function positionOf(text, offset) {
+  const before = text.slice(0, offset);
   const line = (before.match(/\n/g) || []).length;
   const lineStart = before.lastIndexOf("\n") + 1;
   return { line, character: offset - lineStart };
 }
 
-const needle = "show i span";
-const marker = "Source.Span.show i span";
+const needle = "slice i start stop";
+const marker = "EditorModel.slice i start stop";
 const markerAt = text.indexOf(marker);
 const useAt = markerAt + marker.indexOf(needle);
-ok(markerAt >= 0, "the bundle's Model.wiz has the `Source.Span.show` use", String(markerAt));
+ok(markerAt >= 0, "the bundle's Span.wiz has the `EditorModel.slice` use", String(markerAt));
 
-const defLine = spanData.source.split("\n")
-  .findIndex((line) => line.includes("def Source.Span.show"));
-ok(defLine >= 0, "the bundle's Span.wiz has `def Source.Span.show`", String(defLine));
+const defLine = targetData.source.split("\n")
+  .findIndex((line) => line.includes("def EditorModel.slice"));
+ok(defLine >= 0, "the bundle's EditorModel.wiz has `def EditorModel.slice`", String(defLine));
 
 let srv = null;
 let client = null;
@@ -81,38 +84,38 @@ try {
     languageId: "wiz",
     requestTimeout: 30000,
   });
-  for (const meta of [model, span]) {
-    const data = meta === model ? modelData : spanData;
+  for (const meta of [source, target]) {
+    const data = meta === source ? sourceData : targetData;
     client.openDocument(uriOf(meta), data.source, { languageId: "wiz" });
   }
   await client.connect();
   ok(client.isOpen, "the real wiz lsp accepts the connection");
 
   const pos = positionOf(text, useAt);
-  const hover = await client.hover(uriOf(model), pos);
+  const hover = await client.hover(uriOf(source), pos);
   const hoverText = hover ? JSON.stringify(hover) : "null";
-  ok(hover && /show/.test(hoverText), "the real server answers a hover on `show`",
+  ok(hover && /slice/.test(hoverText), "the real server answers a hover on `slice`",
     hoverText.slice(0, 300));
   ok(hover && /contents/.test(hoverText), "the hover is the LSP contents shape",
     hoverText.slice(0, 120));
 
-  const definition = await client.definition(uriOf(model), pos);
+  const definition = await client.definition(uriOf(source), pos);
   const target = Array.isArray(definition) ? definition[0] : definition;
-  ok(!!target, "the real server answers a definition on `show`",
+  ok(!!target, "the real server answers a definition on `slice`",
     JSON.stringify(definition).slice(0, 300));
   const targetUri = target && (target.uri || target.targetUri);
   const range = target && (target.range || target.targetSelectionRange || target.targetRange);
-  ok(!!targetUri && String(targetUri).endsWith("Web/Source/Span.wiz"),
-    "the definition names Span.wiz", String(targetUri));
+  ok(!!targetUri && String(targetUri).endsWith("Web/EditorModel.wiz"),
+    "the definition names EditorModel.wiz", String(targetUri));
   ok(!!range && range.start && range.start.line === defLine,
-    "the definition range is `def Source.Span.show`'s line",
+    "the definition range is `def EditorModel.slice`'s line",
     range ? JSON.stringify(range) : "no range");
 
   // The same question at a position with no identifier (an empty line) is answered
   // `null`, not an error: the reader's "no answer" path.
   const blankLine = text.split("\n").findIndex((line) => line.trim() === "");
-  ok(blankLine >= 0, "the bundle's Model.wiz has an empty line", String(blankLine));
-  const blank = await client.hover(uriOf(model), { line: Math.max(0, blankLine), character: 0 });
+  ok(blankLine >= 0, "the bundle's Span.wiz has an empty line", String(blankLine));
+  const blank = await client.hover(uriOf(source), { line: Math.max(0, blankLine), character: 0 });
   ok(blank === null || blank === undefined,
     "a hover with nothing under it is null", JSON.stringify(blank));
 } finally {

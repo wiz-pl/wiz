@@ -7,10 +7,11 @@ about the Wiz file it displays, and the answer lands in the reader's existing pa
 
 ## What the slice does
 
-1. `scry web DIR --out BUNDLE --source lib/Web/Source/Model.wiz --source
-   lib/Web/Source/Span.wiz` adds the two Wiz files to the bundle verbatim, with no
+1. `scry web DIR --out BUNDLE --source lib/Web/Source/Span.wiz --source
+   lib/Web/EditorModel.wiz` adds the two Wiz files to the bundle verbatim, with no
    analysis (`--source` is repeatable; `Source.File.language` is `wiz`). The finding
-   pipeline for the analysed C/C# target is untouched.
+   pipeline for the analysed C/C# target is untouched. Span.wiz is the reader's span
+   type; its use of `EditorModel.slice` gives the cross-file definition in the demo.
 2. `index.html` is the same static, complete, no-JavaScript page as before. `app.js`
    adds one branch: `?lsp=PORT` (or `?lsp=ws://HOST:PORT`, `?token=` for a
    `--token-file` server) loads `source-live.js`, which mounts **the same**
@@ -85,9 +86,9 @@ findings on one line, or a definition range inside a finding, used to fail the
 * **`wiz lsp` has no `-I`.** Its `libs` are the toolchain's `lib/` (for a checkout
   binary, `<checkout>/lib`). A Wiz file under `scry/src/` imports `Scry.*`, which is
   not on that root, so its hover/definition would fail. The demo therefore displays
-  `lib/Web/Source/Model.wiz` (the reader's own model) and `lib/Web/Source/Span.wiz`;
-  both resolve. Making `scry/src` usable needs a toolchain search path for the server,
-  not a page change.
+  `lib/Web/Source/Span.wiz` (the reader's span type) and `lib/Web/EditorModel.wiz` (its
+  imported line table); both resolve. Making `scry/src` usable needs a toolchain search
+  path for the server, not a page change.
 * **No completion, no diagnostics panel, no editor.** Click/hover only; the reader is
   still not an editor. `wiz/interactiveInfo` is not used: the info view stays scry's
   fact/definition rows.
@@ -100,6 +101,13 @@ findings on one line, or a definition range inside a finding, used to fail the
   by one per astral character, and fixing that belongs in the server, not the page.
 * Only pointer positions on a rendered line are live: a file not currently open is not
   hit-testable, and a selection made with the keyboard has no live behaviour yet.
+* **The first live answer is slow.** `wiz lsp` elaborates a document with term info on
+  `didOpen`; on this machine the first hover on the reader's Span.wiz took **51 s**
+  (the definition after it, 60 ms). The page's request timeout is 180 s and its footer
+  says "live: connecting…" meanwhile; documents are opened lazily, on the first request
+  for each file, so the bundle's other Wiz files cost nothing until asked about. This is
+  the server's elaboration cost, not the page's (the same `wiz check` of Model.wiz is
+  52 s; Span.wiz is 3.6 s).
 * The live adapter is not on the site's `/source/` page (no server there); it is the
   same bundle bytes plus `?lsp=`.
 
@@ -109,16 +117,24 @@ findings on one line, or a definition range inside a finding, used to fail the
 # 1. The binaries (heavy; do not run lake directly on the controller)
 heavy --rsync -- lake build wiz grail
 
-# 2. The runtime + the two test bundles, in one heavy job (the store path and the
-#    scry binary are produced on the node; the bundles land in the worktree)
-heavy --sshfs -- sh -c '
-  cd scry && nix build ..#tree-sitter-c-sharp -o native/tree-sitter-c-sharp \
-    && ../.lake/build/bin/grail build scry && cd .. \
-  && ui=$(nix build .#wiz-source-ui --print-out-paths) \
-  && web/source-bundle.sh scry/.grail/bin/scry web/out/fixtures \
-       --ui "$ui" \
-  && web/source-bundle.sh scry/.grail/bin/scry web/out/live --ui "$ui" \
-       --source lib/Web/Source/Model.wiz --source lib/Web/Source/Span.wiz'
+# 2. The runtime + the two test bundles, in one heavy job on the same node that built
+#    the binaries (a copied-back wiz/grail is linked against that node's store; see the
+#    ledger note below). The store path and the scry binary are produced on the node;
+#    the bundles land in the worktree.
+heavy --sshfs --nodelist=win3 -- sh -c '
+  grammar=$(nix build .#tree-sitter-c-sharp --no-link --print-out-paths)
+  cp -a "$grammar" scry/native/tree-sitter-c-sharp
+  ( cd scry && cp ../grail.local.wiz . && ../.lake/build/bin/grail build scry )
+  gmp=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#gmp.src)
+  WIZ=.lake/build/bin/wiz nix shell --inputs-from . nixpkgs#emscripten -c \
+    sh web/build-source-ui.sh web/out/ui --gmp-src "$gmp"
+  web/source-bundle.sh scry/.grail/bin/scry web/out/fixtures --ui web/out/ui
+  web/source-bundle.sh scry/.grail/bin/scry web/out/live --ui web/out/ui \
+    --source lib/Web/Source/Span.wiz --source lib/Web/EditorModel.wiz
+  node web/source_static_test.mjs web/out/fixtures
+  node web/source_live_test.mjs web/out/live .lake/build/bin/wiz
+  chrome=$(nix shell --inputs-from . nixpkgs#chromium -c sh -c "command -v chromium")
+  node web/source_chrome_test.mjs "$chrome" web/out/live .lake/build/bin/wiz'
 
 # 3. The Node acceptance tests
 node web/source_static_test.mjs web/out/fixtures
@@ -144,7 +160,7 @@ so run it from the checkout root.
 | Wiz model/view compile (`Source.Page.focus`, `lspHover`, definition answer, marks) |  |  |
 | `scry web --source` + bundle generation |  |  |
 | `scry.source.answer/1` static answers + patch replay (`source_static_test.mjs`) |  |  |
-| real `wiz lsp --ws` hover/definition on the bundled `Model.wiz` |  |  |
+| real `wiz lsp --ws` hover/definition on the bundled `Span.wiz` → `EditorModel.wiz` |  |  |
 | browser: no-JS SSR, mount, static finding hover, `#/f/` |  |  |
 | browser: `?lsp=` live hover card on `Source.Span.show` |  |  |
 | browser: click → definition → info rows + `src-focus` jump |  |  |
