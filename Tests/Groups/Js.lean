@@ -294,6 +294,15 @@ def jsGroup : Group where
           "console.log(\"exports ok\");\n"
         let out ← jsRunScript text script
         checkEq "exports ok" out.trimAscii.toString },
+    { name := "an export may not shadow main or the runtime's own exports", run := fun _ => do
+        -- a duplicate ES binding would make the whole module fail to parse, so the
+        -- emitter refuses it by name instead
+        let e ← jsError ("import Prelude\ndef f (n : Nat) : Nat := n\n" ++
+          "export \"wizApply\" f\ndef main : Nat := 1")
+        unless (e.splitOn "duplicate").length > 1 do throw (IO.userError e)
+        let e2 ← jsError ("import Prelude\ndef f (n : Nat) : Nat := n\n" ++
+          "export \"main\" f\ndef main : Nat := 1")
+        unless (e2.splitOn "entry point").length > 1 do throw (IO.userError e2) },
     { name := "the emitted module is deterministic", run := fun _ => do
         let a ← jsEmit ("import Prelude\ndef c : List Nat := .cons 1 (.cons 2 .nil)\n" ++
           "partial def loop (n acc : Nat) : Nat := match n with\n  | .zero => acc\n" ++

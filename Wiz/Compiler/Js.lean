@@ -233,6 +233,12 @@ def exportE (decls : Array IR.Decl) (sig : RVal.ExternSig) : Except String Strin
     s!"  return wizCallExport({mangle entry}, {jsStr kinds}, {jsStr sig.result.letter.toString}, " ++
     s!"{sig.io}, args);\n{rb}\n")
 
+/-- The names the pasted runtime itself exports (`export function NAME`). An export may
+not shadow one: the module would have two bindings for the name and fail to parse. -/
+def runtimeExportNames (runtime : String) : List String :=
+  let ident (c : Char) : Bool := c.isAlphanum || c == '_' || c == '$'
+  ((runtime.splitOn "export function ").drop 1).map fun s => (s.takeWhile ident).toString
+
 /-- The whole ES module: the runtime, the functions, the exports, `main`, and a runner
 for `node prog.mjs` (not for an import: the importer's `main` is its own). -/
 def program (runtime : String) (decls : Array IR.Decl) (exports : List RVal.ExternSig := [])
@@ -241,8 +247,13 @@ def program (runtime : String) (decls : Array IR.Decl) (exports : List RVal.Exte
   | .error e => .error s!"JS backend: {e}"
   | .ok () => pure ()
   checkExterns decls
-  if exports.any (fun sig => sig.cname == "main") then
-    throw "JS backend: `main` is the module's entry point; an export cannot be named `main`"
+  let reserved := runtimeExportNames runtime
+  for sig in exports do
+    if sig.cname == "main" then
+      throw "JS backend: `main` is the module's entry point; an export cannot be named `main`"
+    if reserved.contains sig.cname then
+      throw s!"JS backend: the export `{sig.cname}` would duplicate the runtime's own \
+`{sig.cname}` export"
   let arities := decls.foldl (fun m d => m.insert d.name d.params.size) {}
   let cafs := IR.cafs decls
   let texts ← decls.toList.mapM (declE arities cafs)
