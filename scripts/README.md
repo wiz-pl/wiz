@@ -107,6 +107,13 @@ reminder, never as a security or merge gate.
 | `branch-rot.py` | classifies local (and `--remote`) branches as redundant, in-flight, attic or needs-PR; opt-in deletion | docs only (`docs/building.md`, monthly hygiene) |
 | `stack-status.py` | prints and refreshes the merge-stack ledger kept outside the repository | docs only (`docs/building.md`) |
 
+## Coverage (research, not a gate)
+
+| script | does | called from |
+|---|---|---|
+| `coverage/wiz-c-coverage.sh` | LLVM source-based coverage for one Wiz program through the C backend (`OUT.c` is generated C, no `#line` back to `.wiz`); writes report/show/export and a summary | by hand; numbers in `wiz-notes/test-coverage.md` (outside this checkout) |
+| `coverage/test-lib-map.py` | static map of `lib/**/*.wiz` modules and declarations against the test corpus (imports, closure, lexical hits, per-group table); `--json`, `--markdown` | by hand |
+
 ## Bootstrap and generators
 
 | script | does | called from |
