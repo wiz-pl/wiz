@@ -11,7 +11,7 @@
         "AGENTS.md",
         ".github/**"
       ],
-      "sha256": "518208f2757bea0715950e4edd5132101faa7afb39ef4eb607572d44bc444138"
+      "sha256": "ee30cfa5f233368c16581a2cd6c62a5b01f5684c4d091c1bded732351ae9540c"
     },
     "lean": {
       "files": 165,
