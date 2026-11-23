@@ -733,9 +733,9 @@ EOF
           docsSiteSource = fs.toSource {
             root = ./.;
             fileset = fs.unions ([
-              ./docs ./bench/stdlib-baseline.json ./bench/stdlib-bench.json
-              ./scry/bench/baseline.json
+              ./docs ./bench ./examples ./tools ./editors ./drafts ./scry
               ./README.md ./ROADMAP.md ./CHANGELOG.md ./LICENSE
+              ./COPYING.RUNTIME
             ] ++ map (f: ./. + "/${f}") siteAssetFiles);
           };
           docs-site = pkgs.stdenv.mkDerivation {
@@ -763,7 +763,7 @@ EOF
             checkPhase = ''
               runHook preCheck
               sh web/check-site.sh site
-              if grep -a -R '/nix/store' site >/dev/null; then
+              if grep -a -R -E '/nix/store/[0-9a-z]{32}-' site >/dev/null; then
                 echo "docs-site: a page names a build store path" >&2; exit 1
               fi
               if grep -a -R "$PWD" site >/dev/null; then
@@ -771,7 +771,7 @@ EOF
               fi
               runHook postCheck
             '';
-            passthru.subset = "docs/ + bench/stdlib-{baseline,bench}.json + scry/bench/baseline.json + README/ROADMAP/CHANGELOG/LICENSE + the site scripts in siteAssetFiles + wiz + reference + web-bundle";
+            passthru.subset = "docs/ + bench/ + examples/ + tools/ + editors/ + drafts/ + scry/ (for the prose links) + README/ROADMAP/CHANGELOG/LICENSE/COPYING.RUNTIME + the site scripts in siteAssetFiles + wiz + reference + web-bundle";
             meta = {
               description = "The documentation site: wiz doc --lib and the landing, guide, benchmark and playground pages";
               platforms = systems;
@@ -817,7 +817,7 @@ EOF
               mkdir -p site/source
               cp -R --no-preserve=mode bundle/. site/source/
               SITE_REQUIRE_SOURCE=1 sh ${docsSiteSource}/web/check-site.sh site
-              if grep -a -R '/nix/store' site >/dev/null; then
+              if grep -a -R -E '/nix/store/[0-9a-z]{32}-' site >/dev/null; then
                 echo "pages: a page names a build store path" >&2; exit 1
               fi
               if grep -a -R "$PWD" site >/dev/null; then
