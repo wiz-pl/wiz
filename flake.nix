@@ -767,7 +767,10 @@ EOF
           siteAssetFiles = [
             "web/build-site.sh" "web/build-bench.py" "web/build-docs.py"
             "web/check-site.sh" "web/check-links.py" "web/bench/index.html"
-            "web/landing/index.html" "web/landing/landing.css"
+            # the landing page is *generated* in the derivation now (build-site.sh
+            # refuses a WEB without landing/index.html), so the generator, its template
+            # and the snippets have to be inputs
+            "web/build-landing.sh" "web/build-landing.py" "web/landing"
             "web/playground.html" "web/playground.js" "web/playground.css"
             "web/overlays.css" "web/widgets.css" "web/lsp-client.js" "web/widgets.js"
             "web/playground-lsp.js" "web/hover.js" "web/selfhost-lsp-shim.js"
@@ -822,12 +825,24 @@ EOF
             buildPhase = ''
               runHook preBuild
               export HOME=$TMPDIR
-              mkdir -p site
+              mkdir -p site web
               # the API pages come from #docs-lib: `wiz doc --lib` is its own derivation
               # now, so a site-only change does not re-render 245 modules
               cp -R --no-preserve=mode ${docs-lib}/docs site/docs
+              # The modules the site publishes (playground page and its Wasm) come from
+              # #web-bundle; the LANDING page is generated, not templated: since the
+              # landing merge, `web/build-site.sh` refuses a WEB without
+              # `landing/index.html`, and nothing else in this derivation ran
+              # `web/build-landing.sh` - so `.#pages` could not build (found by the
+              # docs-truth lane; masked because the docs job never ran while `lean` was
+              # red). The island's first paint needs `wiz`; the module itself is
+              # #wiz-landing-ui.
+              cp -R --no-preserve=mode ${web-bundle}/. web/
+              WIZ=${wiz}/bin/wiz sh web/build-landing.sh web
+              mkdir -p web/landing
+              cp -R --no-preserve=mode ${wiz-landing-ui}/. web/landing/
               WIZ_SOURCE_URL=${lib.escapeShellArg sourceUrl} \
-                sh web/build-site.sh site ${web-bundle}
+                sh web/build-site.sh site web
               runHook postBuild
             '';
             installPhase = ''
