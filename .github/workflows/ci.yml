@@ -476,12 +476,15 @@ jobs:
         id: subset-key
         shell: bash
         run: python3 scripts/ci.py subset-key lean >> "$GITHUB_OUTPUT"
-      - name: Restore the lean subset cache (a pull request)
-        # First choice of seed: this pull request's previous successful `lean` build.
-        # It is untrusted (a PR writes it, a PR reads it), and it is independent of the
-        # trusted namespace below and of any other subset's key.
+      - name: Restore the lean subset cache (a pull request, or an integration push)
+        # First choice of seed: this branch's previous successful `lean` build. It is
+        # untrusted (a branch writes it, a branch reads it), and independent of the
+        # trusted namespace below and of any other subset's key. A push to an
+        # `integration/*` branch is treated like a pull request here: the previous run of
+        # the same branch is a legitimate seed, and without this every integration push
+        # paid a cold Lean build (the `lake-trusted` step below was PR-only too).
         id: subset-cache
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/integration/'))
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .subset-cache/lean
@@ -496,10 +499,16 @@ jobs:
         # when the base predates the output or the cache does not hold it, and the build
         # falls back to `empty-lake` (never a failure).
         id: lake-trusted
-        if: github.event_name == 'pull_request' && steps.subset-cache.outputs.cache-hit != 'true'
+        if: (github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/integration/'))) && steps.subset-cache.outputs.cache-hit != 'true'
         shell: bash
+        # The base commit: on a pull request the merge target, on an integration push the
+        # commit the branch was pushed from (`before`). An all-zero `before` (a new
+        # branch) yields no seed, which is the same "empty" the script already handles.
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: |
-          base="${{ github.event.pull_request.base.sha }}"
+          base="$BASE"
+          case "$base" in ''|*[!0]*) ;; *) echo "seed=empty" >> "$GITHUB_OUTPUT"; echo "trusted seed: empty (no base commit)"; exit 0 ;; esac
           dir="$RUNNER_TEMP/lake-base"
           rm -rf "$dir"; mkdir -p "$dir"
           git fetch --no-tags --depth=1 origin "$base"
@@ -507,8 +516,15 @@ jobs:
           seed=$(scripts/lake-cache.sh trusted "$dir")
           echo "seed=$seed" >> "$GITHUB_OUTPUT"
           echo "trusted seed: $seed"
-      - name: nix build (wiz, grail and the test driver; seeded on a PR)
+      - name: nix build (wiz, grail and the test driver; seeded on a PR or an integration push)
         id: nix
+        # A seeded build for a pull request *and* for a push to an integration branch:
+        # both have a legitimate base to seed from (the merge target, the pushed-from
+        # commit). Before this, an integration push took the pure build and was cold every
+        # time. A master push keeps the pure build: its output is what the trusted cache
+        # publishes.
+        env:
+          USE_SEED: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/integration/')) }}
         run: |
           # One build for every job: the shards substitute these store paths (master's
           # from the trusted cache; a pull request's from its PR cache when published).
@@ -516,10 +532,11 @@ jobs:
           # from the same build.
           # No .#reference here: only the docs job reads it (and only on a push), and no
           # shard waits on it. That job builds it from this cached wiz, off this path.
-          if [ "${{ github.event_name }}" = pull_request ]; then
-            # The PR-only fast path: the same packages from a seeded `.lake`
+          if [ "$USE_SEED" = "true" ]; then
+            # The seeded fast path (a pull request, or an integration push): the same
+            # packages from a seeded `.lake`
             # (flake.nix's withLakeCache, a different derivation), so Lake recompiles
-            # only the modules the branch changed. The seed is this pull request's own
+            # only the modules the branch changed. The seed is this branch's own
             # previous lean cache, else the base commit's `.#lake-seed` substituted from
             # the trusted Cachix, else `empty-lake` (the cold build — a miss is never a
             # failure). This build's `.lake` is saved below under the untrusted,
@@ -545,12 +562,14 @@ jobs:
           echo "wiz: $wiz"; echo "tests: $tests"
           du -sh "$wiz" "$tests"
           nix path-info -S "$wiz" "$tests" | sed 's/^/closure: /'
-      - name: Save the lean subset cache (a pull request)
+      - name: Save the lean subset cache (a pull request, or an integration push)
         # Untrusted and subset-keyed: this is the only writer of this key, and only a
         # successful build reaches it (a failed lean build stops the job before this
         # step). A later `lean` job restores it even if `docs`, `web` or a shard failed
-        # in between; a failed run never writes or poisons another subset's key.
-        if: github.event_name == 'pull_request' && steps.subset-cache.outputs.cache-hit != 'true'
+        # in between; a failed run never writes or poisons another subset's key. An
+        # integration push saves here too, so the next push to that branch is incremental
+        # (it used to be cold every time, because both this and the restore were PR-only).
+        if: (github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/integration/'))) && steps.subset-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .subset-cache/lean
