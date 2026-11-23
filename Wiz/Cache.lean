@@ -345,10 +345,10 @@ def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
   | none =>
   -- (the declarations belong to the module being replayed: `Globals.declModule`)
   let globals := e.decls.foldl (·.insert ·) { s.globals with module := s.module }
-  let globals := { globals with builtins := e.builtins ++ globals.builtins,
-                                assumed := e.assumed ++ globals.assumed,
+  let globals := { globals with assumed := e.assumed ++ globals.assumed,
                                 privates := e.privates.foldl (fun m (n, md) => m.insert n md) globals.privates,
-                                opaques := e.opaques.foldl (fun m (n, md) => m.insert n md) globals.opaques }
+                                opaques := e.opaques.foldl (fun m (n, md) => m.insert n md) globals.opaques }.setBuiltins
+                                (e.builtins ++ globals.builtins)
   { s with globals, messages := s.messages ++ e.messages, builtins := e.builtins ++ s.builtins,
            classes := e.classes ++ s.classes, instances := s.instances ++ e.instances,
            coinductives := s.coinductives ++ e.coinductives, foreignTypes := e.foreignTypes ++ s.foreignTypes,

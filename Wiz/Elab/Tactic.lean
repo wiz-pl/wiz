@@ -396,8 +396,8 @@ partial def reflectT (rc : RCtx R) (t : Term R) (ty? : Option (VTy R)) : ReflM R
     reflectArgs rc (mkCon 1 [encodeString T]) (rc.headType? (← globalsR) (.const T us)) args
   | .natOp op args =>
     let g ← globalsR
-    match g.builtins.find? (·.1 == op) with
-    | some (_, n) => reflectArgs rc (mkCon 1 [encodeString n]) (rc.headType? g (.const n [])) args.toList
+    match g.builtinOf? op with
+    | some n => reflectArgs rc (mkCon 1 [encodeString n]) (rc.headType? g (.const n [])) args.toList
     | none => mkOpq
   | .con (.pair tag rest) =>
     match ← reflectCtor rc tag rest ty? with
