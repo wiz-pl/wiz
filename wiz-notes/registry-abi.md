@@ -883,7 +883,8 @@ they are this design's teeth):
   caps; unknown refusal; duplicate naming both providers and an alias collision;
   capability refusal before dispatch; an `entry-unsupported` refusal with its reason;
   illegal `override`/empty name/empty ABI). No compiler, no process, no scratch
-  directory.
+  directory. `heavy --sshfs -- lake test -- '=ext'` (job 5163) is 6 passed, 0 failed,
+  0 skipped.
 * `Wiz.lean`: one import line.
 * `Main.lean:924`: `targets := Wiz.Ext.backendNames`; `:945-966`: `takeTarget` calls
   `Wiz.Ext.resolveBackend` and returns the entry's **canonical** name, so an alias cannot
@@ -935,12 +936,13 @@ were re-read at those lines, not copied from `extensibility.md` (whose tree was
 node `win3`) exited 0: 630 jobs, including `Wiz.Ext.Basic`, `Tests.Groups.Ext`, `Main`,
 `wiz:exe` and `tests:exe`. The warnings in that log are pre-existing (`Tests/Elab.lean`
 unused `textLib`, `Tests/Scaling`'s `String.mk`, `Tests/Groups/Hdl`'s `String.Slice`
-deprecations); none is from `Wiz/Ext/Basic.lean` or `Tests/Groups/Ext.lean`. The `=ext`
-test run is `heavy --sshfs -- timeout 600 lake test -- '=ext'`; its result is recorded
-below when it returns (one heavy job at a time). What I did **not** run: the full suite,
-`=backend`, `=js`, `=bpf`, `=wasm`, `=selfhost`, `=selfhost-cli-diff`, `=wiz-lint`,
-`grail test`, any measurement. No Lean build was run on the controller; everything goes
-through `heavy`.
+deprecations); none is from `Wiz/Ext/Basic.lean` or `Tests/Groups/Ext.lean`.
+
+`heavy --sshfs -- timeout 600 lake test -- '=ext'` (job 5163) ran the six cases:
+**6 passed, 0 failed, 0 skipped** (146.7 s, all six `✓`). What I did **not** run: the
+full suite, `=backend`, `=js`, `=bpf`, `=wasm`, `=selfhost`, `=selfhost-cli-diff`,
+`=wiz-lint`, `grail test`, any measurement. No Lean build was run on the controller;
+everything goes through `heavy`.
 
 **Not implemented (the prototype stops here).**
 
