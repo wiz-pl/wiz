@@ -172,8 +172,10 @@ The policy is `--cache-verify off|warn|strict` (`--cache-verify=MODE` also works
   are self-signed, so they authenticate nothing: by default the layer is **refused** (no
   entry or region is served from it, and `wiz` warns once per layer that has content for
   a module, naming the flag).
-  `--cache-ro-unsigned` is the explicit opt-in to unauthenticated data, and
-  `--cache-verify off` is the older blanket form of it. When an opted-in layer has bytes
+  `--cache-ro-unsigned` immediately after that layer is the explicit opt-in to
+  unauthenticated data, and `--cache-verify off` is the older blanket form of it. The
+  opt-in names one layer: a wrapper's opt-in for its own store cache does not trust a
+  later user's `--cache-ro`. When an opted-in layer has bytes
   for a module but no manifest, `wiz` warns once per layer (an empty layer is silent).
 
 A manifest whose root does not validate, whose `valid-until` (or whose layer generation's)
@@ -185,7 +187,7 @@ index (`prev` chains it to the old one) and can set its expiry. `--cache-verify-
 prints the per-run counts (manifests, verified entries/regions, mismatches).
 
 Compatibility: a write cache needs one cold pass to acquire manifests, and a
-`--cache-ro` layer is no longer used unless `--cache-ro-unsigned` is given (or
+`--cache-ro` layer is no longer used unless `--cache-ro-unsigned` follows it (or
 `--cache-verify off`). Manifests are additive files — `.wizc`, `.wizr` and `.wizs` keep
 their names and bytes, so an unmanifested cache is byte-identical and no key or salt
 changes.

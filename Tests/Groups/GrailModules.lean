@@ -729,7 +729,7 @@ def modulesGroup : Group where
         let write ← IO.FS.createTempDir
         let m0 ← stats.get
         let (s1, _) ← Cache.elaborateCached (some write) [ro] src init 0 (region := some opts)
-          (verify := .warn) (roUnsigned := true)
+          (verify := .warn) (unsignedReads := [ro])
         checkEq expected (s1.messages.toList.map (·.render src))
         check ((← stats.get).misses > m0.misses) "a bad read-only checksum was not a miss"
         checkEq before (← snapshot ro)
@@ -861,7 +861,7 @@ def modulesGroup : Group where
         -- (read caches only: a region is served from the read-only layer, nothing is written)
         let h0 ← stats.get
         let (s1, _) ← Cache.elaborateCached none [ro] src init 0 (region := some opts)
-          (verify := .warn) (rig := rig) (roUnsigned := true)
+          (verify := .warn) (rig := rig) (unsignedReads := [ro])
         check ((← stats.get).hits > h0.hits) "no module came from a region in the read-only layer"
         checkEq expected (s1.messages.toList.map (·.render src))
         checkEq before (← snapshot ro)
@@ -869,7 +869,7 @@ def modulesGroup : Group where
         let write ← IO.FS.createTempDir
         let h1 ← stats.get
         let (s2, _) ← Cache.elaborateCached (some write) [ro] src init 0 (region := some opts)
-          (verify := .warn) (rig := rig) (roUnsigned := true)
+          (verify := .warn) (rig := rig) (unsignedReads := [ro])
         check ((← stats.get).hits > h1.hits) "the read-only region did not answer through the write layer"
         checkEq expected (s2.messages.toList.map (·.render src))
         checkEq before (← snapshot ro)
@@ -883,7 +883,7 @@ def modulesGroup : Group where
         let beforeBad ← snapshot ro
         let h2 ← stats.get
         let (s3, _) ← Cache.elaborateCached (some write) [ro] src init 0 (region := some opts)
-          (verify := .warn) (rig := rig) (roUnsigned := true)
+          (verify := .warn) (rig := rig) (unsignedReads := [ro])
         checkEq expected (s3.messages.toList.map (·.render src))
         check ((← stats.get).misses > h2.misses) "a truncated read-only region was not a miss"
         checkEq beforeBad (← snapshot ro)
