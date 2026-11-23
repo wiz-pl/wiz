@@ -342,11 +342,12 @@ jobs:
       - name: Subset cache key (the docs subset)
         # The docs examples cache is the `docs` subset's cache, not a hash of the Lean
         # tree: `subset-v1-docs-<os>-<arch>-<toolchain sha12>-examples-<docs sha12>`.
-        # The checker keys its own entries by the compiler and lib/ sources, so this
-        # outer key only has to name the docs subset.
+        # The checker keys its own entries by the compiler and lib/ sources, but the
+        # outer `cache-hit` decides whether the refreshed entries are saved at all: a
+        # lib/ change must make this a miss (and the save run), so pin the lib tree.
         id: subset-key
         shell: bash
-        run: python3 scripts/ci.py subset-key docs --scope examples >> "$GITHUB_OUTPUT"
+        run: python3 scripts/ci.py subset-key docs --scope examples --suffix "$(git rev-parse HEAD:lib)" >> "$GITHUB_OUTPUT"
       - name: nix build wiz (substituted from Cachix)
         id: nix
         shell: bash
@@ -1471,7 +1472,7 @@ jobs:
           # of the same source hits and a changed binary misses by construction. The
           # documented sources decide which entries exist; the prefix still serves the
           # unchanged modules after a lib/ change.
-          python3 scripts/ci.py subset-key docs --scope site >> "$GITHUB_OUTPUT"
+          python3 scripts/ci.py subset-key docs --scope site --suffix "$(git rev-parse HEAD:lib)" >> "$GITHUB_OUTPUT"
       - name: Restore the elaboration cache (a read-only layer)
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
