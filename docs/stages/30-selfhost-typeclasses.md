@@ -172,7 +172,6 @@ global: no axiom, no new kernel rule, no change to the trust ledger.
   elaboration-time evaluator (SH-2.1) …*. The old name-keyed dispatch would have run the
   built-in `deriveBEq` body for a user declaration of that name (D1 in
   `wiz-notes/extensibility.md`).
->>>>>>> agent/ext-registry
 * **Class arity.** A derived instance is `C (T p…)`, so the class must take one type
   parameter; `class Pair (A B : Type)` is rejected with the class's arity in the
   message.

@@ -1200,4 +1200,3 @@ declaration called `deriveBEq` is refused with `entry-unsupported` rather than r
 the frontend's built-in `BEq` body. Package backends are not wired: `grail.wiz`'s
 `Package.command` is a build-graph node, not a registry row (see
 `wiz-notes/ext-registry.md` §4).
->>>>>>> agent/ext-registry
