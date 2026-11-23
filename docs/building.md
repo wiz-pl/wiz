@@ -24,22 +24,27 @@ the self-hosted checker and compiler are built by the first case that needs them
 kept under `/tmp`).
 
 An unimplemented exercise shows up as `✗ ... not implemented yet (hit a sorry)`. A case
-that cannot run here (no C toolchain, no `nix`, …) calls `Tests.skip REASON` and shows up
-as `⊘ name` with `skipped (REASON)`; the total counts it apart (`…, 2 skipped`), and it is
-not a pass. A selector that picks no group, a case index the group lacks, and an unknown
-flag are errors (exit code 2), not an empty run.
+that cannot run here because a dependency is absent (no C toolchain, no `nix`, …) calls
+`Tests.skipMissing REASON`: by default it is a `✗` failure whose output names the
+dependency; `lake test -- --allow-missing-deps` (or `WIZ_ALLOW_MISSING_DEPS=1`) reports
+it as `⊘ name` with `skipped (REASON)` instead. A skip the case *declares*
+(`Tests.skip`) always shows as `⊘`. The total counts skips apart (`…, 2 skipped`), and a
+skip is not a pass. A selector that picks no group, a case index the group lacks, and an
+unknown flag are errors (exit code 2), not an empty run.
 
-**A missing toolchain is a skip; a failing program is a failure.** `Build.runGlobal`
+**A missing toolchain fails by default; a failing program is a failure.** `Build.runGlobal`
 returns a `Build.RunError` that says which happened: `.build`, or `.toolchain` when the
 compiler, `llc` or GMP's `gmp.h` could not be found (no program ran), and `.run` with the
 program's exit code and standard error, `.timeout`, or `.readback` when the program itself
-failed. The helpers in `Tests/Elab.lean` (`failRun`, and `cRun`/`ioRun`/`cRunLibs`/…) skip
-only a `.toolchain` failure and otherwise fail the case, reporting the exit code and the
-program's stderr. Never look for `No such file` in a program's stderr to decide "no
-toolchain": a program may print that itself (a missing fixture, a `File.open`, a
-`Process.output` of a command not on `PATH`), and the case then failed. The `conc` group
-has a case for each half: a run-time ENOENT failure, a pass whose program writes that
-text on stderr and exits 0, and a build that cannot find the compiler.
+failed. The helpers in `Tests/Elab.lean` (`failRun`, and `cRun`/`ioRun`/`cRunLibs`/…) call
+`Tests.skipMissing` on a `.toolchain` failure — a failure naming the dependency by
+default, a reported skip under `--allow-missing-deps` — and otherwise fail the case,
+reporting the exit code and the program's stderr. Never look for `No such file` in a
+program's stderr to decide "no toolchain": a program may print that itself (a missing
+fixture, a `File.open`, a `Process.output` of a command not on `PATH`), and the case then
+failed. The `conc` group has a case for each half: a run-time ENOENT failure, a pass whose
+program writes that text on stderr and exits 0, and a build that cannot find the compiler
+(failing by default, skipping with `--allow-missing-deps`).
 
 A case whose name claims **linear** time must measure it. `Tests.checkScaling`
 (`Tests/Harness.lean`) runs the same action at `n` and `2n` (best of three, the fixed
