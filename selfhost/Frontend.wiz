@@ -288,6 +288,13 @@ def binderQs : List Syntax → Option (List Q)
 def binderWs : List Syntax → List QW
   | .nil => .nil
   | .cons b bs => List.append (wsFor (binderW b) (binderNames b)) (binderWs bs)
+-- the written types of a list of binders, one per name (`fun`'s binders)
+def typeFor (t : Option Syntax) : Nat → List (Option Syntax)
+  | .zero => .nil
+  | .succ k => .cons t (typeFor t k)
+def binderTs : List Syntax → List (Option Syntax)
+  | .nil => .nil
+  | .cons b bs => List.append (typeFor (binderType b) (List.length (binderNames b))) (binderTs bs)
 def qName : Q → String
   | .qz => "0"
   | .qo => "1"
@@ -2839,10 +2846,18 @@ def isMetaApp (es : ES) (ty : Val) : Bool := match metaApp es (force es ty) with
   | .mk _ _ => .true
   | .none => .false
 -- a `fun` against a function type whose domain isn't known yet waits too: the other
--- arguments may fix it (`zipWith3 (fun b x y => …) c t e`; elab-postpone-lambdas)
+-- arguments may fix it (`zipWith3 (fun b x y => …) c t e`; elab-postpone-lambdas). A
+-- lambda whose binders are all written with a type is checked at once: its body may
+-- solve the domain (`Ex (fun (n : Nat) => n = 2)`, which the `∃` surface makes).
+def bindersTyped : List Syntax → Bool
+  | .nil => .true
+  | .cons b rest => match binderType b with
+    | .some _ => bindersTyped rest
+    | .none => .false
 def funDomMeta (es : ES) (a : Syntax) (ty : Val) : Bool := match strEq (kindOf (unparen a)) "term.fun" with
   | .true => match whnf (force es ty) with
-    | .vpi _ _ _ d _ _ => isMetaApp es d
+    | .vpi _ _ _ d _ _ => Bool.and (isMetaApp es d)
+        (Bool.not (bindersTyped (kids (kid (unparen a) 1))))
     | _ => .false
   | .false => .false
 -- `.c` (or `.c a …`) against a type `T …`: `T.c`
@@ -2979,6 +2994,11 @@ def nthSyntax : List Syntax → Nat → Syntax
   | .cons s rest, i => match i with
     | .zero => s
     | .succ j => nthSyntax rest j
+def setNthSyn (v : Syntax) : List Syntax → Nat → List Syntax
+  | .nil, _ => .nil
+  | .cons s rest, i => match i with
+    | .zero => .cons v rest
+    | .succ j => .cons s (setNthSyn v rest j)
 def nthName : List String → Nat → String
   | .nil, _ => "_"
   | .cons s rest, i => match i with
@@ -3021,6 +3041,13 @@ partial def asNames (p : Syntax) : List String := match strEq (kindOf (unparen p
 partial def asInner (p : Syntax) : Syntax := match strEq (kindOf (unparen p)) "term.asPat" with
   | .true => asInner (kid (unparen p) 2)
   | .false => unparen p
+def hasDotChar : List Char → Bool
+  | .nil => .false
+  | .cons c cs => match Nat.beq (Char.code c) 46 with
+    | .true => .true
+    | .false => hasDotChar cs
+def hasDot (s : String) : Bool := match s with
+  | .mk cs => hasDotChar cs
 -- `x@p` matches `p` and also binds `x` to the scrutinee
 partial def patOf (T : String) (p : Syntax) : Pat := match strEq (kindOf (unparen p)) "term.asPat" with
   | .true => patOf T (kid (unparen p) 2)
@@ -3049,12 +3076,14 @@ partial def patOf (T : String) (p : Syntax) : Pat := match strEq (kindOf (unpare
     | .false => match headCtor T p with
       | .some c => .ctor c .nil
       | .none => .any (identOf p)
+-- a variable pattern (`_` too); a dotted identifier is a constructor name, not a
+-- variable (the host's `patView` resolves the name; `[]` is `List.nil`)
 def isVarPat (p : Syntax) : Bool := match strEq (kindOf p) "term.ident" with
-  | .true => .true
+  | .true => Bool.not (hasDot (identOf p))
   | .false => strEq (kindOf p) "term.hole"
 -- (A18) a variable pattern, an as-pattern over one, or `_`
 def isVarPatA (p : Syntax) : Bool := match strEq (kindOf (asInner p)) "term.ident" with
-  | .true => .true
+  | .true => Bool.not (hasDot (identOf (asInner p)))
   | .false => strEq (kindOf (asInner p)) "term.hole"
 
 -- a column: a variable (by level) and its type, with constants and inlined, over the
@@ -3225,6 +3254,22 @@ def headOf : Tm → Tms → TyHead
 def headTm : Tm → Tm
   | .app f _ => headTm f
   | t => t
+-- a type whose head is a definition, unfolded (at depth `d`) until it is an inductive
+-- type's (stage 19d)
+partial def unfoldTy (gs : Globals) (d : Nat) (ty : Tm) : Tm := match headOf ty .tnil with
+  | .mk T _ args => match Globals.ind gs T with
+    | .some _ => ty
+    | .none => match headTm ty with
+      | .const _ _ _ v _ => unfoldTy gs d (nfAt d (tApps v args))
+      | _ => ty
+  | .none => ty
+-- (A17) the inductive type and its constructors at a type's head, definitions unfolded
+def indOfTy (gs : Globals) (d : Nat) (ty : Tm) : Option (String × List Ctor) :=
+  match headOf (unfoldTy gs d ty) .tnil with
+  | .mk T _ _ => match Globals.ind gs T with
+    | .some (.mk _ _ _ _ _ cs _ _ _) => .some (T, cs)
+    | .none => .none
+  | .none => .none
 -- the hypotheses' names, for the binds standing for recursive fields that have one
 def ihNamesOf (ihLvls : List Nat) : List Bind → List IHName
   | .nil => .nil
@@ -3638,6 +3683,110 @@ def commaJoin : List String → String
   | .cons x rest => match rest with
     | .nil => x
     | .cons _ _ => String.append (String.append x ", ") (commaJoin rest)
+
+-- ## (A17) Anonymous constructors `⟨…⟩`
+
+-- What a checked `⟨…⟩` is: the constructor of the expected structure, the tuple at a Σ,
+-- or the only constructor of a data type (the host's `elabAnon`), and its errors. The
+-- shape is read from the expected type, so the rewrite is the same for a term (in
+-- `checkT`) and for a pattern (`splitAnon`).
+inductive AShape where
+  | strct (S : String) (fields : List String)
+  | tup
+  | ctor (c : String)
+  | bad (msg : String)
+-- the syntax a checked `⟨…⟩` is elaborated as, or the host's error
+inductive AS where
+  | ok (s : Syntax)
+  | err (msg : String)
+-- the source type name (a private type's kernel name is `_private.M._0.T`)
+def anonTyStr (cx : Cx) (es : ES) (ty : Val) : String :=
+  let d := Cx.lvl cx;
+  show (scopeNames (Cx.sc cx)) d (quote d (force es ty))
+def anonDoneMsg (cx : Cx) (es : ES) (ty : Val) : String :=
+  String.append "an anonymous constructor ⟨…⟩ needs a structure, a pair or a data type with one constructor as its expected type, not "
+    (anonTyStr cx es ty)
+def anonShape (gs : Globals) (es : ES) (cx : Cx) (ty : Val) : AShape :=
+  let d := Cx.lvl cx;
+  match structOf gs es ty with
+  | .some S => match Globals.structFields gs S with
+    | .some fs => .strct S fs
+    | .none => .bad (String.append "internal error: a structure without fields: " S)
+  | .none => match whnf (force es ty) with
+    | .vsigma _ _ _ _ _ _ => .tup
+    | _ => match indOfTy gs d (quote d (force es ty)) with
+      | .some (T, cs) => match cs with
+        | .cons (.mk c _ _ _ _ _) .nil => .ctor c
+        | _ => .bad (String.append (String.append (String.append "an anonymous constructor ⟨…⟩ needs a type with one constructor, and "
+            (privBase T)) " has ") (Nat.toString (List.length cs)))
+      | .none => .bad (anonDoneMsg cx es ty)
+-- `h a₁ … aₙ` (just `h` with no arguments), in the tree the host's `elabAnon` builds
+def appArgsOf (h : Syntax) (args : List Syntax) : Syntax := match args with
+  | .nil => h
+  | .cons a as => mkNode "term.app" (.cons h (one (mkNull (.cons a as))))
+-- `(a, b, …)`: the tuple node is `("(", a, ",", [b, ",", …], ")")`
+def sepWithCommas : List Syntax → List Syntax
+  | .nil => .nil
+  | .cons q qs => .cons (.atom ",") (.cons q (sepWithCommas qs))
+def tupleNodeOf (a b : Syntax) (rest : List Syntax) : Syntax :=
+  mkNode "term.tuple" (.cons (.atom "(") (.cons a (.cons (.atom ",")
+    (.cons (mkNull (.cons b (sepWithCommas rest))) (one (.atom ")"))))))
+-- the components of `⟨a, b⟩` (the `sepBy(term, ",")`'s terms)
+def anonItems (s : Syntax) : List Syntax := nonAtoms (kids (kid s 1))
+-- the tree a checked `⟨…⟩` is elaborated as, or the host's error
+def anonTermOf (sh : AShape) (args : List Syntax) : AS :=
+  match sh with
+  | .strct S _ => .ok (appArgsOf (mkNode "term.ident" (one (.ident (String.append S ".mk")))) args)
+  | .tup => match args with
+    | .cons a (.cons b rest) => .ok (tupleNodeOf a b rest)
+    | _ => .err "an anonymous constructor of a pair has at least two components"
+  | .ctor c => .ok (appArgsOf (mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident c)))) args)
+  | .bad m => .err m
+-- the pattern a `⟨p₁, …, pₙ⟩` pattern is rewritten to: the structure's `.mk`, the tuple,
+-- or the data type's only constructor (as the host's `structPattern?` does)
+def anonPatOf (sh : AShape) (ps : List Syntax) : AS :=
+  match sh with
+  | .strct S fs => match Nat.beq (List.length ps) (List.length fs) with
+    | .true => .ok (appArgsOf (mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident "mk")))) ps)
+    | .false => .err (String.append (String.append (String.append (String.append S ".mk expects ")
+        (Nat.toString (List.length fs)))
+        (String.append (match Nat.beq (List.length fs) 1 with
+          | .true => " argument"
+          | .false => " arguments")
+          (String.append (String.append " (the fields " (commaJoin fs)) "), got ")))
+        (Nat.toString (List.length ps)))
+  | .tup => match ps with
+    | .cons a (.cons b rest) => .ok (tupleNodeOf a b rest)
+    | _ => .err "an anonymous constructor pattern on a pair has at least two components"
+  | .ctor c => .ok (appArgsOf (mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident c)))) ps)
+  | .bad m => .err m
+-- an as-pattern `x@y@inner` rebuilt around a rewritten pattern (the name is a
+-- `term.ident` node, which is what `identOf`/`asNames` read)
+def asPatNode (x : String) (inner : Syntax) : Syntax :=
+  mkNode "term.asPat" (.cons (mkNode "term.ident" (one (.ident x))) (.cons (.atom "@") (one inner)))
+def rewrapAs : List String → Syntax → Syntax
+  | .nil, inner => inner
+  | .cons x rest, inner => asPatNode x (rewrapAs rest inner)
+inductive AnonCols where
+  | ok (cls : List Clause)
+  | err (msg : String)
+-- every clause's column `k`: its `⟨…⟩` becomes the shape's syntax (an as-pattern keeps
+-- its names), any other pattern stays; the first failing pattern's error is the result
+def anonCol (k : Nat) (sh : AShape) : List Clause → AnonCols
+  | .nil => .ok .nil
+  | .cons (.mk pats binds rhs) rest =>
+    let p := nthSyntax pats k;
+    let inner := asInner p;
+    match strEq (kindOf inner) "term.anon" with
+    | .false => match anonCol k sh rest with
+      | .err m => .err m
+      | .ok cls' => .ok (.cons (.mk pats binds rhs) cls')
+    | .true => match anonPatOf sh (anonItems inner) with
+      | .err m => .err m
+      | .ok p' => match anonCol k sh rest with
+        | .err m => .err m
+        | .ok cls' => .ok (.cons (.mk (setNthSyn (rewrapAs (asNames p) p') pats k) binds rhs) cls')
+
 def memberS (x : String) : List String → Bool
   | .nil => .false
   | .cons y ys => Bool.or (strEq x y) (memberS x ys)
@@ -4743,7 +4892,13 @@ def inferT2 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
           | e => e
         | .false => match strEq k "term.tuple" with
           | .true => inferTuple gs es cx (tupleItems s)
-          | .false => match strEq k "term.hole" with
+          | .false => match strEq k "term.anon" with
+            -- (A17) the host refuses to infer the Σ a `⟨…⟩` would have (`elabAnon`'s
+            -- check-only form); the message is the host's
+            | .true => .err "cannot infer the type of an anonymous constructor ⟨…⟩; add a type ascription"
+            | .false => match strEq k "term.letPat" with
+              | .true => inferLetPat gs es cx s
+              | .false => match strEq k "term.hole" with
             | .true => match newMeta es cx (.vsort (.lnum 1)) with
               | .mk mt es1 => .ok mt (.vsort (.lnum 1)) es1
             | .false => match strEq k "term.namedArg" with
@@ -5014,6 +5169,26 @@ def inferLetPair (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
   | .is .qw => inferT gs es cx (letPairAsMatch s)
   | _ => .err (String.append "a `let (x, y)` at a quantity is not supported by this frontend (its kernel has no `split`); "
       "take the pair apart with `match`")
+-- (A17) `let ⟨a, b⟩ := e; b` (or `let (.mk a b) := e; b`) without a quantity is
+-- `match e with | ⟨a, b⟩ => b`, as the host's `elabLetPat` does; this kernel has no
+-- `split`, so a written quantity is refused (the host takes the structure apart at it).
+def letPatAsMatch (s : Syntax) : Syntax :=
+  let alt := mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (one (kid s 2)))
+    (.cons (.atom "=>") (one (kid s 6)))));
+  mkNode "term.match" (.cons (.atom "match") (.cons (mkNull (one (kid s 4)))
+    (.cons (.atom "with") (one (mkNull (one alt))))))
+def letPatT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
+  match writtenQ (kid s 1) with
+  | .dflt => checkT gs es cx (letPatAsMatch s) ty
+  | .is .qw => checkT gs es cx (letPatAsMatch s) ty
+  | _ => .err (String.append "a `let ⟨…⟩` at a quantity is not supported by this frontend (its kernel has no `split`); "
+      "take it apart with `match`")
+def inferLetPat (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
+  match writtenQ (kid s 1) with
+  | .dflt => inferT gs es cx (letPatAsMatch s)
+  | .is .qw => inferT gs es cx (letPatAsMatch s)
+  | _ => .err (String.append "a `let ⟨…⟩` at a quantity is not supported by this frontend (its kernel has no `split`); "
+      "take it apart with `match`")
 -- (A18) `let () := u; b` is the kernel's unit eliminator: `u` is consumed, then `b`
 def letUnitT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
   match checkT gs es cx (kid s 4) (.vunit (ln 1)) with
@@ -5045,8 +5220,15 @@ def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
       | .mk mt es' => .ok mt ty es'
     | .false => match strEq k "term.tuple" with
     | .true => checkTuple gs es cx (tupleItems s) ty
-    | .false => match strEq k "term.fun" with
-      | .true => checkLams gs es cx (binders (kids (kid s 1))) (binderWs (kids (kid s 1))) (kid s 3) ty
+    | .false => match strEq k "term.anon" with
+      | .true => match anonTermOf (anonShape gs es cx ty) (anonItems s) with
+        | .ok s' => checkT gs es cx s' ty
+        | .err m => .err m
+      | .false => match strEq k "term.letPat" with
+        | .true => letPatT gs es cx s ty
+        | .false => match strEq k "term.fun" with
+      | .true => checkLams gs es cx (binders (kids (kid s 1))) (binderWs (kids (kid s 1)))
+          (binderTs (kids (kid s 1))) (kid s 3) ty
       | .false => match strEq k "term.let" with
         | .true => letT gs es cx s (.some ty)
         | .false => match strEq k "term.letUnit" with
@@ -5092,24 +5274,39 @@ def scrutLets (gs : Globals) (es : ES) (cx : Cx) : List Syntax → SL
       match scrutLets gs es1 (Cx.defineL cx "x✝" (fun _ => eval (TCtx.env (Cx.c cx)) t) xty) rest with
       | .ok cx' cols wrap es2 => .ok cx' (.cons (.mk d A A .qw) cols) (fun b => .letE A t (wrap b)) es2
       | e => e
--- `fun x y => b` against a Π type
--- (a binder's written quantity must be the Π's, as in Lean's `checkFun`)
-def checkLams (gs : Globals) (es : ES) (cx : Cx) (xs : List String) (ws : List QW) (body : Syntax) (ty : Val) : TE := match xs with
+-- `fun x y => b` against a Π type. A binder's written quantity must be the Π's, and a
+-- written type must be the Π's domain, as in Lean's `checkFun`; checking the type also
+-- solves a domain metavariable (`Ex (fun (n : Nat) => …)`, which the `∃` surface makes).
+def tailW : List QW → List QW
+  | .nil => .nil
+  | .cons _ r => r
+def tailTs : List (Option Syntax) → List (Option Syntax)
+  | .nil => .nil
+  | .cons _ r => r
+def checkLams (gs : Globals) (es : ES) (cx : Cx) (xs : List String) (ws : List QW)
+    (ts : List (Option Syntax)) (body : Syntax) (ty : Val) : TE := match xs with
   | .nil => checkT gs es cx body ty
   | .cons x rest => match whnf (force es ty) with
     | .vpi q _ _ dom env cod =>
       let cx' := Cx.bind cx x dom;
-      let go := fun (u : Unit) => (match checkLams gs es cx' rest (match ws with
-          | .nil => .nil
-          | .cons _ ws' => ws') body (eval (.cons (fresh (Cx.lvl cx)) env) cod) with
+      let go := fun (es0 : ES) => (match checkLams gs es0 cx' rest (tailW ws) (tailTs ts) body
+          (eval (.cons (fresh (Cx.lvl cx)) env) cod) with
         | .ok b _ es' => TE.ok (.lam b) ty es'
         | e => e : TE);
+      let checkTy : TE := match ts with
+        | .cons (.some tS) _ => match inferType gs es cx tS with
+          | .err m => .err m
+          | .ok a _ es1 => match unify es1 cx (eval (TCtx.env (Cx.c cx)) a) dom with
+            | .some es2 => go es2
+            | .none => .err (String.append "the λ's binder type does not match the expected type; expected "
+                (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es1 dom))))
+        | _ => go es;
       match ws with
       | .cons (.is q') _ => match qEq q q' with
-        | .true => go ()
+        | .true => checkTy
         | .false => .err (String.append (String.append "binder quantity " (qName q')) (String.append " does not match the expected " (qName q)))
       | .cons .bad _ => .err qtyErr
-      | _ => go ()
+      | _ => checkTy
     | _ => .err "a λ against a type that isn't a function type"
 -- compile the clauses over the columns in the context `cx`, against `expected`;
 -- `top`: the next split is the structural one; `ihLvls`: the fields with hypotheses
@@ -5174,15 +5371,6 @@ def colIndex (l : Nat) : List Col → Nat → Nat → Nat
   | .cons (.mk l' _ _ _) rest, i, dflt => match Nat.beq l l' with
     | .true => i
     | .false => colIndex l rest (i + 1) dflt
--- a type whose head is a definition, unfolded (at depth `d`) until it is an inductive
--- type's (stage 19d)
-def unfoldTy (gs : Globals) (d : Nat) (ty : Tm) : Tm := match headOf ty .tnil with
-  | .mk T _ args => match Globals.ind gs T with
-    | .some _ => ty
-    | .none => match headTm ty with
-      | .const _ _ _ v _ => unfoldTy gs d (nfAt d (tApps v args))
-      | _ => ty
-  | .none => ty
 -- the first column with a constructor pattern
 def firstCtorCol : List Syntax → Nat → Option Nat
   | .nil, _ => .none
@@ -5205,7 +5393,9 @@ def splitCol (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val)
     (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) : CE :=
   let p0 := asInner (patAt k cls);
   let lit := Bool.or (isLitPat p0) (isPlusPat p0);
-  match strEq (kindOf p0) "term.tuple" with
+  match strEq (kindOf p0) "term.anon" with
+  | .true => splitAnon gs mc es cx expected cols top ihLvls cls k
+  | .false => match strEq (kindOf p0) "term.tuple" with
   | .true => splitTuple gs mc es cx expected cols top ihLvls cls k
   | .false => match nthCol cols k with
     | .mk L ty0 _ _ => match headOf (unfoldTy gs L ty0) .tnil with
@@ -5249,6 +5439,20 @@ def splitTuple (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
             (.letE BQ (.snd (.var (d - L))) body)) es'
         | e => e
     | _ => .err "a tuple pattern needs a pair"
+-- (A17) `⟨p₁, …, pₙ⟩` in column `k`: the host's `structPattern?` rewrite. The pattern is
+-- the structure's `.mk`, the tuple over a Σ's components, or the only constructor of a
+-- data type; each clause's column is rewritten (an as-pattern keeps its names) and the
+-- clauses are compiled again.
+def splitAnon (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val)
+    (cols : List Col) (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) : CE :=
+  match nthCol cols k with
+  | .mk L ty0 tyI q =>
+    let d := Cx.lvl cx;
+    let env := TCtx.env (Cx.c cx);
+    let sh := anonShape gs es cx (eval env (shiftTm (d - L) 0 ty0));
+    match anonCol k sh cls with
+    | .err m => .err m
+    | .ok cls' => compileM gs mc es cx expected cols top ihLvls cls'
 -- (13q) the test `T.beq x l` for the literal `l` in the first row of column `k`, `let`
 -- bound (`lit✝` for `x`, `test✝`), and the clauses with the test's column (`litClauses`)
 def litTest (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val) (cols : List Col)
@@ -5561,7 +5765,14 @@ inductive DefR where
 mutual
 def defT (gs : Globals) (es : ES) (cx : Cx) (bs : List Syntax) (tyS vS : Syntax) : DefR := match bs with
   | .nil => match inferType gs es cx tyS with
-    | .ok R _ es1 => match checkT gs es1 cx vS (eval (TCtx.env (Cx.c cx)) R) with
+    | .ok R _ es1 =>
+      -- the type's metavariables solved while it was elaborated are substituted before
+      -- the body is checked: `def two : ∃ n, n = 2 := …`'s `Ex (fun …)` need not stay a
+      -- metavariable in the expected type (the host zonks between the two)
+      let R := match zonk es1 (Cx.lvl cx) R with
+        | .some z => z
+        | .none => R;
+      match checkT gs es1 cx vS (eval (TCtx.env (Cx.c cx)) R) with
       | .ok v _ es2 => .ok R v es2
       | .err m => .err m
     | .err m => .err m
@@ -6040,11 +6251,6 @@ def replaceLastSyn (v : Syntax) : List Syntax → List Syntax
   | .cons s rest => match rest with
     | .nil => one v
     | .cons _ _ => .cons s (replaceLastSyn v rest)
-def setNthSyn (v : Syntax) : List Syntax → Nat → List Syntax
-  | .nil, _ => .nil
-  | .cons s rest, i => match i with
-    | .zero => .cons v rest
-    | .succ j => .cons s (setNthSyn v rest j)
 def setKid (s : Syntax) (i : Nat) (v : Syntax) : Syntax := mkNode (kindOf s) (setNthSyn v (kids s) i)
 -- (an implicit binder keeps its quantity: its default 0 is written out, stage 21m)
 def zeroQtyStx : Syntax := mkNull (one (mkNode "quantity" (one (mkNode "num" (one (.atom "0"))))))
@@ -7658,13 +7864,6 @@ partial def matchPatArgs : List Syntax → List Syntax → List MBind → Option
   | _, _, _ => .none
 end
 def scopeName (n : String) (scope : Nat) : String := n +++ "✝" +++ Nat.toString scope
-def hasDotChar : List Char → Bool
-  | .nil => .false
-  | .cons c cs => match Nat.beq (Char.code c) 46 with
-    | .true => .true
-    | .false => hasDotChar cs
-def hasDot (s : String) : Bool := match s with
-  | .mk cs => hasDotChar cs
 -- node kinds whose identifiers are not references (the host's `unscopedParents`)
 def unscopedParent (k : String) : Bool := Bool.or (Bool.or (strEq k "term.dotIdent") (strEq k "term.field"))
   (Bool.or (strEq k "level.param") (strEq k "term.syntheticHole"))
@@ -7736,6 +7935,46 @@ partial def listLitStx (args : List Syntax) : Syntax := match args with
   | .cons (.atom _) rest => listLitStx rest
   | .cons t rest => mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "List.cons")))
       (one (mkNull (.cons t (one (listLitStx rest))))))
+-- (A17) `¬ P` is `Not P`: lib/Logic.wiz's `notation:max "¬" p:40 => Not p`. The node is
+-- rewritten here because this frontend does not load `Logic` (the embedded prelude has
+-- no such notation).
+def notStx (s : Syntax) : Syntax :=
+  mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "Not")))
+    (one (mkNull (one (kid s 1)))))
+-- (A17) `∃ x y : A, P` is the nest of `Ex`s that lib/Logic.wiz's `Ex.binderMacro`
+-- builds: `Ex (fun (x : A) => Ex (fun (y : A) => P))`. The macro is procedural (this
+-- frontend has no evaluator), so the node is rewritten here. A plain binder takes the
+-- type written after all the binders (if any); a `(x y : A)` group gives each name it.
+-- The binders are the `exBinder+` list: `.ident` nodes and `exBinder` nodes.
+def exBinderType (b : Syntax) : Option Syntax := match kid b 3 with
+  | .missing => .none
+  | t => .some t
+def exBinderNames (b : Syntax) : List String := identNames (kids (kid b 1))
+def exFunStx (x : String) (A : Option Syntax) (body : Syntax) : Syntax :=
+  let b : Syntax := match A with
+    | .some t => mkNode "binder.explicit" (.cons (.atom "(") (.cons (mkNull .nil)
+        (.cons (mkNull (one (.ident x))) (.cons (mkNull (.cons (.atom ":") (one t))) (one (.atom ")"))))))
+    | .none => .ident x;
+  mkNode "term.fun" (.cons (.atom "fun") (.cons (mkNull (one b)) (.cons (.atom "=>") (one body))))
+def exAppStx (body : Syntax) : Syntax :=
+  mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "Ex"))) (one (mkNull (one body))))
+def exIds (A : Option Syntax) (body : Syntax) : List String → Syntax
+  | .nil => body
+  | .cons x rest => exAppStx (exFunStx x A (exIds A body rest))
+def exBinders (A : Option Syntax) (body : Syntax) : List Syntax → Syntax
+  | .nil => body
+  | .cons b rest =>
+    let inner := exBinders A body rest;
+    match b with
+    | .ident x => exAppStx (exFunStx x A inner)
+    | _ => match strEq (kindOf b) "exBinder" with
+      | .true => exIds (exBinderType b) inner (exBinderNames b)
+      | .false => inner
+def exStx (s : Syntax) : Syntax :=
+  let A : Option Syntax := match kids (kid s 2) with
+    | .cons _ (.cons t _) => .some t
+    | _ => .none;
+  exBinders A (kid s 4) (kids (kid s 1))
 -- rewrite `s` while a rule matches it (a template may introduce a rule head); `fuel`
 -- only bounds a rewrite loop at one position, so restructuring a subtree never runs out
 partial def expandTop (notes : List Note) (fuel : Nat) (scope : Nat) (s : Syntax) : Syntax :=
@@ -7756,7 +7995,11 @@ partial def expandNotes (notes : List Note) (scope : Nat) (s : Syntax) : Syntax 
       | .true => expandDo (kid s' 1)
       | .false => match strEq k2 "term.listLit" with
         | .true => listLitStx (kids (kid s' 1))
-        | .false => match strEq k2 "term.boolAnd" with
+        | .false => match strEq k2 "term.not" with
+          | .true => notStx s'
+          | .false => match strEq k2 "term.ex" with
+            | .true => exStx s'
+            | .false => match strEq k2 "term.boolAnd" with
         -- `a && b` and `a || b` are the short-circuiting `if`s the host's macros make
         | .true => iteMatch (kid s' 0) (kid s' 2) (boolVal "false")
         | .false => match strEq k2 "term.boolOr" with

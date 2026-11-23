@@ -1678,6 +1678,55 @@ def surfaceLetUnitProgram : String :=
   "  IO.println (Nat.toString (twice 21));\n" ++
   "  IO.println (Nat.toString (through () 5))\n"
 
+/-- (A17) `⟨…⟩`: at a Σ (also dependent), nested, at a structure and at a data type with
+one constructor; in patterns (nested, under an as-pattern), and in `let`. -/
+def surfaceAnonProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "structure S where\n  x : Nat\n  y : Nat\n" ++
+  "inductive One where\n  | mk (a : Nat) (b : Nat)\n" ++
+  "def p : Nat × Nat := ⟨1, 2⟩\n" ++
+  "def dep : (n : Nat) × (n = n) := ⟨3, rfl⟩\n" ++
+  "def nested : Nat × (Nat × Nat) := ⟨1, ⟨2, 3⟩⟩\n" ++
+  "def s : S := ⟨4, 5⟩\n" ++
+  "def o : One := ⟨6, 7⟩\n" ++
+  "def fstP (q : Nat × Nat) : Nat := match q with\n  | ⟨a, b⟩ => a\n" ++
+  "def deep (q : Nat × (Nat × Nat)) : Nat := match q with\n  | ⟨a, ⟨b, c⟩⟩ => a + b + c\n" ++
+  "def sm (q : S) : Nat := match q with\n  | ⟨a, b⟩ => a * 10 + b\n" ++
+  "def om (q : One) : Nat := match q with\n  | ⟨a, b⟩ => a * 10 + b\n" ++
+  "def asAnon (q : Nat × Nat) : Nat := match q with\n  | whole@⟨a, b⟩ => whole.1 + a + b\n" ++
+  "def letAnon (q : Nat × Nat) : Nat :=\n  let ⟨a, b⟩ := q;\n  a * 10 + b\n" ++
+  "def listAnon : List (Nat × Nat) → Nat\n  | [] => 0\n  | [⟨a, b⟩] => a + b\n  | _ => 1\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (p.1 + p.2 + dep.1 + nested.1 + nested.2.1 + nested.2.2));\n" ++
+  "  IO.println (Nat.toString (s.x * 1000 + s.y * 100 + fstP ⟨8, 9⟩ + deep ⟨1, ⟨2, 3⟩⟩));\n" ++
+  "  IO.println (Nat.toString (om o * 100 + sm s));\n" ++
+  "  IO.println (Nat.toString (asAnon ⟨10, 20⟩ + letAnon ⟨2, 3⟩));\n" ++
+  "  IO.println (Nat.toString (listAnon [] + listAnon [⟨7, 8⟩] + listAnon [⟨1, 2⟩, ⟨3, 4⟩]))\n"
+
+/-- (A17) `∃`/`¬`: the host gets them from `lib/Logic.wiz`; the self-hosted frontend
+cannot load `Logic`, so the same declarations are spelled out (the declarations only;
+`Parse.wiz` supplies the `∃` binder surface, `notation` supplies `¬`). -/
+def surfaceLogicSelfHeader : String :=
+  "def Not (P : Prop) : Prop := P → False\n" ++
+  "def Ex {A : Type} (P : A → Prop) : Prop := (0 R : Prop) → ((a : A) → P a → R) → R\n" ++
+  "def Ex.intro {A : Type} (0 P : A → Prop) (a : A) (p : P a) : Ex P := fun R k => k a p\n" ++
+  "def Ex.elim {A : Type} {P : A → Prop} {0 R : Prop} (h : Ex P) (k : (a : A) → P a → R) : R := h R k\n" ++
+  "notation:max \"¬\" p:40 => Not p\n"
+
+/-- (A17) `∃`/`¬` bodies: one and several binders, every binder spelling, `¬`'s
+precedence (`¬ 0 = 1` is `¬ (0 = 1)`), and an existential in a binder type. `Ex` is the
+impredicative Church encoding, so `Ex.elim` only goes into a proposition: the program
+runs, but every use is a proof. -/
+def surfaceLogicBody : String :=
+  "def two : ∃ n : Nat, n = 2 := @Ex.intro Nat (fun n => n = 2) 2 rfl\n" ++
+  "def three : ∃ x y : Nat, x = y := @Ex.intro Nat (fun x => ∃ y : Nat, x = y) 3 (@Ex.intro Nat (fun y => 3 = y) 3 rfl)\n" ++
+  "def threeT : ∃ (x : Nat) (y : Nat), x = y := three\n" ++
+  "def threeM : ∃ x (y : Nat), x = y := three\n" ++
+  "def useEx (h : ∃ n : Nat, n = n) : ∃ n : Nat, n = n := h\n" ++
+  "def notId {P : Prop} (h : ¬ P) : ¬ P := h\n" ++
+  "def notApp {P : Prop} (h : ¬ P) (p : P) : False := h p\n" ++
+  "def main : IO Unit := IO.println \"ex-not-ok\"\n"
+
 def selfHostGroup : Group where
   name := "selfhost"
   exercise := "Stages 12b–14q"
@@ -2900,6 +2949,53 @@ def selfHostGroup : Group where
         selfhostAgreesHost surfaceLetPairProgram },
     { name := "A18: `let () := u; b` agrees with the host", run := fun _ =>
         selfhostAgreesHost surfaceLetUnitProgram },
+    -- (A17) `⟨…⟩` and `∃`/`¬`
+    { name := "A17: `⟨…⟩` at a Σ (also dependent), nested, at a structure and a one-constructor data type, in patterns and `let`, agrees with the host", run := fun _ =>
+        selfhostAgreesHost surfaceAnonProgram },
+    { name := "A17: `∃`/`¬` elaborate and run as on the host (`lib/Logic.wiz`'s surface)", run := fun _ => do
+        -- the host loads `Logic`; the self-hosted frontend cannot, so it gets the same
+        -- declarations (without the procedural binder macro, which `Parse.wiz` supplies)
+        let cell ← IO.mkRef (none : Option String)
+        ioRunWith ("import Logic\nimport IO\n" ++ surfaceLogicBody) fun out => cell.set (some out)
+        let some expected ← cell.get | return
+        let selfSrc := "import Prelude\nimport IO\n" ++ surfaceLogicSelfHeader ++ surfaceLogicBody
+        selfhostCompileRun selfSrc expected (opt := "-O0")
+        -- the rejections agree too: a witness of the wrong type, and a `¬` applied to a
+        -- proof of the wrong equation
+        let prelude ← IO.FS.readFile "lib/Prelude.wiz"
+        let logic ← IO.FS.readFile "lib/Logic.wiz"
+        let loader : Name → Option String := fun m =>
+          if m == "Prelude" then some prelude else if m == "Logic" then some logic else none
+        for (bad, what) in [
+          ("def bad : ∃ n : Nat, n = 2 := @Ex.intro Nat (fun n => n = 2) 3 rfl\n", "a wrong witness"),
+          ("def bad2 {P : Prop} (p : P) : ¬ P := p\n", "a `¬` armed with a proof")] do
+          let hs := runFrontend (R := ZeroOneMany) ("import Logic\n" ++ bad)
+            { loader, trustedModule := Tests.libModule }
+          unless !(hs.messages.filter (·.severity == .error)).isEmpty do
+            throw (IO.userError s!"the Lean frontend accepts {what}:\n{bad}")
+          let some out ← selfhostOutput ("import Prelude\n" ++ surfaceLogicSelfHeader ++ bad) | return
+          unless (out.splitOn "\n").any (·.startsWith "error") do
+            throw (IO.userError s!"the self-hosted frontend accepts {what}:\n{out}") },
+    { name := "A17: a `⟨…⟩` the expected type cannot supply is rejected, as on the host", run := fun _ => do
+        selfhostAgrees "" [
+          ("def badPair : Nat × Nat := ⟨1⟩\n", false),
+          ("inductive Two where\n  | a\n  | b\ndef badTwo : Two := ⟨1, 2⟩\n", false),
+          ("def badNat : Nat := ⟨1, 2⟩\n", false),
+          ("structure S1 where\n  x : Nat\ndef badArity : S1 := ⟨1, 2⟩\n", false),
+          ("structure S2 where\n  x : Nat\ndef badPat (s : S2) : Nat := match s with\n  | ⟨a, b⟩ => a\n", false),
+          ("inductive Two2 where\n  | a\n  | b\ndef badPat (x : Two2) : Nat := match x with\n  | ⟨a⟩ => 0\n", false)] },
+    { name := "A17: an untyped `⟨…⟩` is rejected with the host's message", run := fun _ => do
+        let msg := "cannot infer the type of an anonymous constructor ⟨…⟩; add a type ascription"
+        let loader ← preludeLoader
+        let src := "import Prelude\n#check ⟨1, 2⟩\n"
+        let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+        let leanErrs := (s.messages.filter (·.severity == .error)).map (·.text)
+        unless leanErrs.toList.any (· == msg) do
+          throw (IO.userError s!"the Lean frontend does not report the expected message: {leanErrs}")
+        let some out ← selfhostOutput src | return
+        let expected := "error: " ++ msg
+        unless (out.splitOn "\n").contains expected do
+          throw (IO.userError s!"the self-hosted frontend does not report the host's message:\n{out}") },
     -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
     { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
         selfhostCheckModules

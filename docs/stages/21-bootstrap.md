@@ -1211,3 +1211,55 @@ operations in the host interpreters.
 **Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
+
+## 21am: `⟨…⟩`, `∃` and `¬` in the self-hosted frontend (A17)
+
+The rest of A17's surface, so a program that writes the standard forms elaborates and
+runs under the self-hosted toolchain as it does under the Lean host.
+
+* **Anonymous constructors** (`Frontend.wiz` `AShape`/`anonShape`, `anonTermOf`,
+  `anonPatOf`). `⟨e₁, …, eₙ⟩` is the host's `elabAnon`: the `mk` of the expected
+  structure, the tuple at a Σ (dependent included), or the only constructor of a data
+  type with one constructor; anything else is the host's error ("needs a structure, a
+  pair or a data type with one constructor as its expected type, not …"), a Σ with fewer
+  than two components its own ("an anonymous constructor of a pair has at least two
+  components"), and a data type with several constructors names the type and the count.
+  The host deliberately has **no inferring form** for `⟨…⟩` (the components never fix a
+  Σ's binder types), so neither has this frontend: at an expected type supplied by a
+  metavariable it reports "cannot infer the type of an anonymous constructor ⟨…⟩; add a
+  type ascription", the host's message. `⟨…⟩` may appear anywhere a term is checked —
+  arguments, `let` values, nested — because it is read from the expected type at the
+  point the term is checked.
+* **`⟨…⟩` patterns** (`splitAnon`, `anonCol`). A pattern column whose first row is
+  `⟨p₁, …, pₙ⟩` is rewritten the way the host's `structPattern?` does it: `.mk p₁ … pₙ`
+  at a structure (with the host's arity message), a tuple pattern at a Σ, or the data
+  type's only constructor — then compiled again, so nested `⟨…⟩`s and `⟨…⟩` under an
+  as-pattern (`x@⟨a, b⟩`) work, and a `⟨…⟩` inside a list literal pattern
+  (`[⟨a, b⟩]`) too. `let ⟨a, b⟩ := e; b` is `match e with | ⟨a, b⟩ => b` (the host's
+  no-quantity `elabLetPat`); a written quantity is refused, as for `let (x, y)`, because
+  this kernel has no `split`.
+* **`∃` and `¬`** (`Parse.wiz` `surfaceCats`/`surfaceTokens`, `Frontend.wiz`
+  `exStx`/`notStx`). `lib/Logic.wiz` declares them: `¬` is an ordinary `notation` (which
+  this frontend already runs, so a program that writes the declaration itself works),
+  but `∃ x y : A, P` is a **procedural** macro (`Ex.binderMacro`, a Wiz function that
+  builds the nest of `Ex`s), and this frontend has no evaluator. The surface is
+  therefore built in, exactly as list literals are: `term.not` at precedence 1024 with
+  its argument at 40 (so `¬ 0 = 1` is `¬ (0 = 1)`), and `term.ex` (`∃` with
+  `ident`/`(x y : A)` binders and an optional type after them) is rewritten to the same
+  tree `Ex.binderMacro` makes, `Ex (fun (x : A) => Ex (fun (y : A) => …))`. The names
+  `Not` and `Ex` must resolve, as on the host: the self-hosted frontend embeds the
+  Prelude but cannot load `Logic`, so a program states the declarations it uses (the
+  tests do).
+* **Tests** (group `selfhost`): `⟨…⟩` at a Σ (also dependent), nested, at a structure and
+  at a one-constructor data type, in patterns (nested, under an as-pattern) and in `let`,
+  compiled and run by both toolchains with the host's output; the rejections
+  (a one-component pair, a two-constructor type, a non-structure, a pattern's arity) as
+  verdict differentials; the untyped `⟨…⟩` with the host's exact message; and `∃`/`¬`
+  (one and several binders, every binder spelling, `¬`'s precedence) run by both
+  toolchains against `Logic` on the host side.
+
+**Pinned differences.** `⟨…⟩` is check-only (see above; the host is). `∃`/`¬` parse even
+without a `syntax`/`notation` declaration (the host needs `import Logic`'s), and a
+program's own `notation` for `¬` is shadowed by the built-in rule when both match; both
+follow list literals, which are built in for the same reason. `let q ⟨…⟩` at a written
+quantity is refused (no `split` in this kernel); the host takes the structure apart.

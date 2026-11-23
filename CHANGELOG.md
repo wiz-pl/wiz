@@ -21,6 +21,18 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   program with the Lean host and with the self-hosted compiler and compare their outputs
   rather than a literal (149–154). Still missing: `∃`/`¬` and `⟨…⟩`; a written quantity
   other than ω on `let (x, y)` is refused.
+* selfhost: A17's remainder — anonymous constructors and the `∃`/`¬` surface. `⟨e₁, …,
+  eₙ⟩` is the expected structure's `mk`, the tuple at a Σ (dependent included) or a data
+  type's only constructor, with the host's errors and its check-only rule (an untyped
+  `⟨…⟩` is "cannot infer the type of an anonymous constructor ⟨…⟩; add a type
+  ascription"); `⟨…⟩` patterns are rewritten before the constructor split (nested, under
+  an as-pattern, in a list literal pattern), and `let ⟨a, b⟩ := e; b` is a `match`.
+  `∃ x y : A, P` and `¬ P` are built into the parser tables (`lib/Logic.wiz`'s
+  `Ex.binderMacro` is procedural, so the frontend rewrites the node to the same nest of
+  `Ex`s; `¬` is `Not`), with `Ex`/`Not` resolved from the program's own declarations
+  (the self-hosted frontend cannot load `Logic`). Tests: a program using them runs in
+  both toolchains, the rejections are verdict differentials, and the untyped message is
+  the host's (21am).
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
