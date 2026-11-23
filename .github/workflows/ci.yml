@@ -1052,7 +1052,9 @@ jobs:
     # (it would run untrusted code on that machine) and uses GitHub's runner instead.
     # Unset (the default): every shard on ubuntu-latest, as before.
     runs-on: ${{ matrix.shard.heavy && vars.WIZ_RUNNER_HEAVY != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.WIZ_RUNNER_HEAVY || 'ubuntu-latest' }}
-    timeout-minutes: 90 # the selfhost group is split into parts (test-shards.json) to keep each one short
+    # the groups are split into parts (test-shards.json) to keep each one short: library
+    # into 12, since the measured shards were 55-85 min (one passed 90) at 8 parts
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.lean.outputs.matrix) }}
