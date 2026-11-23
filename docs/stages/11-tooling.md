@@ -890,10 +890,27 @@ implicit binders, a string with comment markers, comments in odd places).
   (25 cases); `wiz fmt --self-test` runs the fixtures, and the `fmt` gate group formats a
   fixed six-file corpus twice (`lake test -- '=fmt'`, about 12 s) and requires an
   idempotent reprint with no refused command. Both groups are in CI's `core` shard.
+* **In the language server.** `wiz lsp` advertises `documentFormattingProvider` and
+  `documentRangeFormattingProvider` and answers `textDocument/formatting` (one
+  `TextEdit`: the smallest span that changes) and `textDocument/rangeFormatting` (only
+  the commands wholly inside the range; the rest of the file is kept byte for byte).
+  Both run the same `Fmt.run`, from the server's libraries and the document's
+  `include_str` table, so `import` and `syntax` resolve exactly as they do for the
+  document's diagnostics. A file
+  that does not parse gets no edit (its diagnostics say why), and a range request whose
+  change would straddle the range gets none either. `insertSpaces: false` is refused
+  rather than ignored: the formatter's indentation is two spaces, a tab counts as one
+  column to the parser, and `tabSize` therefore does not apply. The playground's editor
+  has a format action (`format()`/`formatSelection()` in `web/playground-lsp.js`,
+  Ctrl/⌘+Shift+F): the `TextEdit`s go through one `WorkspaceEdit` applier
+  (`LspClient.applyWorkspaceEdit`; UTF-16 positions, reverse-order application, a
+  document-version guard, and the caret mapped through the edits), and the page's normal
+  `input` path sends `didChange`.
 * **Not done.** Signatures never break (a long header stays long: wrapping binder lists
   needs `fill`/alignment); a multi-line block comment keeps the indentation of its
-  continuation lines; the self-hosted frontend has no formatter; and the LSP does not
-  offer `textDocument/formatting` yet (`Wiz/Format.lean` is that plumbing's core).
+  continuation lines; the self-hosted frontend has no formatter; range formatting
+  formats whole commands (a selection that cuts through a command formats nothing);
+  and `insertSpaces: false` is refused.
 
 ## 11ab: a static playground
 

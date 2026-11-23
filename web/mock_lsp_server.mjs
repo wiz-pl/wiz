@@ -24,6 +24,46 @@ def k : Nat → Bool → Nat := by
   exact n
 `;
 
+// The mock's formatter: the smallest reprint that is stable (`def  f :Nat:=1` →
+// `def f : Nat := 1`). It is a stand-in for the shape of the protocol, not `wiz fmt`;
+// the Lean `lsp-server` case is the oracle for the real formatter's output.
+function formatLine(line) {
+  return String(line).replace(/^(\s*)def\s+/, "$1def ").replace(/\s*:Nat:=\s*/g, " : Nat := ");
+}
+
+function documentEnd(text) {
+  const lines = String(text || "").split("\n");
+  return { line: Math.max(0, lines.length - 1), character: lines[lines.length - 1].length };
+}
+
+function formattingEdits(text) {
+  const before = String(text || "");
+  const after = before.split("\n").map(formatLine).join("\n");
+  if (after === before) return [];
+  return [{ range: { start: { line: 0, character: 0 }, end: documentEnd(before) }, newText: after }];
+}
+
+function rangeFormattingEdits(text, range) {
+  const value = String(text || "");
+  const lines = value.split("\n");
+  const startLine = range && range.start ? range.start.line : 0;
+  let endLine = range && range.end ? range.end.line : startLine;
+  // an end at the next line's character 0 does not include that line
+  if (range && range.end && range.end.character === 0 && endLine > startLine) endLine -= 1;
+  const edits = [];
+  for (let l = startLine; l <= Math.min(endLine, lines.length - 1); l++) {
+    const line = lines[l] || "";
+    const next = formatLine(line);
+    if (next !== line) {
+      edits.push({
+        range: { start: { line: l, character: 0 }, end: { line: l, character: line.length } },
+        newText: next,
+      });
+    }
+  }
+  return edits;
+}
+
 const INFOVIEW_METHODS = [
   "wiz/plainGoal", "wiz/plainTermGoal", "wiz/interactiveGoals",
   "wiz/interactiveTermGoal", "wiz/subtermInfo", "wiz/interactiveInfo",
@@ -122,6 +162,7 @@ export async function startMockServer(options = {}) {
     // a goal asked about text that has not been sent yet is visible here.
     goalTexts: [], goalVersions: [],
     hover: 0, definition: 0,
+    formatting: 0, formattingArgs: [], rangeFormatting: 0, rangeFormattingArgs: [],
   };
   const docs = new Map();
   const clients = new Set();
@@ -160,6 +201,8 @@ export async function startMockServer(options = {}) {
         reply(client, id, {
           capabilities: {
             textDocumentSync: 1,
+            documentFormattingProvider: !options.noFormatting,
+            documentRangeFormattingProvider: !options.noFormatting,
             experimental: { wizInfoview: { version: 1, methods: INFOVIEW_METHODS.slice() } },
           },
           serverInfo: { name: "wiz-mock", version: "0.0.1" },
@@ -234,6 +277,22 @@ export async function startMockServer(options = {}) {
         return reply(client, id, termResult(client.session));
       case "wiz/plainTermGoal":
         return reply(client, id, plainTermResult());
+      case "textDocument/formatting": {
+        stats.formatting += 1;
+        const uri = params.textDocument && params.textDocument.uri;
+        stats.formattingArgs.push({ uri, options: params.options });
+        if (options.noFormatting) return replyError(client, id, -32601, "MethodNotFound");
+        const text = docs.get(uri) ? docs.get(uri).text : "";
+        return reply(client, id, formattingEdits(text));
+      }
+      case "textDocument/rangeFormatting": {
+        stats.rangeFormatting += 1;
+        const uri = params.textDocument && params.textDocument.uri;
+        stats.rangeFormattingArgs.push({ uri, range: params.range, options: params.options });
+        if (options.noFormatting) return replyError(client, id, -32601, "MethodNotFound");
+        const text = docs.get(uri) ? docs.get(uri).text : "";
+        return reply(client, id, rangeFormattingEdits(text, params.range));
+      }
       case "textDocument/completion": {
         stats.completion += 1;
         stats.completionArgs.push({ uri: params.textDocument && params.textDocument.uri, position: params.position, context: params.context });
