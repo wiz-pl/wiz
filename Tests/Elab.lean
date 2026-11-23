@@ -1958,12 +1958,22 @@ flag is the supported form; the environment variables are kept because the case 
 echoing stub compiler fails every =selfhost case" (`Tests/Groups/SelfHost.lean`) sets them
 for a child process, so the pipeline group cannot quietly stop testing the pipeline. -/
 def selfhostBinaryOverride (name : String) : IO (Option System.FilePath) := do
-  match name with
-  | "compiler" => if let some p ← selfhostCompilerRef.get then return some p
-  | "checker"  => if let some p ← selfhostCheckerRef.get then return some p
-  | _ => pure ()
-  let var := "WIZ_SELFHOST_" ++ name.toUpper
-  return (← IO.getEnv var).map System.FilePath.mk
+  let chosen ← match name with
+    | "compiler" => selfhostCompilerRef.get
+    | "checker"  => selfhostCheckerRef.get
+    | _          => pure none
+  let chosen ← match chosen with
+    | some p => pure (some p)
+    | none => pure ((← IO.getEnv ("WIZ_SELFHOST_" ++ name.toUpper)).map System.FilePath.mk)
+  match chosen with
+  | none => pure none
+  | some p =>
+    -- (a path from `--selfhost-compiler`/`WIZ_SELFHOST_*` is a *store path* the caller
+    -- promised exists; a shard that forgets to realise it used to surface as a case that
+    -- "could not run" - or worse, as a skip in a group that turns any error into one)
+    if !(← p.pathExists) then
+      throw (IO.userError s!"selfhost {name}: {p} does not exist (the caller named a path but did not realise it)")
+    pure (some p)
 
 /-- The whole self-hosted pipeline as a compiled program that checks the file `input.wiz`
 in its working directory. It is built once and kept (under `/tmp`, keyed by its source

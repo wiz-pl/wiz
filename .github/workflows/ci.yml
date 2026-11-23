@@ -1163,10 +1163,21 @@ jobs:
           # missing path falls back to the derivation, as before.
           wiz='${{ needs.lean.outputs.wiz }}'
           tests='${{ needs.lean.outputs.tests }}'
+          # the self-hosted programs are store paths too (perf H2), and nothing else in
+          # this job demands them: without this line they stay strings and every case
+          # that uses one fails to exec - or, in a group that turns any error into a
+          # skip, disappears as "the selfhost compiler is unavailable".
+          shc='${{ needs.lean.outputs.selfhost-compiler }}'
+          shk='${{ needs.lean.outputs.selfhost-checker }}'
           if [ -z "$wiz" ] || [ -z "$tests" ] || ! nix build --no-link "$wiz" "$tests"; then
             nix build .#wiz .#tests --no-link -L
             wiz=$(nix path-info .#wiz)
             tests=$(nix path-info .#tests)
+          fi
+          if [ -n "$shc" ] && [ -n "$shk" ]; then
+            # a miss is not fatal here: the shard falls back to the driver's /tmp build,
+            # and the shard step warns about it
+            nix build --no-link "$shc" "$shk" || echo "::warning title=selfhost::the self-hosted store paths are not substitutable; the driver will build them"
           fi
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
