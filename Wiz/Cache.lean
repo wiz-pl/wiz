@@ -1424,6 +1424,18 @@ def ManifestStore.bump (m : ManifestStore) (f : VerifyCounts → VerifyCounts) :
 def ManifestStore.inWrite (m : ManifestStore) (dir : System.FilePath) : Bool :=
   some dir.toString == m.write.map (·.toString)
 
+/-- Index the region entry a layer just wrote, replacing that layer's previous entry for
+the key. A rewritten region may differ byte-for-byte from the old one (the image is not
+canonical), so keeping the old entry first would read the new file against the old
+digest, drop it, and lose the repair. -/
+def ManifestStore.setRegion (m : ManifestStore) (id : String) (e : ManifestEntry)
+    (dir : System.FilePath) : IO Unit :=
+  m.regions.modify fun mp =>
+    let kept := ((mp[id]?).getD #[]).filter fun (_, d) => d.toString != dir.toString
+    mp.insert id (kept.push (e, dir))
+
+/-- Does `dir` have anything for module `key` (a manifest, a seen marker or a region)? The
+marker is named by the module key; the `.wizc` entries are named by command keys. -/
 def ManifestStore.hasModule (m : ManifestStore) (dir : System.FilePath) (key : Key) :
     IO Bool := do
   let oldMarker := s!"{mixHash m.binary key.fast}.wizm"
@@ -1562,7 +1574,7 @@ def ManifestStore.writeManifest (m : ManifestStore) (key : Key) (module : Name)
     let eid := Key.id { fast := e.key, strong := e.keySha }
     m.entries.modify fun mp => mp.insert eid (((mp[eid]?).getD #[]).push (e, dir))
   if let some e := m0.region then do
-    m.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (e, dir))
+    m.setRegion id e dir
 
 /-- Verify the keyed files of one layer against its manifests (the full-scan tool). This
 is what `wiz cache verify` reports; normal runs verify only what they read. -/
@@ -2054,7 +2066,7 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
             { a with binary := binary, textSalt := salt, rig := opts.rig }
           for ent in e.toList do
             let id := Key.id key
-            ms.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (ent, dir))
+            ms.setRegion id ent dir
           pure e
         catch _ => pure none
       | _, _ => pure none
