@@ -19,6 +19,16 @@ PORT=${1:-18765}
 OUT=$(mktemp -d)
 trap 'if [ -n "$BRIDGE" ]; then pkill -P "$BRIDGE" 2>/dev/null || true; kill "$BRIDGE" 2>/dev/null || true; fi; rm -rf "$OUT"' EXIT
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
+# A single `web-bundle` store path (`nix build .#web-bundle`) carries the three module
+# sets and the page files they copied. The `web` job can then export one variable
+# instead of the three per-module ones; each `--from` below copies only what it needs.
+if [ -n "${WIZ_WEB_BUNDLE:-}" ]; then
+  : "${WIZ_WEB_FROM:=$WIZ_WEB_BUNDLE}"
+  : "${WIZ_PLAYGROUND_FROM:=$WIZ_WEB_BUNDLE}"
+  : "${WIZ_PLAYGROUND_UI_FROM:=$WIZ_WEB_BUNDLE}"
+  export WIZ_WEB_FROM WIZ_PLAYGROUND_FROM WIZ_PLAYGROUND_UI_FROM
+  echo "web/test: modules from $WIZ_WEB_BUNDLE"
+fi
 # (11s) the search box's ranking and rendering (no build or browser needed)
 "$WIZ" run -I "$ROOT/lib" "$ROOT/web/search_gen.wiz" > "$OUT/search.json"
 node "$ROOT/web/scroll-search_test.mjs" "$OUT/search.json" > "$OUT/search.txt"
@@ -30,6 +40,14 @@ grep -qF 'scroll-search: all checks passed' "$OUT/search.txt" && echo "ok (searc
 node "$ROOT/web/goals_test.mjs" "$OUT/goals.json" > "$OUT/goals.txt"
 if grep -qF 'goals: all checks passed' "$OUT/goals.txt"; then echo "ok (goals, wiz)"; else
   echo "FAIL (goals, wiz)"; cat "$OUT/goals.txt"; exit 1; fi
+# (source reader) the hand-written fixture: the reader's SSR, its Loom patches and its
+# cards, with no scry and no Wasm (`scry web`'s bundle acceptance runs in scry.yml,
+# where the scry binary exists)
+"$WIZ" run -I "$ROOT/lib" "$ROOT/web/source_fixture_gen.wiz" > "$OUT/source-fixture.json"
+node "$ROOT/web/source_fixture_test.mjs" "$OUT/source-fixture.json" > "$OUT/source-fixture.txt"
+if grep -qF 'source fixture: all checks passed' "$OUT/source-fixture.txt"; then
+  echo "ok (source reader fixture)"; else
+  echo "FAIL (source reader fixture)"; cat "$OUT/source-fixture.txt"; exit 1; fi
 # (bench) the benchmark page's generator fixtures and the site check's rules for it
 "$ROOT/web/test-bench.sh" > "$OUT/bench.txt"
 grep -qF 'test-bench: ok' "$OUT/bench.txt" && echo "ok (bench page)" || {

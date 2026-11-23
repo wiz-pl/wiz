@@ -133,9 +133,9 @@ def out : ETerm :=
     .prim .lazySet #[v 0, apps (g "wiz.map") [p 0 (v 0),
       lams ["j", "s"] (.prim .coit #[p 0 (v 2), p 1 (v 2), v 1, v 0]),
       apps (p 1 (v 0)) [p 2 (v 0), p 3 (v 0)]]],
-    -- scofix f i a: out (f ◾ (fun j i a => scofix f i a) i a);  inside: a0 i1 j2 x3
+    -- scofix f i a: out (f ◾ (fun i a => scofix f i a) i a);  inside: a0 i1 f2
     .prim .lazySet #[v 0, .app (g "wiz.out") (apps (p 0 (v 0)) [.erased,
-      lams ["j", "i", "a"] (.prim .scofix #[p 0 (v 3), v 1, v 0]), p 1 (v 0), p 2 (v 0)])],
+      lams ["i", "a"] (.prim .scofix #[p 0 (v 2), v 1, v 0]), p 1 (v 0), p 2 (v 0)])],
     -- observed: the payload
     p 0 (v 0)])
 

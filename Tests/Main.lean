@@ -67,6 +67,14 @@ def selectedCases (g : Group) (args : List String) : Option (List Nat) := Id.run
     | _ => return none
   return some ixs
 
+/-- How many of `g`'s cases the selectors pick: all of them when they name the group
+without a `#` list (`selectedCases` returns `none`). This is the denominator of the
+`[n/total]` numbering, over the whole invocation rather than one group. -/
+def selectedCaseCount (g : Group) (args : List String) : Nat :=
+  match selectedCases g args with
+  | none => g.cases.length
+  | some ixs => ((List.range g.cases.length).filter (ixs.contains ·)).length
+
 /-- The group named `name`, among the suite's and the driver's fixtures (`--run` finds
 these; no selector picks them). -/
 def findGroup (name : String) : IO (Option Group) := do
@@ -101,7 +109,7 @@ flags). Prints the case's name and result (and a failure's output) and exits 0 i
 passed, 1 if it failed, 2 on a usage error and 3 if it was skipped: a skipped case is not
 a pass. -/
 def runOne (args : List String) : IO UInt32 := do
-  let usage := "usage: tests --run GROUP INDEX [--jobs N] [toolchain flags] (INDEX from 0: `tests --list-cases '=GROUP'`)"
+  let usage := "usage: tests --run GROUP INDEX [--jobs N] [--allow-missing-deps] [--stats] [toolchain flags] (INDEX from 0: `tests --list-cases '=GROUP'`)"
   let args := match args with
     | [one] => one.splitOn "#"
     | args => args
@@ -186,8 +194,14 @@ starts with one of the arguments, `lake test -- =c` only the group named `c`, an
 against them), and `lake test -- --list-cases SELECTOR…` the selected cases, as
 `GROUP<tab>INDEX<tab>NAME` lines; `lake test -- --run GROUP INDEX` runs one case and
 exits with its result (`runOne`). A selector that picks nothing, a case index the group
-lacks and an unknown flag are errors. A skipped case (`Tests.skip`) shows as `⊘` and is
-counted apart. `--timings FILE` appends one line of JSON per case to
+lacks and an unknown flag are errors. A skip the case declares (`Tests.skip`: a
+documented gap, a `-- test: skip` marker) shows as `⊘` and is counted apart. A case that
+cannot run because a dependency is missing (`Tests.skipMissing`) is a **failure** that
+names the dependency, unless `--allow-missing-deps` (or `WIZ_ALLOW_MISSING_DEPS=1`, the
+shard driver's equivalent) is given, in which case it is a reported skip and the summary
+counts it. `--stats` prints the core evaluator's counters (`Wiz.Core.Stats`) on stderr at
+exit, for the driver and for each case's process; it is diagnostics only, and no term,
+cache key or output depends on it. `--timings FILE` appends one line of JSON per case to
 FILE (its group, index, name, wall time in seconds, whether it passed, and its notes:
 `Tests.note`), labelled with `--shard NAME`.
 
@@ -199,19 +213,34 @@ long sweep may use N workers inside its one process (`=selfhost-libdiff`, fewer 
 memory or CPUs are short). `--jobs-all` also parallelizes groups that did not opt in (for
 auditing a group's isolation, not for CI).
 
-`--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--jobs N] [--part i/n]`
-runs the self-hosted compiler and the Lean frontend over every `lib/` and `scry/` file and
-reports where they disagree (the group `=selfhost-libdiff` is the same sweep;
+`--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--ratchet FILE] [--jobs N] [--part i/n]`
+runs the self-hosted compiler and the Lean frontend over every `lib/` and `scry/` file
+and reports where they disagree (the group `=selfhost-libdiff` is the same sweep;
 `Tests/Groups/SelfhostLibDiff.lean` documents the format). `--jobs N` checks N files at a
 time; with no `--jobs` it is auto (the CPUs minus one), capped by the free memory at
 `--mem` MB per file. The driver's `--jobs` reaches the group's one case; `--jobs 1` is the
 serial control. `--part i/n` (1-based) runs only the files whose index in the sorted list
 is `k % n = i - 1`: the parts are a deterministic partition of the one case, so CI can run
-its 3664 s on n jobs without changing what any file is compared against. -/
-def main (args : List String) : IO UInt32 := do
+its 3664 s on n jobs without changing what any file is compared against. `--ratchet FILE`
+compares the run's verdicts with a checked-in `file<TAB>verdict` baseline and exits 1 on
+a regression (a file that was `ok` and no longer is, or a new file with a gap); the
+group's sweep cases use `Tests/libdiff-baseline.tsv`. -/
+def mainImpl (args : List String) : IO UInt32 := do
   -- a `panic!` fails the case that hits it (each case runs in its own process), as it
   -- fails `wiz check`; `--panic-probe continue` turns it off again
   Wiz.exitOnPanic
+  -- A missing dependency is a failure unless this explicit opt-out is given, and the
+  -- environment variable is its equivalent for the shard driver (CI sets it from
+  -- `.github/test-shards.json`'s `allow-missing-deps`, never by default). It is taken off
+  -- before the toolchain flags and passed to each case's process, which strips it again.
+  let (allowArg, args) := takeSwitch "--allow-missing-deps" args
+  let allowEnv ← IO.getEnv "WIZ_ALLOW_MISSING_DEPS"
+  let allowMissing := allowArg || allowEnv.isSome
+  setAllowMissingDeps allowMissing
+  -- `--stats` enables the core counters in this process and in each case's process (the
+  -- counter output is diagnostics on stderr; a case's result never depends on it)
+  let (statsArg, args) := takeSwitch "--stats" args
+  if statsArg then Wiz.Stats.enable
   -- (23k) a grail job's supervisor, and grail itself (the job-hygiene tests run it)
   -- (13b) `--trace-guess-fallback`: each case's process reports the declarations that reach
   -- the fallback recheck (`checkGuessedDecl`), and the driver forwards them (`forwardGuessLines`)
@@ -243,7 +272,9 @@ def main (args : List String) : IO UInt32 := do
     | _ => false
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
-  flagsRef.set (tc.toFlags ++ (if traceGuesses then ["--trace-guess-fallback"] else []))
+  flagsRef.set (tc.toFlags ++ (if traceGuesses then ["--trace-guess-fallback"] else [])
+    ++ (if statsArg then ["--stats"] else [])
+    ++ (if allowMissing then ["--allow-missing-deps"] else []))
   match args' with
   -- one case in this process: what `Group.run` starts for each case
   | ["--run-case", group, ix] =>
@@ -328,6 +359,10 @@ def main (args : List String) : IO UInt32 := do
     let groups ← allGroups
     let selected := if args.isEmpty then groups
       else groups.filter fun g => args.any (selects g)
+    -- `[n/total]` counts the cases this invocation selected, across its groups (a shard
+    -- runs several), not the whole suite and not each group from 1 again
+    let total := (selected.map (fun g => selectedCaseCount g args)).foldl (· + ·) 0
+    let mut caseNo := 0
     let record (g : Group) (r : CaseResult) : IO Unit := do
       if let some file := timings then
         let h ← IO.FS.Handle.mk file .append
@@ -335,17 +370,33 @@ def main (args : List String) : IO UInt32 := do
     let mut passed := 0
     let mut failed := 0
     let mut skipped := 0
+    let mut missingDeps := 0
     for g in selected do
       let start ← IO.monoMsNow
       let results ← if jobs > 1 && (g.parallel || jobsAll) then
-          g.runJobs jobs (selectedCases g args) (record g)
-        else g.run (selectedCases g args) (record g)
+          g.runJobs jobs (selectedCases g args) (record g) (start := caseNo + 1) (total := some total)
+        else g.run (selectedCases g args) (record g) (start := caseNo + 1) (total := some total)
+      caseNo := caseNo + results.length
       let cases := results.foldl (· + ·.ms) 0
       IO.println s!"  ({g.name}: {showMs ((← IO.monoMsNow) - start)} s; cases {showMs cases} s)"
       let p := (results.filter (·.ok)).length
       let k := (results.filter (·.skipped.isSome)).length
       passed := passed + (p - k)
       skipped := skipped + k
+      missingDeps := missingDeps + (results.filter
+        (fun r => r.notes.any (·.startsWith missingDepMarker))).length
       failed := failed + (results.length - p)
     IO.println s!"\n{passed} passed, {failed} failed{if skipped == 0 then "" else s!", {skipped} skipped"}"
+    -- Visible in the shard log (and in the skip lint, which reads the `--timings` notes):
+    -- the environment skips a job allowed with `--allow-missing-deps` are counted, never
+    -- silent. Without the flag these cases are failures, so this line is empty.
+    if missingDeps > 0 then
+      IO.println s!"{missingDeps} case(s) skipped for a missing dependency (--allow-missing-deps / WIZ_ALLOW_MISSING_DEPS=1)"
     pure (if failed == 0 then 0 else 1)
+
+/-- The driver: `--stats` makes each case's process report the core counters (and the
+driver itself prints its own, which are empty unless it is also `--run-case`). -/
+def main (args : List String) : IO UInt32 := do
+  let rc ← mainImpl args
+  Wiz.Stats.report
+  return rc

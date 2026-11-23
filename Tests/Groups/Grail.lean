@@ -41,7 +41,7 @@ def linkCCase : Case :=
                           ("app/hi.c", "#include <stdint.h>\nuint64_t hi_num(void) { return 1; }\n")]
         let (s, ok) ← build dir tc
         if !ok then
-          skip "no toolchain"
+          skipMissing "no toolchain"
           return
         checkEq 3 s.ran
         let exe := (dir / ".grail" / "bin" / "hi").toString
@@ -85,13 +85,15 @@ def grailLspDiagnostics (dir : System.FilePath) (file : String) : IO (Option (Li
       ("version", (1 : Nat)), ("text", ← IO.FS.readFile path)])])])
   let mut diags := none
   repeat
-    let some m ← LSP.readMessage output | break
-    if LSP.getStr m ["method"] == "textDocument/publishDiagnostics" then
-      let ds := match LSP.get? m ["params", "diagnostics"] with
-        | some (.arr ds) => ds.toList.map (LSP.getStr · ["message"])
-        | _ => []
-      diags := some ds
-      break
+    match ← LSP.readMessage output with
+    | .ok (some m) =>
+      if LSP.getStr m ["method"] == "textDocument/publishDiagnostics" then
+        let ds := match LSP.get? m ["params", "diagnostics"] with
+          | some (.arr ds) => ds.toList.map (LSP.getStr · ["message"])
+          | _ => []
+        diags := some ds
+        break
+    | _ => break
   done.set true
   child.kill
   let _ ← child.wait
@@ -105,7 +107,7 @@ def grailLspCase : Case :=
 #eval two
 ")])
         let some ds ← grailLspDiagnostics dir "main.wiz"
-          | skip "no grail beside the test driver; lake build grail"
+          | skipMissing "no grail beside the test driver; lake build grail"
         check (ds.any (· == "2")) s!"diagnostics: {ds}"
         check (!ds.any fun d => (d.splitOn "unknown module").length > 1) s!"diagnostics: {ds}"
         -- a broken grail.wiz: the server still starts, with the package directory as a root
@@ -159,7 +161,7 @@ def grailGroup : Group where
         let dir2 ← mkTree pkgFiles
         let write ← IO.FS.createTempDir
         let buildArgs := #["--grail", "-C", dir2.toString, "--cache-ro", warm.toString,
-                           "--cache", write.toString, "build", "app"]
+                           "--cache-ro-unsigned", "--cache", write.toString, "build", "app"]
         let out ← IO.Process.output { cmd := self.toString, args := buildArgs }
         checkEq 0 out.exitCode
         check ((out.stdout.splitOn "jobs run").length > 1) s!"{out.stdout}{out.stderr}" },
@@ -237,7 +239,8 @@ def grailGroup : Group where
         let before ← snapshot ro
         let write ← IO.FS.createTempDir
         let pkg ← mkTree pkgFiles
-        let o3 ← grailBuild pkg ["--cache-ro", ro.toString, "--cache", write.toString, "--region-cache"]
+        let o3 ← grailBuild pkg ["--cache-ro", ro.toString, "--cache-ro-unsigned",
+                                 "--cache", write.toString, "--region-cache"]
         checkEq 0 o3.exitCode
         checkEq o0.stdout o3.stdout
         checkEq before (← snapshot ro)
@@ -269,7 +272,7 @@ def grailGroup : Group where
                           ("hello.wiz", "import IO\ndef main : IO Unit := IO.println \"hello from grail\"\n")]
         let (s, ok) ← build dir tc
         if !ok then
-          skip "no toolchain"
+          skipMissing "no toolchain"
           return
         checkEq 3 s.ran
         let out ← IO.Process.output { cmd := (dir / ".grail" / "bin" / "hello").toString }

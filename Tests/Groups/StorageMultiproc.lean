@@ -17,8 +17,8 @@ still sees its old pages, two writers from one base either merge (`+1`) or are r
 (`set`, a transaction begun before a delete), a base outside retention is `expired`, and a
 truncated last commit is ignored on reopen.
 
-The case concatenates the draft files (dropping their draft-local imports), because
-the suite's loader only serves `lib/` modules. The `SIGKILL`-releases-the-lock case needs
+The case concatenates the promoted engine files and the two draft files (dropping
+the imports), which the fixed module header at the top stands in for. The `SIGKILL`-releases-the-lock case needs
 the `flock` utility and is opt-in (`WIZ_MULTIPROC_KILL=1`, which the standalone
 `test-multiproc.sh` sets); here it prints its skipped line.
 -/
@@ -45,11 +45,11 @@ def dropImports (src : String) : String :=
   "\n".intercalate ((src.splitOn "\n").filter (fun l => !(l.startsWith "import ")))
 
 def storageMultiprocBody : IO String := do
-  let files := ["drafts/storage-engine/Core.wiz",
-    "drafts/storage-engine/Storage.wiz",
+  let files := ["lib/Scry/QuireCore.wiz",
+    "lib/Scry/QuireStorage.wiz",
     "drafts/storage-engine/Cursor.wiz",
-    "drafts/storage-engine/Registry.wiz",
-    "drafts/storage-engine/Durable.wiz",
+    "lib/Scry/QuireRegistry.wiz",
+    "lib/Scry/QuireDurable.wiz",
     "drafts/storage-engine/Multiproc.wiz",
     "drafts/storage-engine/MultiprocTest.wiz"]
   let mut body := storageMultiprocImports

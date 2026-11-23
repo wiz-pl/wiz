@@ -357,11 +357,16 @@ structure Scry.ProjectUnit where
   cst : Scry.Cst
   tu : Scry.TU
   errors : Nat
+  /-- The CST columns the `cst` view was built from. Kept for artifact dumps and
+  differential tests (the view exposes kind/field/span/parent/children but not flags,
+  `nextSib`, the child-CSR arc labels, or the intern tables). The view's closures already
+  retain this store, so the field adds no memory. -/
+  store : Scry.CstStore
 
 /-- Build a unit from an already-preprocessed CST. -/
 def Scry.unitOfPre (path : String) (pre : Scry.Preprocessed) (cst : Scry.Cst)
-    (errors : Nat) : Scry.ProjectUnit :=
-  Scry.ProjectUnit.mk path pre cst (Scry.lowerTU path cst) errors
+    (errors : Nat) (store : Scry.CstStore) : Scry.ProjectUnit :=
+  Scry.ProjectUnit.mk path pre cst (Scry.lowerTU path cst) errors store
 
 -- ## The project file table
 
@@ -511,7 +516,7 @@ def Scry.qualifyUnit (tu : Nat) (u : Scry.ProjectUnit) : Scry.ProjectUnit :=
   let funcs := List.map (Scry.renameFunc tu) u.tu.funcs;
   let tu2 := Scry.TU.mk u.tu.path u.tu.files u.tu.paths funcs
     (List.map (Scry.renameWarning tu) u.tu.warnings) u.tu.externalCalls;
-  Scry.ProjectUnit.mk u.path u.pre u.cst tu2 u.errors
+  Scry.ProjectUnit.mk u.path u.pre u.cst tu2 u.errors u.store
 
 /-- Qualify every unit, in project order (the unit's index is its TU index). -/
 partial def Scry.qualifyUnitsGo (units : List Scry.ProjectUnit) (i : Nat) :

@@ -73,9 +73,9 @@ of a committed candidate (with duplicate instances rejected, overlapping candida
 cannot arise; a candidate whose subgoals fail fails the command), **no default
 instances** (`attribute [default_instance]` is still an unsupported command), **no
 `binop`/`OfNat`** (a numeral at a non-`Nat` type is not a class problem; `import
-Prelude` still loads the self-hosted prelude, which has no classes), **no `outParam`**
-(the class's parameter types are not rewritten), and **no universe-polymorphic classes**
-(that is A15). A class with an instance parameter works, and its instance's own
+Prelude` still loads the self-hosted prelude, whose only class is `Append`, for `++`),
+**no `outParam`** (the class's parameter types are not rewritten), and **no
+universe-polymorphic classes** (that is A15). A class with an instance parameter works, and its instance's own
 parameters are solved by ordinary resolution (the `Commute` shape).
 
 ### Tests
@@ -131,23 +131,39 @@ The Lean toolchain's `deriving` is a **deriver**: a Wiz function
 which asks the elaborator for the type's shape (`MacroM.getInductive`) and returns the
 commands that make the instance. This frontend has no elaboration-time evaluation of Wiz
 code and no quotations (`wishful/selfhost-deriving.md`, items 1–3), so a Wiz deriver
-cannot be *run* here. It has the host's **table** instead: `Globals.derivers` maps a
+cannot be *run* here.
+
+The table is the host's, and so is the **runner**. `Frontend.wiz` now has the host's
+`Deriver`/`MacroM` interface and its reflection view: `runDeriver` answers
+`getInductive` from `Globals.view`, an `IndView` (parameters, constructors and fields;
+the host's shape, `Elab/Reflect.lean:17`) built from the already-elaborated `IndInfo`
+with the parameter types as syntax. The deriver returns ordinary commands, which
+`elabDerivedGo` elaborates through the normal `instance`/`def` path. `Inhabited`, the
+smallest of the five, is ported onto it (it is now a `Deriver` that reads the view and
+emits one `instance`, exactly as `lib/Deriving.wiz`'s `deriveInhabited` does); the other
+four are still hardcoded behind the same dispatch and are the remaining port. Running a
+deriver *written in Wiz source* still waits on the evaluator, and a field's type and a
+constructor's result indices are not reflected yet (`.missing`/count only), which is
+enough for the derivers here but not for `Lens`/`Bundle`.
+
+It has the host's **table**: `Globals.derivers` maps a
 class name to a deriver name, `attribute [deriver C] f` records a pair, and `deriving C`
 looks `C` up and dispatches on the registered name. The five derivers `lib/Deriving.wiz`
 registers in the Lean toolchain are implemented in `Frontend.wiz` under the same names
 (`deriveInhabited`, `deriveBEq`, `deriveRepr`, `deriveDecidableEq`, `deriveCompare`) and
 are pre-registered for the canonical class names, because the self-hosted prelude has no
-classes and no `import Deriving`. A deriver reads the type's shape from the
-already-elaborated `IndInfo` (the reflection counterpart) and **emits ordinary
-commands** — a `def` by structural recursion and an `instance` — which go through the
+class of its own beyond `Append` (for `++`) and no `import Deriving`. A deriver reads the
+type's shape from the already-elaborated `IndInfo` (the reflection counterpart) and
+**emits ordinary commands** — a `def` by structural recursion and an `instance` — which go through the
 same elaborator and kernel as a hand-written instance. The derived instance is a normal
 global: no axiom, no new kernel rule, no change to the trust ledger.
 
 * **The table.** Keyed by the class **name** (as `CommandState.derivers` is, not by the
   class's method shape: the host's `Lens` is a `def`, not a class). `attribute [deriver
   C] f` checks that `f` is declared with one argument (the host unifies its type with
-  `Deriver`; this frontend checks the Π arity, since `Deriver`/`MacroM` are not in its
-  prelude) and records `(C, f)`. A built-in deriver's name needs no declaration, so a
+  `Deriver`; this frontend checks the Π arity of the written type, so a `def d :
+  Deriver` alias is rejected where the expanded `String → MacroM (List Syntax)` is
+  accepted) and records `(C, f)`. A built-in deriver's name needs no declaration, so a
   look-alike class can reuse one: `attribute [deriver Eq2] deriveDecidableEq`. A
   registered name that is not one of the five is accepted and reported as unrunnable
   when `deriving C` uses it: *the deriver f cannot be run (this frontend has no
@@ -224,18 +240,19 @@ What a **user deriver** still needs: (1) a way to run Wiz code at elaboration ti
 interpreter over the kernel's terms, or compiling with `Backend.wiz` and loading the
 result), which is also what macros and tactics need; (2) quotations in terms and the
 `Syntax` constructors (`Syntax.mkApp`/`mkVar`/`mkStr`), since the elaborator's `SyntaxF`
-is not visible to a Wiz program; (3) the `Deriver`/`MacroM`/`Syntax` types and the
-`Derive.*` toolkit of `lib/Deriving.wiz` in the self-hosted prelude; (4)
-`MacroM.getInductive`/`getType` requests over the globals (the `IndInfo` change here is
-the data, the request loop is what is missing); (5) `T.rec` as a global (this frontend's
-equations compile to it internally, but a deriver written in Wiz would want to apply it
-by name). Until then the table registers a user's function but cannot call it, and a
-deriver that produces several definitions and laws (`Lens`, `Bundle`) stays out of
-reach.
+is not visible to a Wiz program; (3) the `Derive.*` toolkit of `lib/Deriving.wiz` and
+the rest of the `Syntax` constructors (`mkApp`/`mkVar`/`mkStr`; `Syntax.mkNode`,
+`MacroM`, `Deriver` and `MacroM.getInductive` are in the embedded prelude); (4)
+`MacroM.getType` over the globals and a way to run the Wiz deriver that asks (the
+runner answers `getInductive`; the `IndInfo` change here is the data); (5) `T.rec` as
+a global (this frontend's equations compile to it internally, but a deriver written in
+Wiz would want to apply it by name). Until then the table registers a user's function
+but cannot call it, and a deriver that produces several definitions and laws (`Lens`,
+`Bundle`) stays out of reach.
 
 `lib/*.wiz` has `deriving` clauses for six names; this milestone implements the five
 that `lib/Deriving.wiz` registers. `Lens` (`lib/OpticDerive.wiz`) and `Bundle`/`BitPack`
-(`lib/Hdl/Core.wiz`, `drafts/hdl/`) are user derivers and need the pieces above.
+(`hdl/src/Hdl/Core.wiz`, `drafts/hdl/`) are user derivers and need the pieces above.
 
 ### Tests
 

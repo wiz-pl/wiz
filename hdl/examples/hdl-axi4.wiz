@@ -1,0 +1,492 @@
+-- The AXI4 burst adapters (`import Hdl.Axi4`, `Hdl.Axi4Law`): an AXI4 master's AW/W/B
+-- and AR/R bursts become single-beat `Bus.ReqW` transfers, with INCR and WRAP addresses,
+-- WLAST/RLAST, IDs and a stalling bus slave. The example checks address progression,
+-- beat count, strobes, response IDs/order and the error mapping, and compares the value
+-- simulation, `Netlist.simulate` and `Circuit.simFast`. Run by the `bus-protocol` test
+-- group; yosys runs on the emitted Verilog when it is on PATH (Tests/Groups/HdlProtocol).
+import Hdl.Core
+import Hdl.Sim
+import Hdl.Bus
+import Hdl.BusLaw
+import Hdl.Axi4
+import Hdl.Axi4Law
+import IO
+
+def yes (b : Bool) : String := match b with
+  | .true => "yes"
+  | .false => "NO"
+
+def n01 (b : Bool) : Nat := match b with
+  | .true => 1
+  | .false => 0
+
+def units (n : Nat) : List Nat := Hdl.upto n 0
+
+def allTrue : List Bool → Bool
+  | .nil => .true
+  | .cons b bs => Bool.and b (allTrue bs)
+
+def agree {ω i o : HwTy} (c : Circuit i o) (ins : List (HwTy.El i)) : Bool :=
+  let ω v := Circuit.runLeaves c ins;
+  Bool.and (BEq.beq v (Circuit.simFast c ins))
+    (Bool.and (BEq.beq v (Circuit.simLeaves .true c ins)) (BEq.beq v (Circuit.simLeaves .false c ins)))
+
+def eqTriples : List (Nat × Nat × Nat) → List (Nat × Nat × Nat) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs =>
+    Bool.and (Nat.beq a.1 b.1)
+      (Bool.and (Nat.beq a.2.1 b.2.1)
+        (Bool.and (Nat.beq a.2.2 b.2.2) (eqTriples as bs)))
+  | _, _ => .false
+
+def eqPairs : List (Nat × Nat) → List (Nat × Nat) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs =>
+    Bool.and (Nat.beq a.1 b.1) (Bool.and (Nat.beq a.2 b.2) (eqPairs as bs))
+  | _, _ => .false
+
+def busAckS {ω dw : Nat} (r : Bus.Resp dw HwTy.El) : Bool :=
+  Bool.or (Bus.Law.bit r.ready) (Bus.Law.bit r.rvalid)
+
+def eqNatList (xs ys : List Nat) : Bool := BEq.beq xs ys
+
+-- A stall pattern: the bus answers one cycle in `period`.
+def stallReady (period k : Nat) : Nat :=
+  n01 (Nat.beq (Nat.mod k period) (Nat.sub period 1))
+
+-- The write beat's data and byte strobes, from the beat index.
+def wrData (base k : Nat) : Nat := Nat.mod (Nat.add (Nat.mul (Nat.succ k) 21845) base) 65536
+def wrStrb (k : Nat) : Nat := Nat.add 1 (Nat.mod k 3)
+
+-- A read's data, from its bus address.
+def ramValue (addr : Nat) : Nat := Nat.mod (Nat.add (Nat.mul addr 7) 3) 65536
+
+------------------------------------------------------------------------------------
+-- 1. AXI4 write adapter: AW/W/B -> Bus.ReqW, INCR and WRAP.
+
+-- The generator holds AW until accepted and holds each W beat until the adapter's
+-- WREADY; the bus slave answers one cycle in `period` and reports an error on beat
+-- `errBeat` (use a beat index past `LEN` for none).
+def genWr (fuel k : Nat) (st : Axi4.WrSt 8 16 4 HwTy.El) (awPending : Bool) (wIdx : Nat)
+    (base len size burst id period errBeat : Nat) :
+    List (HwTy.El (Axi4.WriteIn.code 8 16 4) × HwTy.El (Axi4.WriteOut.code 8 16 4)) :=
+  match fuel with
+  | .zero => .nil
+  | .succ f =>
+    let wv := Nat.le wIdx len;
+    let wlast := n01 (Nat.beq wIdx len);
+    let ready := stallReady period k;
+    let aw : Axi4.Aw 8 4 HwTy.El :=
+      Axi4.Aw.mk (BitVec.ofNat 4 id) (BitVec.ofNat 8 base) (BitVec.ofNat 8 len)
+        (BitVec.ofNat 3 size) (BitVec.ofNat 2 burst) (BitVec.ofNat 1 (n01 awPending));
+    let w : Axi4.W 16 HwTy.El :=
+      Axi4.W.mk (BitVec.ofNat 16 (wrData base wIdx)) (BitVec.ofNat 2 (wrStrb wIdx))
+        (BitVec.ofNat 1 wlast) (BitVec.ofNat 1 (n01 wv));
+    let slave : Bus.Resp 16 HwTy.El :=
+      Bus.Resp.mk (BitVec.ofNat 1 ready) (BitVec.ofNat 1 0) (BitVec.ofNat 16 0)
+        (BitVec.ofNat 1 (n01 (Nat.beq wIdx errBeat)));
+    let i : Axi4.WriteIn 8 16 4 HwTy.El :=
+      Axi4.WriteIn.mk aw w (BitVec.ofNat 1 1) slave;
+    let step := Axi4.wrStep st i;
+    let st' := Axi4.WrSt.unpack 8 16 4 (Hw.fst step);
+    let o := Axi4.WriteOut.unpack 8 16 4 (Hw.snd step);
+    let awOk := Bool.and awPending (BitVec.isTrue o.awready);
+    let wOk := Bool.and wv (BitVec.isTrue o.wready);
+    .cons (Bundle.toEl (Axi4.WriteIn.bundle 8 16 4) i, Hw.snd step)
+      (genWr f (Nat.succ k) st' (if awOk then .false else awPending)
+        (if wOk then Nat.succ wIdx else wIdx) base len size burst id period errBeat)
+
+def wrInsFor (base len size burst id period errBeat : Nat) :
+    List (HwTy.El (Axi4.WriteIn.code 8 16 4)) :=
+  Hdl.fsts (genWr (Nat.add (Nat.mul (Nat.add len 1) period) 8) 0 (Axi4.wrInit 8 16 4)
+    .true 0 base len size burst id period errBeat)
+
+def wrIn (x : HwTy.El (Axi4.WriteIn.code 8 16 4)) : Axi4.WriteIn 8 16 4 HwTy.El :=
+  Axi4.WriteIn.unpack 8 16 4 x
+def wrOut (x : HwTy.El (Axi4.WriteOut.code 8 16 4)) : Axi4.WriteOut 8 16 4 HwTy.El :=
+  Axi4.WriteOut.unpack 8 16 4 x
+
+def collectWrBus : List (HwTy.El (Axi4.WriteIn.code 8 16 4) × HwTy.El (Axi4.WriteOut.code 8 16 4)) →
+    List (Nat × Nat × Nat)
+  | .nil => .nil
+  | .cons (i, o) rest =>
+    let ii := wrIn i;
+    let oo := wrOut o;
+    if Bool.and (Bus.Law.bit oo.req.valid) (busAckS ii.slave) then
+      .cons (BitVec.toNat oo.req.addr, (BitVec.toNat oo.req.wdata, BitVec.toNat oo.req.wstrb))
+        (collectWrBus rest)
+    else collectWrBus rest
+
+def collectWrW : List (HwTy.El (Axi4.WriteIn.code 8 16 4) × HwTy.El (Axi4.WriteOut.code 8 16 4)) →
+    List (Nat × Nat × Nat)
+  | .nil => .nil
+  | .cons (i, o) rest =>
+    let ii := wrIn i;
+    let oo := wrOut o;
+    if Bool.and (Bus.Law.bit ii.wch.valid) (Bus.Law.bit oo.wready) then
+      .cons (BitVec.toNat ii.wch.data, (BitVec.toNat ii.wch.strb, n01 (Bus.Law.bit ii.wch.last)))
+        (collectWrW rest)
+    else collectWrW rest
+
+def collectWrB : List (HwTy.El (Axi4.WriteIn.code 8 16 4) × HwTy.El (Axi4.WriteOut.code 8 16 4)) →
+    List (Nat × Nat)
+  | .nil => .nil
+  | .cons (i, o) rest =>
+    let ii := wrIn i;
+    let oo := wrOut o;
+    if Bool.and (Bus.Law.bit oo.bch.valid) (Bus.Law.bit ii.bready) then
+      .cons (BitVec.toNat oo.bch.id, BitVec.toNat oo.bch.resp) (collectWrB rest)
+    else collectWrB rest
+
+def wrExpBeats (base len size burst : Nat) : List (Nat × Nat × Nat) :=
+  Hdl.map (fun (k : Nat) =>
+    (Axi4.beatAddr burst base size len k, (wrData base k, wrStrb k))) (units (Axi4.beats len))
+
+def wrExpWBeats (base len : Nat) : List (Nat × Nat × Nat) :=
+  Hdl.map (fun (k : Nat) => (wrData base k, (wrStrb k, n01 (Nat.beq k len)))) (units (Axi4.beats len))
+
+def wrZip : List (HwTy.El (Axi4.WriteIn.code 8 16 4)) → List (HwTy.El (Axi4.WriteOut.code 8 16 4)) →
+    List (HwTy.El (Axi4.WriteIn.code 8 16 4) × HwTy.El (Axi4.WriteOut.code 8 16 4))
+  | .cons i is, .cons o os => .cons (i, o) (wrZip is os)
+  | _, _ => .nil
+
+def wrCheck (base len size burst id period errBeat : Nat) : Bool :=
+  let ins := wrInsFor base len size burst id period errBeat;
+  let outs := Circuit.run (Axi4.wrC 8 16 4) ins;
+  let z := wrZip ins outs;
+  let beats := collectWrBus z;
+  let ws := collectWrW z;
+  let bs := collectWrB z;
+  let resp := if Nat.lt errBeat (Axi4.beats len) then Axi4.slverr else Axi4.okay;
+  Bool.and (eqTriples beats (wrExpBeats base len size burst))
+    (Bool.and (eqTriples ws (wrExpWBeats base len))
+      (Bool.and (eqPairs bs [(id, resp)])
+        (Bool.and (Axi4.Law.beatCountOk len (List.length beats))
+          (Bool.and (Nat.beq (List.length ws) (Axi4.beats len))
+            (Bool.and (Nat.beq (List.length bs) 1)
+              (Nat.lt (Axi4.beats len) (List.length ins)))))))
+
+------------------------------------------------------------------------------------
+-- The Axi4.Law checks, on the same generated write/read traces. Each accepted `W` beat
+-- becomes one accepted bus request (in order), each accepted bus request is a write at
+-- the beat address, and each `B`/`R` is checked against the `AW`/`AR` and the bus's
+-- data and error. `wrLaws`/`rdLaws` are what the case prints.
+
+def packW (w : Axi4.W 16 HwTy.El) : HwTy.El (Axi4.W.code 16) := Axi4.W.pack 16 w
+def packQ (q : Bus.ReqW 8 16 HwTy.El) : HwTy.El (Bus.ReqW.code 8 16) := Bus.ReqW.pack 8 16 q
+def packAw (a : Axi4.Aw 8 4 HwTy.El) : HwTy.El (Axi4.Aw.code 8 4) := Axi4.Aw.pack 8 4 a
+def packB (b : Axi4.B 4 HwTy.El) : HwTy.El (Axi4.B.code 4) := Axi4.B.pack 4 b
+def packAr (a : Axi4.Ar 8 4 HwTy.El) : HwTy.El (Axi4.Ar.code 8 4) := Axi4.Ar.pack 8 4 a
+def packR (r : Axi4.R 16 4 HwTy.El) : HwTy.El (Axi4.R.code 16 4) := Axi4.R.pack 16 4 r
+
+def wrWs : List (HwTy.El (Axi4.WriteIn.code 8 16 4) × HwTy.El (Axi4.WriteOut.code 8 16 4)) →
+    List (HwTy.El (Axi4.W.code 16))
+  | .nil => .nil
+  | .cons (i, o) rest =>
+    let ii := wrIn i;
+    let oo := wrOut o;
+    if Bool.and (Bus.Law.bit ii.wch.valid) (Bus.Law.bit oo.wready) then
+      .cons (packW ii.wch) (wrWs rest)
+    else wrWs rest
+
+def wrQs : List (HwTy.El (Axi4.WriteIn.code 8 16 4) × HwTy.El (Axi4.WriteOut.code 8 16 4)) →
+    List (HwTy.El (Bus.ReqW.code 8 16))
+  | .nil => .nil
+  | .cons (i, o) rest =>
+    let ii := wrIn i;
+    let oo := wrOut o;
+    if Bool.and (Bus.Law.bit oo.req.valid) (busAckS ii.slave) then
+      .cons (packQ oo.req) (wrQs rest)
+    else wrQs rest
+
+def wrBeatLaws : List Nat → List (HwTy.El (Axi4.W.code 16)) →
+    List (HwTy.El (Bus.ReqW.code 8 16)) → Bool
+  | .nil, .nil, .nil => .true
+  | .cons a as, .cons w ws, .cons q qs =>
+    Bool.and (Axi4.Law.WrBeatOk w q a) (wrBeatLaws as ws qs)
+  | _, _, _ => .false
+
+def wrLastLaws : List Bool → List (HwTy.El (Axi4.W.code 16)) → Bool
+  | .nil, .nil => .true
+  | .cons b bs, .cons w ws =>
+    Bool.and (Axi4.Law.WLastOk w b) (wrLastLaws bs ws)
+  | _, _ => .false
+
+def wrAddrOkAll (base len size burst : Nat) (beats : List (Nat × Nat × Nat)) : Bool :=
+  Axi4.Law.addrsOk burst base size len (Hdl.map (fun (p : Nat × Nat × Nat) => p.1) beats)
+
+def wrBLaws (err : Bool) :
+    List (HwTy.El (Axi4.WriteIn.code 8 16 4) × HwTy.El (Axi4.WriteOut.code 8 16 4)) → Bool
+  | .nil => .false
+  | .cons (i, o) rest =>
+    let ii := wrIn i;
+    let oo := wrOut o;
+    if Bool.and (Bus.Law.bit oo.bch.valid) (Bus.Law.bit ii.bready) then
+      Axi4.Law.BRespOk (packAw ii.awch) (packB oo.bch) err
+    else wrBLaws err rest
+
+def wrLaws (base len size burst id period errBeat : Nat) : Bool :=
+  let ins := wrInsFor base len size burst id period errBeat;
+  let outs := Circuit.run (Axi4.wrC 8 16 4) ins;
+  let z := wrZip ins outs;
+  let beats := collectWrBus z;
+  let ws := wrWs z;
+  let qs := wrQs z;
+  Bool.and (wrAddrOkAll base len size burst beats)
+    (Bool.and (Axi4.Law.beatCountOk len (List.length beats))
+      (Bool.and (wrBeatLaws (Axi4.beatSeq burst base size len) ws qs)
+        (Bool.and (wrLastLaws (Hdl.map (fun (k : Nat) => Nat.beq k len)
+            (units (Axi4.beats len))) ws)
+          (wrBLaws (Nat.lt errBeat (Axi4.beats len)) z))))
+
+def wrAgree (base len size burst id period : Nat) : Bool :=
+  agree (Axi4.wrC 8 16 4) (wrInsFor base len size burst id period 99)
+
+------------------------------------------------------------------------------------
+-- 2. AXI4 read adapter: AR -> Bus.ReqW reads -> R, INCR and WRAP.
+
+def genRd (fuel k : Nat) (st : Axi4.RdSt 8 16 4 HwTy.El) (arPending : Bool)
+    (base len size burst id period errBeat : Nat) :
+    List (HwTy.El (Axi4.ReadIn.code 8 16 4) × HwTy.El (Axi4.ReadOut.code 8 16 4)) :=
+  match fuel with
+  | .zero => .nil
+  | .succ f =>
+    let ready := stallReady period k;
+    let rready := n01 (Nat.beq (Nat.mod k 3) 2);
+    let ar : Axi4.Ar 8 4 HwTy.El :=
+      Axi4.Ar.mk (BitVec.ofNat 4 id) (BitVec.ofNat 8 base) (BitVec.ofNat 8 len)
+        (BitVec.ofNat 3 size) (BitVec.ofNat 2 burst) (BitVec.ofNat 1 (n01 arPending));
+    let slave : Bus.Resp 16 HwTy.El :=
+      Bus.Resp.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 ready)
+        (BitVec.ofNat 16 (ramValue (BitVec.toNat st.addr)))
+        (BitVec.ofNat 1 (n01 (Nat.beq (BitVec.toNat st.beat) errBeat)));
+    let i : Axi4.ReadIn 8 16 4 HwTy.El := Axi4.ReadIn.mk ar (BitVec.ofNat 1 rready) slave;
+    let step := Axi4.rdStep st i;
+    let st' := Axi4.RdSt.unpack 8 16 4 (Hw.fst step);
+    let o := Axi4.ReadOut.unpack 8 16 4 (Hw.snd step);
+    let arOk := Bool.and arPending (BitVec.isTrue o.arready);
+    .cons (Bundle.toEl (Axi4.ReadIn.bundle 8 16 4) i, Hw.snd step)
+      (genRd f (Nat.succ k) st' (if arOk then .false else arPending)
+        base len size burst id period errBeat)
+
+def rdInsFor (base len size burst id period errBeat : Nat) :
+    List (HwTy.El (Axi4.ReadIn.code 8 16 4)) :=
+  Hdl.fsts (genRd (Nat.add (Nat.mul (Nat.add len 1) (Nat.mul period 2)) 10) 0
+    (Axi4.rdInit 8 16 4) .true base len size burst id period errBeat)
+
+def rdIn (x : HwTy.El (Axi4.ReadIn.code 8 16 4)) : Axi4.ReadIn 8 16 4 HwTy.El :=
+  Axi4.ReadIn.unpack 8 16 4 x
+def rdOut (x : HwTy.El (Axi4.ReadOut.code 8 16 4)) : Axi4.ReadOut 8 16 4 HwTy.El :=
+  Axi4.ReadOut.unpack 8 16 4 x
+
+def collectRdBus : List (HwTy.El (Axi4.ReadIn.code 8 16 4) × HwTy.El (Axi4.ReadOut.code 8 16 4)) →
+    List (Nat × Nat × Nat)
+  | .nil => .nil
+  | .cons (i, o) rest =>
+    let ii := rdIn i;
+    let oo := rdOut o;
+    if Bool.and (Bus.Law.bit oo.req.valid) (busAckS ii.slave) then
+      .cons (BitVec.toNat oo.req.addr, (BitVec.toNat oo.req.we, BitVec.toNat oo.req.wstrb))
+        (collectRdBus rest)
+    else collectRdBus rest
+
+def collectR : List (HwTy.El (Axi4.ReadIn.code 8 16 4) × HwTy.El (Axi4.ReadOut.code 8 16 4)) →
+    List (Nat × Nat × Nat)
+  | .nil => .nil
+  | .cons (i, o) rest =>
+    let ii := rdIn i;
+    let oo := rdOut o;
+    if Bool.and (Bus.Law.bit oo.rch.valid) (Bus.Law.bit ii.rready) then
+      .cons (BitVec.toNat oo.rch.data,
+        (BitVec.toNat oo.rch.resp, n01 (Bus.Law.bit oo.rch.last))) (collectR rest)
+    else collectR rest
+
+def collectRId : List (HwTy.El (Axi4.ReadIn.code 8 16 4) × HwTy.El (Axi4.ReadOut.code 8 16 4)) →
+    List Nat
+  | .nil => .nil
+  | .cons (i, o) rest =>
+    let ii := rdIn i;
+    let oo := rdOut o;
+    if Bool.and (Bus.Law.bit oo.rch.valid) (Bus.Law.bit ii.rready) then
+      .cons (BitVec.toNat oo.rch.id) (collectRId rest)
+    else collectRId rest
+
+def rdExpBus (base len size burst : Nat) : List (Nat × Nat × Nat) :=
+  Hdl.map (fun (k : Nat) =>
+    (Axi4.beatAddr burst base size len k, (0, 0))) (units (Axi4.beats len))
+
+def rdExpR (base len size burst errBeat : Nat) : List (Nat × Nat × Nat) :=
+  Hdl.map (fun (k : Nat) =>
+    let resp := if Nat.beq k errBeat then Axi4.slverr else Axi4.okay;
+    (ramValue (Axi4.beatAddr burst base size len k),
+      (resp, n01 (Nat.beq k len)))) (units (Axi4.beats len))
+
+def rdZip : List (HwTy.El (Axi4.ReadIn.code 8 16 4)) → List (HwTy.El (Axi4.ReadOut.code 8 16 4)) →
+    List (HwTy.El (Axi4.ReadIn.code 8 16 4) × HwTy.El (Axi4.ReadOut.code 8 16 4))
+  | .cons i is, .cons o os => .cons (i, o) (rdZip is os)
+  | _, _ => .nil
+
+def rdCheck (base len size burst id period errBeat : Nat) : Bool :=
+  let ins := rdInsFor base len size burst id period errBeat;
+  let outs := Circuit.run (Axi4.rdC 8 16 4) ins;
+  let z := rdZip ins outs;
+  let beats := collectRdBus z;
+  let rs := collectR z;
+  let ids := collectRId z;
+  let idsOk := BEq.beq ids (Hdl.map (fun (_ : Nat) => id) (units (Axi4.beats len)));
+  Bool.and (eqTriples beats (rdExpBus base len size burst))
+    (Bool.and (eqTriples rs (rdExpR base len size burst errBeat))
+      (Bool.and idsOk
+        (Bool.and (Axi4.Law.beatCountOk len (List.length beats))
+          (Bool.and (Nat.beq (List.length rs) (Axi4.beats len))
+            (Nat.lt (Axi4.beats len) (List.length ins))))))
+
+def rdQs : List (HwTy.El (Axi4.ReadIn.code 8 16 4) × HwTy.El (Axi4.ReadOut.code 8 16 4)) →
+    List (HwTy.El (Bus.ReqW.code 8 16))
+  | .nil => .nil
+  | .cons (i, o) rest =>
+    let ii := rdIn i;
+    let oo := rdOut o;
+    if Bool.and (Bus.Law.bit oo.req.valid) (busAckS ii.slave) then
+      .cons (packQ oo.req) (rdQs rest)
+    else rdQs rest
+
+def rdBeatLaws : List Nat → List (HwTy.El (Bus.ReqW.code 8 16)) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons q qs =>
+    Bool.and (Axi4.Law.RdBeatOk q a) (rdBeatLaws as qs)
+  | _, _ => .false
+
+def rdRs : List (HwTy.El (Axi4.ReadIn.code 8 16 4) × HwTy.El (Axi4.ReadOut.code 8 16 4)) →
+    List (HwTy.El (Axi4.R.code 16 4))
+  | .nil => .nil
+  | .cons (i, o) rest =>
+    let ii := rdIn i;
+    let oo := rdOut o;
+    if Bool.and (Bus.Law.bit oo.rch.valid) (Bus.Law.bit ii.rready) then
+      .cons (packR oo.rch) (rdRs rest)
+    else rdRs rest
+
+def rdRLaws (ar : HwTy.El (Axi4.Ar.code 8 4)) : List Nat → List Bool → List Bool →
+    List (HwTy.El (Axi4.R.code 16 4)) → Bool
+  | .nil, .nil, .nil, .nil => .true
+  | .cons a as, .cons e es, .cons l ls, .cons r rs =>
+    Bool.and (Axi4.Law.RLastOk r l)
+      (Bool.and (Axi4.Law.RRespOk ar r (ramValue a) e l)
+        (rdRLaws ar as es ls rs))
+  | _, _, _, _ => .false
+
+def rdLaws (base len size burst id period errBeat : Nat) : Bool :=
+  let ins := rdInsFor base len size burst id period errBeat;
+  let outs := Circuit.run (Axi4.rdC 8 16 4) ins;
+  let z := rdZip ins outs;
+  let beats := collectRdBus z;
+  let qs := rdQs z;
+  let addrs := Axi4.beatSeq burst base size len;
+  let errs := Hdl.map (fun (k : Nat) => Nat.beq k errBeat) (units (Axi4.beats len));
+  let lasts := Hdl.map (fun (k : Nat) => Nat.beq k len) (units (Axi4.beats len));
+  let arE := packAr
+    (rdIn (Hdl.nthD (HwTy.unpack (Axi4.ReadIn.code 8 16 4) 0) ins 0)).arch;
+  Bool.and (Axi4.Law.addrsOk burst base size len
+      (Hdl.map (fun (p : Nat × Nat × Nat) => p.1) beats))
+    (Bool.and (Axi4.Law.beatCountOk len (List.length beats))
+      (Bool.and (rdBeatLaws addrs qs)
+        (rdRLaws arE addrs errs lasts (rdRs z))))
+
+def rdAgree (base len size burst id period : Nat) : Bool :=
+  agree (Axi4.rdC 8 16 4) (rdInsFor base len size burst id period 99)
+
+------------------------------------------------------------------------------------
+-- 3. The AXI4 bundles round-trip through their code, and the pure address / multi-ID
+-- models.
+
+def ax4SlaveInV : Axi4.SlaveIn 8 16 4 HwTy.El :=
+  Axi4.SlaveIn.mk
+    (Axi4.Aw.mk (BitVec.ofNat 4 5) (BitVec.ofNat 8 42) (BitVec.ofNat 8 3)
+      (BitVec.ofNat 3 1) (BitVec.ofNat 2 Axi4.wrap) (BitVec.ofNat 1 1))
+    (Axi4.W.mk (BitVec.ofNat 16 47806) (BitVec.ofNat 2 2) (BitVec.ofNat 1 0) (BitVec.ofNat 1 1))
+    (Axi4.Ar.mk (BitVec.ofNat 4 6) (BitVec.ofNat 8 7) (BitVec.ofNat 8 1)
+      (BitVec.ofNat 3 1) (BitVec.ofNat 2 Axi4.incr) (BitVec.ofNat 1 1))
+    (BitVec.ofNat 1 1) (BitVec.ofNat 1 0)
+
+def ax4SlaveOutV : Axi4.SlaveOut 8 16 4 HwTy.El :=
+  Axi4.SlaveOut.mk (BitVec.ofNat 1 1) (BitVec.ofNat 1 1)
+    (Axi4.B.mk (BitVec.ofNat 4 5) (BitVec.ofNat 2 Axi4.okay) (BitVec.ofNat 1 1))
+    (BitVec.ofNat 1 0)
+    (Axi4.R.mk (BitVec.ofNat 4 6) (BitVec.ofNat 16 47806)
+      (BitVec.ofNat 2 Axi4.okay) (BitVec.ofNat 1 1) (BitVec.ofNat 1 1))
+
+def ax4RoundTrip {F : (HwTy → Type) → Type} (b : Bundle F) (x : F HwTy.El) : Bool :=
+  Nat.beq (HwTy.pack b.code (Bundle.toEl b (Bundle.ofEl b (Bundle.toEl b x))))
+    (HwTy.pack b.code (Bundle.toEl b x))
+
+def ax4BundlesOk : Bool :=
+  Bool.and (ax4RoundTrip (Axi4.SlaveIn.bundle 8 16 4) ax4SlaveInV)
+    (ax4RoundTrip (Axi4.SlaveOut.bundle 8 16 4) ax4SlaveOutV)
+
+def seqOk (burst base size len : Nat) (want : List Nat) : Bool :=
+  BEq.beq (Axi4.beatSeq burst base size len) want
+
+def addrModel : Bool :=
+  Bool.and (seqOk Axi4.incr 16 1 3 [16, 18, 20, 22])
+    (Bool.and (seqOk Axi4.wrap 22 1 3 [22, 16, 18, 20])
+      (Bool.and (seqOk Axi4.wrap 20 1 3 [20, 22, 16, 18])
+        (Bool.and (seqOk Axi4.wrap 0 2 3 [0, 4, 8, 12])
+          (Bool.and (seqOk Axi4.wrap 6 1 1 [6, 4])
+            (Bool.and (eqNatList (Axi4.beatSeq Axi4.incr 0 0 0) [0])
+              (Bool.and (Nat.beq (List.length (Axi4.beatSeq Axi4.incr 5 2 7)) 8)
+                (Bool.and (Axi4.Law.legal 16 1 3 Axi4.wrap)
+                  (Bool.and (Axi4.Law.legal 16 1 3 Axi4.incr)
+                    (Bool.and (Axi4.Law.legalLen 3 Axi4.wrap)
+                      (Bool.not (Axi4.Law.legalLen 4 Axi4.wrap)))))))))))
+
+
+def burst (id : Nat) (addrs : List Nat) : Axi4.Burst := Axi4.Burst.mk id addrs
+
+def orderModel : Bool :=
+  let a := burst 0 [0];
+  let b := burst 1 [8];
+  let c := burst 0 [16];
+  let issued := [a, b, c];
+  Bool.and (Axi4.orderOf issued [a, b, c])
+    (Bool.and (Axi4.orderOf issued [b, a, c])
+      (Bool.and (Axi4.orderOf issued [a, c, b])
+        (Bool.and (Bool.not (Axi4.orderOf issued [c, a, b]))
+          (Bool.and (Bool.not (Axi4.orderOf issued [b, c, a]))
+            (Bool.and (Bool.not (Axi4.orderOf issued [a, b]))
+              (Bool.not (Axi4.orderOf issued [a, b, c, a])))))))
+
+def netWellFormed : Bool :=
+  Bool.and (Netlist.wellFormed (Circuit.netlist "axi4_wr" (Axi4.wrC 8 16 4)))
+    (Netlist.wellFormed (Circuit.netlist "axi4_rd" (Axi4.rdC 8 16 4)))
+
+------------------------------------------------------------------------------------
+
+def main : IO Unit := do
+  IO.println ("axi4 addr model: incr/wrap " <+> yes addrModel
+    <+> ", legal wrap " <+> yes (allTrue (Hdl.map Axi4.legalWrap
+      [1, 3, 7, 15]))
+    <+> ", bad " <+> yes (Bool.not (Bool.or (Axi4.legalWrap 0) (Bool.or (Axi4.legalWrap 4) (Axi4.legalWrap 5)))));
+  IO.println ("axi4 write incr: laws " <+> yes (wrLaws 16 3 1 Axi4.incr 3 3 99)
+    <+> ", beats/strobes/b " <+> yes (wrCheck 16 3 1 Axi4.incr 3 3 99)
+    <+> ", value = simulate = simFast " <+> yes (wrAgree 16 3 1 Axi4.incr 3 3)
+    <+> ", 4 beats, stalled 3");
+  IO.println ("axi4 write wrap: laws " <+> yes (wrLaws 22 3 1 Axi4.wrap 5 2 99)
+    <+> ", beats/strobes/b " <+> yes (wrCheck 22 3 1 Axi4.wrap 5 2 99)
+    <+> ", value = simulate = simFast " <+> yes (wrAgree 22 3 1 Axi4.wrap 5 2)
+    <+> ", 4 beats, stalled 2");
+  IO.println ("axi4 write err: laws " <+> yes (wrLaws 16 1 1 Axi4.incr 7 2 0)
+    <+> ", bresp " <+> yes (wrCheck 16 1 1 Axi4.incr 7 2 0));
+  IO.println ("axi4 read incr: laws " <+> yes (rdLaws 32 3 1 Axi4.incr 1 2 99)
+    <+> ", beats/r/rlast " <+> yes (rdCheck 32 3 1 Axi4.incr 1 2 99)
+    <+> ", value = simulate = simFast " <+> yes (rdAgree 32 3 1 Axi4.incr 1 2)
+    <+> ", 4 beats, backpressure");
+  IO.println ("axi4 read wrap: laws " <+> yes (rdLaws 38 3 1 Axi4.wrap 6 3 99)
+    <+> ", beats/r/rlast " <+> yes (rdCheck 38 3 1 Axi4.wrap 6 3 99)
+    <+> ", value = simulate = simFast " <+> yes (rdAgree 38 3 1 Axi4.wrap 6 3)
+    <+> ", 4 beats, backpressure");
+  IO.println ("axi4 read err: laws " <+> yes (rdLaws 32 1 1 Axi4.incr 2 2 0)
+    <+> ", rresp " <+> yes (rdCheck 32 1 1 Axi4.incr 2 2 0));
+  IO.println ("axi4 outstanding id order " <+> yes orderModel);
+  IO.println ("axi4 bundles " <+> yes ax4BundlesOk);
+  IO.println ("axi4 well formed " <+> yes netWellFormed)

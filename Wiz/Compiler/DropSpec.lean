@@ -91,7 +91,7 @@ partial def specStmts (parents : Std.HashMap Var (Var × Nat)) (ss : Array Stmt)
       let z ← specVar
       let mask := fields.foldl (fun acc i => acc + 2 ^ i) 0
       let done := (done.filter fun (i, _) => !pos.contains i)
-        |>.push (k, .v m (.lit mask)) |>.push (k, .v z (.prim "dropMoved" #[x, m]))
+        |>.push (k, .v m (.lit mask)) |>.push (k, .v z (.prim .dropMoved #[x, m]))
       specStmts parents ss (k + 1) term done
     | s => specStmts parents ss (k + 1) term (done.push (k, s))
   else

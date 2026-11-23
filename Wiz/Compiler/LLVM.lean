@@ -32,6 +32,26 @@ def fresh (base : String) : M String := modifyGet fun s => (s!"%{base}.{s.next}"
 
 def fn (n : Name) : String := "@" ++ C.mangle n
 
+/-- This backend's checked primitive table (the shared runtime symbols, stamped
+`.llvm`). It is not a copy of the C dispatch: both backends read `PrimOp.table`. -/
+def primTable : List PrimEntry := PrimOp.table .llvm
+
+/-- The runtime function for a primitive, from this backend's table. A missing entry is
+a compiler error (there is no `wiz_unknown_prim` fallback). -/
+def primFn (op : PrimOp) : String :=
+  match op with
+  | .extern key => C.externWrapper key
+  | _ =>
+    match primTable.find? (·.prim == op) with
+    | some e => e.symbol
+    | none => panic! s!"LLVM backend: no primitive-table entry for `{op.key}`"
+
+/-- The IR checks both backends run before emission: a partial application with no known
+arity and a jump with no join point in scope are compile errors, not a silent default.
+They live in `C.lean` today (this backend already imports it for `mangle` and
+`externWrapper`); moving them to `IR.lean` is a no-behaviour-change follow-up. -/
+def checkDecls (decls : Array IR.Decl) : Except String Unit := C.checkDecls decls
+
 /-- The SSA name of a variable. -/
 def val (env : Std.HashMap Var String) (x : Var) : String := env.getD x s!"%x{x}"
 
@@ -75,19 +95,18 @@ def expr (arities : Std.HashMap Name Nat) (env : Std.HashMap Var String) (x : St
   | .fap f as => emit s!"  {x} = call i64 {fn f}({args env as})"
   | .pap f as => do
     let arr ← array env as
-    emit s!"  {x} = call i64 @wiz_clo_new(ptr {fn f}_boxed, i32 {(arities.get? f).getD 0}, i32 {as.size}, ptr {arr})"
+    -- (arity 0 used to be emitted for a name with no known arity: a closure that can
+    -- never be applied. `checkDecls` rejects it before emission; both backends read the
+    -- same IR checks.)
+    let arity := match arities.get? f with
+      | some n => n
+      | none => panic! s!"LLVM backend: partial application of `{f}` with no known arity"
+    emit s!"  {x} = call i64 @wiz_clo_new(ptr {fn f}_boxed, i32 {arity}, i32 {as.size}, ptr {arr})"
   | .ap f as => do
     let arr ← array env as
     emit s!"  {x} = call i64 @wiz_apply(i64 {val env f}, i32 {as.size}, ptr {arr})"
   | .prim op as =>
-    let f := match op with
-      | "nat.succ" => "wiz_nat_succ" | "nat.pred" => "wiz_nat_pred"
-      | "nat.add" => "wiz_nat_add" | "nat.sub" => "wiz_nat_sub" | "nat.mul" => "wiz_nat_mul"
-      | "nat.beq" => "wiz_nat_beq" | "nat.blt" => "wiz_nat_blt" | "lazyTag" => "wiz_lazy_tag" | "lazySet" => "wiz_lazy_set" | "memo" => "wiz_memo"
-      | "tag" => "wiz_tag_of" | "natTag" => "wiz_nat_tag" | "fieldAt" => "wiz_field_at" | "mkObj" => "wiz_mk_obj"
-      | "dropMoved" => "wiz_drop_moved"
-      | op => if op.startsWith "nat." then "wiz_nat_" ++ (op.drop 4).toString
-        else if (RVal.ExternSig.ofKey? op).isSome then C.externWrapper op else "wiz_unknown_prim"
+    let f := primFn op
     emit s!"  {x} = call i64 @{f}({args env as})"
   | .reset y => emit s!"  {x} = call i64 @wiz_reset(i64 {val env y})"
   | .reuse tok t as => do
@@ -124,7 +143,9 @@ partial def body (arities : Std.HashMap Name Nat) (env : Std.HashMap Var String)
       emit s!"  {name} = load i64, ptr %jp{p}"
     body arities env' jb
   | .jmp j as => do
-    let ps := ((← get).joins.get? j).getD #[]
+    let ps := match (← get).joins.get? j with
+      | some ps => ps
+      | none => panic! s!"LLVM backend: jump to `j{j}`, which has no join point in scope"
     for p in ps, a in as do emit s!"  store i64 {val env a}, ptr %jp{p}"
     emit s!"  br label %j{j}"
   | .dup x rest => do emit s!"  call void @wiz_inc(i64 {val env x})"; body arities env rest
@@ -212,6 +233,9 @@ declare i32 @wiz_finish(i64)
 /-- A whole LLVM module: the functions and a `main` that prints `wiz.entry`'s value (or
 runs it, for `IO`). The foreign wrappers are C (`C.glue`), compiled with the runtime. -/
 def program (decls : Array IR.Decl) (io : Bool := false) (lib : Bool := false) : String :=
+  let _ : Unit := match checkDecls decls with
+    | .error e => panic! s!"LLVM backend: {e}"
+    | .ok _ => ()
   let arities := decls.foldl (fun m d => m.insert d.name d.params.size) {}
   let cafs := IR.cafs decls
   let parts := decls.map (decl arities cafs)

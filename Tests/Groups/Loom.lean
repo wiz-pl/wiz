@@ -321,6 +321,46 @@ def loomGroup : Group where
           "#eval String.contains (EditorModel.lspDeclarationJson text ix \"f\") \"\\\"kind\\\":3\"\n" ++
           "#eval EditorModel.lspTermGoalJson text ix 0")
           ["3", ".true", ".true", ".true", ".true", r#""null""#] },
+    { name := "selfhost: commands split at column 0 and the engine's lines become diagnostics", run := fun _ =>
+        -- The in-page server's pure half (`Web.Selfhost`): the command splitter (doc
+        -- comments and attributes belong to the command; a block comment, an indented
+        -- line and a `mutual` body do not start one) and the engine's output lines as
+        -- diagnostics (a result is information, a parse error is placed at its token).
+        okLoom ("import Web.Selfhost\n" ++
+          "def src := \"import Prelude\\n-- a comment\\n/-- doc -/\\ndef twice (n : Nat) : Nat := n + n\\n\\n@[simp]\\ntheorem t : Nat := 0\\n/- a block\\ndef notACommand : Nat := 0\\n-/\\n#check twice\\n#eval twice 21\\n\"\n" ++
+          "def cmds := Selfhost.commandsJson src\n" ++
+          "#eval String.contains cmds \"\\\"keyword\\\":\\\"theorem\\\"\"\n" ++
+          "#eval String.contains cmds \"\\\"silent\\\":true\"\n" ++
+          "#eval String.contains cmds \"\\\"result\\\":true\"\n" ++
+          "def ds := Selfhost.diagnosticsOutputJson \"import Prelude\\ndef twice (n : Nat) : Nat := n + n\\n#eval twice 21\\n\" \"twice : Nat → Nat\\n42\\n\"\n" ++
+          "#eval String.contains ds \"\\\"message\\\":\\\"42\\\"\"\n" ++
+          "#eval String.contains ds \"\\\"severity\\\":3\"\n" ++
+          "def bad := Selfhost.diagnosticsOutputJson \"def a : Nat := 1\\n\" \"error: one\\nerror: two\\n\"\n" ++
+          "#eval String.contains bad \"position unknown\"\n" ++
+          "def parsed := Selfhost.diagnosticsOutputJson \"def a : Nat := 1\\n-- 😀\\ndef b : Nat := @@ 2\\n\" \"a : Nat\\nparse error 53: unexpected token '@@'\\n\"\n" ++
+          "#eval String.contains parsed \"parse-error\"\n" ++
+          "#eval String.contains parsed \"\\\"character\\\":15\"")
+          [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true"] },
+    { name := "selfhost: the Prelude rule and the declaration answers are the runtime's", run := fun _ =>
+        -- `withPrelude` adds `import Prelude\n\n` only when the source has no `import`;
+        -- completion/hover/definition are decoded from the check's declaration index,
+        -- not from the caret or the source text in the shim.
+        okLoom ("import Json\nimport Web.EditorModel\nimport Web.Selfhost\n" ++
+          "def text := \"def twice (n : Nat) : Nat := n + n\\ndef pred (n : Nat) : Nat := n\\n#eval twice\\n\"\n" ++
+          "def ix := EditorModel.lspIndexJson text \"import Prelude\\n\\n\" \"[{\\\"s\\\":20,\\\"e\\\":25,\\\"kind\\\":\\\"decl\\\",\\\"name\\\":\\\"twice\\\",\\\"detail\\\":\\\"(n : Nat) → Nat\\\",\\\"ckind\\\":3},{\\\"s\\\":54,\\\"e\\\":58,\\\"kind\\\":\\\"decl\\\",\\\"name\\\":\\\"pred\\\",\\\"detail\\\":\\\"Nat → Nat\\\",\\\"ckind\\\":3}]\"\n" ++
+          "#eval String.contains (Selfhost.preludeJson \"def a : Nat := 1\") \"import Prelude\"\n" ++
+          "#eval String.contains (Selfhost.preludeJson \"import Prelude\\ndef a : Nat := 1\") \"\\\"prefix\\\":\\\"\\\"\"\n" ++
+          "#eval String.contains (Selfhost.completionPrefixJson \"x := tw\" 7) \"\\\"prefix\\\":\\\"tw\\\"\"\n" ++
+          "#eval String.contains (Selfhost.wordAtJson \"def twice (n : Nat)\" 6) \"\\\"word\\\":\\\"twice\\\"\"\n" ++
+          "def completion := Selfhost.completionJson text ix \"{\\\"line\\\":2,\\\"character\\\":8}\"\n" ++
+          "#eval String.contains completion \"\\\"newText\\\":\\\"twice\\\"\"\n" ++
+          "#eval String.contains completion \"\\\"character\\\":6\"\n" ++
+          "#eval String.contains (Selfhost.hoverJson text ix \"{\\\"line\\\":2,\\\"character\\\":10}\") \"twice : (n : Nat) → Nat\"\n" ++
+          "#eval String.contains (Selfhost.definitionJson text ix \"{\\\"line\\\":2,\\\"character\\\":10}\" \"file:///x.wiz\") \"file:///x.wiz\"\n" ++
+          "#eval String.contains (Selfhost.filterCompletionsJson \"[{\\\"label\\\":\\\"twice\\\",\\\"kind\\\":3},{\\\"label\\\":\\\"pred\\\",\\\"kind\\\":3}]\" \"tw\" \"200\") \"twice\"\n" ++
+          "#eval Selfhost.hoverJson text ix \"{\\\"line\\\":1,\\\"character\\\":2}\"")
+          [".true", ".true", ".true", ".true",
+           ".true", ".true", ".true", ".true", ".true", r#""null""#] },
     { name := "session: a step diffs against the retained tree (one render per effect)", run := fun _ =>
         okLoom (loomPrelude ++
           "def live : Loom.LiveApp Model Msg := Loom.LiveApp.mk (Model.mk 0)\n" ++

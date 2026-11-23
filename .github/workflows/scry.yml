@@ -1,5 +1,5 @@
 # The Scry tool's own golden suite: `cd scry && grail test`, which runs the
-# `scry/tests/*.expected` goldens (28 today). The Lean-side groups (`=scry-taint`,
+# `scry/tests/*.expected` goldens (33 today). The Lean-side groups (`=scry-taint`,
 # `=scry-egraph`, …) run inside CI's `library` shard, but those test the library through
 # the Wiz host; nothing ran this package's own suite, so a drifted golden (or a broken
 # `scry` CLI) could land without a red check. `golden-diff.yml` only *shows* what
@@ -25,17 +25,47 @@ on:
     branches: [master]
     paths:
       - "scry/**"
-      - "lib/Scry/**"
       - "Wiz/**"
       - "selfhost/**"
+      - "flake.nix"
+      - "lib/Web/Source/**"
+      - "lib/Web/Highlight.wiz"
+      - "lib/Web/EditorBridge.wiz"
+      - "lib/Web/Hover.wiz"
+      - "lib/Web/Goals.wiz"
+      - "web/source-ui.wiz"
+      - "web/source-static.js"
+      - "web/source-app.js"
+      - "web/source.css"
+      - "web/source-bundle.sh"
+      - "web/source_chrome_test.mjs"
+      - "web/source_fixture_gen.wiz"
+      - "web/source_fixture_test.mjs"
+      - "web/source_static_test.mjs"
+      - "web/build-source-ui.sh"
       - ".github/workflows/scry.yml"
   push:
     branches: [master]
     paths:
       - "scry/**"
-      - "lib/Scry/**"
       - "Wiz/**"
       - "selfhost/**"
+      - "flake.nix"
+      - "lib/Web/Source/**"
+      - "lib/Web/Highlight.wiz"
+      - "lib/Web/EditorBridge.wiz"
+      - "lib/Web/Hover.wiz"
+      - "lib/Web/Goals.wiz"
+      - "web/source-ui.wiz"
+      - "web/source-static.js"
+      - "web/source-app.js"
+      - "web/source.css"
+      - "web/source-bundle.sh"
+      - "web/source_chrome_test.mjs"
+      - "web/source_fixture_gen.wiz"
+      - "web/source_fixture_test.mjs"
+      - "web/source_static_test.mjs"
+      - "web/build-source-ui.sh"
       - ".github/workflows/scry.yml"
   workflow_dispatch:
 
@@ -98,6 +128,38 @@ jobs:
           cd scry
           cp ../grail.local.wiz .   # this machine's toolchain, written by the dev shell
           grail build scry
+      - name: The static source reader (`scry web` + the bundle acceptance)
+        # The P0 reader's export path: `scry web` writes the bundle the browser host
+        # serves, and `web/source_static_test.mjs` replays the SSR and every scripted
+        # Loom patch through the real patch applier. The second export must be
+        # byte-identical (`sha256sum data/*.json`): no timestamp, machine or order in
+        # the data. The reader's modules (`lib/Web/Source/**`, `Highlight`, `EditorBridge`,
+        # `Hover`, `Goals`) and the `web/source-*` files are in this workflow's paths, so a
+        # change to the reader's core or host runs this too.
+        run: |
+          out=$(mktemp -d)
+          ./scry/.grail/bin/scry web scry/tests/fixtures/report --out "$out/b"
+          node web/source_static_test.mjs "$out/b"
+          ./scry/.grail/bin/scry web scry/tests/fixtures/report --out "$out/b2"
+          (cd "$out/b" && sha256sum data/*.json) > "$out/h1"
+          (cd "$out/b2" && sha256sum data/*.json) > "$out/h2"
+          diff "$out/h1" "$out/h2"
+          echo "rebuild identical: $(wc -l < "$out/h1") data/*.json files"
+      - name: The source reader in headless Chromium (`.#wiz-source-ui` + the built bundle)
+        # The reader's runtime is a Wasm module, so the Node test above cannot see whether
+        # it mounts: this loads the exported bundle in a real browser, with scripting off
+        # (the SSR must already list the files and findings) and on (mount, a hover at
+        # taint.c's sink answers `command-injection`, and #/f/<id> selects the row on a
+        # cold load). `web/source-bundle.sh` adds Emscripten's `.wasm` side-car, which
+        # `scry web --ui` alone does not copy.
+        run: |
+          out=$(mktemp -d)
+          ui=$(nix build .#wiz-source-ui --no-link --print-out-paths)
+          sh web/source-bundle.sh ./scry/.grail/bin/scry "$out/b" --ui "$ui"
+          # Use the pinned nixpkgs chromium: the runner's system chromium is often a
+          # snap stub that never opens a DevTools target.
+          chrome=$(nix shell --inputs-from . nixpkgs#chromium -c sh -c 'command -v chromium')
+          node web/source_chrome_test.mjs "$chrome" "$out/b"
       - name: grail test (the *.expected goldens)
         run: |
           cd scry

@@ -2,6 +2,7 @@ import Lean.CompactedRegion
 import Std.Time.DateTime.Timestamp
 import Wiz.Query
 import Wiz.Module
+import Wiz.LegacyNames
 import Wiz.Smt.Sha256
 
 /-!
@@ -19,12 +20,20 @@ Any number of directories may also be **read-only caches** (`wiz --cache-ro DIR`
 order): misses are looked up there after the write cache, and they are never written. A
 Nix package ships one in `$out/share/wiz/cache`; a run with only read caches
 (`--no-cache --cache-ro DIR`, since the default write cache is on) still replays modules
-and computes the binary's id on every run.
+and computes the binary's id on every run. A read-only layer is in someone else's trust
+domain, and a manifest is only a self-signed digest, so by default the layer is
+**refused**; `--cache-ro-unsigned` on that layer is the explicit opt-in to unauthenticated
+data (it does not apply to a later `--cache-ro`).
 
 Commands that change the grammar or the macros (`syntax`, `macro_rules`, `notation`,
 attributes, `import`, user-defined commands) aren't cached; they are cheap to rerun.
-Declarations read from the cache were checked by the kernel when they were stored, so
-they are trusted.
+Declarations read from the cache were checked by the kernel when they were stored, so a
+manifested write-cache entry is trusted as *integrity*: it is the bytes the writer put
+there. That is not authenticity, and a cache is not part of the kernel's trusted base:
+whoever can write a `.wizc` and its manifest can choose what the elaborator replays. The
+manifested write cache is a per-user trust assumption (the same domain as the process);
+a foreign layer needs a signature (P3) or a re-check before it can be treated as
+authority.
 
 The format is S-expressions; quantities are written with the rig's literal syntax.
 -/
@@ -48,6 +57,13 @@ partial def Sx.parse (s : String) : Option Sx :=
   | some (x, rest) => if rest.all (·.isWhitespace) then some x else none
   | none => none
 where
+  /-- A hexadecimal digit's value, or none. (F27) A malformed escape rejects the
+  entry: the value used to be computed with `toNat - 87` for any character, so a
+  corrupt cache file could yield an arbitrary character rather than a miss. -/
+  hexDigit (c : Char) : Option Nat :=
+    if !c.isHexDigit then none
+    else if c.isDigit then some (c.toNat - 48)
+    else some (c.toLower.toNat - 87)
   go (cs : List Char) : Option (Sx × List Char) := do
     let cs := cs.dropWhile (·.isWhitespace)
     match cs with
@@ -64,13 +80,19 @@ where
         match cs with
         | '\\' :: 'n' :: cs => str cs ('\n' :: acc)
         | '\\' :: 't' :: cs => str cs ('\t' :: acc)
-        | '\\' :: 'x' :: h₁ :: h₂ :: cs =>
-          let hex (c : Char) : Nat := if c.isDigit then c.toNat - 48 else c.toLower.toNat - 87
-          str cs (Char.ofNat (16 * hex h₁ + hex h₂) :: acc)
+        | '\\' :: 'x' :: h₁ :: h₂ :: cs => do
+          let a ← hexDigit h₁
+          let b ← hexDigit h₂
+          str cs (Char.ofNat (16 * a + b) :: acc)
         | '\\' :: 'u' :: '{' :: cs =>
           let ds := cs.takeWhile (· != '}')
-          let hex (c : Char) : Nat := if c.isDigit then c.toNat - 48 else c.toLower.toNat - 87
-          str (cs.drop (ds.length + 1)) (Char.ofNat (ds.foldl (fun n c => 16 * n + hex c) 0) :: acc)
+          match ds.mapM hexDigit with
+          | none => none
+          | some [] => none
+          | some vals =>
+            let code := vals.foldl (fun n d => 16 * n + d) 0
+            if code > 0x10FFFF then none
+            else str (cs.drop (ds.length + 1)) (Char.ofNat code :: acc)
         | '\\' :: c :: cs => str cs (c :: acc)
         | '"' :: cs => some (String.ofList acc.reverse, cs)
         | c :: cs => str cs (c :: acc)
@@ -282,7 +304,12 @@ structure Effect (R : Type) where
   privates : Array (Name × String) := #[]
   opaques : Array (Name × String) := #[]
 
-/-- The command kinds whose effect is just the fields of `Effect`. -/
+/-- The command kinds whose effect is just the fields of `Effect`.
+
+`attribute`, `set_option`, `register_attribute`, `register_option` and `local` are
+deliberately absent (like `syntax` and `macro_rules`): an imported module's cached
+commands are replayed by re-elaborating these commands, so their state lives in
+`CommandState` and not in `Effect`; the cache salt does not change. -/
 def cacheable : List Name :=
   ["command.def", "command.axiom", "command.defEqns", "command.inductive", "command.structure",
    "command.class", "command.instance", "command.coinductive", "command.builtin", "command.extern",
@@ -323,9 +350,9 @@ def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
   -- module that was elaborated on its own) must not get around that. (Other keys,
   -- `extern:…`, `repr:…`, `inline`, are per constant.)
   let once (k : Name) : Bool := k == "nat" || k.startsWith "nat." || k == "string" || k == "memo"
-  let clash := e.builtins.filter fun (k, n) => once k && (s.globals.builtins.lookup k).any (· != n)
+  let clash := e.builtins.filter fun (k, n) => once k && (s.globals.builtinOf? k).any (· != n)
   if let (k, n) :: _ := clash then
-    let was := (s.globals.builtins.lookup k).getD "?"
+    let was := (s.globals.builtinOf? k).getD "?"
     let text := s!"builtin {k} := {n}: {k} is already registered (as {was}); a builtin can be registered only once"
     { s with messages := s.messages.push { info := {}, severity := .error, text }, pristine := false } else
   -- An effect's declarations were new where it was recorded (a module elaborated on its
@@ -345,10 +372,10 @@ def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
   | none =>
   -- (the declarations belong to the module being replayed: `Globals.declModule`)
   let globals := e.decls.foldl (·.insert ·) { s.globals with module := s.module }
-  let globals := { globals with builtins := e.builtins ++ globals.builtins,
-                                assumed := e.assumed ++ globals.assumed,
+  let globals := { globals with assumed := e.assumed ++ globals.assumed,
                                 privates := e.privates.foldl (fun m (n, md) => m.insert n md) globals.privates,
-                                opaques := e.opaques.foldl (fun m (n, md) => m.insert n md) globals.opaques }
+                                opaques := e.opaques.foldl (fun m (n, md) => m.insert n md) globals.opaques }.setBuiltins
+                                (e.builtins ++ globals.builtins)
   { s with globals, messages := s.messages ++ e.messages, builtins := e.builtins ++ s.builtins,
            classes := e.classes ++ s.classes, instances := s.instances ++ e.instances,
            coinductives := s.coinductives ++ e.coinductives, foreignTypes := e.foreignTypes ++ s.foreignTypes,
@@ -453,7 +480,7 @@ def Effect.toSx (e : Effect R) : Sx :=
   let decl (d : Decl R) : Sx := list [str d.name, list (d.levelParams.map str), term d.type,
     (match d.value with | some v => term v | none => .a "none"), .a (toString d.inline),
     (match d.impl with | some v => term v | none => .a "none"),
-    (match d.witness with | some v => term v | none => .a "none")]
+    (match d.witness with | some v => term v | none => .a "none"), .a (toString d.typeWritten)]
   let sev : Severity → Sx | .error => .a "error" | .warning => .a "warning" | .info => .a "info"
   let msg (m : Msg) : Sx := list [info m.info, sev m.severity, str m.text, str m.code]
   list [list (e.decls.toList.map decl), list (e.messages.toList.map msg),
@@ -473,12 +500,13 @@ def Effect.toSx (e : Effect R) : Sx :=
 def Effect.ofSx? (x : Sx) : Option (Effect R) := do
   let #[ds, ms, bs, as, cs, is, cos, fts, cc, hs, ss, ps, os, dcs] ← items? x | none
   let decl (x : Sx) : Option (Decl R) := do
-    let #[n, ps, ty, v, inl, im, w] ← items? x | none
+    let #[n, ps, ty, v, inl, im, w, tw] ← items? x | none
     pure { name := ← atom? n, levelParams := ← (← items? ps).toList.mapM atom?, type := ← dterm ty,
            value := ← (match v with | .a "none" => some none | v => (dterm v).map some),
            inline := (← atom? inl) == "true",
            impl := ← (match im with | .a "none" => some none | v => (dterm v).map some),
-           witness := ← (match w with | .a "none" => some none | v => (dterm v).map some) }
+           witness := ← (match w with | .a "none" => some none | v => (dterm v).map some),
+           typeWritten := (← atom? tw) == "true" }
   let msg (x : Sx) : Option Msg := do
     let #[i, sev, t, c] ← items? x | none
     let severity : Severity := match ← atom? sev with
@@ -520,7 +548,7 @@ def Effect.ofSx? (x : Sx) : Option (Effect R) := do
 /-- The cache's version: change it whenever the format or the elaborator's output changes.
 (The directory store also mixes in the binary's own hash, `binaryId`, so two builds of
 wiz never share entries; the salt is for invalidating by hand.) -/
-def salt : UInt64 := hash "wiz-cache-31-deterministic-macro-scopes"  -- 31: macro scopes start at the command's source position (a cache hit no longer shifts them); 30: mandatory component sorts (Π/Σ carry ⟨dom, cod⟩, ULift its content's sort), a mutual block's constructors named per type, error codes, `Info.fix`, `scase` quantity (K1), `letUnit`; 20: proof markers (P2: declarations are stored marked); 15: doc comments and declaration kinds (11s); 14: a builtin key is registered once; 13: witnesses, assumed registrations, warnings; 12: private constructors, observations, fields (13b); 11: 22i, marked structure tails; 9: private names (13b); 8: Q4
+def salt : UInt64 := hash "wiz-cache-32-type-written"  -- 32: `Decl.typeWritten` (the type was written, so `#check` keeps the Π names of its ascription), so cached declarations carry it; 31: macro scopes start at the command's source position (a cache hit no longer shifts them); 30: mandatory component sorts (Π/Σ carry ⟨dom, cod⟩, ULift its content's sort), a mutual block's constructors named per type, error codes, `Info.fix`, `scase` quantity (K1), `letUnit`; 20: proof markers (P2: declarations are stored marked); 15: doc comments and declaration kinds (11s); 14: a builtin key is registered once; 13: witnesses, assumed registrations, warnings; 12: private constructors, observations, fields (13b); 11: 22i, marked structure tails; 9: private names (13b); 8: Q4
 
 /-! ## Keys and atomic writes (stage 23c)
 
@@ -665,6 +693,9 @@ where
         let k₀ := (Module.headersOf src).foldl (fun k h => mixHash k (hash ((headers h).getD ""))) k₀
         -- (include-str) the contents of the files it includes (fast half unchanged)
         let k₀ := mixHash k₀ (Module.includesKey includes m src)
+        -- (the namespace allowlist decides a declaration's absolute name, so it
+        -- is an input of what the module elaborates to; both halves mix its digest)
+        let k₀ := mixHash k₀ Wiz.LegacyNames.digestFast
         -- (the strong half hashes the exact fields, each length-framed: not the 64-bit
         -- hashes above, and not a concatenation that can be ambiguous)
         let headerFields := (Module.headersOf src).flatMap fun h => [s!"header:{h}", (headers h).getD ""]
@@ -673,7 +704,8 @@ where
             strong := Smt.Sha256.hexFramed "wiz-cache/module-v1"
               ([s!"salt:{salt}", s!"toolchain:{toolchain}", s!"toolchain-tag:{strongToolchain}",
                 s!"target-tag:{targetTag}", s!"module:{m}", s!"trusted:{trusted m}", "source", src,
-                s!"includes:{includesKeyStrong includes m src}"] ++ headerFields)
+                s!"includes:{includesKeyStrong includes m src}",
+                s!"legacy-names:{Wiz.LegacyNames.digest}"] ++ headerFields)
             toolchain := strongToolchain, target := targetTag }
         let (k, memo) := (Module.importsOf src).foldl (fun (k, memo) n =>
           let (kn, memo) := go (m :: stack) n memo
@@ -842,7 +874,9 @@ first integrity step is a digest of the bytes that are served, plus a **manifest
 binds a key to that digest. There is no signature yet: a manifest catches corruption, a
 truncated/rewritten file and a mirror that swaps one entry for another; it does not stop a
 writer who controls the manifest too (that needs P3's signatures and, eventually, the
-append-only log).
+append-only log). A read-only layer's manifests are not a trust root either, so such a
+layer is refused unless `--cache-ro-unsigned` on that layer (or `--cache-verify off`)
+says otherwise.
 
 The layout is deliberately the note's **P2** (per-module manifests) with a **P1**
 per-layer generation index:
@@ -883,26 +917,34 @@ The policy is `--cache-verify MODE`:
 * `warn` (the default) — if a manifest exists, every key it lists is served only after its
   bytes match; a mismatch is a miss (the text path/elaboration answers). A new key has a
   SHA-256 half, so a write-cache entry no manifest lists is a miss too: nothing else binds
-  its bytes to the strong input key (an old fast-only key still falls through, and
-  `--cache-verify off` restores the old unverified lookup). An old local cache is one cold
-  pass, then it is rewritten with manifests.
-* `strict` (alias `require`) — only manifested entries are used anywhere. Manifests are
-  written to the write cache (never to a `--cache-ro` layer), so a cold run becomes
-  strict-warm after one pass.
+  its bytes to the strong input key. An old local cache is one cold pass, then it is
+  rewritten with manifests.
+* `strict` (alias `require`) — as `warn`, but an unlisted key is counted as a mismatch too
+  (only manifested entries are used anywhere). It is **not** a stronger authenticity
+  claim: a manifest is a self-signed digest, and a writer who can replace the entry can
+  recompute it. Only signatures (P3) or a kernel re-check can tell a writer from a
+  builder.
+* A **read-only layer** (`--cache-ro`) is not in the user's trust domain. Its manifests
+  are self-signed, so by default they authenticate nothing and the layer is **refused**:
+  no entry or region is served from it, and `wiz` warns once per layer that has content
+  for a module. Passing
+  `--cache-ro-unsigned` (or `--cache-verify off`, which has no manifests and no region
+  gate) is the explicit opt-in to unauthenticated data. This is a deliberate change from
+  the old behaviour, where "the layer has a manifest" was treated as sufficient.
 
 A bad manifest disables the entries it names (they miss); an absent manifest in `warn` is
-the compatibility default. Verification runs at the file boundary (`Store.get`,
-`RegionStore.get`) and costs one digest of the bytes being read anyway; it never scans the
-whole cache, and never repairs a read-only layer. `regionFormat` 2's `.wizs` sidecar is
-still checked first, so a corrupt region never reaches the type-erased reader even when a
-manifest is absent. -/
+a miss for every entry (the write cache's own entries are the only compatibility default).
+Verification runs at the file boundary (`Store.get`, `RegionStore.get`) and costs one
+digest of the bytes being read anyway; it never scans the whole cache, and never repairs a
+read-only layer. A region is **never** read without a manifest entry, in any mode (a
+`.wizr` is a type-erased image and its `.wizs` sidecar is written by the same writer). -/
 
 /-- `--cache-verify`'s policy (`require` is accepted as a synonym of `strict`). -/
 inductive VerifyMode where
   | off
-  /-- verify when a manifest exists; an unlisted key keeps the old lookup (default) -/
+  /-- verify when a manifest exists; an unlisted key is a miss (default) -/
   | warn
-  /-- only manifested entries are used; an unlisted key is a miss -/
+  /-- as `warn`, and an unlisted key counts as a mismatch (not an authenticity check) -/
   | strict
   deriving Repr, Inhabited, BEq, DecidableEq
 
@@ -1280,7 +1322,8 @@ structure VerifyCounts where
   hits : Nat := 0
   /-- entries that a manifest listed but whose bytes did not match (a miss) -/
   mismatches : Nat := 0
-  /-- entries used without a manifest (the `warn` compatibility path) -/
+  /-- entries used without a manifest. Always 0 now: the unmanifested fallback was removed
+  (it is reported only so the `--cache-verify-stats` line keeps its shape) -/
   unverified : Nat := 0
   /-- regions served after their bytes matched a manifest -/
   regions : Nat := 0
@@ -1295,6 +1338,10 @@ structure ManifestStore where
   toolchain : String
   rig : String
   mode : VerifyMode
+  /-- the read-only layers served although their manifests are not authenticated
+  (`--cache-ro-unsigned` on that layer). Empty by default: a manifest is a self-signed
+  digest, so a foreign layer is refused rather than trusted. -/
+  unsignedReads : List System.FilePath := []
   /-- `Key.id`s whose manifests have been loaded -/
   loaded : IO.Ref (Std.HashSet String)
   /-- `Key.id` → (entry, layer), in layer order -/
@@ -1317,8 +1364,9 @@ structure ManifestStore where
 
 def ManifestStore.create (write : Option System.FilePath) (reads : List System.FilePath)
     (binary : UInt64) (toolchain rig : String) (mode : VerifyMode)
-    (stats : Option (IO.Ref VerifyCounts) := none) : IO ManifestStore := do
-  pure { write, reads, binary, toolchain, rig, mode,
+    (stats : Option (IO.Ref VerifyCounts) := none)
+    (unsignedReads : List System.FilePath := []) : IO ManifestStore := do
+  pure { write, reads, binary, toolchain, rig, mode, unsignedReads,
          loaded := ← IO.mkRef ({} : Std.HashSet String),
          entries := ← IO.mkRef ({} : Std.HashMap String (Array (ManifestEntry × System.FilePath))),
          regions := ← IO.mkRef ({} : Std.HashMap String (Array (ManifestEntry × System.FilePath))),
@@ -1335,6 +1383,11 @@ def ManifestStore.dirs (m : ManifestStore) : List System.FilePath := m.write.toL
 def ManifestStore.isRead (m : ManifestStore) (dir : System.FilePath) : Bool :=
   m.reads.any (·.toString == dir.toString)
 
+/-- Is `dir` one of the read-only layers the caller opted into serving unsigned
+(`--cache-ro-unsigned` on that layer)? -/
+def ManifestStore.isUnsigned (m : ManifestStore) (dir : System.FilePath) : Bool :=
+  m.unsignedReads.any (·.toString == dir.toString)
+
 /-- A layer's generation expiry (Unix seconds, `0` for none), read once. -/
 def ManifestStore.expiryOf (m : ManifestStore) (dir : System.FilePath) : IO Nat := do
   let key := dir.toString
@@ -1347,13 +1400,21 @@ def ManifestStore.expiryOf (m : ManifestStore) (dir : System.FilePath) : IO Nat 
     m.expiry.modify (·.insert key n)
     pure n
 
+/-- Warn once per read-only layer that is refused: its manifests are self-signed, so they
+do not authenticate the writer. `--cache-ro-unsigned` is the explicit opt-in. -/
+def ManifestStore.warnRefusedRo (m : ManifestStore) (dir : System.FilePath) : IO Unit := do
+  let key := s!"refused {dir}"
+  if (← m.warnedRo.get).contains key then return
+  m.warnedRo.modify (·.insert key)
+  IO.eprintln s!"cache verify: --cache-ro {dir}: refusing an unauthenticated layer (a manifest is a self-signed digest, not a signature); pass --cache-ro-unsigned to serve it anyway"
+
 /-- Warn once per read-only layer that has no manifest for a module: its entries are not
 used (they would be unverified). -/
 def ManifestStore.warnMissingRo (m : ManifestStore) (dir : System.FilePath) : IO Unit := do
   let key := dir.toString
   if (← m.warnedRo.get).contains key then return
   m.warnedRo.modify (·.insert key)
-  IO.eprintln s!"cache verify: --cache-ro {dir}: no manifest for a module; its entries are not used (--cache-verify off restores the old lookup)"
+  IO.eprintln s!"cache verify: --cache-ro {dir}: no manifest for a module; its entries are not used (a manifest records integrity, not authenticity)"
 
 def ManifestStore.bump (m : ManifestStore) (f : VerifyCounts → VerifyCounts) : IO Unit :=
   match m.stats with
@@ -1363,15 +1424,47 @@ def ManifestStore.bump (m : ManifestStore) (f : VerifyCounts → VerifyCounts) :
 def ManifestStore.inWrite (m : ManifestStore) (dir : System.FilePath) : Bool :=
   some dir.toString == m.write.map (·.toString)
 
+/-- Index the region entry a layer just wrote, replacing that layer's previous entry for
+the key. A rewritten region may differ byte-for-byte from the old one (the image is not
+canonical), so keeping the old entry first would read the new file against the old
+digest, drop it, and lose the repair. -/
+def ManifestStore.setRegion (m : ManifestStore) (id : String) (e : ManifestEntry)
+    (dir : System.FilePath) : IO Unit :=
+  m.regions.modify fun mp =>
+    let kept := ((mp[id]?).getD #[]).filter fun (_, d) => d.toString != dir.toString
+    mp.insert id (kept.push (e, dir))
+
+/-- Does `dir` have anything for module `key` (a manifest, a seen marker or a region)? The
+marker is named by the module key; the `.wizc` entries are named by command keys. -/
+def ManifestStore.hasModule (m : ManifestStore) (dir : System.FilePath) (key : Key) :
+    IO Bool := do
+  let oldMarker := s!"{mixHash m.binary key.fast}.wizm"
+  let marker := if key.strong.isEmpty then oldMarker
+    else s!"{mixHash m.binary key.fast}-{key.strong}.wizm"
+  let oldRegion := s!"{mixHash m.binary key.fast}.wizr"
+  let hasManifest ← (manifestFile dir m.binary key).pathExists
+  let hasMarker ← (dir / marker).pathExists
+  let hasOldMarker ← (dir / oldMarker).pathExists
+  let hasRegion ← (dir / regionFileName m.binary key).pathExists
+  let hasOldRegion ← (dir / oldRegion).pathExists
+  pure (hasManifest || hasMarker || hasOldMarker || hasRegion || hasOldRegion)
+
 /-- Load (once) every layer's manifest for module key `key` and index its entries. A layer
 whose manifest exists but does not validate poisons the keys it names; it is never
-silently treated as authoritative. -/
+silently treated as authoritative. A read-only layer is skipped unless
+`--cache-ro-unsigned` on that layer: its manifest is a self-signed digest, so it cannot
+authenticate the writer (a signer policy is the missing piece, P3). -/
 def ManifestStore.load (m : ManifestStore) (key : Key) : IO Unit := do
   let id := Key.id key
   if (← m.loaded.get).contains id then return
   m.loaded.modify (·.insert id)
   let now ← unixNow
   for dir in m.dirs do
+    if m.isRead dir && !m.isUnsigned dir then
+      -- (warn only when this module was elaborated in the layer: an empty layer, or one
+      -- that simply lacks the module, is not something to refuse loudly)
+      if ← m.hasModule dir key then m.warnRefusedRo dir
+  for dir in m.dirs.filter fun dir => !m.isRead dir || m.isUnsigned dir do
     let f := manifestFile dir m.binary key
     if ← f.pathExists then
       m.present.modify (·.insert id)
@@ -1404,17 +1497,8 @@ def ManifestStore.load (m : ManifestStore) (key : Key) : IO Unit := do
         pure ()
     else if m.isRead dir then
       -- (warn only if this module was elaborated here; an empty layer or one that
-      -- simply lacks the module is not a downgrade. The marker is named by the module
-      -- key; the `.wizc` entries are named by command keys.)
-      let oldMarker := s!"{mixHash m.binary key.fast}.wizm"
-      let marker := if key.strong.isEmpty then oldMarker
-        else s!"{mixHash m.binary key.fast}-{key.strong}.wizm"
-      let oldRegion := s!"{mixHash m.binary key.fast}.wizr"
-      let hasMarker ← (dir / marker).pathExists
-      let hasOldMarker ← (dir / oldMarker).pathExists
-      let hasRegion ← (dir / regionFileName m.binary key).pathExists
-      let hasOldRegion ← (dir / oldRegion).pathExists
-      if hasMarker || hasOldMarker || hasRegion || hasOldRegion then m.warnMissingRo dir
+      -- simply lacks the module is not a downgrade)
+      if ← m.hasModule dir key then m.warnMissingRo dir
 
 /-- The entries a manifest lists for command key `k` (none: unlisted). The strong half is
 part of the index, so a 64-bit collision finds no entry for the other input. -/
@@ -1490,7 +1574,7 @@ def ManifestStore.writeManifest (m : ManifestStore) (key : Key) (module : Name)
     let eid := Key.id { fast := e.key, strong := e.keySha }
     m.entries.modify fun mp => mp.insert eid (((mp[eid]?).getD #[]).push (e, dir))
   if let some e := m0.region then do
-    m.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (e, dir))
+    m.setRegion id e dir
 
 /-- Verify the keyed files of one layer against its manifests (the full-scan tool). This
 is what `wiz cache verify` reports; normal runs verify only what they read. -/
@@ -1613,7 +1697,8 @@ def toolchainTag (dir : Option System.FilePath) : IO String := do
     pure s!"binary:{← binaryId dir}"
 
 /-- An effect read from the cache and the manifest entry (with its layer) that verified it.
-`none` for the entry means the `warn` compatibility path (no manifest listed the key). -/
+`none` for the entry means no manifest was involved: a region hit, an in-memory hit, or
+`--cache-verify off` (which has no manifest store). -/
 abbrev CacheHit (R : Type) := Effect R × Option (ManifestEntry × System.FilePath)
 
 /-- Read `f`, check it against `e` (size and SHA-256), then decode it. Any read, size,
@@ -1822,8 +1907,9 @@ module's marker; `markSeen` writes the marker to `write`, or keeps it in memory 
 there is none, so a `--cache-ro`-only run knows which modules it has already elaborated
 in isolation. Its files are named by the key mixed with the binary, so another build of
 wiz finds none of them. With `verify` on, a manifest-listed entry is served only after
-its bytes match; a listed-but-bad entry is a miss, and an unlisted one falls back to the
-old lookup in `warn` or misses in `strict`. -/
+its bytes match; a listed-but-bad entry is a miss, and an unlisted one is a miss too (a
+manifest is the only thing that binds the bytes to the key; `off` is the unverified
+mode and has no manifest store). -/
 def Store.layeredCore (write : Option System.FilePath) (reads : List System.FilePath)
     (binary : UInt64) (manifests : Option ManifestStore) : IO (Store R) := do
   if let some dir := write then IO.FS.createDirAll dir
@@ -1836,9 +1922,9 @@ def Store.layeredCore (write : Option System.FilePath) (reads : List System.File
   let dirs := write.toList ++ reads
   let seenInMemory ← IO.mkRef ({} : Std.HashSet String)
   let getEntry : Key → IO (Option (CacheHit R)) := fun k => do
-    let file := s!"{entryName k}.wizc"
     match manifests with
     | none =>
+      let file := s!"{entryName k}.wizc"
       for dir in dirs do
         let f := dir / file
         if ← f.pathExists then
@@ -1858,23 +1944,12 @@ def Store.layeredCore (write : Option System.FilePath) (reads : List System.File
         ms.broken.modify (· + 1)
         pure none
       | none =>
-        -- (A new key has a SHA-256 half: without a manifest entry there is nothing that
-        -- binds the bytes to that input, so the write cache is a miss too. This is the
-        -- old-cache migration: one cold pass rewrites its entries with manifests.
-        -- `--cache-verify off` keeps the old unverified lookup; a fast-only legacy key
-        -- reached through the API may also fall through.)
-        if ms.mode == .strict || !k.strong.isEmpty then pure none
-        else
-          for dir in dirs do
-            if ms.isRead dir then continue
-            let f := dir / file
-            if ← f.pathExists then
-              let bytes ← try pure (← IO.FS.readBinFile f) catch _ => pure ByteArray.empty
-              if let some text := String.fromUTF8? bytes then
-                if let some e := (Sx.parse text).bind Effect.ofSx? then
-                  ms.bump fun c => { c with unverified := c.unverified + 1 }
-                  return some (e, some (ManifestEntry.ofBytes "wizc" k file bytes, dir))
-          pure none
+        -- (A key with a SHA-256 half and no manifest entry binds no bytes: it is a miss,
+        -- so an unmanifested `.wizc` is never served. There is no fast-only fallback:
+        -- the 64-bit key is an index, not a digest, and the public `Key`/`Coe UInt64 Key`
+        -- API must not turn into an unverified lookup. `--cache-verify off` is the one
+        -- explicit unverified mode, and it has no manifest store at all.)
+        pure none
   pure {
     getEntry
     get := fun k => return (← getEntry k).map (·.1)
@@ -1895,9 +1970,11 @@ def Store.layeredCore (write : Option System.FilePath) (reads : List System.File
 /-- A layered store with the verification policy `verify` (default off: the old store). -/
 def Store.layered (write : Option System.FilePath) (reads : List System.FilePath)
     (binary : UInt64) (verify : VerifyMode := .off) (rig : String := "")
-    (stats : Option (IO.Ref VerifyCounts) := none) : IO (Store R) := do
+    (stats : Option (IO.Ref VerifyCounts) := none)
+    (unsignedReads : List System.FilePath := []) : IO (Store R) := do
   let manifests ← if verify == .off then pure none else
-    pure (some (← ManifestStore.create write reads binary (← toolchainTag write) rig verify stats))
+    pure (some (← ManifestStore.create write reads binary (← toolchainTag write) rig verify stats
+      unsignedReads))
   Store.layeredCore write reads binary manifests
 
 /-- The store in directory `dir`, for the binary `binary` (`binaryId`): a layered store
@@ -1936,66 +2013,50 @@ structure RegionSink (R : Type) where
 directory first, then each read-only directory in order, and `put` writes only to the write
 directory (none: no writes). A read-only cache is never created, written or repaired, so a
 missing, truncated or mistagged region there is just a miss; a bad file in the write
-directory is dropped (the next run rewrites it). With `manifests`, a region must be listed
-by the module's manifest and its bytes must match: a region is never served from a layer
-whose manifest exists but does not list it (a corrupt or swapped `.wizr` is a miss), and a
-manifest that does not validate makes it a miss. -/
+directory is dropped (the next run rewrites it).
+
+A region is a **type-erased** image: `readRegionFile` reinterprets the bytes as a
+`ModuleArtifact R`, and the `.wizs` sidecar is a 64-bit hash written by whoever wrote the
+region. So a region is served **only** when the module's manifest lists it and its size and
+SHA-256 match: there is no unmanifested fallback, not in `warn` and not with the manifest
+store absent (`--cache-verify off`). Without a manifest entry the bytes are a miss, and the
+text entries (or a fresh elaboration) answer instead. `put` likewise writes a region only
+when the store has manifests, so `--region-cache` with `--cache-verify off` reads and writes
+no regions. -/
 def RegionStore.layered (write : Option System.FilePath) (reads : List System.FilePath)
     (binary : UInt64) (opts : RegionOptions) (manifests : Option ManifestStore := none) :
     IO (RegionStore R) := do
-  let dirs := write.toList ++ reads
   let inWrite (dir : System.FilePath) : Bool :=
     some dir.toString == write.map (·.toString)
   let read (k : Key) : IO (Option (ModuleArtifact R)) := do
-    match manifests with
-    | none =>
-      for dir in dirs do
-        let file := dir / regionFileName binary k
-        if ← file.pathExists then
-          match ← readRegionFile (R := R) file with
-          | some a =>
-            if a.fits binary k opts.rig then return some a
-            else if inWrite dir then removeRegionFiles file
-          | none => if inWrite dir then removeRegionFiles file
+    let some ms := manifests | pure none
+    ms.load k
+    if ← ms.poisonedFor k then
+      ms.bump fun c => { c with mismatches := c.mismatches + 1 }
       pure none
-    | some ms =>
-      ms.load k
-      if ← ms.poisonedFor k then
+    else match ← ms.regionFor k with
+      | some list =>
+        for (ent, dir) in list do
+          match ← readRegionFile (R := R) (dir / ent.file)
+              (expected := some (ent.size, ent.sha256)) with
+          | some a =>
+            if a.fits binary k opts.rig then
+              ms.bump fun c => { c with regions := c.regions + 1 }
+              return some a
+            else if inWrite dir then removeRegionFiles (dir / ent.file)
+          | none => if inWrite dir then removeRegionFiles (dir / ent.file)
         ms.bump fun c => { c with mismatches := c.mismatches + 1 }
         pure none
-      else match ← ms.regionFor k with
-        | some list =>
-          for (ent, dir) in list do
-            match ← readRegionFile (R := R) (dir / ent.file)
-                (expected := some (ent.size, ent.sha256)) with
-            | some a =>
-              if a.fits binary k opts.rig then
-                ms.bump fun c => { c with regions := c.regions + 1 }
-                return some a
-              else if inWrite dir then removeRegionFiles (dir / ent.file)
-            | none => if inWrite dir then removeRegionFiles (dir / ent.file)
+      | none =>
+        -- (unlisted: a miss in every mode. Only a manifest entry binds the image to the
+        -- module key; `strict` additionally counts it as a mismatch.)
+        if ms.mode == .strict then
           ms.bump fun c => { c with mismatches := c.mismatches + 1 }
-          pure none
-        | none =>
-          if ms.mode == .strict || (← ms.presentFor k) then
-            if ms.mode == .strict then
-              ms.bump fun c => { c with mismatches := c.mismatches + 1 }
-            pure none
-          else
-            for dir in dirs do
-              if ms.isRead dir then continue
-              let file := dir / regionFileName binary k
-              if ← file.pathExists then
-                match ← readRegionFile (R := R) file with
-                | some a =>
-                  if a.fits binary k opts.rig then return some a
-                  else if inWrite dir then removeRegionFiles file
-                | none => if inWrite dir then removeRegionFiles file
-            pure none
+        pure none
   pure {
     get := fun k => read k
-    put := fun a => match write with
-      | some dir => do
+    put := fun a => match write, manifests with
+      | some dir, some ms => do
         -- (a pure cache: a region that cannot be written, say because `Effect` grew a
         -- closure, must not fail the run; the `.wizc` entries remain the authority)
         try
@@ -2003,15 +2064,12 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
                              target := a.targetSha, binary := a.binarySha }
           let e ← writeRegionFile (dir / regionFileName binary key)
             { a with binary := binary, textSalt := salt, rig := opts.rig }
-          match manifests with
-          | some ms =>
-            for ent in e.toList do
-              let id := Key.id key
-              ms.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (ent, dir))
-          | none => pure ()
+          for ent in e.toList do
+            let id := Key.id key
+            ms.setRegion id ent dir
           pure e
         catch _ => pure none
-      | none => pure none
+      | _, _ => pure none
     stats := opts.stats
     manifests }
 
@@ -2019,9 +2077,11 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
 regions are searched in the same layer order, with one shared manifest index. -/
 def Store.layeredRegion (write : Option System.FilePath) (reads : List System.FilePath)
     (binary : UInt64) (opts : RegionOptions) (verify : VerifyMode := .off) (rig : String := "")
-    (stats : Option (IO.Ref VerifyCounts) := none) : IO (Store R) := do
+    (stats : Option (IO.Ref VerifyCounts) := none)
+    (unsignedReads : List System.FilePath := []) : IO (Store R) := do
   let manifests ← if verify == .off then pure none else
-    pure (some (← ManifestStore.create write reads binary (← toolchainTag write) rig verify stats))
+    pure (some (← ManifestStore.create write reads binary (← toolchainTag write) rig verify stats
+      unsignedReads))
   let store ← Store.layeredCore write reads binary manifests
   let region ← RegionStore.layered write reads binary opts manifests
   pure { store with region := some region }
@@ -2213,7 +2273,7 @@ partial def elaborateWith (store : Store R) (input : String) (init : CommandStat
     | some _ => pure (some { module := init.module, effects := ← IO.mkRef #[], keys := ← IO.mkRef #[],
                              rerun := ← IO.mkRef #[], region := false, entries := ← IO.mkRef #[] })
     | none => pure none
-  let result ← go keys init [] input init chainKey .write manifestKey none rootSink
+  let result ← go keys init [] input { init with headerDone := false } chainKey .write manifestKey none rootSink
   match store.manifests with
   | some ms =>
     if !rootPath.isEmpty then
@@ -2259,7 +2319,7 @@ where
                        rerun := ← IO.mkRef #[], region := store.region.isSome,
                        entries := ← IO.mkRef #[] })
         else pure none
-      let (_, h) ← go keys base (m :: stack) src { base with imported := [m], messages := #[], module := m } k .write k none sink
+      let (_, h) ← go keys base (m :: stack) src ({ base with imported := [m], messages := #[], module := m }).atModuleStart k .write k none sink
       store.markSeen k m
       pure (some h)
     -- (the isolated run above wrote the artifact if it was missing or unusable)
@@ -2271,7 +2331,7 @@ where
       | none => pure 0
     -- (the command loop still runs: imports, keys and duplicate checks are unchanged; the
     -- effects come from the region when it has them)
-    let (s', h) ← go keys base (m :: stack) src { s with imported := m :: s.imported, messages := #[], module := m } k .replay k region
+    let (s', h) ← go keys base (m :: stack) src ({ s with imported := m :: s.imported, messages := #[], module := m }).atModuleStart k .replay k region
     let brokenAfter ← match store.manifests with
       | some ms => ms.broken.get
       | none => pure brokenBefore
@@ -2285,7 +2345,7 @@ where
                            rerun := ← IO.mkRef #[], region := true,
                            entries := ← IO.mkRef #[] })
             else pure none
-          let _ ← go keys base (m :: stack) src { base with imported := [m], messages := #[], module := m } k .write k none sink
+          let _ ← go keys base (m :: stack) src ({ base with imported := [m], messages := #[], module := m }).atModuleStart k .write k none sink
           pure ()
       | none => pure ()
     -- after a fresh isolated run, the hits are that run's (the replay reads what it wrote)
@@ -2318,10 +2378,16 @@ where
       | .ok (cmd, stop) =>
         let text := String.ofList (chars.extract pos stop).toList
         key := key.mixText text
-        if cmd.isOfKind "command.import" then
+        if cmd.isOfKind "command.import" || cmd.isOfKind "command.openImport" then
+          if s.headerDone then
+            -- (import header) an import after a declaration: not brought in, one error
+            s := { s with messages := s.messages.push { info := cmd.info, severity := .error, code := ErrorCode.importOrder, text := "imports must precede declarations: an `import` may appear only at the top of the file, before every other command (comments are not commands)" } }
+            pos := stop
+            continue
           allCacheable := false
           if let some sink := sink then sink.rerun.modify (·.push (pos, stop))
-          let m := ((cmd.getArg 1).getId?).getD "_"
+          let openImport := cmd.isOfKind "command.openImport"
+          let m := ((cmd.getArg (if openImport then 2 else 1)).getId?).getD "_"
           -- what the rest of the file sees depends on the module's text, through its key
           key := key.mixKey (← keyOf keys m)
           if stack.contains m then
@@ -2359,6 +2425,10 @@ where
               else
               s := { inner with messages := (if errs.isEmpty then s.messages else s.messages.push msg) ++ warns,
                                 module := s.module, infos := s.infos }
+          -- (13u) `open import M` is `import M` plus a file-scope `open M`, whether
+          -- M was just loaded or was already imported by this file
+          if openImport && !stack.contains m then
+            s := { s with globals := { s.globals with opens := s.globals.opens ++ [m] } }
           pos := stop
           continue
         let cacheable? := cacheable.contains cmd.kind
@@ -2408,7 +2478,11 @@ where
               if store.manifests.isSome then
                 sink.entries.modify (·.push (ManifestEntry.ofEffect store.binary key e))
           s := s'
+        -- (import header) a command that is not an import closes the header
+        s := { s with headerDone := true }
         pos := stop
+    -- (13t) a namespace the module left open is an error in it
+    s := s.checkUnclosedNamespaces
     -- (write the module's region after a complete isolated run; a manifest is written even
     -- for an aborted run: the entries before a parse error were elaborated and their bytes
     -- are valid, and without a manifest every run re-elaborated the file's whole prefix)
@@ -2438,21 +2512,23 @@ are written to the write cache and checked on load (`rig` is the rig's tag).
 `strongToolchain`/`targetTag` are the SHA-256 namespaces (`Toolchain.tag`,
 `Toolchain.targetTag`); `rootTag` is a strong version of `key₀` (the root file's headers),
 so a root manifest is bound to its actual inputs too. `rootPath` is the root file's path,
-used only for the manifest pointer an edit follows to keep its unchanged prefix warm. -/
+used only for the manifest pointer an edit follows to keep its unchanged prefix warm.
+`unsignedReads` (`--cache-ro-unsigned` on that layer) serves the named read-only layers
+although their manifests are not authenticated; it is empty by default. -/
 def elaborateCached (write : Option System.FilePath) (reads : List System.FilePath)
     (input : String) (init : CommandState R) (key₀ : UInt64)
     (toolchain : UInt64 := 0) (binary : Option UInt64 := none)
     (region : Option RegionOptions := none) (verify : VerifyMode := .off) (rig : String := "")
     (stats : Option (IO.Ref VerifyCounts) := none)
     (strongToolchain : String := "") (targetTag : String := "") (rootTag : String := "")
-    (rootPath : String := "") :
+    (rootPath : String := "") (unsignedReads : List System.FilePath := []) :
     IO (CommandState R × Nat) := do
   let binary ← match binary with | some b => pure b | none => binaryId write
   let binaryTag ← if region.isSome || verify != .off then toolchainTag write else pure ""
   -- (13b) `--trace-guess-fallback` reports from the elaborator: nothing may come from a cache
   let store ← if ← traceGuessesRef.get then Store.memory else match region with
-    | some opts => Store.layeredRegion write reads binary opts verify rig stats
-    | none => Store.layered write reads binary verify rig stats
+    | some opts => Store.layeredRegion write reads binary opts verify rig stats unsignedReads
+    | none => Store.layered write reads binary verify rig stats unsignedReads
   -- (the layer's `manifest.sexpr` is not refreshed here: rebuilding it reads and
   -- re-validates every manifest in the layer, which is O(cache) per run — about a minute
   -- on a shared cache of thousands of manifests. Nothing a run does reads its module

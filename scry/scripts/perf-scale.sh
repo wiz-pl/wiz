@@ -22,7 +22,7 @@
 #
 # Dependencies: bash, python3 (os.fork/os.wait4; no `time`/`ps` needed) and a built
 # `scry` (`cd scry && grail build scry`) with the vendored tree-sitter shim. The default
-# rule pack is found at `../lib/Scry/rules/default.scry`; `--rules FILE` passes another
+# rule pack is found at `rules/default.scry`; `--rules FILE` passes another
 # one. The script writes only under a temporary directory.
 #
 # Timing policy: the numbers are informational unless the run is inside a `perf-run`

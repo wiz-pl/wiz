@@ -327,7 +327,7 @@ def cRunLibsFlags (src : String) (cflags : List String) :
   match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir (timeout := some 120) with
   | .error e =>
     if e.isToolchain then
-      skip "no toolchain"
+      skipMissing "no toolchain"
       pure none
     else pure (some (.error e))
   | r => pure (some r)
@@ -508,7 +508,7 @@ def concGroup : Group where
         match ← cRunLibsOut src with
         | .ok v => throw (IO.userError s!"the program passed: {v}")
         | .error e =>
-          if e.isToolchain then skip "no toolchain"
+          if e.isToolchain then skipMissing "no toolchain"
           else do
             -- the failure reports the exit code and the program's own stderr
             check ((e.message.splitOn "the program failed (3)").length > 1) e.message
@@ -526,15 +526,16 @@ def concGroup : Group where
         match ← cRunLibsOut "import IO\nimport Sys\ndef main : IO Unit := Process.exit 3\n" with
         | .ok v => throw (IO.userError s!"the program ran to the end: {v}")
         | .error e =>
-          if e.isToolchain then skip "no toolchain"
+          if e.isToolchain then skipMissing "no toolchain"
           else check ((e.message.splitOn "the program failed (3)").length > 1) e.message },
     { name := "a program that writes 'No such file' on stderr and exits 0 still passes", run := fun _ =>
         cRunLibs ("import IO\nimport Sys\n" ++
           "def main : IO Unit := IO.bind (IO.ePrintln \"open log.txt: No such file or directory\") (fun _ => IO.println \"ok\")\n") "ok\n" },
-    -- The other half: a build that cannot start the compiler is still a genuine "no
-    -- toolchain" skip. Run the passing case above in a child driver whose `--cc` does not
-    -- exist, and check that it is reported SKIPPED (exit 3), not failed.
-    { name := "a build that cannot find the compiler is still a 'no toolchain' skip", run := fun _ => do
+    -- The other half: a build that cannot start the compiler is a genuine missing
+    -- dependency. By default it **fails**, naming `cc`; only the explicit
+    -- `--allow-missing-deps` reports it as a skip. Run the passing case above in a child
+    -- driver whose `--cc` does not exist and check both.
+    { name := "a build that cannot find the compiler fails by default, and is a skip only with --allow-missing-deps", run := fun _ => do
         let self ← IO.appPath
         let target := "a program that writes 'No such file' on stderr and exits 0 still passes"
         let listed ← IO.Process.output { cmd := self.toString, args := #["--list-cases", "=conc"] }
@@ -544,19 +545,33 @@ def concGroup : Group where
             | _ => none
           | throw (IO.userError s!"`--list-cases =conc` has no case named {target}")
         let args := #["--run", "conc", toString i, "--cc", "/nonexistent/wiz-test-cc"]
-        let r ← IO.Process.output { cmd := self.toString, args }
+        -- The shard that runs this case may itself be `--allow-missing-deps` (the library
+        -- shard is, for iverilog) and exports WIZ_ALLOW_MISSING_DEPS for its children.
+        -- Drop it for both halves, so the default-failure half tests the default even
+        -- there and the opt-in half tests the flag alone.
+        let noAllowEnv : Array (String × Option String) := #[("WIZ_ALLOW_MISSING_DEPS", none)]
+        -- without the flag: exit 1, and the failure names the dependency and the flag
+        let r ← IO.Process.output { cmd := self.toString, args, env := noAllowEnv }
+        check (r.exitCode == 1) s!"exit {r.exitCode}, not 1 (a failure):\n{r.stdout}{r.stderr}"
+        check ((r.stdout.splitOn "missing dependency: no toolchain").length > 1) r.stdout
+        check ((r.stdout.splitOn "--allow-missing-deps").length > 1) r.stdout
+        check ((r.stdout.splitOn "FAILED").length > 1) r.stdout
+        -- with the flag: a reported skip (exit 3)
+        let r ← IO.Process.output { cmd := self.toString, args := args.push "--allow-missing-deps",
+                                     env := noAllowEnv }
         check (r.exitCode == 3) s!"exit {r.exitCode}, not 3 (a skip):\n{r.stdout}{r.stderr}"
         check ((r.stdout.splitOn "⊘").length > 1) r.stdout
         check ((r.stdout.splitOn "SKIPPED (no toolchain)").length > 1) r.stdout },
     -- The classifier itself: a build that cannot start a program, or cannot find GMP's
     -- header, is a missing toolchain; a compiler that ran and rejected the program (or a
     -- missing test input file) is not; and no program failure ever is.
-    { name := "only a missing compiler, llc or gmp.h is classified as 'no toolchain'", run := fun _ => do
+    { name := "only a missing compiler, llc, gmp.h or gmp library is classified as 'no toolchain'", run := fun _ => do
         let tc : Wiz.Toolchain := {}
         check (Build.missingToolchain tc "cc failed:\ncould not execute external process 'cc'") "a missing cc"
         check (Build.missingToolchain tc "llc failed:\ncould not execute external process 'llc'") "a missing llc"
         check (Build.missingToolchain tc "cc: no such file or directory (error code: 2)") "cc could not start"
         check (Build.missingToolchain tc "cc failed:\nfatal error: gmp.h: No such file or directory") "gmp.h"
+        check (Build.missingToolchain tc "cc failed:\nld: cannot find -lgmp: No such file or directory") "the gmp library at link time"
         check (!Build.missingToolchain tc "cc failed:\ncc: error: c/helper.c: No such file or directory") "a missing link_c file"
         check (!Build.missingToolchain tc "cc failed:\nmain.c:3:1: error: 'x' undeclared") "a rejected program"
         check (!(Build.RunError.run 3 "No such file or directory").isToolchain) "a program failure"

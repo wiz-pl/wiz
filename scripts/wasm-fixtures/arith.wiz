@@ -1,0 +1,7 @@
+import Prelude
+
+def fact : Nat → Nat
+  | .zero => 1
+  | .succ n => (.succ n) * fact n
+
+def main : Nat := fact 12 + 7 * 9 - Nat.pred 0

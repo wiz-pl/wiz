@@ -15,7 +15,7 @@ the same names and statements as Feral's lowering of `struct` (lib/Feral.wiz,
 `Fe.lensDefs`), so lowered code can use the deriver. The lenses are ordinary values:
 for an HDL bundle (`structure Tx (r : HwTy → Type)`) `Tx.lineL : Lens (Tx r) (r Bit)` is
 one lens at every representation, on values (proofs) and on wires (synthesis); see
-lib/Hdl/Optic.wiz. Fields whose types depend on earlier fields are not supported (a
+hdl/src/Hdl/Optic.wiz. Fields whose types depend on earlier fields are not supported (a
 put would have to change the type). The profunctor layer (`lib/Optic.wiz`, `LensP`)
 reads and updates a derived lens through `LensP.ofLens` (`LensP.ofLens_view`/
 `LensP.ofLens_over` agree by `rfl`); the store form stays the derived data because the

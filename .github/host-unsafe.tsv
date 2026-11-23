@@ -41,6 +41,7 @@ Wiz/Socket.lean	closeRaw	extern	c/sockets.c: close and unlink the socket path se
 Wiz/Socket.lean	connectRaw	extern	c/sockets.c connect(2) to the buffered path: IO; handles come back through wiz_sock_ok_handles
 Wiz/Socket.lean	exitOnPanicRaw	extern	c/sockets.c: sets the process-wide exit-on-panic flag, so a panic fails the process instead of returning a default; makes failures louder, never hides one
 Wiz/Socket.lean	listenRaw	extern	c/sockets.c bind/listen on the buffered path: IO; the descriptor comes back through wiz_sock_ok_fd
+Wiz/Socket.lean	modeRaw	extern	c/sockets.c stat(2) of the buffered socket path: IO; returns only st_mode & 0777 through wiz_sock_ok_fd, read by the mode test
 Wiz/Socket.lean	pair	extern	c/sockets.c socketpair(2): IO; handles come back through wiz_sock_ok_pair
 Wiz/Socket.lean	pathClear	extern	c/sockets.c: clears the C path buffer; IO, used only inside setPath
 Wiz/Socket.lean	pathPush	extern	c/sockets.c: appends one byte to the C path buffer; IO, used only inside setPath
@@ -48,3 +49,17 @@ Wiz/Socket.lean	shutdown	extern	c/sockets.c shutdown(2): IO on a descriptor the 
 Wiz/Socket.lean	tcpConnect	extern	c/sockets.c connect(2) over TCP: IO; handles through wiz_sock_ok_handles
 Wiz/Socket.lean	tcpListenRaw	extern	c/sockets.c bind/listen over TCP: IO; the descriptor through wiz_sock_ok_fd
 Wiz/Socket.lean	tcpPortRaw	extern	c/sockets.c getsockname(2): IO; the port through wiz_sock_ok_fd
+Tests/Groups/PerfCore.lean	plainVal	implemented_by	test fixture: opaque over plainValImpl, which returns its argument unchanged; used only to compare the plain and counted paths in the perf-core tests
+Tests/Groups/PerfCore.lean	plainValImpl	unsafe	returns its argument unchanged and ignores the Cell; test driver only
+Wiz/Core/Stats.lean	closedEval	implemented_by	opaque over closedEvalImpl: the value is returned unchanged; the only effect is a process-local counter used by --stats
+Wiz/Core/Stats.lean	closedEvalImpl	unsafe,unsafeBaseIO	mutates only the per-run stats Cell and returns its argument unchanged; counters feed --stats only and are never a kernel input
+Wiz/Core/Stats.lean	convOutcome	implemented_by	opaque over convOutcomeImpl: the Bool is returned unchanged; the only effect is a process-local counter used by --stats
+Wiz/Core/Stats.lean	convOutcomeImpl	unsafe,unsafeBaseIO	mutates only the per-run stats Cell and returns its Bool unchanged; counters feed --stats only and are never a kernel input
+Wiz/Core/Stats.lean	countedOptVal	implemented_by	opaque over countedOptValImpl: the Option is returned unchanged; the only effect is a process-local counter used by --stats
+Wiz/Core/Stats.lean	countedOptValImpl	unsafe,unsafeBaseIO	mutates only the per-run stats Cell and returns its argument unchanged; counters feed --stats only and are never a kernel input
+Wiz/Core/Stats.lean	countedSpine	implemented_by	opaque over countedSpineImpl: the spine pair is returned unchanged; the only effect is a process-local counter used by --stats
+Wiz/Core/Stats.lean	countedSpineImpl	unsafe,unsafeBaseIO	mutates only the per-run stats Cell and returns its spine pair unchanged; counters feed --stats only and are never a kernel input
+Wiz/Core/Stats.lean	countedVal	implemented_by	opaque over countedValImpl: the value is returned unchanged; the only effect is a process-local counter used by --stats
+Wiz/Core/Stats.lean	countedValImpl	unsafe,unsafeBaseIO	mutates only the per-run stats Cell and returns its argument unchanged; counters feed --stats only and are never a kernel input
+Wiz/Core/Stats.lean	isPropOutcome	implemented_by	opaque over isPropOutcomeImpl: the Bool is returned unchanged; the only effect is a process-local counter used by --stats
+Wiz/Core/Stats.lean	isPropOutcomeImpl	unsafe,unsafeBaseIO	mutates only the per-run stats Cell and returns its Bool unchanged; counters feed --stats only and are never a kernel input

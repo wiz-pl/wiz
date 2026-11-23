@@ -105,7 +105,7 @@ def testRunnerGroup : Group where
           check ((t.message.splitOn "needs --trust-native").length > 1) t.message
           check (!(← (dir / "tests/on-demand.expected").pathExists)) "--update wrote a skipped test's .expected" },
     { name := "a nested package under the tests root is not a test", run := fun _ => do
-        -- examples/grail-index/sources/*: packages with their own grail.wiz (and a
+        -- examples/fate-index/sources/*: packages with their own grail.wiz (and a
         -- directory name with dots), whose modules import each other's packages
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
           ("tests/one.wiz", "import Prelude\ndef x : Nat := 1\n"), ("tests/one.expected", ""),
@@ -147,7 +147,7 @@ def testRunnerGroup : Group where
         let tc : Toolchain := { (← toolchain) with cacheDir := some (← IO.FS.createTempDir) }
         let (res, _) ← runTests dir tc
         if res.any fun t => (t.message.splitOn "gmp.h").length > 1 then
-          skip "no toolchain"; return
+          skipMissing "no toolchain"; return
         for t in res do check t.ok s!"{t.file}: {t.message}" },
     { name := "--update never records a failure: a program that doesn't build, fails or times out", run := fun _ => do
         let tc : Toolchain := { (← toolchain) with cacheDir := some (← IO.FS.createTempDir) }
@@ -175,7 +175,7 @@ def testRunnerGroup : Group where
           ("tests/exit.wiz", "-- test: run\nimport Sys\ndef main : IO Unit := Process.exit 3\n")]
         let (res, _) ← runTests dir tc (update := true)
         if res.any fun t => (t.message.splitOn "gmp.h").length > 1 then
-          skip "no toolchain"; return
+          skipMissing "no toolchain"; return
         failed res "tests/exit.wiz" "exited with 3"
         check (!(← (dir / "tests/exit.expected").pathExists)) "--update recorded the failed run" },
     -- the suite's own driver (`Tests/Main.lean`): `tests --run GROUP INDEX` ran a case
@@ -189,7 +189,7 @@ def testRunnerGroup : Group where
           pure (o.exitCode, o.stdout ++ o.stderr)
         let has (out s : String) : IO Unit := check ((out.splitOn s).length > 1) s!"no {s} in:\n{out}"
         let (code, out) ← run #["--run", "driver-fixtures", "0"]
-        checkEq 0 code; has out "✓ fixture: passes"; has out "driver-fixtures #0: passed"
+        checkEq 0 code; has out "[1/1]   ✓ fixture: passes"; has out "driver-fixtures #0: passed"
         let (code, out) ← run #["--run", "driver-fixtures", "1"]
         checkEq 1 code; has out "✗ fixture: fails"; has out "fixture failure"
         has out "fixture output before the failure"; has out "FAILED"
@@ -197,12 +197,43 @@ def testRunnerGroup : Group where
         checkEq 3 code; has out "⊘ fixture: skips"; has out "skipped (fixture reason)"; has out "SKIPPED"
         let (code, out) ← run #["--run", "=driver-fixtures", "3"]
         checkEq 3 code; has out "skipped (old fixture reason)"
-        for bad in [#["--run", "driver-fixtures", "4"], #["--run", "driver-fixtures", "x"],
+        for bad in [#["--run", "driver-fixtures", "5"], #["--run", "driver-fixtures", "x"],
             #["--run", "no-such-group", "0"], #["--run", "driver-fixtures"],
             #["--run", "driver-fixtures", "0", "extra"], #["=no-such-group"], #["=testrunner#99"],
             #["testrunner", "--no-such-flag"], #["=rig", "--jobs", "0"], #["=rig", "--jobs", "x"]] do
           let (code, out) ← run bad
           check (code == 2) s!"tests {" ".intercalate bad.toList}: exit code {code}, not 2:\n{out}" },
+    -- The missing-dependency policy (`Tests.skipMissing`): by default a case whose
+    -- dependency is absent FAILS, naming it; `--allow-missing-deps` (or the shard driver's
+    -- `WIZ_ALLOW_MISSING_DEPS=1`) reports it as a skip; a declared skip is a skip either
+    -- way. The driver's own fixture, so it needs neither a toolchain nor a build.
+    { name := "a missing dependency fails by default, skips with --allow-missing-deps / WIZ_ALLOW_MISSING_DEPS, and a declared skip still skips", run := fun _ => do
+        let self ← IO.appPath
+        let run (args : Array String) (env : Array (String × Option String)) : IO (UInt32 × String) := do
+          let o ← IO.Process.output { cmd := self.toString, args, env }
+          pure (o.exitCode, o.stdout ++ o.stderr)
+        let unset := #[("WIZ_ALLOW_MISSING_DEPS", none)]
+        -- default: a failure that names the dependency and the one flag
+        let (code, out) ← run #["--run", "driver-fixtures", "4"] unset
+        checkEq 1 code
+        check ((out.splitOn "missing dependency: no fixture-dep on PATH").length > 1) out
+        check ((out.splitOn "--allow-missing-deps").length > 1) out
+        check ((out.splitOn "FAILED").length > 1) out
+        -- the flag: a reported skip, with the reason and exit 3
+        let (code, out) ← run #["--allow-missing-deps", "--run", "driver-fixtures", "4"] unset
+        checkEq 3 code
+        check ((out.splitOn "⊘ fixture: missing dependency").length > 1) out
+        check ((out.splitOn "skipped (no fixture-dep on PATH)").length > 1) out
+        check ((out.splitOn "SKIPPED").length > 1) out
+        -- the shard driver's environment equivalent
+        let (code, out) ← run #["--run", "driver-fixtures", "4"] #[("WIZ_ALLOW_MISSING_DEPS", some "1")]
+        checkEq 3 code
+        check ((out.splitOn "SKIPPED (no fixture-dep on PATH)").length > 1) out
+        -- a declared skip is unaffected by either spelling
+        for args in [#["--run", "driver-fixtures", "2"], #["--allow-missing-deps", "--run", "driver-fixtures", "2"]] do
+          let (code, out) ← run args unset
+          checkEq 3 code
+          check ((out.splitOn "skipped (fixture reason)").length > 1) out },
     -- `--jobs N` runs an opted-in group's cases in a bounded pool; its log is the
     -- sequential log but for the times (the cases are printed in case order, whether
     -- they finished in that order or not)
@@ -214,12 +245,17 @@ def testRunnerGroup : Group where
         let (c1, one) ← run #["--jobs", "1", "=rig"]
         let (c4, four) ← run #["--jobs", "4", "=rig"]
         checkEq 0 c1; checkEq 0 c4
-        -- the case lines, without their times (`(0.032 s)`); the group total too
+        -- the case lines, without their times (`(0.032 s)`) but with their `[n/total]`
+        -- position (which `--jobs` must not change); the group total too
         let norm (out : String) : List String :=
           (out.splitOn "\n").filterMap fun l =>
             if l.startsWith "── " then some l
-            else if l.startsWith "  ✓ " || l.startsWith "  ⊘ " || l.startsWith "  ✗ " then some (l.splitOn " (").head!
-            else none
+            else
+              let body := match l.splitOn "] " with
+                | [num, rest] => if num.startsWith "[" then rest else l
+                | _ => l
+              if body.startsWith "  ✓ " || body.startsWith "  ⊘ " || body.startsWith "  ✗ " then some (l.splitOn " (").head!
+              else none
         check ((norm four).length > 4) "no cases in the --jobs 4 log"
         checkEq (norm one) (norm four)
         -- and the same result

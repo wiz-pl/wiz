@@ -41,7 +41,7 @@ def Signal.zipWith3S {d : ClockDomain} {A B C D : Type} {i : Size} (f : A → B 
   | .tail => Signal.zipWith3S f a.tail b.tail c.tail             -- wishful: sized-signal-fix
 
 -- `Signal.pureS` and the numeral instance at a sized signal have *landed* in
--- lib/Hdl/Signal.wiz (numerals never observe, so they do not need L2). What is left is
+-- hdl/src/Hdl/Signal.wiz (numerals never observe, so they do not need L2). What is left is
 -- the observing operators.
 
 -- What `+` and `if` must resolve to at a sized signal. These are the instances the plan's

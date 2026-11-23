@@ -81,6 +81,26 @@ def isExecutable (p : System.FilePath) : IO Bool := do
   for b in p.toString.toUTF8 do pathPush b
   pathExecutableRaw
 
+/-- `ms` milliseconds in `UInt32`-sized sleeps, longest first. `IO.sleep` takes a
+`UInt32`, so `ms.toUInt32` would wrap a limit at or above 2^32 ms (~49.7 days), and the
+supervisor would time the job out at once. -/
+partial def sleepChunks (ms : Nat) : List UInt32 :=
+  if ms == 0 then []
+  else
+    let chunk := min ms 4294967295
+    chunk.toUInt32 :: sleepChunks (ms - chunk)
+
+/-- Sleep `ms` milliseconds without wrapping. -/
+def sleepMs (ms : Nat) : IO Unit := do
+  for chunk in sleepChunks ms do
+    IO.sleep chunk
+
+/-- The 8-bit status the supervisor exits with. A POSIX wait status is 8 bits, so a code
+above 255 cannot be reported as-is; clamp it to 255 instead of letting `toUInt8` wrap it
+(a 256 would become 0, a false success). -/
+def exitStatus8 (code : UInt32) : UInt8 :=
+  if code > 255 then 255 else code.toUInt8
+
 /-- `--grail-exec MS [--cwd DIR] [--env K=V]… -- CMD ARGS…` -/
 def execMain (args : List String) : IO UInt32 := do
   let usage : IO UInt32 := do IO.eprintln s!"grail --grail-exec: bad arguments {args}"; pure 2
@@ -118,7 +138,7 @@ def execMain (args : List String) : IO UInt32 := do
     killOnce
   -- the time limit
   let _ ← IO.asTask (prio := .dedicated) do
-    IO.sleep ms.toUInt32
+    sleepMs ms
     unless ← finished.get do
       timedOut.set true
       killOnce
@@ -127,7 +147,7 @@ def execMain (args : List String) : IO UInt32 := do
   let code := if ← timedOut.get then 124 else code
   (← IO.getStdout).flush
   (← IO.getStderr).flush
-  exitNow code.toUInt8
+  exitNow (exitStatus8 code)
   pure code
 
 /-- Run `cmd args` under a supervisor (`self --grail-exec …`), capturing its output. -/

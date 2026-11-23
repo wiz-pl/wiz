@@ -54,6 +54,16 @@ def fails (input : String) (errFragment : String) : IO Unit :=
   | .ok stx => throw (IO.userError s!"expected a parse error, got {stx}")
   | .error e => check ((e.splitOn errFragment).length > 1) s!"error {e} does not mention {errFragment}"
 
+/-- The column of an offset by walking back to the start of its line: the reference the
+parser's cached column (`colOfCached`, F24) must agree with at every offset. -/
+def colWalk (chars : Array Char) (i : Nat) : Nat := Id.run do
+  let mut j := i
+  let mut col := 0
+  while j > 0 && chars[j - 1]! != '\n' do
+    j := j - 1
+    col := col + 1
+  return col
+
 def termGroup : Group where
   name := "parser: terms"
   parallel := true
@@ -132,6 +142,24 @@ def termGroup : Group where
         fails "{ s with }" "identifier" },
     { name := "comments are whitespace", run := fun _ =>
         parses "f /- a /- nested -/ -/ b -- c" "(term.app (term.ident f) [(term.ident b)])" },
+    { name := "column checks carry the column, not a walk to the line start (F24)", run := fun _ => do
+        -- the answer must be the old walk's, from an empty cache and from a warm one; the
+        -- tab, the empty line and the offset at the end of the input are the interesting
+        -- columns (`colGt`/`colGe` run per application argument and per layout entry)
+        let chars := chars "def f := g a\n  (h b c)\n\n\tlast\n"
+        let mut cache : Std.HashMap Nat Nat := {}
+        for i in [0:chars.size + 1] do
+          let (cold, _) := colOfCached chars i {}
+          let (warm, cache') := colOfCached chars i cache
+          checkEq (colWalk chars i) cold
+          checkEq (colWalk chars i) warm
+          cache := cache' },
+    { name := "a 200-argument application keeps its tree (a column check per argument)", run := fun _ => do
+        let args := (List.range 200).map fun k => s!"a{k}"
+        let input := "f " ++ " ".intercalate args
+        let expected := "(term.app (term.ident f) [" ++
+          " ".intercalate (args.map fun a => s!"(term.ident {a})") ++ "])"
+        parses input expected },
     { name := "error: missing body", run := fun _ => fails "fun x =>" "term" },
     { name := "error: unbalanced paren", run := fun _ => fails "(f a" "')'" },
     { name := "error reports the farthest position", run := fun _ => fails "f (a b" "1:7" },
@@ -212,6 +240,19 @@ def cmdGroup : Group where
         let r ← parseFileOk "def a := f\n  x\n#check a\naxiom b : Type"
         checkEq 3 r.commands.size
         checkEq "(command.def a [] [] [] (term.app (term.ident f) [(term.ident x)]))" r.commands[0]!.toSExpr },
+    { name := "layout: many indented continuation lines keep their trees (F24)", run := fun _ => do
+        -- one `colGt` per argument line, each at a column that grows with the line's
+        -- offset: the trees must not depend on how the column is looked up
+        let args := (List.range 60).map fun k => s!"(g{k} x)"
+        let input := "def body := f\n" ++ "\n".intercalate (args.map fun a => "  " ++ a) ++
+          "\n#check body"
+        let r ← parseFileOk input
+        checkEq 2 r.commands.size
+        let app := "(term.app (term.ident f) [" ++
+          " ".intercalate ((List.range 60).map fun k =>
+            s!"(term.paren (term.app (term.ident g{k}) [(term.ident x)]))") ++ "])"
+        checkEq ("(command.def body [] [] [] " ++ app ++ ")") r.commands[0]!.toSExpr
+        checkEq "(command.check (term.ident body))" r.commands[1]!.toSExpr },
     { name := "error recovery", run := fun _ => do
         let r := parseFile "def a := (\ndef b := x\n#check b"
         checkEq 1 r.messages.size

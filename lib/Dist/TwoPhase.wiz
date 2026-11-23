@@ -1,0 +1,663 @@
+import Temporal
+import Data.ListLemmas
+/-!
+# Dist.TwoPhase
+
+Two-phase commit (`import Dist.TwoPhase`), the P0 protocol of
+`wiz-notes/distributed-proofs.md` §8.1.
+
+* `Phase` is a coordinator's and a participant's phase; `Act N` is the action type.
+* `TwoPC N` is the global state: the coordinator phase, the participants' phases, the
+  "prepare delivered", "vote received" and "crashed" flags, and the decision flags.
+  A message pool is represented by those delivery flags, so a lost message is simply a
+  flag that stays false (omission) and a crashed participant cannot respond or decide.
+* `TwoPC.Step` is the labelled transition relation; `TwoPC.lts` is the `LTS`.
+* `TwoPC.Inv` is the note's invariant: a participant commits only after the
+  coordinator, the coordinator commits only after every participant prepared, and no
+  participant commits while another aborts.
+* `TwoPC.safety` proves `□ Inv` for every run of `LTS` (all `N`, all traces).
+* `TwoPC.next2` is the executable finite instance for `N = 2`; `Dist.TwoPhaseFinite`
+  proves its `next` is the spec's `step` in both directions.
+
+The participant vectors are lists with a default (`getP`, `getPrep`, …): reading
+beyond the list gives the initial value. `setAt` pads with that default, so the
+same/other index equations hold for every index and no length invariant is needed in
+the safety proof. The P0 instance is `N = 2`; P2's quorum layer uses `Vec`/`Fin`.
+-/
+
+/-- The coordinator's and a participant's phase. -/
+inductive Phase where
+  | init
+  | prepared
+  | committed
+  | aborted
+
+/-- Boolean equality of phases. -/
+def Phase.eq : Phase → Phase → Bool
+  | .init, .init => .true
+  | .prepared, .prepared => .true
+  | .committed, .committed => .true
+  | .aborted, .aborted => .true
+  | _, _ => .false
+
+/-- `Phase.eq` is sound. -/
+def Phase.eq_sound : (a b : Phase) → Phase.eq a b = .true → a = b
+  | .init, .init, h => rfl
+  | .prepared, .prepared, h => rfl
+  | .committed, .committed, h => rfl
+  | .aborted, .aborted, h => rfl
+  | .init, .prepared, h => absurd h.1
+  | .init, .committed, h => absurd h.1
+  | .init, .aborted, h => absurd h.1
+  | .prepared, .init, h => absurd h.1
+  | .prepared, .committed, h => absurd h.1
+  | .prepared, .aborted, h => absurd h.1
+  | .committed, .init, h => absurd h.1
+  | .committed, .prepared, h => absurd h.1
+  | .committed, .aborted, h => absurd h.1
+  | .aborted, .init, h => absurd h.1
+  | .aborted, .prepared, h => absurd h.1
+  | .aborted, .committed, h => absurd h.1
+
+/-- `Phase.eq` is complete. -/
+def Phase.eq_complete : (a b : Phase) → a = b → Phase.eq a b = .true
+  | .init, .init, h => rfl
+  | .prepared, .prepared, h => rfl
+  | .committed, .committed, h => rfl
+  | .aborted, .aborted, h => rfl
+  | .init, .prepared, h => absurd h.1
+  | .init, .committed, h => absurd h.1
+  | .init, .aborted, h => absurd h.1
+  | .prepared, .init, h => absurd h.1
+  | .prepared, .committed, h => absurd h.1
+  | .prepared, .aborted, h => absurd h.1
+  | .committed, .init, h => absurd h.1
+  | .committed, .prepared, h => absurd h.1
+  | .committed, .aborted, h => absurd h.1
+  | .aborted, .init, h => absurd h.1
+  | .aborted, .prepared, h => absurd h.1
+  | .aborted, .committed, h => absurd h.1
+
+/-- A false `Phase.eq` is a proof of difference. -/
+def Phase.eq_false (a b : Phase) (h : Phase.eq a b = .false) : ¬ a = b :=
+  fun (e : a = b) => Bool.trueNeFalse (Eq.trans (Eq.symm (Phase.eq_complete a b e)) h)
+
+/-- `init` and `committed` differ. -/
+def Phase.init_ne_committed : ¬ Phase.init = Phase.committed := Phase.eq_false .init .committed rfl
+/-- `prepared` and `committed` differ. -/
+def Phase.prepared_ne_committed : ¬ Phase.prepared = Phase.committed := Phase.eq_false .prepared .committed rfl
+/-- `aborted` and `committed` differ. -/
+def Phase.aborted_ne_committed : ¬ Phase.aborted = Phase.committed := Phase.eq_false .aborted .committed rfl
+/-- `init` and `aborted` differ. -/
+def Phase.init_ne_aborted : ¬ Phase.init = Phase.aborted := Phase.eq_false .init .aborted rfl
+/-- `prepared` and `aborted` differ. -/
+def Phase.prepared_ne_aborted : ¬ Phase.prepared = Phase.aborted := Phase.eq_false .prepared .aborted rfl
+/-- `committed` and `aborted` differ. -/
+def Phase.committed_ne_aborted : ¬ Phase.committed = Phase.aborted := Phase.eq_false .committed .aborted rfl
+
+/-- `some x = some y` gives `x = y`. -/
+def Option.some_inj {A : Type} (x y : A) (h : Option.some x = Option.some y) : x = y := h.1
+
+/-- The list with position `i` set to `y`; out-of-range positions are padded with `d`. -/
+def TwoPC.listSetAt {A : Type} (d : A) : Nat → List A → A → List A
+  | .zero, .nil, y => List.cons y List.nil
+  | .zero, .cons _ xs, y => List.cons y xs
+  | .succ k, .nil, y => List.cons d (TwoPC.listSetAt d k List.nil y)
+  | .succ k, .cons x xs, y => List.cons x (TwoPC.listSetAt d k xs y)
+
+/-- The element at `i`, or `none`. -/
+def TwoPC.listNth {A : Type} : List A → Nat → Option A
+  | .nil, _ => .none
+  | .cons x xs, .zero => .some x
+  | .cons x xs, .succ k => TwoPC.listNth xs k
+
+/-- The element at `i`, or `d` out of range. -/
+def TwoPC.listGetDef {A : Type} (d : A) (xs : List A) (i : Nat) : A :=
+  match TwoPC.listNth xs i with
+  | .some x => x
+  | .none => d
+
+/-- Reading the position just written. -/
+def TwoPC.getDefSetAtSame {A : Type} (d : A) :
+    (i : Nat) → (xs : List A) → (y : A) → TwoPC.listGetDef d (TwoPC.listSetAt d i xs y) i = y
+  | .zero, .nil, y => rfl
+  | .zero, .cons x xs, y => rfl
+  | .succ k, .nil, y => TwoPC.getDefSetAtSame d k List.nil y
+  | .succ k, .cons x xs, y => TwoPC.getDefSetAtSame d k xs y
+
+/-- Reading another position after a write. -/
+def TwoPC.getDefSetAtNe {A : Type} (d : A) :
+    (i j : Nat) → (xs : List A) → (y : A) → ¬ i = j →
+    TwoPC.listGetDef d (TwoPC.listSetAt d i xs y) j = TwoPC.listGetDef d xs j
+  | .zero, .zero, xs, y, h => absurd (h rfl)
+  | .zero, .succ j, .nil, y, h => rfl
+  | .zero, .succ j, .cons x xs, y, h => rfl
+  | .succ i, .zero, .nil, y, h => rfl
+  | .succ i, .zero, .cons x xs, y, h => rfl
+  | .succ i, .succ j, .nil, y, h =>
+      TwoPC.getDefSetAtNe d i j List.nil y
+        (fun (e : i = j) => h (Eq.congrArg Nat.succ e))
+  | .succ i, .succ j, .cons x xs, y, h =>
+      TwoPC.getDefSetAtNe d i j xs y
+        (fun (e : i = j) => h (Eq.congrArg Nat.succ e))
+
+/-- The actions of two-phase commit. Participant indices are `Nat`; every action that
+uses one has the side condition `i < N`. -/
+inductive Act (N : Nat) where
+  | cPrepare
+  | deliverPrepare (i : Nat)
+  | respondYes (i : Nat)
+  | respondNo (i : Nat)
+  | recv (i : Nat)
+  | decideCommit
+  | decideAbort
+  | commit (i : Nat)
+  | abort (i : Nat)
+  | crash (i : Nat)
+
+/-- The global state: the coordinator, the participants, the delivery/vote/crash flags,
+and the decision flags. -/
+structure TwoPC (N : Nat) where
+  c : Phase
+  p : List Phase
+  prep : List Bool
+  heard : List Bool
+  crashed : List Bool
+  commitSent : Bool
+  abortSent : Bool
+
+/-- The participant at `i`; out of range is still `init`. -/
+def TwoPC.getP {N : Nat} (s : TwoPC N) (i : Nat) : Phase := TwoPC.listGetDef .init s.p i
+/-- Whether participant `i` received the prepare; out of range is `false`. -/
+def TwoPC.getPrep {N : Nat} (s : TwoPC N) (i : Nat) : Bool := TwoPC.listGetDef .false s.prep i
+/-- Whether the coordinator received participant `i`'s vote; out of range is `false`. -/
+def TwoPC.getHeard {N : Nat} (s : TwoPC N) (i : Nat) : Bool := TwoPC.listGetDef .false s.heard i
+/-- Whether participant `i` has crashed; out of range is `false`. -/
+def TwoPC.getCrashed {N : Nat} (s : TwoPC N) (i : Nat) : Bool := TwoPC.listGetDef .false s.crashed i
+
+/-- Set participant `i`'s phase. -/
+def TwoPC.setP {N : Nat} (s : TwoPC N) (i : Nat) (ph : Phase) : TwoPC N :=
+  TwoPC.mk s.c (TwoPC.listSetAt .init i s.p ph) s.prep s.heard s.crashed s.commitSent s.abortSent
+/-- Set the coordinator phase. -/
+def TwoPC.setC {N : Nat} (s : TwoPC N) (c : Phase) : TwoPC N :=
+  TwoPC.mk c s.p s.prep s.heard s.crashed s.commitSent s.abortSent
+
+/-- Set participant `i`'s prepare-delivered flag. -/
+def TwoPC.setPrep {N : Nat} (s : TwoPC N) (i : Nat) (b : Bool) : TwoPC N :=
+  TwoPC.mk s.c s.p (TwoPC.listSetAt .false i s.prep b) s.heard s.crashed s.commitSent s.abortSent
+/-- Set participant `i`'s vote-received flag. -/
+def TwoPC.setHeard {N : Nat} (s : TwoPC N) (i : Nat) (b : Bool) : TwoPC N :=
+  TwoPC.mk s.c s.p s.prep (TwoPC.listSetAt .false i s.heard b) s.crashed s.commitSent s.abortSent
+/-- Set participant `i`'s crashed flag. -/
+def TwoPC.setCrashed {N : Nat} (s : TwoPC N) (i : Nat) (b : Bool) : TwoPC N :=
+  TwoPC.mk s.c s.p s.prep s.heard (TwoPC.listSetAt .false i s.crashed b) s.commitSent s.abortSent
+
+/-- Reading the phase just written. -/
+def TwoPC.getP_setP_same {N : Nat} (s : TwoPC N) (i : Nat) (ph : Phase) :
+    TwoPC.getP (TwoPC.setP s i ph) i = ph :=
+  TwoPC.getDefSetAtSame .init i s.p ph
+
+/-- Reading another phase after a write. -/
+def TwoPC.getP_setP_ne {N : Nat} (s : TwoPC N) (i j : Nat) (ph : Phase) (h : ¬ i = j) :
+    TwoPC.getP (TwoPC.setP s i ph) j = TwoPC.getP s j :=
+  TwoPC.getDefSetAtNe .init i j s.p ph h
+
+/-- Every participant prepared (in range). -/
+def TwoPC.allPrepared {N : Nat} (s : TwoPC N) : Prop :=
+  (i : Nat) → Nat.lt i N = .true → TwoPC.getP s i = .prepared
+/-- Every participant's vote reached the coordinator (in range). -/
+def TwoPC.allHeard {N : Nat} (s : TwoPC N) : Prop :=
+  (i : Nat) → Nat.lt i N = .true → TwoPC.getHeard s i = .true
+
+/-- The initial states: everything is `init`, no message delivered, nobody crashed,
+nothing decided. -/
+def TwoPC.Init {N : Nat} (s : TwoPC N) : Prop :=
+  s.c = .init ∧
+  ((i : Nat) → TwoPC.getP s i = .init) ∧
+  ((i : Nat) → TwoPC.getPrep s i = .false) ∧
+  ((i : Nat) → TwoPC.getHeard s i = .false) ∧
+  ((i : Nat) → TwoPC.getCrashed s i = .false) ∧
+  s.commitSent = .false ∧ s.abortSent = .false
+
+/-- A participant's phase in a phase list; out of range is `init`. -/
+def TwoPC.getPOf (p : List Phase) (i : Nat) : Phase := TwoPC.listGetDef .init p i
+
+/-- The safety invariant as a function of the coordinator phase and the participant
+phases (the note's §8.1): a participant commits only after the coordinator, the
+coordinator commits only after every participant prepared, and no participant commits
+while another aborts. -/
+def TwoPC.InvOf (0 N : Nat) (c : Phase) (p : List Phase) : Prop :=
+  (((i : Nat) → Nat.lt i N = .true → TwoPC.getPOf p i = .committed → c = .committed) ∧
+   (c = .committed → (i : Nat) → Nat.lt i N = .true →
+     TwoPC.getPOf p i = .prepared ∨ TwoPC.getPOf p i = .committed)) ∧
+  ((i j : Nat) → Nat.lt i N = .true → Nat.lt j N = .true →
+     TwoPC.getPOf p i = .committed → TwoPC.getPOf p j = .aborted → False)
+
+/-- The safety invariant of a state. -/
+def TwoPC.Inv {N : Nat} (s : TwoPC N) : Prop := TwoPC.InvOf N s.c s.p
+
+/-- The invariant depends only on the coordinator phase and the participant phases. -/
+def TwoPC.Inv_congr {N : Nat} (s t : TwoPC N) (hc : s.c = t.c) (hp : s.p = t.p) :
+    TwoPC.Inv s → TwoPC.Inv t :=
+  fun (h : TwoPC.Inv s) =>
+    Eq.substProp (fun (p : List Phase) => TwoPC.InvOf N t.c p) hp
+      (Eq.substProp (fun (c : Phase) => TwoPC.InvOf N c s.p) hc h)
+
+
+/-- All `n` first indices satisfy `p`. -/
+def TwoPC.allN : (p : Nat → Bool) → Nat → Bool
+  | p, .zero => .true
+  | p, .succ n => Bool.and (p 0) (TwoPC.allN (fun (i : Nat) => p (Nat.succ i)) n)
+
+/-- `allN p n = true` says `p` at every index below `n`. -/
+def TwoPC.allN_spec :
+    (p : Nat → Bool) → (n : Nat) → TwoPC.allN p n = .true → (k : Nat) →
+    Nat.lt k n = .true → p k = .true
+  | p, .zero, h, k, hk => absurd (Nat.lt_zero_absurd k hk)
+  | p, .succ n, h, .zero, hk => Bool.and_true_left (p 0) (TwoPC.allN (fun (i : Nat) => p (Nat.succ i)) n) h
+  | p, .succ n, h, .succ k, hk =>
+      TwoPC.allN_spec (fun (i : Nat) => p (Nat.succ i)) n
+        (Bool.and_true_right (p 0) (TwoPC.allN (fun (i : Nat) => p (Nat.succ i)) n) h) k hk
+
+/-- Every participant prepared, as a Boolean check over the `N` indices. -/
+def TwoPC.allPreparedB (N : Nat) (s : TwoPC N) : Bool :=
+  TwoPC.allN (fun (i : Nat) => Phase.eq (TwoPC.getP s i) .prepared) N
+
+/-- Every participant's vote reached the coordinator, as a Boolean check. -/
+def TwoPC.allHeardB (N : Nat) (s : TwoPC N) : Bool :=
+  TwoPC.allN (fun (i : Nat) => TwoPC.getHeard s i) N
+
+/-- The list is `[x]` when `b` is true and empty otherwise. -/
+def TwoPC.singleIf {N : Nat} (b : Bool) (x : TwoPC N) : List (TwoPC N) :=
+  match b with
+  | .true => List.cons x List.nil
+  | .false => List.nil
+
+/-- Membership in `singleIf b x` is `b = true` and equality with `x`. -/
+def TwoPC.mem_singleIf {N : Nat} :
+    (b : Bool) → (x y : TwoPC N) → y ∈ TwoPC.singleIf b x → b = .true ∧ y = x
+  | .true, x, y, h =>
+      And.intro rfl
+        (Or.elim (Iff.mp (List.mem_cons_iff y x ([] : List (TwoPC N))) h)
+          (fun (e : y = x) => e)
+          (fun (hn : y ∈ ([] : List (TwoPC N))) => False.elim hn))
+  | .false, x, y, h => False.elim h
+
+/-- The state after the coordinator commits. -/
+def TwoPC.setCommitted {N : Nat} (s : TwoPC N) : TwoPC N :=
+  TwoPC.mk .committed s.p s.prep s.heard s.crashed .true s.abortSent
+/-- The state after the coordinator aborts. -/
+def TwoPC.setAborted {N : Nat} (s : TwoPC N) : TwoPC N :=
+  TwoPC.mk .aborted s.p s.prep s.heard s.crashed s.commitSent .true
+
+/-- The executable transitions of one action. -/
+def TwoPC.nextAct (N : Nat) (a : Act N) (s : TwoPC N) : List (TwoPC N) :=
+  match a with
+  | .cPrepare =>
+      TwoPC.singleIf (Phase.eq s.c .init) (TwoPC.setC s .prepared)
+  | .deliverPrepare i =>
+      TwoPC.singleIf
+        (Bool.and (Nat.lt i N)
+          (Bool.and (Phase.eq s.c .prepared)
+            (Bool.and (Bool.not (TwoPC.getPrep s i)) (Bool.not (TwoPC.getCrashed s i)))))
+        (TwoPC.setPrep s i .true)
+  | .respondYes i =>
+      TwoPC.singleIf
+        (Bool.and (Nat.lt i N)
+          (Bool.and (Phase.eq s.c .prepared)
+            (Bool.and (TwoPC.getPrep s i)
+              (Bool.and (Phase.eq (TwoPC.getP s i) .init) (Bool.not (TwoPC.getCrashed s i))))))
+        (TwoPC.setP s i .prepared)
+  | .respondNo i =>
+      TwoPC.singleIf
+        (Bool.and (Nat.lt i N)
+          (Bool.and (Phase.eq s.c .prepared)
+            (Bool.and (TwoPC.getPrep s i)
+              (Bool.and (Phase.eq (TwoPC.getP s i) .init) (Bool.not (TwoPC.getCrashed s i))))))
+        (TwoPC.setP s i .aborted)
+  | .recv i =>
+      TwoPC.singleIf
+        (Bool.and (Nat.lt i N)
+          (Bool.and (Bool.or (Phase.eq (TwoPC.getP s i) .prepared)
+              (Phase.eq (TwoPC.getP s i) .aborted))
+            (Bool.not (TwoPC.getHeard s i))))
+        (TwoPC.setHeard s i .true)
+  | .decideCommit =>
+      TwoPC.singleIf
+        (Bool.and (Phase.eq s.c .prepared)
+          (Bool.and (TwoPC.allHeardB N s) (TwoPC.allPreparedB N s)))
+        (TwoPC.setCommitted s)
+  | .decideAbort =>
+      TwoPC.singleIf (Phase.eq s.c .prepared) (TwoPC.setAborted s)
+  | .commit i =>
+      TwoPC.singleIf
+        (Bool.and (Nat.lt i N)
+          (Bool.and (Phase.eq s.c .committed)
+            (Bool.and (Phase.eq (TwoPC.getP s i) .prepared) (Bool.not (TwoPC.getCrashed s i)))))
+        (TwoPC.setP s i .committed)
+  | .abort i =>
+      TwoPC.singleIf
+        (Bool.and (Nat.lt i N)
+          (Bool.and (Phase.eq s.c .aborted)
+            (Bool.and (Phase.eq (TwoPC.getP s i) .prepared) (Bool.not (TwoPC.getCrashed s i)))))
+        (TwoPC.setP s i .aborted)
+  | .crash i =>
+      TwoPC.singleIf
+        (Bool.and (Nat.lt i N) (Bool.not (TwoPC.getCrashed s i)))
+        (TwoPC.setCrashed s i .true)
+
+/-- A step is membership in the executable transition list. -/
+def TwoPC.Step (N : Nat) (a : Act N) (s s' : TwoPC N) : Prop :=
+  s' ∈ TwoPC.nextAct N a s
+
+/-- The two-phase-commit protocol as a labelled transition system. -/
+def TwoPC.lts (N : Nat) : LTS (TwoPC N) (Act N) :=
+  LTS.mk TwoPC.Init (TwoPC.Step N)
+
+/-- A true `Bool.not` is a false Boolean. -/
+def TwoPC.not_true (b : Bool) (h : Bool.not b = .true) : b = .false :=
+  Iff.mp (Bool.not_eq_true b) h
+
+/-- The invariant holds initially. -/
+def TwoPC.init_inv {N : Nat} (s : TwoPC N) (h : TwoPC.Init s) : TwoPC.Inv s :=
+  And.intro
+    (And.intro
+      (fun (i : Nat) (hi : Nat.lt i N = .true) (hc : TwoPC.getP s i = .committed) =>
+        False.elim (Phase.init_ne_committed (Eq.trans (Eq.symm (h.2.1 i)) hc)))
+      (fun (hc : s.c = .committed) (i : Nat) (hi : Nat.lt i N = .true) =>
+        False.elim (Phase.init_ne_committed (Eq.trans (Eq.symm h.1) hc))))
+    (fun (i j : Nat) (hi : Nat.lt i N = .true) (hj : Nat.lt j N = .true)
+        (hc : TwoPC.getP s i = .committed) (ha : TwoPC.getP s j = .aborted) =>
+      False.elim (Phase.init_ne_committed (Eq.trans (Eq.symm (h.2.1 i)) hc)))
+
+/-- `Nat.beq n n` is true. -/
+def TwoPC.natBeqRefl : (n : Nat) → Nat.beq n n = .true
+  | .zero => rfl
+  | .succ n => TwoPC.natBeqRefl n
+
+/-- A false `Nat.beq` proves inequality. -/
+def TwoPC.natBeqFalse : (a b : Nat) → Nat.beq a b = .false → ¬ a = b :=
+  fun (a b : Nat) (h : Nat.beq a b = .false) (e : a = b) =>
+    Bool.trueNeFalse
+      (Eq.trans (Eq.symm (Eq.substProp (fun (z : Nat) => Nat.beq a z = .true) e (TwoPC.natBeqRefl a))) h)
+
+/-- Every pair of numbers is equal or not (by `Nat.beq`). -/
+def TwoPC.natEqOrNe (a b : Nat) : a = b ∨ ¬ a = b :=
+  Or.elim (Bool.cases (Nat.beq a b))
+    (fun (h : Nat.beq a b = .true) => Or.inl (Nat.eq_of_beq a b h))
+    (fun (h : Nat.beq a b = .false) => Or.inr (TwoPC.natBeqFalse a b h))
+
+/-- If the coordinator has not committed, no participant has. -/
+def TwoPC.no_committed {N : Nat} (s : TwoPC N) (h : TwoPC.Inv s) (hc : ¬ s.c = .committed)
+    (i : Nat) (hi : Nat.lt i N = .true) : ¬ TwoPC.getP s i = .committed :=
+  fun (hp : TwoPC.getP s i = .committed) => hc (h.1.1 i hi hp)
+
+/-- Changing the coordinator to `prepared` from a non-committed state preserves the
+invariant (`p` is unchanged). -/
+def TwoPC.inv_c_prepared {N : Nat} (s : TwoPC N) (h : TwoPC.Inv s) (hc : ¬ s.c = .committed) :
+    TwoPC.Inv (TwoPC.setC s .prepared) :=
+  And.intro
+    (And.intro
+      (fun (i : Nat) (hi : Nat.lt i N = .true) (hp : TwoPC.getP s i = .committed) =>
+        False.elim (TwoPC.no_committed s h hc i hi hp))
+      (fun (hc' : (.prepared : Phase) = .committed) (i : Nat) (hi : Nat.lt i N = .true) =>
+        False.elim (Phase.prepared_ne_committed hc')))
+    (fun (i j : Nat) (hi : Nat.lt i N = .true) (hj : Nat.lt j N = .true)
+        (hp : TwoPC.getP s i = .committed) (ha : TwoPC.getP s j = .aborted) =>
+      False.elim (TwoPC.no_committed s h hc i hi hp))
+
+/-- Changing the coordinator to `aborted` from a non-committed state preserves the
+invariant (`p` is unchanged). -/
+def TwoPC.inv_c_aborted {N : Nat} (s : TwoPC N) (h : TwoPC.Inv s) (hc : ¬ s.c = .committed) :
+    TwoPC.Inv (TwoPC.setC s .aborted) :=
+  And.intro
+    (And.intro
+      (fun (i : Nat) (hi : Nat.lt i N = .true) (hp : TwoPC.getP s i = .committed) =>
+        False.elim (TwoPC.no_committed s h hc i hi hp))
+      (fun (hc' : (.aborted : Phase) = .committed) (i : Nat) (hi : Nat.lt i N = .true) =>
+        False.elim (Phase.aborted_ne_committed hc')))
+    (fun (i j : Nat) (hi : Nat.lt i N = .true) (hj : Nat.lt j N = .true)
+        (hp : TwoPC.getP s i = .committed) (ha : TwoPC.getP s j = .aborted) =>
+      False.elim (TwoPC.no_committed s h hc i hi hp))
+
+/-- Committing after every participant prepared preserves the invariant. -/
+def TwoPC.inv_c_committed {N : Nat} (s : TwoPC N) (h : TwoPC.Inv s)
+    (hprep : s.c = .prepared) (hall : TwoPC.allPrepared s) :
+    TwoPC.Inv (TwoPC.setC s .committed) :=
+  And.intro
+    (And.intro
+      (fun (i : Nat) (hi : Nat.lt i N = .true) (hp : TwoPC.getP s i = .committed) =>
+        False.elim (TwoPC.no_committed s h
+          (fun (hc : s.c = .committed) => Phase.prepared_ne_committed (Eq.trans (Eq.symm hprep) hc))
+          i hi hp))
+      (fun (hc : (.committed : Phase) = .committed) (i : Nat) (hi : Nat.lt i N = .true) =>
+        Or.inl (hall i hi)))
+    (fun (i j : Nat) (hi : Nat.lt i N = .true) (hj : Nat.lt j N = .true)
+        (hp : TwoPC.getP s i = .committed) (ha : TwoPC.getP s j = .aborted) =>
+      False.elim (TwoPC.no_committed s h
+        (fun (hc : s.c = .committed) => Phase.prepared_ne_committed (Eq.trans (Eq.symm hprep) hc))
+        i hi hp))
+
+/-- A participant update to a non-committed value, with the coordinator not committed,
+preserves the invariant. -/
+def TwoPC.inv_setP_no_committed {N : Nat} (s : TwoPC N) (i : Nat) (v : Phase)
+    (h : TwoPC.Inv s) (hc : ¬ s.c = .committed) (hv : ¬ v = .committed) :
+    TwoPC.Inv (TwoPC.setP s i v) :=
+  And.intro
+    (And.intro
+      (fun (j : Nat) (hj : Nat.lt j N = .true) (hp : TwoPC.getP (TwoPC.setP s i v) j = .committed) =>
+        Or.elim (TwoPC.natEqOrNe j i)
+          (fun (e : j = i) =>
+            let hnew : TwoPC.getP (TwoPC.setP s i v) j = v :=
+              Eq.substProp (fun (z : Nat) => TwoPC.getP (TwoPC.setP s i v) z = v)
+                (Eq.symm e) (TwoPC.getP_setP_same s i v)
+            False.elim (hv (Eq.trans (Eq.symm hnew) hp)))
+          (fun (hne : ¬ j = i) =>
+            let hold : TwoPC.getP s j = .committed :=
+              Eq.trans (Eq.symm (TwoPC.getP_setP_ne s i j v (fun (e : i = j) => hne (Eq.symm e)))) hp
+            False.elim (TwoPC.no_committed s h hc j hj hold)))
+      (fun (hc' : (TwoPC.setP s i v).c = .committed) => False.elim (hc hc')))
+    (fun (j k : Nat) (hj : Nat.lt j N = .true) (hk : Nat.lt k N = .true)
+        (hp : TwoPC.getP (TwoPC.setP s i v) j = .committed)
+        (ha : TwoPC.getP (TwoPC.setP s i v) k = .aborted) =>
+      Or.elim (TwoPC.natEqOrNe j i)
+        (fun (e : j = i) =>
+          let hnew : TwoPC.getP (TwoPC.setP s i v) j = v :=
+            Eq.substProp (fun (z : Nat) => TwoPC.getP (TwoPC.setP s i v) z = v)
+              (Eq.symm e) (TwoPC.getP_setP_same s i v)
+          False.elim (hv (Eq.trans (Eq.symm hnew) hp)))
+        (fun (hne : ¬ j = i) =>
+          let hold : TwoPC.getP s j = .committed :=
+            Eq.trans (Eq.symm (TwoPC.getP_setP_ne s i j v (fun (e : i = j) => hne (Eq.symm e)))) hp
+          False.elim (TwoPC.no_committed s h hc j hj hold)))
+
+/-- Invariant clause 1 after committing participant `i`. -/
+def TwoPC.inv_setP_committed_1 {N : Nat} (s : TwoPC N) (i : Nat)
+    (h : TwoPC.Inv s) (hc : s.c = .committed) :
+    (j : Nat) → Nat.lt j N = .true →
+    TwoPC.getP (TwoPC.setP s i .committed) j = .committed →
+    (TwoPC.setP s i .committed).c = .committed :=
+  fun (j : Nat) (hj : Nat.lt j N = .true)
+      (hp : TwoPC.getP (TwoPC.setP s i .committed) j = .committed) => hc
+
+/-- Invariant clause 2 after committing participant `i`. -/
+def TwoPC.inv_setP_committed_2 {N : Nat} (s : TwoPC N) (i : Nat)
+    (h : TwoPC.Inv s) (hc : s.c = .committed) :
+    (TwoPC.setP s i .committed).c = .committed →
+    (j : Nat) → Nat.lt j N = .true →
+    TwoPC.getP (TwoPC.setP s i .committed) j = .prepared ∨
+    TwoPC.getP (TwoPC.setP s i .committed) j = .committed :=
+  fun (hc' : (TwoPC.setP s i .committed).c = .committed) (j : Nat) (hj : Nat.lt j N = .true) =>
+    Or.elim (TwoPC.natEqOrNe j i)
+      (fun (e : j = i) =>
+        let hnew : TwoPC.getP (TwoPC.setP s i .committed) j = .committed :=
+          Eq.substProp (fun (z : Nat) => TwoPC.getP (TwoPC.setP s i .committed) z = .committed)
+            (Eq.symm e) (TwoPC.getP_setP_same s i .committed)
+        Or.inr hnew)
+      (fun (hne : ¬ j = i) =>
+        let hold : TwoPC.getP s j = TwoPC.getP (TwoPC.setP s i .committed) j :=
+          Eq.symm (TwoPC.getP_setP_ne s i j .committed (fun (e : i = j) => hne (Eq.symm e)))
+        Or.elim (h.1.2 hc j hj)
+          (fun (hp : TwoPC.getP s j = .prepared) => Or.inl (Eq.trans (Eq.symm hold) hp))
+          (fun (hp : TwoPC.getP s j = .committed) => Or.inr (Eq.trans (Eq.symm hold) hp)))
+
+/-- Invariant clause 3 after committing participant `i`. -/
+def TwoPC.inv_setP_committed_3 {N : Nat} (s : TwoPC N) (i : Nat)
+    (h : TwoPC.Inv s) (hc : s.c = .committed) :
+    (j k : Nat) → Nat.lt j N = .true → Nat.lt k N = .true →
+    TwoPC.getP (TwoPC.setP s i .committed) j = .committed →
+    TwoPC.getP (TwoPC.setP s i .committed) k = .aborted → False :=
+  fun (j k : Nat) (hj : Nat.lt j N = .true) (hk : Nat.lt k N = .true)
+      (hp : TwoPC.getP (TwoPC.setP s i .committed) j = .committed)
+      (ha : TwoPC.getP (TwoPC.setP s i .committed) k = .aborted) =>
+    Or.elim (TwoPC.natEqOrNe j i)
+      (fun (ej : j = i) =>
+        Or.elim (TwoPC.natEqOrNe k i)
+          (fun (ek : k = i) =>
+            let newk : TwoPC.getP (TwoPC.setP s i .committed) k = .committed :=
+              Eq.substProp (fun (z : Nat) => TwoPC.getP (TwoPC.setP s i .committed) z = .committed)
+                (Eq.symm ek) (TwoPC.getP_setP_same s i .committed)
+            False.elim (Phase.committed_ne_aborted (Eq.trans (Eq.symm newk) ha)))
+          (fun (hnek : ¬ k = i) =>
+            let oldk : TwoPC.getP s k = .aborted :=
+              Eq.trans (Eq.symm (TwoPC.getP_setP_ne s i k .committed (fun (e : i = k) => hnek (Eq.symm e)))) ha
+            Or.elim (h.1.2 hc k hk)
+              (fun (hpk : TwoPC.getP s k = .prepared) => False.elim (Phase.prepared_ne_aborted (Eq.trans (Eq.symm hpk) oldk)))
+              (fun (hpk : TwoPC.getP s k = .committed) => False.elim (Phase.committed_ne_aborted (Eq.trans (Eq.symm hpk) oldk)))))
+      (fun (hnej : ¬ j = i) =>
+        let oldj : TwoPC.getP s j = .committed :=
+          Eq.trans (Eq.symm (TwoPC.getP_setP_ne s i j .committed (fun (e : i = j) => hnej (Eq.symm e)))) hp
+        Or.elim (TwoPC.natEqOrNe k i)
+          (fun (ek : k = i) =>
+            let newk : TwoPC.getP (TwoPC.setP s i .committed) k = .committed :=
+              Eq.substProp (fun (z : Nat) => TwoPC.getP (TwoPC.setP s i .committed) z = .committed)
+                (Eq.symm ek) (TwoPC.getP_setP_same s i .committed)
+            False.elim (Phase.committed_ne_aborted (Eq.trans (Eq.symm newk) ha)))
+          (fun (hnek : ¬ k = i) =>
+            let oldk : TwoPC.getP s k = .aborted :=
+              Eq.trans (Eq.symm (TwoPC.getP_setP_ne s i k .committed (fun (e : i = k) => hnek (Eq.symm e)))) ha
+            False.elim (h.2 j k hj hk oldj oldk)))
+
+/-- A participant update to `committed` when the coordinator is already committed
+preserves the invariant. -/
+def TwoPC.inv_setP_committed {N : Nat} (s : TwoPC N) (i : Nat)
+    (h : TwoPC.Inv s) (hc : s.c = .committed) :
+    TwoPC.Inv (TwoPC.setP s i .committed) :=
+  And.intro
+    (And.intro (TwoPC.inv_setP_committed_1 s i h hc)
+      (TwoPC.inv_setP_committed_2 s i h hc))
+    (TwoPC.inv_setP_committed_3 s i h hc)
+
+/-- Transport the invariant from its two components (coordinator and participant
+phases) to a state with those components. -/
+def TwoPC.Inv_components {N : Nat} (s : TwoPC N) (c : Phase) (p : List Phase)
+    (h : TwoPC.InvOf N c p) (hc : s.c = c) (hp : s.p = p) : TwoPC.Inv s :=
+  Eq.substProp (fun (c' : Phase) => TwoPC.InvOf N c' s.p) (Eq.symm hc)
+    (Eq.substProp (fun (p' : List Phase) => TwoPC.InvOf N c p') (Eq.symm hp) h)
+
+/-- The invariant is preserved by every action. -/
+def TwoPC.preserve (N : Nat) :
+    (a : Act N) → (s s' : TwoPC N) → TwoPC.Inv s → TwoPC.Step N a s s' → TwoPC.Inv s'
+  | .cPrepare, s, s', hinv, hmem =>
+      let h := TwoPC.mem_singleIf (Phase.eq s.c .init) (TwoPC.setC s .prepared) s' hmem
+      TwoPC.Inv_components s' .prepared s.p (TwoPC.inv_c_prepared s hinv
+          (fun (hcomm : s.c = .committed) =>
+            Phase.init_ne_committed (Eq.trans (Eq.symm (Phase.eq_sound s.c .init h.1)) hcomm)))
+          h.2.1 h.2.2.1
+  | .deliverPrepare i, s, s', hinv, hmem =>
+      let g := Bool.and (Nat.lt i N)
+        (Bool.and (Phase.eq s.c .prepared)
+          (Bool.and (Bool.not (TwoPC.getPrep s i)) (Bool.not (TwoPC.getCrashed s i))))
+      let h := TwoPC.mem_singleIf g (TwoPC.setPrep s i .true) s' hmem
+      TwoPC.Inv_components s' s.c s.p hinv h.2.1 h.2.2.1
+  | .respondYes i, s, s', hinv, hmem =>
+      let g := Bool.and (Nat.lt i N)
+        (Bool.and (Phase.eq s.c .prepared)
+          (Bool.and (TwoPC.getPrep s i)
+            (Bool.and (Phase.eq (TwoPC.getP s i) .init) (Bool.not (TwoPC.getCrashed s i)))))
+      let h := TwoPC.mem_singleIf g (TwoPC.setP s i .prepared) s' hmem
+      let g2 := Bool.and_true_right (Nat.lt i N) _ h.1
+      let hc := Phase.eq_sound s.c .prepared (Bool.and_true_left (Phase.eq s.c .prepared) _ g2)
+      TwoPC.Inv_components s' s.c (TwoPC.listSetAt .init i s.p .prepared)
+        (TwoPC.inv_setP_no_committed s i .prepared hinv
+          (fun (hcomm : s.c = .committed) => Phase.prepared_ne_committed (Eq.trans (Eq.symm hc) hcomm))
+          Phase.prepared_ne_committed) h.2.1 h.2.2.1
+  | .respondNo i, s, s', hinv, hmem =>
+      let g := Bool.and (Nat.lt i N)
+        (Bool.and (Phase.eq s.c .prepared)
+          (Bool.and (TwoPC.getPrep s i)
+            (Bool.and (Phase.eq (TwoPC.getP s i) .init) (Bool.not (TwoPC.getCrashed s i)))))
+      let h := TwoPC.mem_singleIf g (TwoPC.setP s i .aborted) s' hmem
+      let g2 := Bool.and_true_right (Nat.lt i N) _ h.1
+      let hc := Phase.eq_sound s.c .prepared (Bool.and_true_left (Phase.eq s.c .prepared) _ g2)
+      TwoPC.Inv_components s' s.c (TwoPC.listSetAt .init i s.p .aborted)
+        (TwoPC.inv_setP_no_committed s i .aborted hinv
+          (fun (hcomm : s.c = .committed) => Phase.prepared_ne_committed (Eq.trans (Eq.symm hc) hcomm))
+          Phase.aborted_ne_committed) h.2.1 h.2.2.1
+  | .recv i, s, s', hinv, hmem =>
+      let g := Bool.and (Nat.lt i N)
+        (Bool.and (Bool.or (Phase.eq (TwoPC.getP s i) .prepared)
+            (Phase.eq (TwoPC.getP s i) .aborted))
+          (Bool.not (TwoPC.getHeard s i)))
+      let h := TwoPC.mem_singleIf g (TwoPC.setHeard s i .true) s' hmem
+      TwoPC.Inv_components s' s.c s.p hinv h.2.1 h.2.2.1
+  | .decideCommit, s, s', hinv, hmem =>
+      let g := Bool.and (Phase.eq s.c .prepared)
+        (Bool.and (TwoPC.allHeardB N s) (TwoPC.allPreparedB N s))
+      let h := TwoPC.mem_singleIf g (TwoPC.setCommitted s) s' hmem
+      let g2 := Bool.and_true_right (Phase.eq s.c .prepared) _ h.1
+      let hc := Phase.eq_sound s.c .prepared (Bool.and_true_left (Phase.eq s.c .prepared) _ h.1)
+      let hp := Bool.and_true_right (TwoPC.allHeardB N s) _ g2
+      let hall : TwoPC.allPrepared s :=
+        fun (j : Nat) (hj : Nat.lt j N = .true) =>
+          Phase.eq_sound (TwoPC.getP s j) .prepared
+            (TwoPC.allN_spec (fun (k : Nat) => Phase.eq (TwoPC.getP s k) .prepared) N hp j hj)
+      TwoPC.Inv_components s' .committed s.p (TwoPC.inv_c_committed s hinv hc hall) h.2.1 h.2.2.1
+  | .decideAbort, s, s', hinv, hmem =>
+      let h := TwoPC.mem_singleIf (Phase.eq s.c .prepared) (TwoPC.setAborted s) s' hmem
+      let hc := Phase.eq_sound s.c .prepared h.1
+      TwoPC.Inv_components s' .aborted s.p
+        (TwoPC.inv_c_aborted s hinv
+          (fun (hcomm : s.c = .committed) => Phase.prepared_ne_committed (Eq.trans (Eq.symm hc) hcomm))) h.2.1 h.2.2.1
+  | .commit i, s, s', hinv, hmem =>
+      let g := Bool.and (Nat.lt i N)
+        (Bool.and (Phase.eq s.c .committed)
+          (Bool.and (Phase.eq (TwoPC.getP s i) .prepared) (Bool.not (TwoPC.getCrashed s i))))
+      let h := TwoPC.mem_singleIf g (TwoPC.setP s i .committed) s' hmem
+      let g2 := Bool.and_true_right (Nat.lt i N) _ h.1
+      let hc := Phase.eq_sound s.c .committed (Bool.and_true_left (Phase.eq s.c .committed) _ g2)
+      TwoPC.Inv_components s' s.c (TwoPC.listSetAt .init i s.p .committed)
+        (TwoPC.inv_setP_committed s i hinv hc) h.2.1 h.2.2.1
+  | .abort i, s, s', hinv, hmem =>
+      let g := Bool.and (Nat.lt i N)
+        (Bool.and (Phase.eq s.c .aborted)
+          (Bool.and (Phase.eq (TwoPC.getP s i) .prepared) (Bool.not (TwoPC.getCrashed s i))))
+      let h := TwoPC.mem_singleIf g (TwoPC.setP s i .aborted) s' hmem
+      let g2 := Bool.and_true_right (Nat.lt i N) _ h.1
+      let hc := Phase.eq_sound s.c .aborted (Bool.and_true_left (Phase.eq s.c .aborted) _ g2)
+      TwoPC.Inv_components s' s.c (TwoPC.listSetAt .init i s.p .aborted)
+        (TwoPC.inv_setP_no_committed s i .aborted hinv
+          (fun (hcomm : s.c = .committed) => Phase.aborted_ne_committed (Eq.trans (Eq.symm hc) hcomm))
+          Phase.aborted_ne_committed) h.2.1 h.2.2.1
+  | .crash i, s, s', hinv, hmem =>
+      let g := Bool.and (Nat.lt i N) (Bool.not (TwoPC.getCrashed s i))
+      let h := TwoPC.mem_singleIf g (TwoPC.setCrashed s i .true) s' hmem
+      TwoPC.Inv_components s' s.c s.p hinv h.2.1 h.2.2.1
+
+/-- Two-phase-commit safety for every `N` and every run. -/
+def TwoPC.safety (N : Nat) (σ : Trace (TwoPC N)) (h : (TwoPC.lts N).Run σ) :
+    TL.always (TL.now (TwoPC.Inv)) σ 0 :=
+  LTS.invariant (TwoPC.lts N) TwoPC.Inv
+    (fun (s : TwoPC N) (hi : TwoPC.Init s) => TwoPC.init_inv s hi)
+    (fun (a : Act N) (s s' : TwoPC N) (hinv : TwoPC.Inv s) (hstep : TwoPC.Step N a s s') =>
+      TwoPC.preserve N a s s' hinv hstep)
+    σ h
+
+/-- The bounded form: the invariant holds throughout the first `n` states of a run. -/
+def TwoPC.safetyDuring (N n : Nat) (σ : Trace (TwoPC N)) (h : (TwoPC.lts N).Run σ) :
+    TL.during n (TL.now (TwoPC.Inv)) σ 0 :=
+  LTS.safetyDuring (TwoPC.lts N) TwoPC.Inv n
+    (fun (s : TwoPC N) (hi : TwoPC.Init s) => TwoPC.init_inv s hi)
+    (fun (a : Act N) (s s' : TwoPC N) (hinv : TwoPC.Inv s) (hstep : TwoPC.Step N a s s') =>
+      TwoPC.preserve N a s s' hinv hstep)
+    σ h

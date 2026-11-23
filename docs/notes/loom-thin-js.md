@@ -1,11 +1,12 @@
 # Loom pages: the JavaScript is a mount point
 
-**Status:** design + stages 1–6 and the editor remainder (`thin-js-34` for 1–4;
-`loom-edit` for the editor's pure rules and `host.edit`; `loom-56` for 5–6, all off
-`integration/train8`, 2026-11-20). The migration is staged; each stage is independently
+**Status:** design + stages 1–7 and the editor remainder (`thin-js-34` for 1–4;
+`loom-edit` for the editor's pure rules and `host.edit`; `loom-56` for 5–6;
+`thin-js-7` for the in-page server's pure half and the last paint rules, all off
+`integration/train9`, 2026-11-21). The migration is staged; each stage is independently
 landable. Stage 2 (one page, no fallback), stage 3 (the state format and the effect
 protocol), stage 4 (the keyboard policy and the overlays), the editor's pure rules and
-`host.edit`, and stages 5–6 are on the merged branch.
+`host.edit`, stages 5–6 and stage 7 are on the merged branch.
 
 The browser side of Wiz's pages has grown to about 5.1k lines of production JavaScript
 (`web/*.js`, not counting tests), and most of it is not browser capability: it is page
@@ -17,6 +18,13 @@ that for a page (`?ui=loom` at the time; it is the page now). The rule from here
 
 This note is the target API, the ownership boundary, the inventory that got us here, and
 the stages that remove the rest.
+
+> **Canonical model.** The host / Loom runtime / SSR shell / designer-builder split, the
+> data paths of each surface, the wire's role, the single validation table and the
+> adopt-and-listen contract are canonical in
+> [`loom-wire-protocol.md`](loom-wire-protocol.md). The ownership table below is this
+> note's JavaScript-line-budget view of the same boundary; when the two differ, the
+> protocol note wins.
 
 ## 1. The target API
 
@@ -37,8 +45,10 @@ mount(document.body, {
 2. **loads and instantiates the runtime module** (the dynamic import's factory, with
    `print`/`printErr`), checks the ABI before touching the page, and throws on failure
    (the page shows a text reason);
-3. **mounts the SSR** (`wiz_loom_html`) into the element, installs `js_patch`'s applier
-   and the delegated event listeners;
+3. **decides adopt or replace** from the container's `data-wiz-*` island attributes
+   and the SSR hash (canonical in `loom-wire-protocol.md`); on replace it mounts the SSR
+   (`wiz_loom_html`) into the element, installs `js_patch`'s applier and the delegated
+   event listeners;
 4. **turns DOM events into steps** (`event "\n" index "\n" payload`, the existing
    driver ABI);
 5. **publishes the host capabilities** a Wiz program cannot reach — `clipboard`,
@@ -54,6 +64,7 @@ The runtime interface is therefore small and stable:
 ```
 wiz_loom_init : S
 wiz_loom_html : S -> String                    -- SSR, first paint
+wiz_loom_ssr_hash : S -> String                -- optional: the adopt hash (see the protocol note)
 wiz_loom_step : S -> String -> IO S            -- one DOM event, patched via js_patch
 wiz_loom_<effect> : S -> ... -> IO S           -- the page's effects, if it has any
 ```
@@ -315,6 +326,43 @@ segments/items): it is the irreducible host plus what stages 5–7 have left —
 `squiggles.js` 235) and the pages' transport (`playground-lsp.js` 381,
 `playground-engine.js` 170). The plan's stage-6 number assumed those would be gone by
 then; they are not, so the target is not met rather than redefined.
+
+## 4c. Stage 7 (`thin-js-7`)
+
+`PositionIndex` and the editor rules already landed (`lib/Web/EditorModel.wiz`,
+`loom-*`); this branch moves the rest of the in-page server's pure half and the last
+paint-time rules:
+
+* **`lib/Web/Selfhost.wiz`** (new) owns the engine's text output as diagnostics (the
+  command splitter with doc comments/attributes/`mutual` blocks, the parse-error
+  placement in UTF-16, severity and message un-prefixing), `parseCheck`'s shape check,
+  `withPrelude`, the completion prefix/word scan/filter, and the completion, hover and
+  definition answers decoded from the check's declaration index. `web/selfhost-lsp-shim.js`
+  is now the server around them (314 lines, from 597): the JSON-RPC switch, the
+  document map, the engine calls and the WebSocket stand-in. It receives the rules as
+  `index`, the same adapter the overlays use; `createIndexer` in
+  `web/playground-lsp.js` is the production adapter over `mount.ask`, and
+  `web/framework/index-oracle.mjs` is the Node test oracle (test-only).
+* **`Web.EditorModel`** gained the completion card's tooltip, the Ctrl/⌘-Space ask
+  key, and the source-span ↔ offsets mapping, so `web/completions.js`,
+  `web/squiggles.js` and `web/playground-lsp.js` only paint/measure/position.
+  `playground-lsp.js` no longer carries `positionAt`/`parseSpan`/`offsetAt`; a span's
+  offsets are `Web.EditorModel.spanJson` and the caret is the runtime's `position`.
+* **What remains host.** `web/lsp-client.js` (480) is the transport the note already
+  names as permanent: the socket, the promise/timer pending map, request ids, the token
+  in the URL, and the boot-time endpoint rule (`web/infoview.js` needs `endpointOf`
+  before it mounts). Its pure *shapes* could move, but every page would need the runtime
+  before the socket exists and the docs page has no `createIndexer`; the layout gain is
+  nil. `web/squiggles.js` (250) is the mirror, `getComputedStyle`, scroll and
+  `ResizeObserver`; the ranges are the runtime's. `web/completions.js` (360) is the
+  popup's rows, keyboard dispatch and the measured glyph; filter/order/insert/score are
+  `Web.EditorModel`. `web/selfhost-lsp-shim.js`'s remaining 314 lines are the protocol
+  and the engine boundary.
+
+Production JS is now **3,470** in `web/*.js` before the framework's unchanged 628-line
+browser half (the shim alone is 283 lines lighter; `playground-lsp.js` grew by the
+adapter that marshals the runtime's answers). `=loom` has two new cases pinning
+`Web.Selfhost`.
 
 ## 5. Stages, each landable on its own
 

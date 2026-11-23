@@ -1,5 +1,6 @@
 -- test: run
 import Scry.Cli
+import Scry.NativeLink
 -- `scry egraph` end to end on a C file: the native store parses, `Scry.Lower` produces
 -- Wil, `Scry.EgraphWil` builds the e-classes and folds/rewrites them. The report is
 -- deterministic: `2 + 3` folds to 5, `a * 1` and `a + 0` rewrite to `a`, and `b + c`

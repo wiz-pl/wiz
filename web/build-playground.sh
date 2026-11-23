@@ -17,8 +17,6 @@
 # module (wiz-infoview.mjs) is unchanged and can live in the same OUT directory.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-# without emcc on the PATH, run again with Emscripten from nixpkgs
-if ! command -v emcc >/dev/null; then exec nix shell --inputs-from "$ROOT" nixpkgs#emscripten -c "$0" "$@"; fi
 GMPSRC=
 FROM=${WIZ_PLAYGROUND_FROM:-}
 OPT=
@@ -51,7 +49,7 @@ if ! command -v emcc >/dev/null; then
 fi
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
 # (after the compiler's own -O2, so emcc's last -O wins)
-CFLAGS="-I$OUT/gmp -DWIZ_NO_THREADS"
+CFLAGS="-I$OUT/gmp -DWIZ_NO_THREADS -ffile-prefix-map=$ROOT=. -ffile-prefix-map=$OUT=."
 [ -z "$OPT" ] || CFLAGS="$CFLAGS -O$OPT"
 
 # 1. mini-gmp, as web/build.sh does (share web/out when both are built)

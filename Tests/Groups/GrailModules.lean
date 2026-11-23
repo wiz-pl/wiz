@@ -32,7 +32,11 @@ def modulesGroup : Group where
         checkEq "A/B/C.wiz" (Module.relPath "A.B.C").toString
         checkEq "A.B" (Module.nameOf "A/B.wiz")
         checkEq ["Prelude", "Data.Two"] (Module.importsOf "import Prelude\n-- c\n  import Data.Two\nimport_c \"m.h\"\ndef x := 1\n")
-        checkEq ["m.h"] (Module.headersOf "import_c \"m.h\" (pure)\n") },
+        checkEq ["m.h"] (Module.headersOf "import_c \"m.h\" (pure)\n")
+        -- the scan is textual, so a `--` comment that documents the syntax must not
+        -- become a header (it did: selfhost/Frontend.wiz, and F09 rejected the `…`)
+        checkEq [] (Module.headersOf "-- the `import_c \"…\"` names\n")
+        checkEq ["m.h"] (Module.headersOf "  -- import_c \"x.h\"\ndef x := 1\nimport_c \"m.h\"\n") },
     { name := "a file reaches modules in subdirectories", run := fun _ => do
         let dir ← mkTree libFiles
         let ms ← Module.loadClosure ["lib", dir] "import Use\n#eval four\n"
@@ -74,6 +78,24 @@ def modulesGroup : Group where
           "the strong toolchain is not in the module key"
         check (k != Cache.moduleKeyStrong loader (fun _ => none) 0 "M" (targetTag := "target-a"))
           "the target is not in the module key" },
+    { name := "SHA-256: the NIST FIPS 180-4 known-answer vectors", run := fun _ => do
+        -- Every padding case from FIPS 180-4 (and NIST's CAVP examples): the empty
+        -- message, one short block, the 448-bit message (which still fits in one block but
+        -- needs the length in a second word), the 896-bit two-block message, and the
+        -- 1,000,000-'a' multi-block message. These are the trusted SMT cache's key
+        -- function, so a wrong digest must fail here rather than only show up as a
+        -- domain-separation inequality.
+        checkEq "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          (Smt.Sha256.hex "")
+        checkEq "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+          (Smt.Sha256.hex "abc")
+        checkEq "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+          (Smt.Sha256.hex "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
+        checkEq "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1"
+          (Smt.Sha256.hex
+            "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu")
+        checkEq "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+          (Smt.Sha256.hex (String.ofList (List.replicate 1000000 'a'))) },
     { name := "target and toolchain ids: separate SHA-256 namespaces, not the 64-bit build id", run := fun _ => do
         let tc : Toolchain := {}
         let other : Toolchain := { tc with cflags := ["-O2"] }
@@ -284,7 +306,7 @@ def modulesGroup : Group where
           check (!(← (ro / entry.fileName).pathExists)) s!"also written to the read-only cache: {entry.fileName}" },
     { name := "the command line: a warm and an empty read-only cache plus a write cache match --no-cache", run := fun _ => do
         let wiz := ((← IO.appPath).parent.getD ".") / "wiz"
-        unless ← wiz.pathExists do skip "no wiz binary"; return
+        unless ← wiz.pathExists do skipMissing "no wiz binary"; return
         let dir ← mkTree [("main.wiz", "import M\ndef n : Nat := two + 3\n#eval n\n"),
                           ("M.wiz", "import Prelude\ndef two : Nat := 2\n")]
         let ro := dir / "ro"
@@ -299,7 +321,8 @@ def modulesGroup : Group where
         checkEq 0 cold.exitCode
         check ((cold.stdout.splitOn "info: 5").length > 1) s!"cold: {cold.stdout}{cold.stderr}"
         let before ← snapshot ro
-        let cached ← run (["--cache-ro", ro.toString, "--cache-ro", empty.toString, "--cache", write.toString] ++ base)
+        let cached ← run (["--cache-ro", ro.toString, "--cache-ro-unsigned",
+                           "--cache-ro", empty.toString, "--cache", write.toString] ++ base)
         let plain ← run (["--no-cache"] ++ base)
         checkEq 0 cached.exitCode
         checkEq plain.exitCode cached.exitCode
@@ -347,8 +370,9 @@ def modulesGroup : Group where
         let src := "import Prelude\nimport Sneaky\n"
         let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := loaderOf ms }
         check (sneaky s) s!"runFrontend: Sneaky used Nat without importing Prelude: {s.messages.toList.map (·.text)}"
-        let s := runFrontend (R := ZeroOneMany) ("import Prelude\ndef two : Nat := 2\nimport Sneaky\n") { trustedModule := Tests.libModule, loader := loaderOf ms }
-        check (sneaky s) s!"runFrontend, after a definition: {s.messages.toList.map (·.text)}"
+        -- the fixed header (13u): a later import is the error, not a module the frontend loads
+        let s := runFrontend (R := ZeroOneMany) "import Prelude\ndef two : Nat := 2\nimport Sneaky\n" { trustedModule := Tests.libModule, loader := loaderOf ms }
+        check (s.messages.any fun m => m.code == "import-order") s!"runFrontend, after a definition: {s.messages.toList.map (·.text)}"
         let (s, _) := Query.elaborate (R := ZeroOneMany) {} src { trustedModule := Tests.libModule, loader := loaderOf ms, termInfo := true }
         check (sneaky s) s!"the language server's engine: {s.messages.toList.map (·.text)}"
         -- through the server: the diagnostic is at the import
@@ -386,7 +410,7 @@ def modulesGroup : Group where
           m.severity == .error && m.text.startsWith "'b' is declared by both"
         for src in ["import M.A\nimport M.B\n" ++ boomA, "import M.B\nimport M.A\n" ++ boomB,
                     "import M.A\nimport M.D\n" ++ boomA, "import M.A\nimport M.D\n" ++ boomB,
-                    "import M.C\nimport M.B\n" ++ boomA, "import M.Base\ndef b : Bool := Bool.false\nimport M.A\n" ++ boomA,
+                    "import M.C\nimport M.B\n" ++ boomA, "import M.Base\nimport M.A\ndef b : Bool := Bool.false\n" ++ boomA,
                     "import M.A\ndef b : Bool := Bool.false\n" ++ boomA] do
           for (how, s) in ← paths src do
             check (clash s) s!"{how}: no clash reported for\n{src}\n{s.messages.toList.map (·.text)}"
@@ -541,6 +565,7 @@ def modulesGroup : Group where
         let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
         let rig := RigTag.tag (R := ZeroOneMany)
         let (s, _) ← Cache.elaborateCached (some cache) [] "import M\n#eval y\n" init 0 (region := some { rig })
+          (verify := .warn)
         check (!s.messages.any (·.severity == .error)) s!"messages: {s.messages.toList.map (·.text)}"
         let binary ← Cache.binaryId (some cache)
         let k := moduleCacheKey ms 0 "M"
@@ -596,15 +621,18 @@ def modulesGroup : Group where
         let opts : Cache.RegionOptions := { rig, stats := some stats }
         let src := "import M\n#eval x\n"
         let (s0, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+          (verify := .warn)
         let good := s0.messages.toList.map (·.render src)
         check (!s0.messages.any (·.severity == .error)) s!"messages: {good}"
         let before ← stats.get
         let _ ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+          (verify := .warn)
         check ((← stats.get).hits > before.hits) "the warm run did not come from a region"
         -- (a truncated region: a miss, not an error, and the run is rewritten)
         for f in ← regionFiles cache do IO.FS.writeFile f ""
         let after ← stats.get
         let (s1, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+          (verify := .warn)
         checkEq good (s1.messages.toList.map (·.render src))
         check ((← stats.get).misses > after.misses) "a truncated region was not a miss"
         for f in ← regionFiles cache do
@@ -617,6 +645,7 @@ def modulesGroup : Group where
             module := "M", key := k.fast, keySha := k.strong }
         let after2 ← stats.get
         let (s2, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+          (verify := .warn)
         checkEq good (s2.messages.toList.map (·.render src))
         check ((← stats.get).misses > after2.misses) "a mismatched region was not a miss"
         let some a ← Cache.readModuleRegion (R := ZeroOneMany) cache binary rig k
@@ -634,6 +663,7 @@ def modulesGroup : Group where
         let opts : Cache.RegionOptions := { rig, stats := some stats }
         let src := "import M\n#eval x\n"
         let (s0, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+          (verify := .warn)
         let good := s0.messages.toList.map (·.render src)
         check (!s0.messages.any (·.severity == .error)) s!"messages: {good}"
         -- (the sidecar round-trips: a file's hash reads back as its checksum)
@@ -654,12 +684,14 @@ def modulesGroup : Group where
         checkEq (none : Option UInt64) (← Cache.regionFileChecksum f)
         let m0 ← stats.get
         let (s1, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+          (verify := .warn)
         checkEq good (s1.messages.toList.map (·.render src))
         check ((← stats.get).misses > m0.misses) "a flipped byte was not a miss"
         check (← Cache.regionFileChecksum f).isSome "the write cache did not repair the region"
         -- (the repaired region is served again)
         let h0 ← stats.get
         let (s2, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+          (verify := .warn)
         check ((← stats.get).hits > h0.hits) "the repaired region was not served"
         checkEq good (s2.messages.toList.map (·.render src))
         -- (truncation: one byte short, then the payload cut in half)
@@ -670,6 +702,7 @@ def modulesGroup : Group where
           checkEq (none : Option UInt64) (← Cache.regionFileChecksum f)
           let m1 ← stats.get
           let (s3, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+            (verify := .warn)
           checkEq good (s3.messages.toList.map (·.render src))
           check ((← stats.get).misses > m1.misses) s!"a region {what} was not a miss"
           check (← Cache.regionFileChecksum f).isSome s!"a region {what} was not repaired" },
@@ -683,6 +716,7 @@ def modulesGroup : Group where
         let src := "import Use\nimport Other\n#eval four + one\n"
         let ro ← IO.FS.createTempDir
         let (cold, _) ← Cache.elaborateCached (some ro) [] src init 0 (region := some opts)
+          (verify := .warn)
         let expected := cold.messages.toList.map (·.render src)
         -- (corrupt one region's payload in the read-only layer)
         let binary ← Cache.binaryId (some ro)
@@ -695,6 +729,7 @@ def modulesGroup : Group where
         let write ← IO.FS.createTempDir
         let m0 ← stats.get
         let (s1, _) ← Cache.elaborateCached (some write) [ro] src init 0 (region := some opts)
+          (verify := .warn) (unsignedReads := [ro])
         checkEq expected (s1.messages.toList.map (·.render src))
         check ((← stats.get).misses > m0.misses) "a bad read-only checksum was not a miss"
         checkEq before (← snapshot ro)
@@ -748,12 +783,14 @@ def modulesGroup : Group where
         let rig := RigTag.tag (R := ZeroOneMany)
         let src := "import M\n#eval x\n"
         let (r0, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some { rig })
+          (verify := .warn)
         let expected := r0.messages.toList.map (·.render src)
         let far := now + 400 * 86400
         let n ← Cache.pruneCache cache 7 (now := some far)
         check (n.total > 0) "a warm cache had nothing to prune"
         checkEq #[] (← regionFiles cache)
         let (r1, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some { rig })
+          (verify := .warn)
         checkEq expected (r1.messages.toList.map (·.render src))
         check ((← regionFiles cache).size > 0) "the pruned region was not rewritten" },
     { name := "a warm run is served from the module region, with the same state", run := fun _ => do
@@ -766,9 +803,11 @@ def modulesGroup : Group where
         let opts : Cache.RegionOptions := { rig, stats := some stats }
         let src := "import Use\nimport Other\n#eval four + one\n"
         let (cold, _) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+          (verify := .warn)
         check (!cold.messages.any (·.severity == .error)) s!"messages: {cold.messages.toList.map (·.text)}"
         let before ← stats.get
         let (warm, hw) ← Cache.elaborateCached (some cache) [] src init 0 (region := some opts)
+          (verify := .warn)
         let after ← stats.get
         check (after.hits > before.hits) s!"no module came from a region: {repr after}"
         check (after.commands > 0) s!"no command came from a region: {repr after}"
@@ -785,7 +824,8 @@ def modulesGroup : Group where
         let recheck : IO (CommandState ZeroOneMany) := do
           let ms ← Module.loadAll ["lib", dir]
           let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
-          pure (← Cache.elaborateCached (some cache) [] src init 0 (region := some { rig })).1
+          pure (← Cache.elaborateCached (some cache) [] src init 0 (region := some { rig })
+            (verify := .warn)).1
         let s1 ← recheck
         check (s1.messages.any fun m => (m.render src).endsWith "info: 1") s!"{s1.messages.toList.map (·.render src)}"
         IO.FS.writeFile (dir / "M.wiz") "import Prelude\ndef x : Nat := 2\n"
@@ -800,8 +840,9 @@ def modulesGroup : Group where
         let some a ← Cache.readModuleRegion (R := ZeroOneMany) cache binary rig k2
           | throw (IO.userError "no readable region for the edited module")
         checkEq k2.fast a.key },
-    { name := "regions layer over read-only caches (and never repair them)", run := fun _ => do
-        -- (`--region-cache` + `--cache-ro`: regions live in the same directory layers)
+    { name := "regions layer over read-only caches when opted in (and never repair them)", run := fun _ => do
+        -- (`--region-cache` + `--cache-ro`: regions live in the same directory layers; the
+        -- layer is unauthenticated, so serving it is an explicit opt-in)
         let dir ← mkTree libFiles
         let ms ← Module.loadAll ["lib", dir]
         let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
@@ -809,9 +850,10 @@ def modulesGroup : Group where
         let stats ← IO.mkRef ({} : Cache.RegionCounts)
         let opts : Cache.RegionOptions := { rig, stats := some stats }
         let src := "import Use\nimport Other\n#eval four + one\n"
-        -- (cold: the text entries and the regions in `ro`, as a Nix store would ship them)
+        -- (cold: the text entries, manifests and regions in `ro`, as a Nix store would ship them)
         let ro ← IO.FS.createTempDir
         let (cold, _) ← Cache.elaborateCached (some ro) [] src init 0 (region := some opts)
+          (verify := .warn) (rig := rig)
         check (!cold.messages.any (·.severity == .error)) s!"messages: {cold.messages.toList.map (·.text)}"
         check ((← regionFiles ro).size > 0) "no region was written"
         let expected := cold.messages.toList.map (·.render src)
@@ -819,6 +861,7 @@ def modulesGroup : Group where
         -- (read caches only: a region is served from the read-only layer, nothing is written)
         let h0 ← stats.get
         let (s1, _) ← Cache.elaborateCached none [ro] src init 0 (region := some opts)
+          (verify := .warn) (rig := rig) (unsignedReads := [ro])
         check ((← stats.get).hits > h0.hits) "no module came from a region in the read-only layer"
         checkEq expected (s1.messages.toList.map (·.render src))
         checkEq before (← snapshot ro)
@@ -826,6 +869,7 @@ def modulesGroup : Group where
         let write ← IO.FS.createTempDir
         let h1 ← stats.get
         let (s2, _) ← Cache.elaborateCached (some write) [ro] src init 0 (region := some opts)
+          (verify := .warn) (rig := rig) (unsignedReads := [ro])
         check ((← stats.get).hits > h1.hits) "the read-only region did not answer through the write layer"
         checkEq expected (s2.messages.toList.map (·.render src))
         checkEq before (← snapshot ro)
@@ -839,6 +883,7 @@ def modulesGroup : Group where
         let beforeBad ← snapshot ro
         let h2 ← stats.get
         let (s3, _) ← Cache.elaborateCached (some write) [ro] src init 0 (region := some opts)
+          (verify := .warn) (rig := rig) (unsignedReads := [ro])
         checkEq expected (s3.messages.toList.map (·.render src))
         check ((← stats.get).misses > h2.misses) "a truncated read-only region was not a miss"
         checkEq beforeBad (← snapshot ro)

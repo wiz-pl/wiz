@@ -1,0 +1,11 @@
+import Std
+
+-- Negative case for the unique `Str.append` fast path: the receiver is shared with
+-- another live value (`p.1`), so its reference count is above one and the append
+-- must copy. `p.1` must stay "abc"; the append's result is "abcx".
+def both (s : Str) : Str × Str := (s, Str.append s (Str.ofString "x"))
+
+def main : IO Unit := do
+  let p := both (Str.ofString "abc");
+  IO.println (Str.toString p.1);
+  IO.println (Str.toString p.2)

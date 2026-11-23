@@ -40,7 +40,7 @@ runs:
     # this action never pushes whatever a job happened to build. Only master's push step
     # names the trusted cache; a PR's push step names its own untrusted cache.
     - if: inputs.cachix-name != ''
-      uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
+      uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
       with:
         name: ${{ inputs.cachix-name }}
         authToken: ${{ inputs.cachix-token }}
@@ -49,7 +49,7 @@ runs:
     # read-only here; the build job's explicit push is the only writer. The cache's key is
     # added for this job only, so master and the docs/tower jobs never trust it.
     - if: inputs.cachix-pr-name != '' && inputs.cachix-pr-token != ''
-      uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
+      uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
       with:
         name: ${{ inputs.cachix-pr-name }}
         authToken: ${{ inputs.cachix-pr-token }}
@@ -63,7 +63,7 @@ runs:
     - name: Restore the Lean toolchain
       id: elan-cache
       if: inputs.lean == 'true'
-      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.elan
         key: elan-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ hashFiles('lean-toolchain') }}
@@ -73,7 +73,7 @@ runs:
       run: nix develop --command bash -c 'lake --version'
     - name: Save the Lean toolchain (master)
       if: inputs.lean == 'true' && steps.elan-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/master'
-      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.elan
         key: elan-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ hashFiles('lean-toolchain') }}

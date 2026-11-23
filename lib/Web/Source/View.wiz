@@ -1,0 +1,334 @@
+import Text
+import Web.EditorModel
+import Web.Highlight
+import Web.Hover
+import Web.Loom
+import Web.Source.Facts
+import Web.Source.Model
+import Web.Source.Span
+
+/-!
+# Web.Source.View
+
+The reader's view: the file tree, the finding index, the source pane, the hover card and
+the info panel, as `Loom.VNode`s.
+
+Only `Loom.el`, `Loom.text` and the `Web.Highlight` assembler build markup: no `Loom.raw`,
+so the source text (which is untrusted input) is escaped by construction, and a finding
+message cannot inject a tag. Every list is keyed (`Loom.keyed`), so a state change moves
+or patches the row it changed instead of re-rendering the pane; the Node acceptance test
+applies the resulting patch lists to the SSR and compares with the next state's SSR.
+
+The page is one `Loom.LiveApp`; `Source.View.app` is the whole runtime interface
+(`web/source-ui.wiz` re-exports it as the `wiz_loom_*` ABI).
+-/
+
+-- ## Small builders
+
+/-- A finding's display title: `rule (severity)`. -/
+def Source.View.title (f : Source.Finding) : String :=
+  String.append f.rule (String.append " (" (String.append f.severity ")"))
+
+/-- A finding's `file:line:column` location. -/
+def Source.View.location (f : Source.Finding) : String :=
+  String.append f.path (String.append ":"
+    (String.append (Nat.repr f.line) (String.append ":" (Nat.repr f.column))))
+
+/-- A span as `L:C-L:C` in the file's line table. -/
+def Source.View.spanText (f : Source.File) (span : Source.Span) : String :=
+  Source.Span.show (EditorModel.index f.text) span
+
+/-- How many findings a file has. -/
+def Source.View.findingCount (s : Source.Page) (fileId : String) : Nat :=
+  List.length (Source.Page.findingsOf s fileId)
+
+/-- The class suffix of a finding's severity (`sev-error`, …). -/
+def Source.View.severityClass (severity : String) : String :=
+  String.append "sev-" severity
+
+-- ## File tree
+
+/-- One file row: the path, its finding count, and whether it is open. -/
+def Source.View.fileRow (s : Source.Page) (f : Source.File) : Loom.VNode Source.Msg :=
+  let open : Bool := match s.openFile with
+    | .some id => String.eq id f.id
+    | .none => .false;
+  let cls := match open with
+    | .true => "file-row open"
+    | .false => "file-row";
+  let count := Source.View.findingCount s f.id;
+  let badge := match Nat.beq count 0 with
+    | .true => []
+    | .false => [Loom.el "span" [Loom.class "file-count"] [Loom.text (Nat.repr count)]];
+  Loom.on "click" (Source.Msg.openFile f.id)
+    (Loom.keyed f.id (Loom.el "li" [Loom.class cls, Loom.attr "data-file" f.id]
+      (List.append [Loom.el "span" [Loom.class "file-path"] [Loom.text f.path]] badge)))
+
+/-- The file tree. -/
+def Source.View.fileTree (s : Source.Page) : Loom.VNode Source.Msg :=
+  Loom.el "ul" [Loom.class "file-list"]
+    (match s.files with
+      | .nil => [Loom.el "li" [Loom.class "empty"] [Loom.text "no files"]]
+      | _ => List.map (Source.View.fileRow s) s.files)
+
+-- ## Finding index
+
+/-- One finding row: semantic id, rule, location. The id is the link text, so a copied
+link is the semantic id (`#/f/f_ab12…`). -/
+def Source.View.findingRow (s : Source.Page) (f : Source.Finding) : Loom.VNode Source.Msg :=
+  let selected : Bool := match s.selected with
+    | .some id => String.eq id f.id
+    | .none => .false;
+  let cls := match selected with
+    | .true => "finding-row selected"
+    | .false => "finding-row";
+  Loom.on "click" (Source.Msg.select f.id)
+    (Loom.keyed f.id (Loom.el "li" [Loom.class cls, Loom.attr "data-finding" f.id,
+        Loom.attr "aria-selected" (match selected with | .true => "true" | .false => "false")]
+      [ Loom.el "span" [Loom.class "fid"] [Loom.text f.id]
+      , Loom.el "span" [Loom.class (String.append "rule " (Source.View.severityClass f.severity))]
+          [Loom.text f.rule]
+      , Loom.el "span" [Loom.class "loc"] [Loom.text (Source.View.location f)]
+      ]))
+
+/-- The finding index. -/
+def Source.View.findingList (s : Source.Page) : Loom.VNode Source.Msg :=
+  Loom.el "ol" [Loom.class "finding-list"]
+    (match s.findings with
+      | .nil => [Loom.el "li" [Loom.class "empty"] [Loom.text "no findings"]]
+      | _ => List.map (Source.View.findingRow s) s.findings)
+
+-- ## Source pane
+
+/-- The marks on one line: every finding span that overlaps it, clipped to the line.
+The attributes carry the semantic id and the span, so a click can ask for the facts at
+that node without a second lookup. -/
+def Source.View.lineMarks (s : Source.Page) (f : Source.File) (start stop : Nat) :
+    List Highlight.Mark :=
+  let fs := Source.Page.findingsOf s f.id;
+  List.foldl (fun acc x =>
+      let a := match Nat.le start x.span.start with | .true => x.span.start | .false => start;
+      let b := match Nat.le stop x.span.stop with | .true => stop | .false => x.span.stop;
+      match Source.Span.overlaps (Source.Span.mk a b) x.span with
+      | .true => List.append acc [Highlight.Mark.mk a b]
+      | .false => acc) [] fs
+
+/-- The finding a mark belongs to (the first finding whose span contains it). -/
+def Source.View.markFinding (s : Source.Page) (f : Source.File) (m : Highlight.Mark) :
+    Option Source.Finding :=
+  List.find (fun x => Source.Span.contains x.span m.start)
+    (Source.Page.findingsOf s f.id)
+
+/-- One source line: its number and its text, with finding spans wrapped in a span that
+asks for the hover card (mouseover) or the info view (click). -/
+def Source.View.lineRow (s : Source.Page) (f : Source.File) (i : EditorModel.PositionIndex)
+    (line start stop : Nat) : Loom.VNode Source.Msg :=
+  let text := EditorModel.slice i start stop;
+  let marks := Source.View.lineMarks s f start stop;
+  -- `Highlight` works on the line's own UTF-16 offsets; the marks are file offsets, so
+  -- they are shifted once here and shifted back when the payload asks for the node.
+  let relative := List.map (fun (m : Highlight.Mark) =>
+    Highlight.Mark.mk (m.start - start) (m.stop - start)) marks;
+  let wrap := fun (m : Highlight.Mark) (body : String) =>
+    let abs := Source.Span.mk (m.start + start) (m.stop + start);
+    let finding := match Source.View.markFinding s f abs with
+      | .some x => x
+      | .none => Source.Finding.mk "" f.id f.path "" "" "" abs 0 0 .false "";
+    let payload := Source.spanPayload f.id abs;
+    let cls := String.append "src-mark " (Source.View.severityClass finding.severity);
+    Loom.on "mouseover" (Source.Msg.hoverSpan payload)
+      (Loom.on "click" (Source.Msg.infoSpan payload)
+        (Loom.el "span" [Loom.class cls, Loom.attr "data-finding" finding.id,
+            Loom.attr "data-span" (Source.Span.show i abs)]
+          [Highlight.text body]));
+  Loom.keyed (Nat.repr line) (Loom.el "div" [Loom.class "src-line", Loom.attr "data-line" (Nat.repr line)]
+    [ Loom.el "span" [Loom.class "ln"] [Loom.text (Nat.repr (line + 1))]
+    , Loom.el "code" [Loom.class "line"] [Highlight.nodeWithNode text wrap relative]
+    ])
+
+/-- The source pane's lines, from the file's line table. -/
+partial def Source.View.lineRows (s : Source.Page) (f : Source.File) (i : EditorModel.PositionIndex)
+    (line : Nat) (acc : List (Loom.VNode Source.Msg)) : List (Loom.VNode Source.Msg) :=
+  match Nat.lt line (EditorModel.lineCount i) with
+  | .false => acc
+  | .true =>
+    let start := EditorModel.lineStartAt i line;
+    let stop := EditorModel.lineEndAt i line;
+    Source.View.lineRows s f i (line + 1)
+      (List.append acc [Source.View.lineRow s f i line start stop])
+
+/-- The source pane for the open file. -/
+def Source.View.sourcePane (s : Source.Page) : Loom.VNode Source.Msg :=
+  match Source.Page.current s with
+  | .none => Loom.el "section" [Loom.class "source-pane"]
+      [Loom.el "p" [Loom.class "empty"] [Loom.text "no file open"]]
+  | .some f =>
+    let i := EditorModel.index f.text;
+    let count := Source.View.findingCount s f.id;
+    let countText := match Nat.beq count 1 with
+      | .true => "1 finding"
+      | .false => String.append (Nat.repr count) " findings";
+    Loom.el "section" [Loom.class "source-pane", Loom.attr "data-file" f.id]
+      [ Loom.el "div" [Loom.class "pane-head"]
+          [ Loom.el "h2" [] [Loom.text f.path]
+          , Loom.el "span" [Loom.class "pane-count"] [Loom.text countText]
+          , Loom.el "span" [Loom.class "pane-lang"] [Loom.text f.language]
+          ]
+      , Loom.el "div" [Loom.class "source-lines"]
+          (Source.View.lineRows s f i 0 [])
+      ]
+
+-- ## Cards
+
+/-- A decoded answer's title, with its span text when it has one. The span text comes
+from the answer (the host wrote it), so the view shows where an answer points without
+rebuilding a line table. -/
+def Source.View.answerTitle (s : Source.Page) (a : Source.Answer) : String :=
+  match String.isEmpty a.spanText with
+  | .true => a.title
+  | .false => String.append a.title (String.append " at " a.spanText)
+
+/-- The hover card from a decoded answer (`Hover.cardLines`, so the markup, the escaping
+and the highlight classes are the same as the editor's hover). -/
+def Source.View.hoverPane (s : Source.Page) : Loom.VNode Source.Msg :=
+  match s.hover with
+  | .none => Loom.text ""
+  | .some a => match a.status with
+    | "ok" => Loom.el "div" [Loom.class "hover-host",
+        Loom.attr "data-rule" a.rule, Loom.attr "data-finding" a.findingId]
+        [Hover.cardLines a.lines (Source.View.answerTitle s a)]
+    | _ => Loom.el "div" [Loom.class "hover-host none"] [Loom.text "no answer"]
+
+/-- One fact row in the info view: its kind, its span and its generic columns. -/
+def Source.View.factRow (s : Source.Page) (r : Source.FactRow) : Loom.VNode Source.Msg :=
+  let f := Source.Page.file s r.fileId;
+  let spanText := match f with
+    | .some file => Source.View.spanText file r.span
+    | .none => "";
+  let cells := List.map (fun p =>
+      Loom.el "div" [Loom.class "fact-cell"]
+        [ Loom.el "span" [Loom.class "fact-key"] [Loom.text p.1]
+        , Loom.el "span" [Loom.class "fact-value"] [Loom.text p.2]
+        ]) r.columns;
+  Loom.el "div" [Loom.class "fact-row", Loom.attr "data-kind" r.kind,
+      Loom.attr "data-node" r.node, Loom.attr "data-span" spanText]
+    (List.append
+      [ Loom.el "span" [Loom.class "fact-kind"] [Loom.text r.kind]
+      , Loom.el "span" [Loom.class "fact-span"] [Loom.text spanText]
+      ] cells)
+
+/-- One finding row inside an answer (`info`). -/
+def Source.View.answerFindingRow (s : Source.Page) (f : Source.Finding) : Loom.VNode Source.Msg :=
+  Loom.on "click" (Source.Msg.select f.id)
+    (Loom.keyed f.id (Loom.el "div" [Loom.class "fact-finding", Loom.attr "data-finding" f.id]
+      [ Loom.el "span" [Loom.class "fid"] [Loom.text f.id]
+      , Loom.el "span" [Loom.class (String.append "rule " (Source.View.severityClass f.severity))]
+          [Loom.text f.rule]
+      , Loom.el "span" [Loom.class "msg"] [Loom.text f.message]
+      ]))
+
+/-- The info panel: the fact rows and the findings at the requested node. -/
+def Source.View.infoPane (s : Source.Page) : Loom.VNode Source.Msg :=
+  match s.info with
+  | .none => Loom.text ""
+  | .some a => match a.status with
+    | "ok" =>
+      let rows := match a.rows with
+        | .nil => [Loom.el "p" [Loom.class "empty"] [Loom.text "no fact at this node"]]
+        | _ => List.map (Source.View.factRow s) a.rows;
+      let findings := List.map (Source.View.answerFindingRow s) a.findings;
+      Loom.el "section" [Loom.class "info-pane", Loom.attr "data-file" a.fileId]
+        (List.append
+          [ Loom.el "div" [Loom.class "pane-head"]
+              [ Loom.el "h2" [] [Loom.text "Info"]
+              , Loom.on "click" Source.Msg.closeInfo
+                  (Loom.el "button" [Loom.class "close"] [Loom.text "close"])
+              ]
+          ] (List.append
+            [ Loom.el "div" [Loom.class "fact-rows"] rows
+            , Loom.el "div" [Loom.class "fact-findings"] findings
+            ] []))
+    | _ => Loom.el "section" [Loom.class "info-pane none"] [Loom.text "no answer"]
+
+/-- The selected finding's card: rule, severity, message, span and derivation status.
+`checked` is rendered as "rule derivation checked against this EDB", not "safe". -/
+def Source.View.selectionPane (s : Source.Page) : Loom.VNode Source.Msg :=
+  match Source.Page.selection s with
+  | .none => Loom.text ""
+  | .some f =>
+    let status := match f.checked with
+      | .true => "rule derivation checked against this EDB"
+      | .false => "no certificate (unchecked)";
+    let spanText := match Source.Page.file s f.fileId with
+      | .some file => Source.View.spanText file f.span
+      | .none => "";
+    Loom.el "section" [Loom.class "selection", Loom.attr "data-finding" f.id]
+      [ Loom.el "h2" [] [Loom.text (Source.View.title f)]
+      , Loom.el "p" [Loom.class "msg"] [Loom.text f.message]
+      , Loom.el "dl" []
+          [ Loom.el "dt" [] [Loom.text "id"], Loom.el "dd" [] [Loom.text f.id]
+          , Loom.el "dt" [] [Loom.text "at"], Loom.el "dd" [] [Loom.text spanText]
+          , Loom.el "dt" [] [Loom.text "derivation"], Loom.el "dd" [] [Loom.text status]
+          ]
+      ]
+
+/-- The right-hand panel: the info view when it is open, else the selection. -/
+def Source.View.panel (s : Source.Page) : Loom.VNode Source.Msg :=
+  match String.eq s.panel "info" with
+  | .true => match s.info with
+    | .some _ => Loom.el "div" [Loom.class "reader-panel"]
+        [ Source.View.infoPane s, Source.View.selectionPane s ]
+    | .none => Loom.el "div" [Loom.class "reader-panel"] [Source.View.selectionPane s]
+  | .false => Loom.el "div" [Loom.class "reader-panel"] [Source.View.selectionPane s]
+
+-- ## The page
+
+/-- The reader's footer: the honesty line (a static export is one run's evidence, not a
+proof, and no findings is not safety). -/
+def Source.View.footer (s : Source.Page) : Loom.VNode Source.Msg :=
+  let tool := match String.isEmpty s.tool with
+    | .true => "scry"
+    | .false => s.tool;
+  let note := match String.isEmpty s.note with
+    | .true => Loom.text ""
+    | .false => Loom.el "span" [Loom.class "note"] [Loom.text s.note];
+  Loom.el "footer" [Loom.class "reader-foot"]
+    [ Loom.el "span" [Loom.class "provenance"]
+        [Loom.text (String.append tool (String.append " · " (String.append s.mode " export")))]
+    , Loom.el "span" [Loom.class "caveat"]
+        [Loom.text "Evidence from one run, not a proof; no findings is not safety."]
+    , note
+    ]
+
+/-- The whole reader. -/
+def Source.View.page (s : Source.Page) : Loom.VNode Source.Msg :=
+  let body := match s.bundleLoaded with
+    | .false => [Loom.el "p" [Loom.class "loading"] [Loom.text s.note]]
+    | .true =>
+      [ Loom.el "aside" [Loom.class "reader-side"]
+          [ Loom.el "h2" [] [Loom.text "Files"]
+          , Source.View.fileTree s
+          , Loom.el "h2" [] [Loom.text "Findings"]
+          , Source.View.findingList s
+          ]
+      , Loom.el "main" [Loom.class "reader-main"]
+          [ Source.View.sourcePane s
+          , Source.View.panel s
+          , Source.View.hoverPane s
+          ]
+      ];
+  Loom.el "div" [Loom.class "source-reader", Loom.attr "data-mode" s.mode]
+    (List.append
+      [ Loom.el "header" [Loom.class "reader-head"]
+          [ Loom.el "h1" [] [Loom.text "scry source"]
+          , Loom.el "span" [Loom.class "reader-mode"] [Loom.text s.mode]
+          ]
+      ] (List.append body [Source.View.footer s]))
+
+-- ## The runtime interface
+
+/-- The app: the page's state, the step, and the view. -/
+def Source.View.app : Loom.LiveApp Source.Page Source.Msg :=
+  Loom.LiveApp.mk Source.Page.initial
+    (fun m _payload s => Source.Page.step s m)
+    Source.View.page

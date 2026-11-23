@@ -78,7 +78,7 @@ def ffiStructGroup : Group where
           "def showB : Bool → String\n  | .true => \"true\"\n  | .false => \"false\"\nglue bump (p : Pair) : Pair := \"p.a = p.a + 1; p.b = p.b * 2; p.ok = !p.ok; return p;\"\n" ++
           "def main : IO Unit := do\n  let p := bump (Pair.mk 41 (Float64.ofNat 3) .false);\n" ++
           "  IO.println (Nat.toString p.a);\n  IO.println (Float64.toString p.b);\n" ++
-          "  IO.println (showB p.ok)") "42\n6\ntrue\n" },
+          "  IO.println (showB p.ok)") "42\n6E0\ntrue\n" },
     { name := "import_c binds functions on structs: div, ldiv", run := fun _ =>
         ioRun ("import IO\nimport_c \"stdlib.h\" (pure)\n" ++
           "def main : IO Unit := do\n  let d := C.div 100 7;\n  IO.println (Nat.toString d.quot);\n" ++
@@ -94,7 +94,7 @@ def ffiStructGroup : Group where
           "  n ← C.box_name_len (C.box.mk (pt 0 0) (pt 1 1) \"four\" (Bytes.ofString \"A\") 0);\n  IO.println (Nat.toString n);\n" ++
           "  c ← C.counter_new;\n  k ← C.counter_bump c;\n  k ← C.counter_bump c;\n  IO.println (Nat.toString k);\n" ++
           "  s ← C.sum_bytes (Bytes.ofString \"AB\");\n  IO.println (Nat.toString s)")
-          "11\n22\n12\nmade in C\nwiz!\n7\n69\n2\n131\n" },
+          "1.1E1\n2.2E1\n1.2E1\nmade in C\nwiz!\n7\n69\n2\n131\n" },
     { name := "foreign_type (c := …) takes over a header's pointer type, with a finalizer", run := fun _ => do
         let h ← writePointHeader
         ioRun (s!"import IO\nforeign_type Counter (finalizer := \"counter_free\") (c := \"counter\")\nimport_c \"{h}\"\n" ++

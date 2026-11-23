@@ -1,0 +1,14 @@
+import Prelude
+import Text
+
+/-! A rule whose closure reaches an axiom. The registry must refuse it, naming the trust
+source; no set can smuggle trust into the lint pass. -/
+
+lint-set "bad-trust" "wiz-lint/1" [decl]
+
+axiom trustMe : Nat
+
+def leaky (view : String) : String :=
+  if Nat.beq trustMe 0 then "" else ""
+
+lint W503 "leaky" api warning declaration [decl] leaky
