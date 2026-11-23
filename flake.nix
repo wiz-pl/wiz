@@ -915,6 +915,13 @@ EOF
               runHook preBuild
               export HOME=$TMPDIR LAKE_CACHE_DIR=$TMPDIR/lake-cache \
                 LEAN_CC=${releaseCC} CC=${releaseCC} CXX=${releaseCC}
+              # Lake's executable link can pick the ambient cc/gcc/g++ even when
+              # LEAN_CC is set; put the release wrapper under every driver name first.
+              mkdir -p cc-bin
+              for t in cc gcc g++ c++ clang clang++; do
+                ln -sf ${releaseCC} cc-bin/$t
+              done
+              export PATH=$PWD/cc-bin:$PATH
               lake build wiz grail
               runHook postBuild
             '';
@@ -1007,15 +1014,6 @@ EOF
               for b in bin/wiz bin/grail bin/tower; do
                 patchelf --set-interpreter ${releaseInterp} "$b"
                 patchelf --remove-rpath "$b"
-                # The link names these dynamically even with the static archives in
-                # the link (Lean's executable driver still records its C++ runtime).
-                # The leaf removes the redundant NEEDED entries; doCheck then runs
-                # wiz/grail/tower under env -i with only glibc, so a genuinely
-                # unresolved symbol fails the build.
-                for lib in libstdc++.so.6 libgcc_s.so.1 libgmp.so.10 libuv.so.1 \
-                           libssl.so.3 libcrypto.so.3; do
-                  patchelf --remove-needed "$lib" "$b" 2>/dev/null || true
-                done
                 strip --strip-unneeded "$b"
                 python3 ${./scripts}/scrub-store-paths.py "$b"
               done
