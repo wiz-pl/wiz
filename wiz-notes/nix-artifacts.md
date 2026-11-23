@@ -94,6 +94,7 @@ bundled-compiler checks therefore apply only to a release.yml tarball that still
 | `wiz-web-bundle` | `wiz-web` + `wiz-playground` + `wiz-playground-ui` (each its own fileset) |
 | `wiz-docs-site` | `docs/` + `bench/` + `examples/` + `tools/` + `editors/` + `drafts/` + `scry/` + `README.md`/`ROADMAP.md`/`CHANGELOG.md`/`LICENSE` + `siteAssetFiles` (the site scripts, enumerated in `flake.nix`) + `wiz` + `reference` + `wiz-web-bundle` |
 | `wiz-pages` | `wiz-docs-site` + `scry/` + `web/source-{bundle.sh,app.js,css,static.js}` + `web/framework/` + `wiz-source-ui` + `tree-sitter-c-sharp` |
+| `release-tower` | `tower/` + `scripts/build-tower-wiz.sh` + `lib/` + `release-unwrapped` + `release-static-libs` |
 | `wiz-release-bin` | `lib/` + `editors/` + `scripts/release-licenses` + `LICENSE` + `COPYING.RUNTIME` + `web/wasm-host.mjs`, composed with `release-unwrapped` + `release-tower` + `wiz-web` |
 | `wiz-unwrapped-release` | `buildSrc`: `lakefile.lean`, `lake-manifest.json`, `lean-toolchain`, `Main.lean`, `Wiz/`, `Grail/`, `WizMeta/`, `STC/`, `Tests/`, `runtime/`, `c/` (the release is a leaf; Lake reads the package definition) |
 

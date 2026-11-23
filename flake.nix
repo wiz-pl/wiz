@@ -940,7 +940,7 @@ EOF
             inherit (unwrapped) version;
             src = fs.toSource {
               root = ./.;
-              fileset = fs.unions [ ./tower ./scripts/build-tower-wiz.sh ];
+              fileset = fs.unions [ ./tower ./scripts/build-tower-wiz.sh ./lib ];
             };
             nativeBuildInputs = [ release-unwrapped ];
             dontStrip = true;
@@ -948,7 +948,14 @@ EOF
             buildPhase = ''
               runHook preBuild
               export HOME=$TMPDIR
-              sh scripts/build-tower-wiz.sh tower-bin ${release-unwrapped}/bin/grail \
+              # grail finds the standard library beside its launcher
+              # (share/wiz/.lake/build/bin/grail with share/wiz/lib); the release
+              # unwrapped output has only bin/grail, so give it the layout it reads.
+              mkdir -p grail-root/share/wiz/.lake/build/bin
+              cp ${release-unwrapped}/bin/grail grail-root/share/wiz/.lake/build/bin/grail
+              cp -R lib grail-root/share/wiz/lib
+              sh scripts/build-tower-wiz.sh tower-bin \
+                "$PWD/grail-root/share/wiz/.lake/build/bin/grail" \
                 --cc ${releaseCC} \
                 --cflags ${lib.escapeShellArg "-I${release-gmp.dev}/include"} \
                 --ldflags ${lib.escapeShellArg "-L${release-static-libs}/lib"}
@@ -959,7 +966,7 @@ EOF
               install -Dm755 tower-bin $out/bin/tower
               runHook postInstall
             '';
-            passthru.subset = "tower/ + scripts/build-tower-wiz.sh + release-unwrapped + release-static-libs";
+            passthru.subset = "tower/ + scripts/build-tower-wiz.sh + lib/ (the grail layout) + release-unwrapped + release-static-libs";
           };
 
           # The binary release tarball (scripts/release-tarball.sh): the portable
