@@ -1,3 +1,3 @@
-examples/hdl-sim-theorem.wiz:36:1: info: .cons (.cons 0 .nil) (.cons (.cons 1 .nil) (.cons (.cons 0 .nil) (.cons (.cons 1 .nil) .nil)))
-examples/hdl-sim-theorem.wiz:37:1: info: .cons (.cons 0 .nil) (.cons (.cons 1 .nil) (.cons (.cons 0 .nil) (.cons (.cons 1 .nil) .nil)))
+examples/hdl-sim-theorem.wiz:36:1: info: [[0], [1], [0], [1]]
+examples/hdl-sim-theorem.wiz:37:1: info: [[0], [1], [0], [1]]
 examples/hdl-sim-theorem.wiz:38:1: info: .true
