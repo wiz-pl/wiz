@@ -60,7 +60,7 @@ if [ -n "$modules" ]; then
     files="$files $f"
   done
 else
-  files=$(ls lib/*.wiz)
+  files=$(find lib -name '*.wiz' -print | LC_ALL=C sort)
 fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/trust-ffi.XXXXXX")
@@ -226,8 +226,8 @@ if [ "$bad" = 0 ]; then
   if ! cc $cflags -Werror=incompatible-pointer-types -Werror=implicit-function-declaration \
       -I "$root" -fsyntax-only "$tmp/sig.c" 2>"$tmp/cc.err"; then
     if grep -q 'gmp.h' "$tmp/cc.err"; then
-      echo "trust-ffi-audit: signature check skipped: cc cannot find gmp.h (set WIZ_CFLAGS)" >&2
-      skipped=1
+      echo "trust-ffi-audit: cc cannot find gmp.h; set WIZ_CFLAGS (or fix the toolchain) — a signature check cannot be skipped" >&2
+      bad=1
     else
       cat "$tmp/cc.err" >&2
       bad=1
