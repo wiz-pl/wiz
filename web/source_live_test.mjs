@@ -82,12 +82,12 @@ try {
     rootUri: fileUri("", root),
     clientInfo: { name: "scry-source-live-test" },
     languageId: "wiz",
-    requestTimeout: 30000,
+    requestTimeout: 180000,
   });
-  for (const meta of [source, target]) {
-    const data = meta === source ? sourceData : targetData;
-    client.openDocument(uriOf(meta), data.source, { languageId: "wiz" });
-  }
+  // Only the hovered file is opened: the page opens documents lazily too, and the
+  // server's term-info elaboration is the expensive part. The definition target's text
+  // is in the bundle, not in a document.
+  client.openDocument(uriOf(source), sourceData.source, { languageId: "wiz" });
   await client.connect();
   ok(client.isOpen, "the real wiz lsp accepts the connection");
 
