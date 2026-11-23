@@ -1031,7 +1031,10 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
         | j => some j
       pure (srv, #[reply (if ts.size == 1 then ts[0]! else if ts.isEmpty then Json.null else Json.arr ts)])
     | _ => pure (srv, #[reply (completion srv doc off)])
-  | _ => pure (srv, if id.isSome then #[reply Json.null] else #[])
+  -- An unknown request is an error (JSON-RPC -32601 MethodNotFound); an unknown
+  -- notification is ignored, and so is any `$/…` notification (LSP §"$ Notifications
+  -- and Requests"). A `$/…` *request* is still answered with -32601.
+  | _ => pure (srv, if id.isSome then #[replyError (-32601) s!"{method} is not supported"] else #[])
 
 /-! ## The infoview socket (`wiz lsp --infoview SOCK`, protocol §8)
 
