@@ -5968,7 +5968,7 @@ def nativeReflStep (gs : Globals) (stx : Syntax) (x : String) : Step :=
       | .cons _ _ => errStep gs nativeClosedMsg
       | .nil => match kids (kid stx 4) with
         | .cons _ (.cons tyStx _) =>
-          match inferType gs ES.empty (Cx.mk empty (Globals.scope gs) .nil) tyStx with
+          match inferType gs ES.empty (Cx.mk empty (Globals.scope gs) .nil .nil) tyStx with
           | .err m => errStep gs m
           | .ok ty0 _ es0 => match finishElab gs es0 with
             | .err m => errStep gs m
@@ -6575,9 +6575,10 @@ def defStep (gs : Globals) (stx : Syntax) : Step := match strEq (kindOf stx) "co
       (scrutsAreParams (fieldNames (fieldsOf (kids (kid stx 3)))) (nonAtoms (kids (kid (kid stx 6) 1))))) with
     | .true =>
       -- (A21) a non-recursive match on a parameter held at 1 uses the general match
-      -- (the case at 1, `scrutLets`); structural recursion keeps `matchDefCmd`
+      -- (the case at 1, `scrutLets`); structural recursion keeps `matchDefCmd`, and so
+      -- does a definition none of whose parameters is at 1 (a structure's projection, say)
       let rec := clausesMention (identOf' (kid stx 1)) (clausesOf (kids (kid (kid stx 6) 3)));
-      match Bool.not rec with
+      match Bool.and (Bool.not rec) (linearBinder (kids (kid stx 3))) with
       | .true => command gs stx
       | .false => withDefault gs stx
     | .false => match strEq (kindOf stx) "command.defEqns" with
