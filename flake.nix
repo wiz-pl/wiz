@@ -1019,15 +1019,20 @@ EOF
                 strip --strip-unneeded "$b"
                 python3 ${./scripts}/scrub-store-paths.py "$b"
               done
+              # Package in buildPhase: stdenv runs checkPhase before installPhase, and
+              # the check compares the packaged archive.
+              mkdir -p package
+              RELEASE_SOURCE_DATE_EPOCH=${epoch} SOURCE_DATE_EPOCH=${epoch} \
+                sh ${./scripts}/release-tarball.sh \
+                  "package/wiz-${releaseArch}-linux.tar.gz" bin "${revision}" "" \
+                  ${wiz-web} ${releaseSrc}
               runHook postBuild
             '';
             installPhase = ''
               runHook preInstall
               mkdir -p $out
-              RELEASE_SOURCE_DATE_EPOCH=${epoch} SOURCE_DATE_EPOCH=${epoch} \
-                sh ${./scripts}/release-tarball.sh \
-                  "$out/wiz-${releaseArch}-linux.tar.gz" bin "${revision}" "" \
-                  ${wiz-web} ${releaseSrc}
+              cp package/wiz-${releaseArch}-linux.tar.gz \
+                 package/wiz-${releaseArch}-linux.tar.gz.sha256 $out/
               runHook postInstall
             '';
             doCheck = true;
@@ -1052,9 +1057,9 @@ EOF
                     repro/b/bin "${revision}" "" ${wiz-web} ${releaseSrc} )
               cmp repro/a/out/$name.tar.gz repro/b/out/$name.tar.gz
               cmp repro/a/out/$name.tar.gz.sha256 repro/b/out/$name.tar.gz.sha256
-              cmp "$out/$name.tar.gz" repro/a/out/$name.tar.gz
+              cmp package/$name.tar.gz repro/a/out/$name.tar.gz
               sh ${./scripts}/test-release-portability.sh \
-                "$out/$name.tar.gz" --glibc ${pkgs.glibc}
+                "package/$name.tar.gz" --glibc ${pkgs.glibc}
               runHook postCheck
             '';
             passthru.subset = "release leaf: lib/ + editors/ + scripts/release-licenses + LICENSE + COPYING.RUNTIME + web/wasm-host.mjs, composed with release-unwrapped + release-tower + wiz-web";
