@@ -506,7 +506,7 @@ jobs:
           seed=$(scripts/lake-cache.sh trusted "$dir")
           echo "seed=$seed" >> "$GITHUB_OUTPUT"
           echo "trusted seed: $seed"
-      - name: nix build (wiz, grail and the test driver)
+      - name: nix build (wiz, grail and the test driver; seeded on a PR)
         id: nix
         run: |
           # One build for every job: the shards substitute these store paths (master's
@@ -946,7 +946,7 @@ jobs:
           fi
           python3 scripts/ci.py subset-key wizlib --scope "${prefix}${bin}" >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
-      - name: Restore the elaboration cache
+      - name: Restore the elaboration cache (PR-scoped on a pull request)
         id: trust-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1117,7 +1117,7 @@ jobs:
             --scope "${prefix}${{ matrix.shard.name }}-${{ needs.lean.outputs.compiler-key }}-${{ hashFiles('selfhost/*.wiz', 'selfhost/Tables.wiz', 'lib/*.wiz') }}" \
             --suffix "${{ hashFiles('**/*.wiz') }}" >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
-      - name: Restore the Wiz build caches
+      - name: Restore the Wiz build caches (writable; PR-scoped on a pull request)
         id: wiz-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1167,7 +1167,7 @@ jobs:
           "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${ro[@]}" "${allow[@]}" "${jobs[@]}" \
             --timings "logs/${{ matrix.shard.name }}.jsonl" \
             --shard "${{ matrix.shard.name }}" "${sel[@]}" 2>&1 | tee "logs/${{ matrix.shard.name }}.log"
-      - name: Save the Wiz build caches
+      - name: Save the Wiz build caches (PR-scoped on a pull request)
         # Only a shard whose tests passed reaches this step (the old `always()` wrote a
         # failed shard's cache). A shard that succeeds while another subset fails still
         # saves its own key, so the next run of this PR restores it.
