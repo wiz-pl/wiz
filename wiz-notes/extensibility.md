@@ -541,6 +541,8 @@ those lines, not taken from the audit):
 * `wiz-notes/refine-platform.md` §1 — the cross-plan table.
 * `wiz-notes/elab-evaluator-plan.md` — FeEval design and its measurement gate.
 * `wiz-notes/linting.md` §2.5–2.8 — the lint ABI, fuel, and the selfhost decision.
+* `wiz-notes/structured-view.md` — Item 3 as implemented: `wiz-info/1` on `wiz-lint/2`,
+  the `info` capability and the `Tac.getBinderFacts` request.
 * `wiz-notes/wishful/selfhost-deriving.md` — the deriver gaps, item by item.
 * `wiz-notes/selfhost-parity.md` A11–A13 — the current parity state.
 * `docs/design/README.md` — the Lean-extensibility policy sentence.

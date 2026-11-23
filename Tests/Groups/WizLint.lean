@@ -202,7 +202,7 @@ def lintGroup : Group where
             "decl=true,spans=true,imports=true,globals=true,messages=true,facts=true," ++
             "info=false,tactics=false,kernelTerm=false,sourceText=false|" ++
             "correctness,performance,api,maintainability,ecosystem|off,hint,warning,error|" ++
-            "declaration,module,workspace|facts|3,9|rawThing!|W101|7\t9\ta#1\tmsg|pkg|ok") out },
+            "declaration,module,workspace|facts|3,9|rawThing!|W101|7\t9\ta#1\tmsg|v2info|pkg|ok") out },
     { name := "a rule written against lib/Lint.wiz fires from the typed view", run := fun _ => do
         let set ← match ← loadSet "Typed.wiz" with
           | Except.ok s => pure s
@@ -215,6 +215,64 @@ def lintGroup : Group where
         check ((on.messages.find? (·.code == "W503")).map (·.text)
           == some "typed declaration 'rawThing' (0 binder(s))")
           s!"the typed rule's text did not survive: {on.messages.map (·.text)}" },
+    { name := "wiz-lint/2: a Wiz rule reads a binder's type head and arity", run := fun _ => do
+        let set ← match ← loadSet "Structured.wiz" with
+          | Except.ok s => pure s
+          | Except.error e => throw (IO.userError s!"the structured fixture set was refused: {e}")
+        check (set.abi == "wiz-lint/2") s!"unexpected ABI: {set.abi}"
+        checkEq ["W504", "W505"] (set.rules.toList.map (·.code))
+        let src := "import Prelude\nimport Data.Result\n\ndef unusedResult (r : Result Nat) : Nat := 0\n"
+        let on ← lintWith "Tests/fixtures/lint/structured.wiz" src
+          (sets := #[set]) (enabled := ["structured"])
+        noErrors on
+        check (!(on.messages.filter (·.code == "W504")).isEmpty)
+          s!"W504 did not fire: {on.messages.map (·.text)}"
+        check ((on.messages.find? (·.code == "W504")).map (·.text)
+          == some "binder 'r' has type head 'Result' (arity 1)")
+          s!"unexpected W504 text: {on.messages.map (·.text)}"
+        -- the W5xx rule is the W101 ratchet: same finding, expressed over the view
+        let core := on.messages.filter (·.code == "W101")
+        let structured := on.messages.filter (·.code == "W505")
+        check (!core.isEmpty) "the fixture produced no W101 to re-express"
+        checkEq core.size structured.size
+        for m in core do
+          check (structured.any fun v => v.text == m.text && v.anchor == m.anchor)
+            s!"W505 does not re-express W101 on '{m.text}' ({m.anchor})" },
+    { name := "wiz-lint/1 refuses the structured info capability, naming it", run := fun _ => do
+        match ← loadSet "BadInfoV1.wiz" with
+        | Except.ok _ => throw (IO.userError "a wiz-lint/1 set declaring info was accepted")
+        | Except.error e =>
+          check ((e.splitOn "info").length > 1) s!"the refusal does not name info: {e}"
+          check ((e.splitOn "wiz-lint/2").length > 1) s!"the refusal does not name wiz-lint/2: {e}" },
+    { name := "the info projection names a type head; the v2 renderer writes the rows", run := fun _ => do
+        let i : Info ZeroOneMany := .ident default "x" true [] (.const "Nat" [])
+        match Wiz.Elab.View.infoNode? "f" 0 i with
+        | none => throw (IO.userError "an ident node was projected away")
+        | some (r, next) =>
+          checkEq "f" r.decl
+          checkEq "ident" r.node
+          checkEq "x" r.name
+          checkEq "local" r.flag
+          checkEq "Nat" r.head
+          checkEq (0 : Nat) r.arity
+          checkEq "h0" r.handle
+          checkEq (1 : Nat) next
+        let w : Info ZeroOneMany := .warning default "msg"
+        check (Wiz.Elab.View.infoNode? "f" 0 w).isNone
+          "a message-only info node must not be exposed"
+        let v : Lint.CommandView :=
+          { abi := "wiz-lint/2", capabilities := [.info],
+            binderFacts := #[{ decl := "f", depth := 0, name := "r", used := false,
+                               kind := "pi", bi := "default", head := "Result", arity := 1,
+                               handle := "h0" }],
+            infoNodes := #[{ decl := "f", node := "ident", start := 1, stop := 2, name := "r",
+                             flag := "local", head := "Nat", arity := 0, handle := "h0" }] }
+        let text := v.render
+        check ((text.splitOn "view\twiz-lint/2").length > 1) s!"no v2 header: {text}"
+        check ((text.splitOn "binder-info\tf\t0\tr\tfalse\tpi\tdefault\tResult\t1\th0").length > 1)
+          s!"the binder-info row is not the schema: {text}"
+        check ((text.splitOn "info\tf\tident\t1\t2\tr\tlocal\tNat\t0\th0\t\n").length > 1)
+          s!"the info row is not the schema: {text}" },
     { name := "a manifest lint set loads; lint.conf names it and refuses an undeclared name", run := fun _ => do
         let lints ← IO.FS.readFile "Tests/fixtures/lint-pkg/Lints.wiz"
         let tc ← toolchain

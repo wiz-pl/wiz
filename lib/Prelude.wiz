@@ -632,6 +632,9 @@ inductive Tac where
   -- (P0) the raw open goals, including the main goal a tactic has just solved: what
   -- `replaceMainGoal` replaces (so it does not drop the next goal)
   | getOpen (k : List Nat → Tac)
+  -- (structured view) declaration `n`'s binder facts: one `binder-info` row per binder
+  -- (`wiz-info/1`), or `none` if `n` is not a declaration in the globals
+  | getBinderFacts (n : String) (k : Option (List String) → Tac)
 
 /-- The metaprogramming monad: requests to the elaborator (`Tac`) in
 continuation-passing style, so `bind` is just composition. Macros (`MacroM`) and
@@ -662,6 +665,10 @@ def TacticM.getGoals : TacticM (List Nat) := fun k => Tac.getGoals k
 /-- The open goals **as the tactic started**, including the main goal a tactic just
 solved: what `TacticM.replaceMainGoal` replaces. (The filtered list is `getGoals`.) -/
 def TacticM.getOpen : TacticM (List Nat) := fun k => Tac.getOpen k
+/-- Declaration `n`'s binder facts: one `binder-info` row per binder (`wiz-info/1`), the
+same projection the `wiz-lint/2` view uses; `none` if `n` is not a declaration. -/
+def TacticM.getBinderFacts (n : String) : TacticM (Option (List String)) :=
+  fun k => Tac.getBinderFacts n k
 /-- Replace the list of open goals. -/
 def TacticM.setGoals (gs : List Nat) : TacticM Unit := fun k => Tac.setGoals gs (k ())
 /-- The type of goal `g` (what is to be proved), reflected. -/

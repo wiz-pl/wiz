@@ -1,0 +1,11 @@
+import Prelude
+import Text
+
+/-! A set pinned to `wiz-lint/1` that asks for the structured `info` capability. The
+registry must refuse it and name `info` (the view exists only in `wiz-lint/2`). -/
+
+lint-set "bad-info-v1" "wiz-lint/1" [info]
+
+def noop (view : String) : String := ""
+
+lint W506 "info-view-v1" api warning declaration [info] noop

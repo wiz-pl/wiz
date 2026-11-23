@@ -25,11 +25,12 @@ def rawDecls (view : String) : String :=
     "" c.decls
 ```
 
-`Lint.Capability.stable` is the same split the registry enforces: a package set may
-declare `decl`, `spans`, `imports`, `globals`, `messages` and `facts`, and the unstable
-views (`info`, `tactics`, `kernelTerm`, `sourceText`) are refused at registration. The
-names, spellings and stable/unstable split must match the host; a test compares each
-one with `Wiz/Lint/Basic.lean`.
+`Lint.Capability.stable` is the v1 package/unstable split (`decl`, `spans`, `imports`,
+`globals`, `messages` and `facts` are stable; `info`, `tactics`, `kernelTerm` and
+`sourceText` are not). `Lint.Capability.at ABI` is the versioned predicate the registry
+uses: a set pinned to `wiz-lint/2` may also declare `info`, the structured view. The
+names, spellings and splits must match the host; a test compares each one with
+`Wiz/Lint/Basic.lean`.
 
 A finding is still four tab-separated fields, `start`, `stop`, `anchor`, `text`, and
 `anchor` is the stable baseline key (a declaration name plus an occurrence, never a
@@ -87,6 +88,16 @@ def Lint.Capability.stable : Lint.Capability → Bool
   | .tactics => .false
   | .kernelTerm => .false
   | .sourceText => .false
+
+/-- The capabilities the named ABI version provides. `wiz-lint/2` adds `info`, the
+structured view; every other capability is v1's package set. This is `abiCapability` in
+`Wiz/Lint/Basic.lean`. -/
+def Lint.Capability.at (abi : String) (c : Lint.Capability) : Bool :=
+  Bool.or (Lint.Capability.stable c)
+    (Bool.and (String.eq abi "wiz-lint/2")
+      (match c with
+      | .info => .true
+      | _ => .false))
 
 /-- The stable category of a rule. The `W` block allocates codes by category. -/
 inductive Lint.Category where

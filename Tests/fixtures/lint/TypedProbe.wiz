@@ -23,6 +23,11 @@ def catKeys : String := String.intercalate "," (List.map Lint.Category.key Lint.
 def sevKeys : String := String.intercalate "," (List.map Lint.Severity.key Lint.Severity.all)
 def scopeKeys : String := String.intercalate "," (List.map Lint.Scope.key Lint.Scope.all)
 
+def v2Info : String :=
+  match Lint.Capability.at "wiz-lint/2" .info with
+  | .true => "v2info"
+  | .false => "nov2info"
+
 def probe (view : String) : String :=
   let c := Lint.Command.parse view;
   let spanText := match c.span with
@@ -39,6 +44,7 @@ def probe (view : String) : String :=
     (.cons capKeys (.cons capStable (.cons catKeys (.cons sevKeys (.cons scopeKeys
       (.cons (match Lint.Command.has c .facts with | .true => "facts" | .false => "nofacts")
       (.cons spanText (.cons declText (.cons msgCode (.cons finding
+      (.cons v2Info
       (.cons (match Lint.packageCode "W501" with | .true => "pkg" | .false => "nopkg")
       (.cons (match Lint.Capability.ofKey "facts" with | .some .facts => "ok" | _ => "bad")
-      .nil))))))))))))
+      .nil)))))))))))))

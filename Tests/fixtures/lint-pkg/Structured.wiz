@@ -1,0 +1,59 @@
+import Prelude
+import Text
+import Lint
+
+/-!
+A `wiz-lint/2` fixture: rules over the structured view's `binder-info` rows.
+
+* `W504` reads the **head and arity** of a binder's type. The `wiz-lint/1` view's
+  `binder` row has only name/used/depth, so this finding cannot be expressed there.
+* `W505` re-expresses core `W101` (an unused binding) over the same rows: per
+  declaration, with the declaration always named. The `wiz-lint` group runs both rules
+  on the same source and compares their findings, so the two stay in step.
+-/
+
+lint-set "structured" "wiz-lint/2" [info]
+
+def fieldAt (fs : List String) (i : Nat) : String :=
+  match List.drop i fs with
+  | .cons s _ => s
+  | .nil => ""
+
+def binderRows (view : String) : List (List String) :=
+  List.foldr (fun (line : String) (acc : List (List String)) =>
+    let fs := String.splitOn line "\t";
+    match fs with
+    | .cons tag _ => if String.eq tag "binder-info" then .cons fs acc else acc
+    | .nil => acc) .nil (String.splitOn view "\n")
+
+def hiddenName (n : String) : Bool :=
+  if String.eq n "_" then .true
+  else if String.startsWith n "_" then .true
+  else String.contains n "✝"
+
+def renderFinding (decl anchorName text : String) : String :=
+  let anchor := String.append (String.append decl "#") anchorName;
+  String.append (Lint.Finding.render (Lint.Finding.mk 0 0 anchor text)) "\n"
+
+/-- `W504`: a binder whose type's head is `Result` at arity 1. -/
+def resultFindings (view : String) : String :=
+  List.foldr (fun (row : List String) (acc : String) =>
+    if Bool.and (String.eq (fieldAt row 7) "Result") (String.eq (fieldAt row 8) "1") then
+      let name := fieldAt row 3;
+      let text := String.append (String.append "binder '" name)
+        "' has type head 'Result' (arity 1)";
+      let anchorName := String.append "binder:" name;
+      String.append (renderFinding (fieldAt row 1) anchorName text) acc
+    else acc) "" (binderRows view)
+
+/-- `W505`: the `W101` finding, expressed over the structured view. -/
+def unusedFindings (view : String) : String :=
+  List.foldr (fun (row : List String) (acc : String) =>
+    let name := fieldAt row 3;
+    if Bool.and (String.eq (fieldAt row 4) "false") (Bool.not (hiddenName name)) then
+      let text := String.append (String.append "unused binding '" name) "'";
+      String.append (renderFinding (fieldAt row 1) (fieldAt row 2) text) acc
+    else acc) "" (binderRows view)
+
+lint W504 "binder-type-head" api warning declaration [info] resultFindings
+lint W505 "unused-binding-view" correctness warning declaration [info] unusedFindings

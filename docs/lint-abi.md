@@ -1,9 +1,14 @@
-# The package lint ABI (`wiz-lint/1`)
+# The package lint ABI (`wiz-lint/1`, `wiz-lint/2`)
 
 A package contributes a lint set as a Wiz module. The set is **data plus one pure
 function per rule**: the toolchain builds a stable view of the command, calls the
 function in the interpreter, and reads findings back. A package set never runs host code
 and never needs a compiler rebuild.
+
+`wiz-lint/1` is the original interface and does not change. `wiz-lint/2` adds one
+capability, `info`: the structured view of the command's declarations (binder facts with
+a type head and arity, and a whitelist of elaboration info nodes) described below. A set
+names the version it was written against in its `lint-set` header.
 
 This is the Wiz-rule entry of the shared extension model (`wiz-notes/separate-repos.md`):
 the interface is a total function over a stable view, not over kernel internals. The
@@ -39,7 +44,8 @@ core rule.
 
 ## The capability set
 
-A package may declare only the **stable** capabilities:
+A package may declare the stable capabilities; a set pinned to `wiz-lint/2` may also
+declare `info`:
 
 | capability | the view contains |
 |---|---|
@@ -49,15 +55,18 @@ A package may declare only the **stable** capabilities:
 | `globals` | one `global` line per declaration in the elaborated module |
 | `messages` | one `message` line per message: severity, code, span, text |
 | `facts` | one `binder` line per binder: name, used, depth |
+| `info` | (`wiz-lint/2` only) one `binder-info` line per binder: declaration, depth, name, used, kind, binder info, head, arity, handle; then one `info` line per exposed elaboration node |
 
-`info`, `tactics`, `kernelTerm` and `sourceText` are not part of the package ABI: they
-are unstable host views. A set that asks for one is refused, naming the capability.
+`tactics`, `kernelTerm` and `sourceText` are not part of a package ABI yet. `info` is not
+part of `wiz-lint/1`: a v1 set that declares it is refused, naming the capability and
+`wiz-lint/2`. A set pinned to `wiz-lint/2` may declare it (see "The structured view"
+below).
 
 The registry checks, before any rule runs:
 
 1. the code is `W` + three digits in `W500`–`W999`, and is unique in the enabled closure
    (a duplicate names both sets);
-2. every rule's `requires` is declared by the set;
+2. every rule's `requires` is declared by the set **and** provided by the set's ABI;
 3. the runner's closure has **no trust source** (`Globals.axiomsOf`: an axiom, a foreign
    function, `implemented_by`, an untrusted `builtin`, a native representation) and **no
    `partial` definition** (the driver must terminate);
@@ -78,6 +87,8 @@ view	wiz-lint/1
 caps	decl,spans
 ```
 
+(`view	wiz-lint/2` for a set pinned to the structured view.)
+
 `caps` names exactly the sections present. Then, in this order:
 
 ```
@@ -94,6 +105,62 @@ message	<severity>	<code>	<start>	<stop>	<text>
 
 A section the set did not declare is absent, so a rule cannot read an undeclared
 capability by accident. `start`/`stop` are offsets in the target file.
+
+## The structured view (`wiz-lint/2`)
+
+The schema is `wiz-info/1`: a `wiz-lint/2` section, not a second ABI. A set pinned to
+`wiz-lint/2` may declare `info`. The header is then `view	wiz-lint/2`, the v1 sections
+are unchanged, and two sections are appended **after** `message`:
+
+```
+binder-info	<decl>	<depth>	<name>	<used>	<kind>	<bi>	<head>	<arity>	<handle>
+info	<decl>	<node>	<start>	<stop>	<name>	<flag>	<head>	<arity>	<handle>	<data>
+```
+
+`binder-info` is one row per binder of each declaration the command added:
+
+* `decl` is the declaration name (the `wiz-lint/1` `binder` row does not carry it);
+* `depth` is the binder's depth in the stack, the same number `W101` uses in its anchor;
+* `kind` is `pi`, `lam`, `let`, `sigma`, `split` or `ecase`; `bi` is the `Π` binder's
+  `default`, `implicit` or `instImplicit`;
+* `head` is the head **constant** of the binder's type (`""` when the type is not an
+  application of a constant), and `arity` is the number of arguments applied to it. The
+  arguments themselves are not exposed;
+* `handle` is `h<n>` when the binder has a type term, `""` otherwise (a `lam`, `split`
+  or `ecase` binder has no type in the term).
+
+`info` is one row per exposed node of the command's elaboration info tree (`Wiz/Elab/Basic.lean`'s
+`Info`): `node` is `ident`, `decl`, `term`, `tactic`, `match`, `unknownIdent`,
+`syntaxRef`, `expansion`, `import` or `inst`; `flag` is the node's small word
+(`local`/`global`, `hole`/`term`, `annotated`/`inferred`, `block`/`single`,
+`kind`/`cat`, `rule`/`fn`, `catchAll`/`covered`, `instance`); `head`/`arity` and
+`handle` describe the node's principal type like a binder's; `data` is node-specific and
+never more than one field (a term's hypothesis count, an expansion's handler, an
+instance's head, a match's covered count). Synthetic nodes (a macro's output) are not
+in the view, and the message-only variants (`warning`, `trace`) and quick-fix data
+(`fix`) are not exposed.
+
+A handle is **opaque**. A `binder-info` handle is meaningful only among its
+declaration's binder rows; an `info` handle only among the command's info rows. The pair
+`(decl, handle)` identifies the occurrence, nothing more: handles are not canonical, not
+stable across runs or files, not a type identity, and a binder handle is not comparable
+with an info handle. A rule can tell two rows apart without reading a term; it cannot
+turn a handle back into one.
+
+The projection never contains a kernel `Term`, a de Bruijn index, a universe level, a
+metavariable number, a local context, or a goal's hypotheses. A rule that needs one of
+those needs a new capability, not a wider `info` row.
+
+Attribution: a `decl` node names its own declaration. Every other node belongs to the
+command's only declaration; for a command that adds several declarations from one span
+(a `mutual` block) it belongs to the first declaration whose site contains it, and
+nothing more is guessed. A module-scope rule gets no `info` rows (the view is the
+command's declarations, not the file's).
+
+`wiz-lint/1` readers are unaffected: `lib/Lint.wiz` ignores unknown tags, and a v2 set
+that does not declare `info` emits exactly the v1 sections (only the `view` header
+changes). The `info` section is the only capability `wiz-lint/2` adds; `tactics`,
+`kernelTerm` and `sourceText` remain unavailable at every version.
 
 ## Findings
 
@@ -114,8 +181,8 @@ ordinary `Msg` with `code := the rule id`, so the language server, `--json`, and
 The view is text because that is the smallest stable interface, but a rule need not
 split it by hand. `lib/Lint.wiz` mirrors the registry's vocabulary — `Capability`,
 `Category`, `Severity`, `Scope` and their `key`/`ofKey` spellings, with
-`Capability.stable` the same package/unstable split the registry enforces — and parses
-the view into structures:
+`Capability.stable` the v1 package/unstable split and `Capability.at ABI` the versioned
+predicate (`wiz-lint/2` adds `info`) — and parses the view into structures:
 
 ```wiz no-check
 import Lint
@@ -204,7 +271,8 @@ The `--package-lint`/`--set` flags and the manifest field are the discovery path
 directory-wide default file set (the package's roots) and `--diff BASE` (changed lines
 only) are not wired yet — for now a caller names the files and the baseline's keys are
 not line-scoped, so a whole-file run is the safe form. The remaining work is quick
-fixes (`Fix`), the stable projected `info` view (`termView`), a step/fuel budget for the
-interpreter (so a trusted-library `partial` helper cannot hang a run), and the selfhost
-lint table. `lint.conf`'s `deny`/severity gating is also still open: the flags
-(`--deny`, `--rule`) are per invocation, not per repository.
+fixes (`Fix`), a typed projection of the `wiz-lint/2` `binder-info`/`info` rows in
+`lib/Lint.wiz` (the host schema is fixed; the wrapper still parses only the v1 tags), a
+step/fuel budget for the interpreter (so a trusted-library `partial` helper cannot hang a
+run), and the selfhost lint table. `lint.conf`'s `deny`/severity gating is also still
+open: the flags (`--deny`, `--rule`) are per invocation, not per repository.

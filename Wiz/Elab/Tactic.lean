@@ -90,6 +90,8 @@ def byCases := 42
 def getHints := 43
 -- (P0) the raw open-goal list (before filtering solved goals), for `replaceMainGoal`
 def getOpen := 44
+-- (structured view) one declaration's binder facts (`wiz-info/1`)
+def getBinderFacts := 45
 end TacTag
 
 structure Goal (R : Type) where

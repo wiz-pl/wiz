@@ -328,6 +328,21 @@ def tacticGroup : Group where
           "\ndef t2 : Nat := by\n  show_simps\n  exact 0") ["r1, r2", "r1, r2"]
         okLib ("import Prelude\n" ++ defs ++ "attribute [simp] r1\nattribute [simp 2000] r2\n" ++ namesTac ++
           "def t : Nat := by\n  show_simps\n  exact 0") ["r2, r1"] },
+    { name := "TacticM.getBinderFacts: the structured binder rows of a declaration", run := fun _ => do
+        okLib ("import Prelude\n" ++
+          "def unusedResult (r : Nat) : Nat := 0\n" ++
+          "def rowsText : List String → String\n" ++
+          "  | .nil => \"\"\n" ++
+          "  | .cons row rest => String.append row (String.append \"|\" (rowsText rest))\n" ++
+          "syntax (name := showFacts) \"show_facts\" : tactic\n" ++
+          "def showFactsTac : Tactic := fun _ => do\n" ++
+          "  fs ← TacticM.getBinderFacts \"unusedResult\";\n" ++
+          "  match fs with\n" ++
+          "  | .some rows => TacticM.trace (rowsText rows)\n" ++
+          "  | .none => TacticM.trace \"none\"\n" ++
+          "attribute [tactic tactic.showFacts] showFactsTac\n" ++
+          "def probe : Nat := by\n  show_facts\n  exact 0")
+          ["binder-info\tunusedResult\t0\tr\tfalse\tpi\tdefault\tNat\t0\th0|"] },
     { name := "simp: [simp] attribute errors and warnings", run := fun _ => do
         failsLibs "import Prelude\nattribute [simp] Nat.succ" "not an equation"
         failsLibs "import Prelude\nattribute [simp] nope" "unknown declaration"

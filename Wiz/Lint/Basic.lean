@@ -42,10 +42,10 @@ inductive Scope where
   deriving BEq, Repr, Inhabited
 
 /-- The capability a rule declares. The registry builds exactly the declared view; a
-package rule may read only the **stable** capabilities (`decl`, `spans`, `imports`,
-`globals`, `messages`, `facts`). The unstable ones (`info`, `tactics`, `kernelTerm`,
-`sourceText`) are refused for a package set (a core rule, or a future `abi`-pinned set,
-may use them). -/
+package rule may read only the capabilities its set's ABI provides. `wiz-lint/1` has the
+stable six (`decl`, `spans`, `imports`, `globals`, `messages`, `facts`); `wiz-lint/2`
+adds the structured `info` view. The other unstable views (`tactics`, `kernelTerm`,
+`sourceText`) are refused for a package set at every version. -/
 inductive Capability where
   | decl
   | spans
@@ -85,9 +85,10 @@ def Capability.ofKey? : String → Option Capability
   | "sourceText" => some .sourceText
   | _ => none
 
-/-- The capabilities a package rule set may declare. The unstable views are not part of
-the P1 package ABI: a rule that needs `info` or the raw term asks for a toolchain
-extension, not a capability the loader can honour. -/
+/-- The capabilities a `wiz-lint/1` package rule set may declare. The unstable views are
+not part of the P1 package ABI: a rule that needs `info` or the raw term asks for a
+toolchain extension, or pins its set to `wiz-lint/2`, which adds the structured `info`
+view. -/
 def packageCapability : Capability → Bool
   | .decl => true
   | .spans => true
@@ -99,6 +100,16 @@ def packageCapability : Capability → Bool
   | .tactics => false
   | .kernelTerm => false
   | .sourceText => false
+
+/-- The lint ABIs this toolchain reads. A set names the one it was written against. -/
+def supportedAbi (abi : String) : Bool :=
+  abi == "wiz-lint/1" || abi == "wiz-lint/2"
+
+/-- The capabilities an ABI version provides. `wiz-lint/2` adds the structured `info`
+view; every other capability is v1's package set. `tactics`, `kernelTerm` and
+`sourceText` are not provided by any version yet. -/
+def abiCapability (abi : String) (c : Capability) : Bool :=
+  packageCapability c || (abi == "wiz-lint/2" && c == .info)
 
 def Category.key : Category → String
   | .correctness => "correctness"

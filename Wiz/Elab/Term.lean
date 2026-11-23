@@ -3,6 +3,7 @@ import Wiz.Elab.Macro
 import Wiz.Elab.Tactic
 import Wiz.Elab.Class
 import Wiz.Elab.Struct
+import Wiz.Elab.View
 import Wiz.Smt.Translate
 import Wiz.Smt.Sat
 
@@ -4184,6 +4185,15 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     -- (P0) the raw open list: the main goal a tactic has just solved is still first, so
     -- `replaceMainGoal` knows which goal it replaces and keeps the next ones
     return ← runTac code info st (apply code (fld 0) (encodeList (st.open.map encodeNat)))
+  if tag == TacTag.getBinderFacts then
+    -- (structured view) the declaration's binder facts, as `wiz-info/1` rows
+    let n ← str (fld 0)
+    let ans := match g.find? n with
+      | some d =>
+        mkCon 1 [encodeList ((View.declFacts d).1.toList.map fun f =>
+          encodeString (View.BinderRow.render (View.BinderFact.row d.name f)))]
+      | none => mkCon 0 []
+    return ← runTac code info st (apply code (fld 1) ans)
   if tag == TacTag.setGoals then
     let some gs := decodeList (fld 0) | throwAt info "tactic: malformed goal list"
     return ← runTac code info { st with «open» := ← gs.mapM num } (fld 1)
