@@ -63,7 +63,7 @@ FAST_PROGRAMS = 8
 FAST_STEPS = 4
 NIGHTLY_PROGRAMS = 200
 NIGHTLY_STEPS = 8
-TMP_ROOT = Path(os.environ.get("TMPDIR", "/tmp/opencode"))
+TMP_ROOT = Path(os.environ.get("TMPDIR", "/tmp/opencode")) / "incremental-scry"
 
 IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -338,8 +338,8 @@ class Run:
 
 
 def run_artifacts(binary: Path, root: Path, out: Path, cache: Optional[Path],
-                  mode: str, rules: Path) -> Run:
-    args = [str(binary), str(root), "--out", str(out), "--rules", str(rules)]
+                  mode: str, rules: Path, cc: str) -> Run:
+    args = [str(binary), str(root), "--out", str(out), "--rules", str(rules), "--cc", cc]
     if cache is not None:
         args += ["--cache-dir", str(cache)]
     if mode in ("allow", "skip"):
@@ -351,12 +351,12 @@ def run_artifacts(binary: Path, root: Path, out: Path, cache: Optional[Path],
 
 
 def run_cli(binary: Path, root: Path, outdir: Path, cache: Optional[Path],
-            rules: Path, mode: str) -> Run:
+            rules: Path, mode: str, cc: str) -> Run:
     outdir.mkdir(parents=True, exist_ok=True)
     sarif = outdir / "cli.sarif"
     facts = outdir / "cli.facts"
     args = [str(binary), "project", str(root), "--taint", "--json",
-            "--rules", str(rules), "--sarif", str(sarif), "--facts", str(facts)]
+            "--rules", str(rules), "--cc", cc, "--sarif", str(sarif), "--facts", str(facts)]
     if cache is not None:
         args += ["--cache-dir", str(cache)]
     if mode in ("allow", "skip"):
@@ -466,7 +466,7 @@ def parse_manifest_hits(path: Path) -> dict[str, int]:
 
 
 def run_campaign(seed: int, program: int, steps: int, artifacts: Path, scry: Path,
-                 rules: Path, keep: bool, cli: bool) -> CampaignResult:
+                 rules: Path, cc: str, keep: bool, cli: bool) -> CampaignResult:
     rng = random.Random(seed * 100003 + program)
     fuzz = load_fuzz_lower()
     base = new_state(rng, fuzz, rng.randint(1, 3))
@@ -488,7 +488,7 @@ def run_campaign(seed: int, program: int, steps: int, artifacts: Path, scry: Pat
             write_state(root / "proj", st)
             for mode in modes:
                 run_artifacts(artifacts, root / "proj",
-                              root / f"warm-{step}-{mode}", cache, mode, rules)
+                              root / f"warm-{step}-{mode}", cache, mode, rules, cc)
 
         # Final state: full (no cache) vs incremental (warm cache), for each mode.
         final = history[-1]
@@ -497,8 +497,8 @@ def run_campaign(seed: int, program: int, steps: int, artifacts: Path, scry: Pat
         for mode in modes:
             full_out = root / f"full-{mode}"
             inc_out = root / f"inc-{mode}"
-            full = run_artifacts(artifacts, root / "proj", full_out, None, mode, rules)
-            inc = run_artifacts(artifacts, root / "proj", inc_out, cache, mode, rules)
+            full = run_artifacts(artifacts, root / "proj", full_out, None, mode, rules, cc)
+            inc = run_artifacts(artifacts, root / "proj", inc_out, cache, mode, rules, cc)
             why = compare_runs(f"artifacts/{mode}", full, inc)
             if why is None:
                 why = compare_trees(f"artifacts/{mode}", full_out, inc_out)
@@ -512,8 +512,8 @@ def run_campaign(seed: int, program: int, steps: int, artifacts: Path, scry: Pat
             for mode in modes:
                 cli_full_dir = root / f"cli-full-{mode}"
                 cli_inc_dir = root / f"cli-inc-{mode}"
-                full = run_cli(scry, root / "proj", cli_full_dir, None, rules, mode)
-                inc = run_cli(scry, root / "proj", cli_inc_dir, cache, rules, mode)
+                full = run_cli(scry, root / "proj", cli_full_dir, None, rules, mode, cc)
+                inc = run_cli(scry, root / "proj", cli_inc_dir, cache, rules, mode, cc)
                 why = compare_runs(f"cli/{mode}", full, inc)
                 if why is None:
                     fs = full.stdout.strip()
@@ -608,6 +608,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="scry-artifacts binary")
     ap.add_argument("--scry", type=Path, default=DEFAULT_SCRY, help="scry binary")
     ap.add_argument("--rules", type=Path, default=DEFAULT_RULES, help="rule pack")
+    ap.add_argument("--cc", default=os.environ.get("CC", "cc"),
+                    help="C compiler for cc -E (default $CC or cc)")
     ap.add_argument("--no-cli", action="store_true",
                     help="compare only the artifact bundles, not `scry project`")
     ap.add_argument("--keep", action="store_true",
@@ -647,7 +649,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     for program in range(args.programs):
         seed = args.seed + program
         res = run_campaign(seed, program, args.steps, args.artifacts, args.scry,
-                           args.rules, args.keep, not args.no_cli)
+                           args.rules, args.cc, args.keep, not args.no_cli)
         rows.append({"seed": seed, "program": program, "ok": res.ok,
                      "message": res.message if not res.ok else res.message,
                      "hits": res.hits, "mutations": res.steps})

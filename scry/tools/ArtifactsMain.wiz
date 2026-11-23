@@ -1,5 +1,8 @@
 import Sys
 import Text
+import Word
+import WordArray
+import Intern
 import Scry.ProjectIO
 import Scry.Project
 import Scry.ProjectTaint
@@ -145,7 +148,7 @@ def Scry.adStoreDump (s : Scry.CstStore) : String :=
     "edge\t" ++ Nat.repr i ++ "\t" ++ Scry.adEdgeRow s i);
   let relnames := Scry.adRange nr (fun i =>
     "relname\t" ++ Nat.repr i ++ "\t" ++ Scry.cstEnc (Scry.adIntern s.relNames i));
-  let rels := List.concat (Scry.adRange r (fun i => Scry.adRelRows s i));
+  let rels := List.concat (List.map (fun i => Scry.adRelRows s i) (Scry.schemaRange r));
   Scry.adLines (List.concat
     [ [ "store\tv1"
       , "language\t" ++ Scry.cstEnc s.language
@@ -315,7 +318,8 @@ def Scry.adUnit (u : Scry.ProjectUnit) : String :=
   let externals := Scry.adExternals tu.externalCalls;
   Scry.adLines (List.concat
     [ [ "unit\t" ++ Scry.cstEnc u.path
-      , "errors\t" ++ Nat.repr u.errors ]
+      , "errors\t" ++ Nat.repr u.errors
+      , "store-digest\t" ++ Scry.cstFullDigest u.store ]
     , files
     , [ "funcs\t" ++ Nat.repr (List.length tu.funcs) ]
     , funcs
@@ -410,12 +414,12 @@ partial def Scry.artifactUnitsGo2 (out : String) (i : Nat) :
     Scry.artifactUnitsGo2 out (Nat.succ i) rest
 
 /-- Build, dump, and return. -/
-def Scry.artifactRun (args : List String) : EIO Nat := do
+def Scry.artifactRun (args : List String) : EIO Unit := do
   match Scry.parseArtifactArgs .none
       (Scry.ArtifactOpts.mk "" .none "cc" Scry.CacheOpts.none .false .false .false .none "") args with
   | .error e => do
     EIO.lift (IO.ePrintln ("scry-artifacts: " ++ e));
-    EIO.pure 2
+    EIO.lift (Process.exit 2)
   | .ok pair => do
     let opts := pair.2;
     r ← Scry.ProjectIO.buildProject pair.1 opts.compdb opts.cc opts.allowErrors
@@ -432,7 +436,6 @@ def Scry.artifactRun (args : List String) : EIO Nat := do
     FS.writeFile (opts.out ++ "/report.json") (Scry.renderProjectJson rep);
     FS.writeFile (opts.out ++ "/report.sarif") (Scry.renderProjectSarif rep);
     FS.writeFile (opts.out ++ "/report.human") (Scry.ProjectReport.human rep);
-    EIO.pure 0
+    EIO.pure ()
 
-def main : IO Unit := IO.bind IO.args (fun args =>
-  IO.bind (EIO.toIO (Scry.artifactRun args)) (fun n => Process.exit n))
+def main : IO Unit := EIO.toIO (IO.bind IO.args Scry.artifactRun)

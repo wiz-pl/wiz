@@ -4,7 +4,6 @@ import Functor
 import WordArray
 import Intern
 import IO
-import Scry.Identity
 import Scry.Facts
 /-!
 # Scry.CstStore: the native CST columns
@@ -468,61 +467,6 @@ def Scry.CstStore.kindIdOf (s : Scry.CstStore) (name : String) : Option U32 :=
 /-- The store's field id for a field name. -/
 def Scry.CstStore.fieldIdByName (s : Scry.CstStore) (name : String) : Option U32 :=
   InternTable.find s.fields name
-
--- ## A content digest of every column
-
-/-- Mix a string into a running FNV-style hash (scry's identity hash: multiply then
-add; the constants are FNV's, see `Scry.Identity`). -/
-def Scry.digestStr (h : U64) (s : String) : U64 :=
-  List.foldl (fun acc c => Scry.fnvStep acc (U64.ofNat (Char.code c)))
-    (Scry.fnvStep h (U64.ofNat (String.length s))) (String.chars s)
-
-/-- Mix an intern table (its names, in id order) into a running hash. -/
-def Scry.digestTable (h : U64) (t : InternTable) : U64 :=
-  List.foldl (fun acc s => Scry.digestStr acc s) h (InternTable.toList t)
-
-/-- Mix a `U32` column, with its length, into a running hash. -/
-def Scry.digestU32 (h : U64) (a : U32Array) : U64 :=
-  U32Array.foldl (fun acc x => Scry.fnvStep acc (U64.ofNat (UIntN.toNat x)))
-    (Scry.fnvStep h (U64.ofNat (U32Array.size a))) a
-
-/-- Mix a `U64` column, with its length, into a running hash. -/
-def Scry.digestU64 (h : U64) (a : U64Array) : U64 :=
-  U64Array.foldl (fun acc x => Scry.fnvStep acc x)
-    (Scry.fnvStep h (U64.ofNat (U64Array.size a))) a
-
-/-- A digest of **every** column of a store, including the intern tables and the child
-CSR. `render`/`ofText` does not write `nextSib` or the child CSR (`ofText` re-derives
-them from the edge rows), so a spill round trip that loses a column has a different
-digest even when its rendered text is byte-identical. The project cache stores this
-digest and refuses a loaded entry whose recomputed digest does not match; that turns any
-lossy round trip into a cache miss instead of a stale hit.
-
-Collisions are 64-bit; this is a fast consistency check, not a security commitment. -/
-def Scry.CstStore.fullDigest (s : Scry.CstStore) : String :=
-  let h0 := Scry.digestStr Scry.fnvOffset s.language;
-  let h1 := Scry.digestTable h0 s.kinds;
-  let h2 := Scry.digestTable h1 s.fields;
-  let h3 := Scry.digestTable h2 s.paths;
-  let h4 := Scry.digestU32 h3 s.kindCol;
-  let h5 := Scry.digestU32 h4 s.fieldCol;
-  let h6 := Scry.digestU32 h5 s.flags;
-  let h7 := Scry.digestU32 h6 s.parent;
-  let h8 := Scry.digestU64 h7 s.spans;
-  let h9 := Scry.digestU32 h8 s.fileCol;
-  let h10 := Scry.digestU32 h9 s.nextSib;
-  let h11 := Scry.digestU32 h10 s.childOff;
-  let h12 := Scry.digestU32 h11 s.children;
-  let h13 := Scry.digestU32 h12 s.childField;
-  let h14 := Scry.digestU32 h13 s.edgeSrc;
-  let h15 := Scry.digestU32 h14 s.edgeDst;
-  let h16 := Scry.digestU32 h15 s.edgeLabel;
-  let h17 := Scry.digestU64 h16 s.bytes;
-  let h18 := Scry.digestTable h17 s.relNames;
-  let h19 := Scry.digestU32 h18 s.relArity;
-  let h20 := Scry.digestU32 h19 s.relOff;
-  let h21 := Scry.digestU32 h20 s.relTuples;
-  Nat.repr (UIntN.toNat h21)
 
 -- ## The spill format
 
