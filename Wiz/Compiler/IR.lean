@@ -179,6 +179,60 @@ def symbol? (backend : Backend) (p : PrimOp) : Option String :=
 
 end PrimOp
 
+namespace Backend
+
+/-- The target's name, as `--target` spells it and as an implementation key carries it. -/
+def name : Backend → String
+  | .c => "c"
+  | .llvm => "llvm"
+  | .wasm => "wasm"
+
+end Backend
+
+/-- One implementation of a foreign declaration for a target. The *declaration* is the
+library's `extern` (one interface, written once); a row here is a registration naming the
+target and the symbol that implements it. `extern` itself is a declaration plus the C row,
+so a `c`/`llvm` build needs no entry; a row is added only where the target's symbol is not
+the C ABI's. Rows are not kernel constants: `#print axioms` still names the declaration. -/
+structure ExternImpl where
+  /-- the declared Wiz name (the interface every call site writes) -/
+  decl : Name
+  /-- the target whose implementation this is -/
+  backend : Backend
+  /-- the symbol the target's runtime provides (a Wasm runtime function today) -/
+  symbol : String
+  deriving Repr, Inhabited
+
+namespace ExternImpl
+
+/-- The registry key of one implementation: target and declaration. A row for another
+target cannot be selected by the declaration alone, and the key text names the target
+wherever it is recorded. -/
+def key (i : ExternImpl) : Name := s!"{i.backend.name}:{i.decl}"
+
+end ExternImpl
+
+/-- The implementations of library externs that are not the C ABI. The declaration is in
+`lib/` (`Std`'s five `Array` externs); the Wasm runtime implements them as in-module
+functions. Keyed by the declaration's Wiz name, not by the C name: the same interface may
+have a different symbol (or ABI) on another target. -/
+def externImpls : List ExternImpl :=
+  [ { decl := "Array.empty", backend := .wasm, symbol := "wiz_array_empty" },
+    { decl := "Array.push", backend := .wasm, symbol := "wiz_array_push" },
+    { decl := "Array.size", backend := .wasm, symbol := "wiz_array_size" },
+    { decl := "Array.getD", backend := .wasm, symbol := "wiz_array_get" },
+    { decl := "Array.set", backend := .wasm, symbol := "wiz_array_set" } ]
+
+/-- The implementation of `decl` for `backend` in `impls`. The `impls` argument is the
+registry to read (the default is `externImpls`); a build passes it explicitly so a test
+can drop or damage a row and prove the row is what selects the symbol. -/
+def externImplIn (impls : List ExternImpl) (backend : Backend) (decl : Name) : Option ExternImpl :=
+  impls.find? fun i => i.backend == backend && i.decl == decl
+
+/-- The implementation of `decl` for `backend`, from the shared registry. -/
+def externImpl? (backend : Backend) (decl : Name) : Option ExternImpl :=
+  externImplIn externImpls backend decl
+
 inductive Expr where
   /-- `◾`, a scalar -/
   | erased
