@@ -1508,7 +1508,11 @@ jobs:
   docs:
     name: docs (wiz doc --lib + site)
     needs: [lean, wasm]
-    if: github.event_name == 'push'
+    # Built on a pull request as well as a push: the source-reader step is the one place
+    # a regression in `/source/` (a missing store path, a broken bundle, the Chromium
+    # check) shows up before merge, and it cost a master red to discover that when this
+    # was push-only. Only the *deploy* to Pages stays merge-action-only (`deploy-docs`).
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # 60 min: `wiz doc --lib` (10-19 min cold, ~2-4 min with the restored cache), the
     # source reader's `grail build scry` (~12 min measured in scry.yml) and the site,
@@ -1719,7 +1723,9 @@ jobs:
   deploy-docs:
     name: deploy docs to Pages
     needs: docs
-    if: github.event_name == 'push'
+    # Merge action only: a push to master. The site is *built* on every pull request now;
+    # publishing it is the one step that belongs to the merge.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # 10 min: upload the artifact and deploy it; no build
     timeout-minutes: 10
@@ -1899,10 +1905,16 @@ jobs:
           # default build (a toolchain or lakefile bump can break it too)
           want_stc=false
           if [ "$code" = true ] || [ "$stc" = true ]; then want_stc=true; fi
-          # the site is built and checked on every push (and only then); its failure is a
-          # real failure on master, so it is required there. `deploy-docs` stays out: a
-          # Pages outage is not a defect in the commit.
-          want_site=$([ "${{ github.event_name }}" = push ] && echo true || echo false)
+          # The site is built and checked on a pull request as well as a push (the source
+          # reader is where a `/source/` regression shows up), so it is required whenever
+          # it could run: `lean` ran (the job needs it), the `web` filter matched (the
+          # `wasm` job, which `docs` also needs, only runs then), and the event is not the
+          # schedule. `deploy-docs` stays out of the gate: a Pages outage is not a defect.
+          want_docs=$([ "$code" = true ] && [ "${{ needs.changes.outputs.web }}" = true ] && [ "${{ github.event_name }}" != schedule ] && echo true || echo false)
+          # The cold trusted seed is a master push's job only (it publishes the trusted
+          # store path); another event's seeded build falls back to a cold build, so the
+          # seed job is not required there.
+          want_seed=$([ "${{ github.event_name }}" = push ] && [ "${{ github.ref }}" = refs/heads/master ] && echo true || echo false)
           # a docs-only change has no lean job, so `docs_examples` builds wiz and checks
           # the snippets; a code change runs the same check in `lean`
           want_docs_examples=$([ "$code" = false ] && [ "$docs" = true ] && echo true || echo false)
@@ -1919,7 +1931,7 @@ jobs:
           check lean "${{ needs.lean.result }}" "$code"
           # the cold trusted seed only runs on a push to master; a PR's seeded build
           # falls back to the cold build when it is missing, so it is not required there
-          check "lake seed" "${{ needs.lake_seed.result }}" "$want_site"
+          check "lake seed" "${{ needs.lake_seed.result }}" "$want_seed"
           check "trust ledger" "${{ needs.trust_ledger.result }}" "$code"
           check "STC metatheory" "${{ needs.stc.result }}" "$want_stc"
           check tests "${{ needs.tests.result }}" "$want_tests"
@@ -1929,7 +1941,7 @@ jobs:
           # a change to web/** must build the playground and pass its Node tests; the
           # job is skipped (and that is fine) only when the filter does not want it
           check web "${{ needs.web.result }}" "$web"
-          check docs "${{ needs.docs.result }}" "$want_site"
+          check docs "${{ needs.docs.result }}" "$want_docs"
           check packages "${{ needs.packages.result }}" "$want_packages"
           check runtime "${{ needs.runtime.result }}" "$want_runtime"
 
