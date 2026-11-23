@@ -1,0 +1,84 @@
+import Prelude
+
+/-!
+# Doc-comment fences
+
+A `wiz` fence in a module comment is checked like a Markdown one:
+
+```wiz
+def doc_good : Nat := 1
+```
+
+A runnable block and its output:
+
+```wiz run
+import IO
+
+def main : IO Unit := IO.println "hello from fixture"
+```
+
+```text
+hello from fixture
+```
+
+A fragment is counted as no-check:
+
+```wiz no-check
+def doc_fragment : Nat := defined_above
+```
+
+An untagged block is not Wiz (it is counted, not checked):
+
+```
+this untagged block is not Wiz
+```
+
+A Lean block is another language (counted too):
+
+```lean
+example : Nat := 1
+```
+
+Another run block with no output block of its own (it must not borrow the `text`
+block of a later comment):
+
+```wiz run
+import IO
+
+def main : IO Unit := IO.println "hello from fixture"
+```
+-/
+
+/-- A plain block in a later comment is not the output of the run above.
+
+```text
+wrong output
+```
+-/
+def note : Nat := 0
+
+/-- A declaration doc comment carries fences too.
+
+```wiz
+def decl_good : Nat := 2
+```
+-/
+def decl_good : Nat := 2
+
+/-- This one is deliberately broken: the checker must name the file and the line.
+
+```wiz
+FAIL_DOC_FENCE
+```
+-/
+def broken : Nat := 0
+
+-- ```wiz
+-- FAIL_LINE_COMMENT
+-- ```
+
+def string_literal : String := "/-!
+```wiz
+FAIL_STRING_LITERAL
+```
+-/"

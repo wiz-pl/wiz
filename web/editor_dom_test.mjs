@@ -4,6 +4,7 @@
 //
 //   usage: node web/editor_dom_test.mjs
 "use strict";
+import { readFileSync } from "node:fs";
 import { document as minidoc, Element } from "./framework/minidom.mjs";
 import { mountSquiggles, wantsSquiggles } from "./squiggles.js";
 import { mountCompletions, wantsCompletions } from "./completions.js";
@@ -104,6 +105,7 @@ function squiggleTexts(layer) {
   check("squiggles: under the offending text", squiggleTexts(pane), ["nope"]);
   check("squiggles: the message is the tooltip", firstSquiggle(pane).getAttribute("title"), "unknown identifier");
   check("squiggles: the severity class", firstSquiggle(pane).getAttribute("class"), "squiggle sev-error");
+
   check("squiggles: the count is on the parent", pane.getAttribute("data-squiggles"), "1");
 
   // Diagnostics clear: nothing is drawn.
@@ -130,6 +132,26 @@ function squiggleTexts(layer) {
   checkThat("squiggles: destroyed, the editor stays", editor.parentNode === pane);
 }
 
+// The class suffix is the runtime's `severityName`, not a numeric map in the widget: a
+// name the page does not know is still the one painted (`sev-hint` for a severity-1
+// span). The oracle's `rules.segments` would re-derive the name, so this uses a rule
+// that returns a runtime-shaped span directly.
+{
+  const doc = makeDoc();
+  const editor = makeEditor(doc, "def f : Nat := nope\n");
+  const pane = doc.createElement("div");
+  pane.appendChild(editor);
+  doc.body.appendChild(pane);
+  const squiggles = mountSquiggles(editor, {
+    document: doc,
+    segments: () => [{ start: 15, stop: 19, severity: 1, severityName: "hint", message: "m" }],
+  });
+  squiggles.update([]);
+  check("squiggles: the runtime's severity name is painted verbatim",
+    firstSquiggle(pane).getAttribute("class"), "squiggle sev-hint");
+  squiggles.destroy();
+}
+
 check("squiggles: on by default", wantsSquiggles(""), true);
 check("squiggles: ?squiggles=off", wantsSquiggles("?squiggles=off"), false);
 check("squiggles: ?squiggles=0", wantsSquiggles("?squiggles=0"), false);
@@ -149,7 +171,8 @@ function completionPage(options = {}) {
   doc.body.appendChild(editor);
   const calls = [];
   const popup = mountCompletions({
-    editor, document: doc, rules, debounce: options.debounce === undefined ? 5 : options.debounce,
+    editor, document: doc, rules: options.rules || rules,
+    debounce: options.debounce === undefined ? 5 : options.debounce,
     autoTrigger: options.autoTrigger,
     onRequest: options.onRequest || (async (position) => { calls.push(position); return options.items || NAT_ITEMS; }),
   });
@@ -202,6 +225,30 @@ function completionPage(options = {}) {
   check("completions: the caret", editor.selectionStart, 7);
   check("completions: one input event", inputs, 1);
   check("completions: closed after accepting", popup.isOpen(), false);
+}
+
+{
+  // The host has no key table: it carries out whichever command the runtime names, even
+  // when the key is not one a real popup binds (here ArrowDown means "close").
+  const command = { action: "close" };
+  const { popup } = completionPage({
+    value: "Nat.", caret: 4, rules: { ...rules, key: () => command },
+  });
+  await popup.request({ line: 0, character: 4 });
+  let prevented = false;
+  popup.handleKey({ key: "ArrowDown", preventDefault() { prevented = true; } });
+  check("completions: the runtime's key command is carried out", popup.isOpen(), false);
+  check("completions: a handled key is prevented", prevented, true);
+}
+
+{
+  // A move command carries the index itself; the host sets it, it does not add a delta.
+  const { popup } = completionPage({
+    value: "Nat.", caret: 4, rules: { ...rules, key: () => ({ action: "move", index: 2 }) },
+  });
+  await popup.request({ line: 0, character: 4 });
+  popup.handleKey({ key: "x", preventDefault() {} });
+  check("completions: the runtime's index is the selection", popup.selectedIndex(), 2);
 }
 
 {
@@ -300,6 +347,17 @@ function completionPage(options = {}) {
   popup.handleKey({ key: "Enter", preventDefault() {}, stopPropagation() {} });
   check("completions: a textEdit from older text is not applied", editor.value, "def x := Nat.add");
   check("completions: the caret after a re-anchored edit", editor.selectionStart, 16);
+}
+
+// The popup may not bring back the policy the runtime owns: a local key table, a page
+// size, or scoring/filtering/acceptance arithmetic is the regression this pins.
+{
+  const source = readFileSync(new URL("./completions.js", import.meta.url), "utf-8");
+  checkThat("source: no local key table",
+    !/case\s+"(?:Arrow|Page|Enter|Tab|Escape)/.test(source));
+  checkThat("source: no local page size", !/\bPAGE\b/.test(source));
+  checkThat("source: no local completion scoring, filtering or acceptance",
+    !/completionScore|filterCompletions|acceptCompletion|completionPopupState/.test(source));
 }
 
 check("completions: on by default", wantsCompletions(""), true);

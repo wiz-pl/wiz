@@ -277,10 +277,12 @@ in arrival order (`serveWith`).
 server prints the port on stderr. It can be combined with `--infoview`, and `--no-stdio`
 runs the server without an editor on stdin. The handshake requires a `GET` with
 `Upgrade: websocket`. A request with an `Origin` header is let in only from a local page:
-`null` (a local file), `vscode-webview://`, or `http(s)://` on `localhost`, `127.0.0.1`
-or `[::1]` (`localOrigin`); a browser page on any site could otherwise talk to the
-server. With web infoview files available, a plain `GET` of one of those files (and only
-those, by exact name: `webAssets`) is served over HTTP on the same port.
+`vscode-webview://`, or `http(s)://` on `localhost`, `127.0.0.1` or `[::1]`
+(`localOrigin`); an opaque origin, which browsers send as `null` for a sandboxed iframe
+or a `data:`/`file:` page, is refused, so a page on any site cannot talk to the server
+either directly or through a sandboxed frame. With web infoview files available, a plain
+`GET` of one of those files (and only those, by exact name: `webAssets`) is served over
+HTTP on the same port.
 
 Each text or binary frame holds one JSON-RPC message; fragments are joined, pings
 answered, client frames must be masked, and messages over 256 MiB end the connection. A

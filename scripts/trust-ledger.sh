@@ -20,6 +20,21 @@
 #   scripts/trust-ledger.sh --update --reason "why" [--owner "who"] [--review DATE]
 #                                       regenerate the ledger and add the new rows
 #                                       (an explicit --review also renews migration rows)
+#   scripts/trust-ledger.sh --update --renew-expired --review DATE \
+#                            --owner "who re-reviewed" --reason "what was re-checked"
+#                                       renew the rows whose review date has passed;
+#                                       the reason is kept and gains
+#                                       ` | renewed DATE by OWNER: BASIS` (the owner
+#                                       becomes the named re-reviewer; an explicit
+#                                       review for a new or renewed row must be
+#                                       >= today + 90)
+#
+# Scry is a package (`scry/`), not part of lib/ (separate-repos.md P0.1): its modules
+# and rule packs moved to `scry/src/Scry/` and `scry/rules/`, and its rows left this
+# ledger with them. The eight reviewed rows for Scry.Index/Scry.Interproc/Scry.Wil are
+# kept in `scry/trust-baseline.tsv` (a review record: the lib/ walk cannot see them).
+# A scry trust walk belongs to the package's own CI. (Quire, promoted into `lib/Scry/`,
+# is in the walk and in this ledger like any other lib/ module.)
 #
 # `--cache DIR` is the elaboration cache the walk writes and `--cache-ro DIR` (repeatable)
 # a read-only layer it searches, in the order given (the same flags as `wiz`). The walk

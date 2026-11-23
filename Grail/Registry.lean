@@ -188,18 +188,47 @@ def lookupVendor (dir : System.FilePath) (sha256 : String) : IO (Option System.F
       if e.fileName.startsWith (sha256 ++ ".") then return some e.path
   pure none
 
-/-- Download `url` to `dest` (`curl` for http/https, a copy for a path or `file://`). -/
-def download (url : String) (dest : System.FilePath) : IO (Except String Unit) := do
+/-- The `curl` arguments for a download. `--` ends the options before the URL: a
+registry-supplied URL beginning with `-` must be an address, not a curl option. With
+`maxBytes`, `--max-filesize` makes curl refuse a body larger than the size the entry
+declared (R19: the cap is enforced before the bytes reach the disk, not only after). -/
+def curlArgs (url : String) (dest : System.FilePath) (maxBytes : Option Nat := none) :
+    Array String :=
+  #["-fsSL", "--retry", "2", "--connect-timeout", "20"] ++
+    (match maxBytes with
+     | some n => #["--max-filesize", toString n]
+     | none => #[]) ++
+    #["-o", dest.toString, "--", url]
+
+/-- A downloaded archive must exist and have bytes. `curl -f` fails on an HTTP error, but
+a connection that closes early can still leave a partial (or empty) file, and an empty
+file is never an archive. -/
+def nonEmptyFile (dest : System.FilePath) : IO (Except String Unit) := do
+  if !(← dest.pathExists) then return .error s!"{dest}: the download wrote no file"
+  if (← dest.metadata).byteSize == 0 then
+    return .error s!"{dest}: the download is empty (a truncated or failed transfer)"
+  pure (.ok ())
+
+/-- Download `url` to `dest` (`curl` for http/https, a copy for a path or `file://`). The
+URL is never allowed to look like an option, and the result must be a non-empty file: a
+failed or truncated transfer is an error, not a cache entry. `maxBytes` is the declared
+archive size: `curl --max-filesize` refuses a larger body. -/
+def download (url : String) (dest : System.FilePath) (maxBytes : Option Nat := none) :
+    IO (Except String Unit) := do
   if url.startsWith "file://" then
     if let .error e ← copyFile (url.drop 7).toString dest then return .error e
-    return .ok ()
+    return ← nonEmptyFile dest
   if !url.contains "://" then
-    return (← copyFile url dest).map (fun _ => ())
+    match ← copyFile url dest with
+    | .error e => return .error e
+    | .ok () => return ← nonEmptyFile dest
   try
-    let o ← IO.Process.output { cmd := "curl", args :=
-      #["-fsSL", "--retry", "2", "--connect-timeout", "20", "-o", dest.toString, url] }
-    pure (if o.exitCode == 0 then .ok ()
-      else .error s!"curl {url}: {o.stderr.trimAscii}")
+    let o ← IO.Process.output { cmd := "curl", args := curlArgs url dest maxBytes }
+    if o.exitCode != 0 then
+      -- do not leave a partial file behind for a later run to pick up
+      if ← dest.pathExists then IO.FS.removeFile dest
+      return .error s!"curl {url}: {o.stderr.trimAscii}"
+    nonEmptyFile dest
   catch e => pure (.error s!"curl: {e}")
 
 where
@@ -210,14 +239,138 @@ where
       pure (.ok ())
     catch e => pure (.error s!"{src}: {e}")
 
-/-- Unpack a `.tar.gz` into `dest`, dropping its single top-level directory. -/
+/-! ## Checking an archive before it is unpacked
+
+The SHA-256 in the lock says *which* bytes are wanted, not that the publisher's archive is
+safe to extract: the publisher chooses the member names and types. A listing pass (`tar
+-t` and `tar -tv`) runs first and refuses a member whose name is absolute or has a `..`
+component, a symlink or hardlink whose target is absolute or leaves `dest`, or a device or
+fifo. Relative links inside `dest` are accepted (source archives legitimately contain
+them). This is a pre-scan, not a path check after extraction, so nothing is written
+outside `dest` even briefly. `--strip-components=1` is not a sanitiser: it can *expose* a
+`..` that was hidden below the stripped component. -/
+
+/-- One member of an archive: its name, the type character of `tar -tv` (`'-'` a
+regular file, `'d'` a directory, `'l'` a symlink, `'h'` a hardlink) and a link's target. -/
+structure TarMember where
+  name : String
+  kind : Char
+  target : String
+  deriving Repr, BEq, Inhabited
+
+/-- Could `name` be written outside the extraction root? Rejected: an absolute name, and
+any `..` component (the root itself is `.` and stays inside). -/
+def safeMemberName (name : String) : Bool :=
+  !name.startsWith "/" && name != ".." && !(name.splitOn "/").contains ".."
+
+/-- What follows the first `sep` in `s` (with `sep` kept when the field contains it):
+the link target of a `tar -tv` line. -/
+def afterSep (s sep : String) : Option String :=
+  match s.splitOn sep with
+  | [] => none
+  | [_] => none
+  | _ :: rest => some (String.intercalate sep rest)
+
+/-- The components of a path that name a directory here (empty components and `.` do not). -/
+def pathDepth : List String → Nat
+  | [] => 0
+  | c :: rest => if c.isEmpty || c == "." then pathDepth rest else pathDepth rest + 1
+
+/-- How many directories above the extraction root a member's own directory is (`0` at
+the root): `usr/lib/x` is 2 deep. -/
+def memberDepth (name : String) : Nat :=
+  match (name.splitOn "/").reverse with
+  | _ :: dirs => pathDepth dirs
+  | [] => 0
+
+/-- Does `target`, read from a directory `depth` levels below the root, stay inside it?
+Only `..` moves up, and it may not move above the root; `.` and empty components stay.
+This is lexical (a target that is itself a link is checked as a link of its own). -/
+def insideFrom : List String → Nat → Bool
+  | [], _ => true
+  | c :: rest, depth =>
+    if c == ".." then
+      match depth with
+      | 0 => false
+      | d + 1 => insideFrom rest d
+    else if c.isEmpty || c == "." then insideFrom rest depth
+    else insideFrom rest (depth + 1)
+
+/-- A symlink target is safe when it is relative and, read from the link's own directory
+(`depth`), never climbs above the extraction root. A link to a sibling
+(`ld-linux-x86-64.so.2 -> ld-2.27.so`) or a parent (`usr/lib/x -> ../../lib/y`) is
+fine; a link one level down may not use two `..`. -/
+def safeSymlink (depth : Nat) (target : String) : Bool :=
+  !target.isEmpty && !target.startsWith "/" && insideFrom (target.splitOn "/") depth
+
+/-- A hardlink target is another archive member's name, relative to the archive root (and
+`--strip-components`, when used, applies to it too), so it may not be absolute or contain
+`..` at all. Nothing legitimate needs either. -/
+def safeHardlink (target : String) : Bool :=
+  !target.isEmpty && !target.startsWith "/" && !(target.splitOn "/").contains ".."
+
+/-- The first unsafe member, described, or `none` when every member is a regular file, a
+directory, or a link whose target stays inside the extraction root. -/
+def unsafeMember? (members : List TarMember) : Option String :=
+  members.findSome? fun m =>
+    if !safeMemberName m.name then
+      some s!"{repr m.name} would be written outside the extraction directory (an absolute path or a `..` component)"
+    else if m.kind == '-' || m.kind == 'd' then none
+    else if m.kind == 'l' then
+      -- `untar` strips the archive's top component, so the link's directory is one level
+      -- higher than the name in the archive says
+      if safeSymlink (memberDepth m.name - 1) m.target then none
+      else some s!"{repr m.name} -> {repr m.target} would be written outside the extraction directory (an absolute or escaping symlink)"
+    else if m.kind == 'h' then
+      if safeHardlink m.target then none
+      else some s!"{repr m.name} is a hardlink to {repr m.target}, an absolute or escaping member name"
+    else
+      some s!"{repr m.name} is not a regular file, a directory or a link (tar type {repr m.kind}); devices and fifos are refused"
+
+/-- List `tar`'s members without extracting: the names from `tar -t`, and the type
+characters and link targets from `tar -tv`, which must line up one for one. -/
+def tarMembers (tar : System.FilePath) : IO (Except String (List TarMember)) := do
+  let listing (verbose : Bool) : IO (Except String (List String)) := do
+    try
+      let args := if verbose then #["-tvzf", tar.toString] else #["-tzf", tar.toString]
+      let o ← IO.Process.output { cmd := "tar", args }
+      if o.exitCode != 0 then return .error s!"tar -t {tar}: {o.stderr.trimAscii}"
+      pure (.ok ((o.stdout.splitOn "\n").filter (· != "")))
+    catch e => pure (.error s!"tar -t: {e}")
+  let names ← listing false
+  let verbose ← listing true
+  match names, verbose with
+  | .ok names, .ok verbose =>
+    if names.length != verbose.length then
+      return .error s!"tar -t {tar}: the name and type listings disagree ({names.length} vs {verbose.length} entries)"
+    pure (.ok (names.zipWith (fun n v =>
+      let kind := (v.toList.head?).getD '?'
+      let target :=
+        if kind == 'l' then (afterSep v " -> ").getD ""
+        else if kind == 'h' then (afterSep v " link to ").getD ""
+        else ""
+      { name := n, kind, target }) verbose))
+  | .error e, _ => pure (.error e)
+  | _, .error e => pure (.error e)
+
+/-- Unpack a `.tar.gz` into `dest`, dropping its single top-level directory. The archive
+is listed and checked first; a member whose name or link target could escape `dest` (or a
+device/fifo) refuses the whole archive, before `tar -x` runs. A relative symlink or
+hardlink that stays inside `dest` is accepted: source archives legitimately contain them
+and the release sysroot needs them. -/
 def untar (tar : System.FilePath) (dest : System.FilePath) : IO (Except String Unit) := do
-  try
-    let o ← IO.Process.output { cmd := "tar", args :=
-      #["-xzf", tar.toString, "-C", dest.toString, "--strip-components=1", "--no-same-owner"] }
-    pure (if o.exitCode == 0 then .ok ()
-      else .error s!"tar {tar}: {o.stderr.trimAscii}")
-  catch e => pure (.error s!"tar: {e}")
+  match ← tarMembers tar with
+  | .error e => pure (.error e)
+  | .ok members =>
+    match unsafeMember? members with
+    | some why => pure (.error s!"{tar}: refusing to unpack: {why}")
+    | none =>
+      try
+        let o ← IO.Process.output { cmd := "tar", args :=
+          #["-xzf", tar.toString, "-C", dest.toString, "--strip-components=1", "--no-same-owner"] }
+        pure (if o.exitCode == 0 then .ok ()
+          else .error s!"tar {tar}: {o.stderr.trimAscii}")
+      catch e => pure (.error s!"tar: {e}")
 
 /-- The tree hash of an archive's contents: unpack into a temporary directory (the same
 `--strip-components=1` layout `fetch` uses) and hash the tree. -/
@@ -232,11 +385,9 @@ def unpackTreeHash (tar : System.FilePath) : IO (Except String String) := do
     IO.FS.removeDirAll tmp
     pure r
 
-/-- The cached archive for `p`, downloading and verifying it if needed. A `vendor`
-directory is searched first (by hash, so the lock's source URL is not rewritten); a
-missing or corrupt cache entry is fetched again. With `offline`, a missing or corrupt
-entry (in the cache and in the vendor directory) is an error: nothing is downloaded. -/
-def archive (cache : System.FilePath) (p : PkgLock) (offline : Bool := false)
+/-- `archive` without the declared-size check (kept separate so the check wraps every
+path: cache hit, vendor file, fresh download). -/
+def archiveBytes (cache : System.FilePath) (p : PkgLock) (offline : Bool := false)
     (vendor : Option System.FilePath := none) :
     IO (Except String System.FilePath) := do
   let dir := cache / "grail" / "downloads"
@@ -270,7 +421,7 @@ def archive (cache : System.FilePath) (p : PkgLock) (offline : Bool := false)
   if offline then
     return .error s!"--offline: {p.name} {p.version} is not in the archive cache ({f}); run `grail fetch` without --offline"
   let tmp := dir / s!"{p.sha256}.tmp{← IO.Process.getPID}"
-  match ← download p.source tmp with
+  match ← download p.source tmp p.size with
   | .error e =>
     if ← tmp.pathExists then IO.FS.removeFile tmp
     return .error s!"{p.name} {p.version}: {e}"
@@ -285,6 +436,26 @@ def archive (cache : System.FilePath) (p : PkgLock) (offline : Bool := false)
         return .error s!"{p.name} {p.version}: {p.source} has sha256 {h}, the lock says {p.sha256}"
       IO.FS.rename tmp f
       pure (.ok f)
+
+/-- The cached archive for `p`, downloading and verifying it if needed. A `vendor`
+directory is searched first (by hash, so the lock's source URL is not rewritten); a
+missing or corrupt cache entry is fetched again. With `offline`, a missing or corrupt
+entry (in the cache and in the vendor directory) is an error: nothing is downloaded.
+The declared `size` (from the index, via the lock) is a cap on the download and is
+checked against the file's length. -/
+def archive (cache : System.FilePath) (p : PkgLock) (offline : Bool := false)
+    (vendor : Option System.FilePath := none) :
+    IO (Except String System.FilePath) := do
+  match ← archiveBytes cache p offline vendor with
+  | .error e => pure (.error e)
+  | .ok f =>
+    match p.size with
+    | none => pure (.ok f)
+    | some n =>
+      let actual := (← f.metadata).byteSize.toNat
+      if actual != n then
+        pure (.error s!"{p.name} {p.version}: size: the archive is {actual} bytes, the entry says {n}")
+      else pure (.ok f)
 
 /-- The stamp a fetched package carries: the hash of the archive it came from. -/
 def stampFile (dir : System.FilePath) : System.FilePath := dir / ".grail-pkg"
@@ -666,6 +837,44 @@ def checkLocked (lock : Lock) (pkg : Package) (indexCommit : String := "")
         if !Requirement.satisfies req v then
           throw s!"grail.lock has {q.name} {q.version}, but {p.name} asks for {d.req}: run `grail update`"
 
+/-- (P0) The lock's registry entries must be the ones a **signed** snapshot names: for
+every `pkg` line the snapshot lists the same `name@version` with the same archive
+SHA-256, and (when the snapshot records one) the same tree hash and size.
+
+The lock itself is not signed, so this comparison is what makes the signature useful for
+a committed lock: `grail fetch --locked` reads no index, so a hand-edited `pkg` line (a
+swapped archive and tree hash, with bytes supplied by `--vendor`) has the shape every
+local check promises and is accepted by `checkLocked` and `fetch`. `grail index verify
+--locked` is where the signed snapshot and the lock are both available, so the check
+lives there. A version the snapshot does not list is refused too: a lock that claims a
+release the index never signed is not the release the index vouched for. -/
+def checkLockEntries (lock : Lock) (snap : Snapshot) : Except String Unit := do
+  for p in lock.pkgs do
+    let who := s!"{p.name} {p.version}"
+    match snap.find? p.name p.version with
+    | none => throw s!"grail.lock has {who}, which the signed index snapshot does not list"
+    | some e =>
+      if p.sha256 != e.sha256 then
+        throw s!"grail.lock has {who} sha256 {p.sha256}, the signed index snapshot has {e.sha256}"
+      if !e.tree.isEmpty && p.tree != e.tree then
+        let got := if p.tree.isEmpty then "(none)" else p.tree
+        throw s!"grail.lock has {who} tree {got}, the signed index snapshot has {e.tree}"
+      if e.size > 0 then
+        if let some n := p.size then
+          if n != e.size then
+            throw s!"grail.lock has {who} size {n}, the signed index snapshot has {e.size}"
+
+/-- (P0) Read `dir/grail.lock` and check its registry entries against `snap`. The caller
+has already verified `snap` (its key, sequence and digest are the lock's pins). -/
+def checkLockSnapshot (dir : System.FilePath) (snap : Snapshot) :
+    IO (Except String Unit) := do
+  let lock := lockFile dir
+  if !(← lock.pathExists) then
+    return .error s!"no {lock}: --locked audits a committed lock against the signed index"
+  match Lock.parse (← IO.FS.readFile lock) with
+  | .error e => pure (.error e)
+  | .ok l => pure (checkLockEntries l snap)
+
 /-- The signature a project's `grail.lock` pins, if it has one. (A missing or malformed
 lock has none; the caller decides whether that is an error.) -/
 def lockSignature (dir : System.FilePath) : IO (Option Signature) := do
@@ -818,10 +1027,11 @@ publisher (and the index's reviewer) can make locally. The archive layout must b
 fixed one: one top-level `NAME-VERSION/` with the package's `grail.wiz` in it. `modules`
 are the package's module names (from `archiveModules`), recorded so the resolver can
 refuse two packages that would collide at `import` (R32). `size`, `tree` and `commands`
-are the v3 integrity fields (R19/R20/R36). -/
+are the v3 integrity fields (R19/R20/R36); a published entry must carry `size` and
+`tree`, because both are claims the fetch path and the lock enforce. -/
 def publishEntry (pkg : Package) (source sha : String) (modules : List String := [])
-    (size : Option Nat := none) (tree : String := "") (commands : String := "") :
-    Except String IxVersion := do
+    (size : Option Nat := none) (tree : String := "") (commands : String := "")
+    (commit : String := "") : Except String IxVersion := do
   if !validName pkg.name then throw s!"package name {pkg.name}: expected [a-z][a-z0-9-]* (at most 64)"
   if pkg.version.isEmpty then throw "grail.wiz has no Package.version: a published package needs one"
   let v ← Version.parse pkg.version
@@ -829,9 +1039,19 @@ def publishEntry (pkg : Package) (source sha : String) (modules : List String :=
     throw s!"Package.version {pkg.version}: expected a normalised version like 1.2.3"
   if source.isEmpty then throw "no --source URL for the archive"
   if !isSha256 sha then throw s!"sha256 {sha}: expected 64 lowercase hex digits"
-  if !tree.isEmpty && !isSha256 tree then throw s!"tree {tree}: expected 64 lowercase hex digits"
+  match size with
+  | none => throw "size: a published entry needs the archive's byte length (grail publish computes it)"
+  | some _ => pure ()
+  if tree.isEmpty then
+    throw "tree: a published entry needs the archive's tree hash (grail publish computes it)"
+  if !isSha256 tree then throw s!"tree {tree}: expected 64 lowercase hex digits"
   if !commands.isEmpty && !isSha256 commands then
     throw s!"command digest {commands}: expected 64 lowercase hex digits"
+  if !commit.isEmpty then
+    let hex (s : String) : Bool := s.toList.all fun c =>
+      ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f')
+    unless (commit.length == 40 || commit.length == 64) && hex commit do
+      throw s!"commit {commit}: expected a 40- or 64-digit lowercase hex git commit (a tag is not a pin)"
   if !pkg.toolchain.isEmpty then
     if let .error e := Requirement.parse pkg.toolchain then
       throw s!"Package.toolchain {pkg.toolchain}: {e}"
@@ -839,7 +1059,7 @@ def publishEntry (pkg : Package) (source sha : String) (modules : List String :=
     if let .error e := Requirement.parse r.req then
       throw s!"Package.require {r.name} {r.req}: {e}"
   pure { version := v, source, sha256 := sha, toolchain := pkg.toolchain, modules,
-         size, tree, commands, deps := pkg.requires }
+         size, tree, commands, commit, deps := pkg.requires }
 
 /-- The members of a `.tar.gz` (`tar -tzf`), one path per line. -/
 def archiveMembers (archive : System.FilePath) : IO (Except String (List String)) := do
@@ -885,29 +1105,218 @@ def checkArchiveLayout (archive : System.FilePath) (name version : String) : IO 
       return .error s!"{archive}: no {top}/grail.wiz (wrong version in the archive?)"
     pure (.ok ())
 
-/-- `grail publish ARCHIVE --source URL`: hash the release archive and print the index
-entry, after checking the manifest and the archive layout. Printing (not writing) is the
-MVP: publishing is a reviewed pull request to the index repository. -/
-def publish (archive : Option System.FilePath) (source : String) (pkg : Package) :
-    IO (Except String String) := do
+/-! ## Publishing: what the archive says, and the signed opt-out
+
+A published entry is a claim about a file a stranger will download. Everything the entry
+records that can be recomputed from the archive is recomputed here, from the archive:
+
+* `size` is the file's byte length (and the fetch path enforces it as a cap);
+* `tree` is `treeHash` of the unpacked bytes;
+* `commands` is `commandDigest` of the `grail.wiz` **inside the archive** — not the one in
+  the publisher's working directory, which need not be the archived commit.
+
+A declared entry (`--entry FILE`) is compared field by field, and a mismatch names the
+field and both values. `grail index check` makes the same comparison for an index that is
+already written, so a hand-edited `size`, `tree` or `commands` is caught there too. -/
+
+/-- The facts the archive itself determines: its tree hash, the command digest of the
+manifest inside it, and that manifest. -/
+structure ArchiveFacts where
+  tree : String
+  commands : String
+  pkg : Package
+  deriving Inhabited
+
+/-- Unpack `tar` into a fresh temporary tree and read its own `grail.wiz`. The temporary
+directory is removed whether the read succeeds or fails. -/
+def archiveFacts (tc : Toolchain) (salt : UInt64) (std : System.FilePath)
+    (tar : System.FilePath) : IO (Except String ArchiveFacts) := do
+  let tmp ← IO.FS.createTempDir
+  let d := tmp / "tree"
+  IO.FS.createDirAll d
+  match ← untar tar d with
+  | .error e => IO.FS.removeDirAll tmp; pure (.error e)
+  | .ok () =>
+    let r ←
+      match ← treeHash d with
+      | .error e => pure (.error e)
+      | .ok tree =>
+        match ← readConfig tc salt std d with
+        | .error e => pure (.error s!"{tar}: the archive's grail.wiz: {e}")
+        | .ok (p, _) => pure (.ok { tree, commands := commandDigest p.targets, pkg := p })
+    IO.FS.removeDirAll tmp
+    pure r
+
+/-- The integrity fields of a declared entry that disagree with the archive. Each line
+names the field and both values. `tree` and `commands` are compared only when the
+declared entry carries them (an entry from before the field existed); `size` whenever it
+does — `none` means the publisher recorded no length, not that zero is expected. -/
+def integrityMismatches (declared : IxVersion) (size : Option Nat) (tree commands : String) :
+    List String := Id.run do
+  let mut es : List String := []
+  match declared.size, size with
+  | some n, some actual =>
+    if actual != n then es := es ++ [s!"size: the archive is {actual} bytes, the entry says {n}"]
+  | _, _ => pure ()
+  if !declared.tree.isEmpty && declared.tree != tree then
+    es := es ++ [s!"tree: the archive's tree is {tree}, the entry says {declared.tree}"]
+  if !declared.commands.isEmpty && declared.commands != commands then
+    es := es ++ [s!"commands: the archive's grail.wiz gives {commands}, the entry says {declared.commands}"]
+  es
+
+/-- Refuse a declared entry that does not describe the archive, naming every field that
+disagrees (or `()` when it is truthful). -/
+def checkDeclared (name version : String) (declared actual : IxVersion) :
+    Except String Unit := do
+  let es := integrityMismatches declared actual.size actual.tree actual.commands
+  if !es.isEmpty then
+    throw (s!"{name} {version}: the entry does not describe the archive:\n  " ++
+      "\n  ".intercalate es)
+  pure ()
+
+/-- `grail publish ARCHIVE`: the index entry the archive actually justifies. The
+manifest inside the archive is authoritative; the working directory's manifest only
+identifies the release (`name`/`version` must agree). `declared` is an entry to check
+against the archive first (`--entry FILE`). -/
+def publishVersion (archive : Option System.FilePath) (source : String) (pkg : Package)
+    (commit : String := "") (declared : Option IxVersion := none)
+    (tc : Toolchain := {}) (salt : UInt64 := 7) (std : System.FilePath := "lib") :
+    IO (Except String IxVersion) := do
   let some ar := archive | return .error "usage: grail publish ARCHIVE --source URL"
   unless ← ar.pathExists do return .error s!"{ar}: no such archive"
   if let .error e ← checkArchiveLayout ar pkg.name pkg.version then return .error e
-  let roots := pkg.targets.filterMap fun | .lib _ r => some r | _ => none
-  let modules ← match ← archiveModules ar pkg.name pkg.version roots with
-    | .error e => return .error e
-    | .ok ms => pure ms
   match ← sha256File ar with
   | .error e => pure (.error e)
   | .ok sha =>
     let size := some (← ar.metadata).byteSize.toNat
-    let tree ← match ← unpackTreeHash ar with
+    let facts ← match ← archiveFacts tc salt std ar with
       | .error e => return .error e
-      | .ok h => pure h
-    let commands := commandDigest pkg.targets
-    match publishEntry pkg source sha modules size tree commands with
+      | .ok f => pure f
+    if facts.pkg.name != pkg.name then
+      return .error s!"{ar}: the archive's grail.wiz is package {facts.pkg.name}, not {pkg.name}"
+    if facts.pkg.version != pkg.version then
+      return .error s!"{ar}: the archive's grail.wiz is version {facts.pkg.version}, not {pkg.version}"
+    let roots := facts.pkg.targets.filterMap fun | .lib _ r => some r | _ => none
+    let modules ← match ← archiveModules ar facts.pkg.name facts.pkg.version roots with
+      | .error e => return .error e
+      | .ok ms => pure ms
+    match publishEntry facts.pkg source sha modules size facts.tree facts.commands commit with
     | .error e => pure (.error e)
-    | .ok v => pure (.ok (Index.renderVersion v))
+    | .ok v =>
+      match declared with
+      | some d =>
+        match checkDeclared facts.pkg.name facts.pkg.version d v with
+        | .error e => pure (.error e)
+        | .ok () => pure (.ok v)
+      | none => pure (.ok v)
+
+/-- `grail publish ARCHIVE --source URL`: print the entry `publishVersion` computes. -/
+def publish (archive : Option System.FilePath) (source : String) (pkg : Package)
+    (commit : String := "") : IO (Except String String) := do
+  match ← publishVersion archive source pkg commit with
+  | .error e => pure (.error e)
+  | .ok v => pure (.ok (Index.renderVersion v))
+
+/-- Parse a declared entry (`--entry FILE`): a whole `(index …)` document, one
+`(package …)` node, or a bare `(version …)` node. The `name@version` to compare is
+selected by `name` and `version`. -/
+def parseDeclared (text name version : String) : Except String IxVersion := do
+  let some x := Sx.parse text | throw "not an S-expression"
+  let findVersion (p : IxPackage) : Except String IxVersion :=
+    match p.versions.filter (fun v => Version.render v.version == version) with
+    | v :: _ => pure v
+    | [] => throw s!"{name} {version} is not in the declared entry"
+  match x with
+  | .l xs =>
+    match xs.toList with
+    | .a "version" :: _ => Index.decodeVersion x
+    | .a "package" :: _ => findVersion (← Index.decodePackage x)
+    | .a "index" :: _ =>
+      let ps ← Index.parse text
+      match ps.find? (·.name == name) with
+      | some p => findVersion p
+      | none => throw s!"no package {name} in the declared index"
+    | _ => throw s!"expected (index …), (package …) or (version …), got {x.render}"
+  | _ => throw s!"expected (index …), (package …) or (version …), got {x.render}"
+
+/-- Write one release into an index checkout (`grail publish --index DIR`). An unsigned
+write is refused unless `allowUnsigned` says so: "publishing" means the registry state
+grows, and a fresh consumer cannot tell an unsigned entry from a hand-added one. A signed
+write regenerates `index/snapshot.sexpr` (next sequence), signs it with
+`ssh-keygen -Y sign -n grail-index`, and writes/updates `allowed_signers` at the index
+root — the file a fresh consumer passes to `--allowed-signers`. -/
+def publishInto (dir : System.FilePath) (pkgName : String) (v : IxVersion)
+    (key : Option System.FilePath) (identity expires : String) (allowUnsigned : Bool) :
+    IO (Except String (List String)) := do
+  unless ← dir.isDir do return .error s!"--index {dir}: not an index checkout directory"
+  let ver := Version.render v.version
+  -- the opt-in is checked before anything is written, so a refused publish leaves the
+  -- index byte-for-byte as it was
+  if key.isNone && !allowUnsigned then
+    return .error s!"refusing to publish {pkgName} {ver} unsigned: pass --key KEY to sign the index snapshot, or --allow-unsigned to publish an entry that no signed snapshot covers"
+  let signed : Option (System.FilePath × String × String) ← match key with
+    | none => pure none
+    | some k =>
+      unless ← k.pathExists do return .error s!"--key {k}: no such file"
+      match ← Sign.publicKeyOf k with
+      | .error e => return .error e
+      | .ok pub =>
+        match ← Sign.fingerprintOf pub with
+        | .error e => return .error e
+        | .ok fp => pure (some (k, pub, fp))
+  let id := if identity.isEmpty then "grail-publish" else identity
+  let idxDir := dir / "index"
+  IO.FS.createDirAll idxDir
+  let file := idxDir / s!"{pkgName}.sexpr"
+  let old : IxPackage ←
+    if ← file.pathExists then
+      match Index.parse (← IO.FS.readFile file) with
+      | .ok ps =>
+        match ps.find? (·.name == pkgName) with
+        | some p => pure p
+        | none => pure { name := pkgName }
+      | .error e => return .error s!"{file}: {e}"
+    else pure { name := pkgName }
+  match Index.addVersion [old] old v with
+  | .error e => pure (.error e)
+  | .ok ps =>
+    let pkg := ps.headD old
+    Cache.writeAtomic file (Index.render [pkg])
+    let entryLine := s!"wrote {file} ({pkgName} {ver}, {pkg.versions.length} versions)"
+    match signed with
+    | none =>
+      pure (.ok [entryLine,
+        "unsigned: no snapshot was written (--allow-unsigned); the entry is not covered by a signature"])
+    | some (k, pub, fp) =>
+      let expires ←
+        if !expires.isEmpty then pure expires
+        else match ← Sign.nowUtc with
+          | .ok now => pure (Sign.addOneYear now)
+          | .error e => return .error e
+      if !Sign.validUtc expires then
+        return .error s!"--expires {expires} is not UTC (YYYY-MM-DDTHH:MM:SSZ)"
+      let updated ← match ← Sign.nowUtc with
+        | .ok t => pure t
+        | .error e => return .error e
+      let pkgs ← match ← readIndexDir dir with
+        | .error e => return .error e
+        | .ok m => pure m
+      let seq ← Sign.nextSeq dir
+      let name ← Sign.registryName dir
+      let snap ← Sign.ofIndex dir name pkgs seq updated fp expires
+      let path := idxDir / "snapshot.sexpr"
+      let oldSig : System.FilePath := System.FilePath.mk (path.toString ++ ".sig")
+      if ← oldSig.pathExists then IO.FS.removeFile oldSig
+      Cache.writeAtomic path (Snapshot.render snap)
+      match ← Sign.signSnapshot k path with
+      | .error e => pure (.error e)
+      | .ok () =>
+        let allowed := dir / "allowed_signers"
+        match ← Sign.updateAllowedSigners allowed id pub with
+        | .error e => pure (.error e)
+        | .ok () => pure (.ok [entryLine,
+            s!"wrote {path} (seq {seq}, {snap.packages.length} packages), signed by {id} {fp}",
+            s!"updated {allowed} ({id})"])
 
 /-- Before a build: check the lock out (registry packages unpacked and verified, git
 dependencies at their commits) and return the module roots they give (their `lib`

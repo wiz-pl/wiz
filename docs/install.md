@@ -198,8 +198,28 @@ that records no verified index snapshot. The first update against an index needs
 trust root: `grail update --require-signature --allowed-signers FILE` verifies the
 index's signed snapshot and pins its key, sequence and digest in the lock. `--locked`
 reads no index, so it checks that entry's shape; add `grail index verify --locked` to
-re-verify the signature offline. Update a dependency with `grail update`, never by
+re-verify the signature offline and to check the lock's registry entries against the
+signed snapshot (a hand-edited archive or tree hash is refused there, because the lock
+itself is not signed). Update a dependency with `grail update`, never by
 editing the lock.
+
+A publisher writes the index the same way:
+
+```sh
+grail publish greet-1.2.0.tar.gz --source URL --index ../fate-index \
+  --key ~/.ssh/grail-index --identity wiz-pl --expires 2027-11-22T00:00:00Z
+```
+
+This checks the archive (the entry's `size`, `tree` and `commands` are recomputed from
+the archive, never taken from the manifest in your working directory), appends the
+immutable `name@version` entry to `INDEX/index/name.sexpr`, regenerates
+`INDEX/index/snapshot.sexpr` at the next `(seq)`, signs it, and writes or updates
+`INDEX/allowed_signers` with the signing key under `--identity`. Commit all three; the
+`allowed_signers` file is what a fresh consumer passes to `--allowed-signers`. An
+unsigned publish is the exception and needs `--allow-unsigned`: it writes the entry but
+no snapshot, so nothing covers it. `--entry FILE` checks an entry you already wrote
+against the archive before writing anything (every mismatch names the field and both
+values).
 
 **The escape.** An index without a signed snapshot (the `examples/fate-index` fixture
 is one, and so is any registry that predates signing) is accepted only if you say so:

@@ -123,10 +123,10 @@ toolchain's `gcCflags`/`gcLdflags`), run it, and hand its output to `k`. -/
 def selfhostRunWith (file : String) (k : String → IO Unit) (flags : Array String := #[])
     (progArgs : Array String := #[]) (opt : String := "-O2") (smallStack : Bool := false) : IO Unit := do
   let tc ← toolchain
-  if tc.gcCflags.isEmpty then skip "no garbage collector, --gc-cflags"; return
+  if tc.gcCflags.isEmpty then skipMissing "no garbage collector, --gc-cflags"; return
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     IO.FS.writeFile (dir / "input.wiz") file
@@ -182,7 +182,7 @@ def selfhostC (file : String) (flags : Array String := #[]) : IO (Option String)
   match ← selfhostCompiler with
   | .error e =>
     if (e.splitOn "gmp.h").length > 1 then
-      skip "no toolchain"
+      skipMissing "no toolchain"
       return none
     else throw (IO.userError e)
   | .ok exe =>
@@ -202,7 +202,7 @@ def selfhostModuleC (files : List (String × String)) (args : Array String := #[
   match ← selfhostCompiler with
   | .error e =>
     if (e.splitOn "gmp.h").length > 1 then
-      skip "no toolchain"
+      skipMissing "no toolchain"
       return none
     else throw (IO.userError e)
   | .ok exe =>
@@ -221,7 +221,7 @@ error, and no C (15g). -/
 def selfhostCompileFails (file : String) (errors : String) : IO Unit := do
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     IO.FS.writeFile (dir / "input.wiz") file
@@ -235,7 +235,7 @@ command's `file:line:col`, and prints no C. -/
 def selfhostCheckFails (file expected : String) : IO Unit := do
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     IO.FS.writeFile (dir / "input.wiz") file
@@ -379,7 +379,7 @@ def ffiProgram1 : String :=
   "  IO.println (Float64.toString (Float64.sub (Float64.ofNat 1) (Float64.ofNat 3)))\n"
 
 def ffiExpected1 : String :=
-  "16\nSuccess\ndigit\nnot\nfrom C\n42\n1000000000000\nwraps\nzero\n0.25\n-2\n"
+  "16\nSuccess\ndigit\nnot\nfrom C\n42\n1000000000000\nwraps\nzero\n2.5E-1\n-2E0\n"
 
 /-- (21l) A foreign pointer type with a finalizer: `fclose` runs when the last reference
 to the `FILE` goes (so the file is complete when it is read back). -/
@@ -745,11 +745,11 @@ def selfhostLinkRun (files : List (String × String)) (expected : String) (flags
     (fails : Option String := none) (failCode : UInt32 := 3) : IO Unit := do
   let tc ← toolchain
   if tc.gcCflags.isEmpty then
-    skip "no garbage collector (--gc-cflags)"
+    skipMissing "no garbage collector (--gc-cflags)"
     return
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then IO.println "    (skipped: no toolchain)" else throw (IO.userError e)
+    if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     for (p, text) in files do
@@ -887,7 +887,7 @@ def structFiles : List (String × String) :=
       "uint64_t outer_sum(wiz_s_Outer o) { return o.p.a + o.n + strlen(o.p.name); }\n" ++
       "wiz_s_Outer make_outer(uint64_t n) { wiz_s_Outer o; o.p.a = n; o.p.b = 0.5; o.p.ok = 1; o.p.name = \"made in C\"; o.n = 2 * n; return o; }\n")]
 
-def structExpected : String := "3\n2\n42\n6\ntrue\nwiz!\n54\nmade in C\n15\n"
+def structExpected : String := "3\n2\n42\n6E0\ntrue\nwiz!\n54\nmade in C\n15\n"
 
 /-- (22i, `--unbox-structs`) A one-field and a two-field `c_struct` by value: the last
 field is not in a pair, so `wiz_sin`/`wiz_sout` must read and build the unboxed layout. A
@@ -938,7 +938,7 @@ def structDeepProgram (header : String) : String :=
   "  IO.println (Nat.toString (deepSum d));\n  r ← deepMake 5;\n" ++
   "  IO.println (Nat.toString (r.s.a.x + r.s.b.x + r.n));\n  IO.println (Float64.toString r.s.b.y)\n"
 
-def structDeepExpected : String := "5\n6\n22\n21\n1.5\n"
+def structDeepExpected : String := "5\n6E0\n22\n21\n1.5E0\n"
 
 /-- (C8) A byte array (`unsigned char data[4]`) as a `c_struct` field, passed and
 returned by value through an extern (not through `glue`): cut/zero-padded going in,
@@ -1031,10 +1031,10 @@ def reprDecls : List (String × Bool) := [
 and the handle functions. -/
 def selfhostLibRun (src csrc expected : String) (flags : Array String := #[]) : IO Unit := do
   let tc ← toolchain
-  if tc.gcCflags.isEmpty then skip "no garbage collector, --gc-cflags"; return
+  if tc.gcCflags.isEmpty then skipMissing "no garbage collector, --gc-cflags"; return
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     IO.FS.writeFile (dir / "input.wiz") src
@@ -1335,6 +1335,33 @@ def classInstParamExpected : String :=
   "instMyCommute : ((((((MyCommute Nat) Nat) Option) instMyMonadOption) instMyHandlerNatOption) instMyHandlerNatOption)\n" ++
   "con((#1, (tt, tt)))\n"
 
+/-- (`String ++`) `++` is a class problem through `Append` in both frontends: on String
+(`"ab" ++ "c"` is `String.append`) and on a `List`. The embedded prelude used to declare
+`infixr:67 " ++ " => List.append`, so `"a" ++ "b"` elaborated to `List.append` and was
+rejected (`expected List, got String`) while the host reached `String.append` through
+`HAppend`'s default instance. `strEq` and `nth` are local because `lib/Text.wiz` cannot
+be imported by the self-hosted frontend yet (its `List.map` duplicates the prelude's). -/
+def appendHeader : String :=
+  "def chEq : List Char → List Char → Bool\n" ++
+  "  | .nil, .nil => .true\n" ++
+  "  | .cons a as, .cons b bs => Bool.and (Nat.beq (Char.code a) (Char.code b)) (chEq as bs)\n" ++
+  "  | _, _ => .false\n" ++
+  "def strEq : String → String → Bool\n  | .mk a, .mk b => chEq a b\n" ++
+  "def flag (b : Bool) : Nat := if b then 1 else 0\n" ++
+  "def nth : List Nat → Nat → Nat\n" ++
+  "  | .cons x _, .zero => x\n" ++
+  "  | .cons _ xs, .succ k => nth xs k\n" ++
+  "  | .nil, _ => 0\n"
+
+/-- (`String ++`) The same values in both frontends: `"a" ++ "b"` is `"ab"` (not `"ba"`),
+and a `List` append keeps the elements in order. -/
+def appendCases : List (String × Nat) := [
+  ("flag (strEq (\"a\" ++ \"b\") \"ab\")", 1),
+  ("flag (strEq (\"a\" ++ \"b\") \"ba\")", 0),
+  ("nth (List.cons 1 (List.cons 2 List.nil) ++ List.cons 3 List.nil) 0", 1),
+  ("nth (List.cons 1 (List.cons 2 List.nil) ++ List.cons 3 List.nil) 2", 3),
+  ("List.length (List.cons 1 (List.cons 2 List.nil) ++ List.cons 3 List.nil)", 3)]
+
 /-- (A10) A method call with no instance for its class argument: an error. -/
 def classMissing : String :=
   "import Prelude\nclass Default (A : Type) where\n  d : A\n" ++
@@ -1463,6 +1490,14 @@ def parseDiffCorpus : List (Name × String) := [
   ("term", "f x y"), ("term", "fun (x : Nat) => x"), ("term", "(x : A) → B x"),
   ("term", "(a, b).1"), ("term", "match n with\n  | .zero => a\n  | .succ m => b"),
   ("term", "let x := 1; x"), ("term", "f (g x"), ("term", "Type 1"),
+  -- (the numeral is decimal text until the kernel types it: a hexadecimal literal above
+  -- 2^63 is not clamped, and one above 2^64-1 is still its exact value here, as in the
+  -- Lean lexer; the parenthesised application is the shape that exposed the clamp)
+  ("term", "f b (Nat.succ (Nat.div (Bytes.size b) 512)) 0 (U64.ofNat 0xcbf29ce484222325)"),
+  ("term", "14695981039346656037"), ("term", "18446744073709551615"),
+  ("term", "18446744073709551616"), ("term", "0x10000000000000000"),
+  ("command", "#eval 0xcbf29ce484222325"),
+  ("command", "def f : Nat → Nat\n  | 0xFFFFFFFFFFFFFFFF => 1\n  | _ => 0"),
   ("command", "def f (x : Nat) : Nat := x"),
   ("command", "inductive T where\n  | a\n  | b (t : T)"),
   ("command", "#eval f 41"), ("command", "def f : Nat → Nat\n  | .zero => 0\n  | .succ n => n")]
@@ -1852,7 +1887,7 @@ D6.) -/
 def selfhostLevelErrors (decls : List (String × String)) : IO Unit := do
   let loader ← preludeLoader
   match ← selfhostCompiler with
-  | .error e => if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+  | .error e => if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     for (d, phrase) in decls do
       let src := "import Prelude\n" ++ d
@@ -2049,7 +2084,7 @@ finish. The program is not run. -/
 def selfhostClosedScrutBounded (secs : Nat) : IO Unit := do
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     IO.FS.writeFile (dir / "input.wiz") (closedScrutProgram 40)
@@ -2529,6 +2564,33 @@ def checkEkTiming (out : String) : IO Unit := do
   | _ => throw (IO.userError s!"unexpected output: {out}")
 
 
+/-- The (22i) structure marker makes a structure's value end in its constructor's
+**index-equation** proof. A structure with fields ends in the marker tail
+`(0 fields✝ : Enum [fields✝]) → Unit` (`Wiz/Core/Term.lean`'s `structTailDom`: the host
+adds it in `Wiz/Elab/Inductive.lean`, the self-hosted frontend in `selfhost/Frontend.wiz`
+(22i, `0e306827c`)), so this structure is indexed by a proposition and the kernel's
+constructor payload ends in `refl(I, i)`, not the `tt` an unindexed data type carries
+(`Wiz/Elab/Command.lean`, "the index equation: `()` at `Unit`; for a phantom tail,
+`refl`"; `selfhost/Frontend.wiz`'s `addCtors`). The proof has no runtime content
+(`Compiler/Erase.lean`'s `erasedFunTy`/`unboxedSigma`), so this is the checker's normal
+form, not a field. The value was recorded by `d328b3bee`; it changed because
+`0e306827c` gave the self-hosted frontend the (22i) marker. -/
+def structuresProjSrc : String :=
+  "inductive Nat where\n  | zero\n  | succ (n : Nat)\nstructure Pair (A B : Type) where\n  fst : A\n  snd : B\n#check Pair.mk\ndef p : Pair Nat (Pair Nat Nat) := .mk .zero (.mk (.succ .zero) .zero)\n#reduce Pair.fst (Pair.snd p)\ndef swap {A B : Type} (q : Pair A B) : Pair B A := .mk (Pair.snd q) (Pair.fst q)\n#reduce Pair.fst (swap p)\n#reduce p.snd.fst\ndef swap2 {A B : Type} (q : Pair A B) : Pair B A := .mk q.snd q.fst\n#reduce (swap2 p).fst\n"
+
+def structuresProjExpected : String :=
+  "Nat : U0\nPair : (x0 : U0) → (x1 : U0) → U0\nPair.fst : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → x0\nPair.snd : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → x1\n(x0 :0 U0) → (x1 :0 U0) → (x2 : x0) → (x3 : x1) → ((Pair x0) x1)\np : ((Pair Nat) ((Pair Nat) Nat))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nswap : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → ((Pair x1) x0)\ncon((#0, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (refl((x0 :0 Enum1) → Unit0, λx0. tt), tt)))))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nswap2 : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → ((Pair x1) x0)\ncon((#0, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (refl((x0 :0 Enum1) → Unit0, λx0. tt), tt)))))\n"
+
+def structuresProjTest : IO Unit := do
+  let some out ← selfhostOutput structuresProjSrc | return
+  checkEq structuresProjExpected out
+  -- The distinguishing claim, named: both swap values end in the marker's index proof,
+  -- and neither matches the pre-marker two-slot value (`... , (tt, tt)))))`).
+  check ((out.splitOn "refl((x0 :0 Enum1) → Unit0, λx0. tt)").length == 3)
+    "the swap values do not end in the structure marker's index-equation proof"
+  check ((out.splitOn "con((#0, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt)))))").length == 1)
+    "a swap value still has the pre-marker (two-slot) normal form"
+
 /-- The pipeline group: every case here runs the **self-hosted** compiler (`selfhostCompiler`)
 or checker (`selfhostChecker`), and compares what it says. A case that only runs the Lean
 host belongs in `selfhost-host`; the case that sets an echoing stub proves this group
@@ -2620,9 +2682,8 @@ def selfHostGroup : Group where
     { name := "mutual types sharing a constructor name (Ev.s, Od.s), checked in Wiz", run := fun _ =>
         selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\nmutual\ninductive Ev where\n  | z\n  | s (o : Od)\ninductive Od where\n  | s (e : Ev)\nend\n#check Ev.s\n#check Od.s\ndef two : Ev := .s (.s .z)\ndef isZ : Ev → Nat\n  | .z => .zero\n  | Ev.s _ => .succ .zero\ndef unOd : Od → Ev\n  | .s e => e\n#reduce isZ (unOd (.s two))\n#reduce isZ (unOd (Od.s Ev.z))\n"
           "Nat : U0\nEv : U0\nOd : U0\n(x0 : Od) → Ev\n(x0 : Ev) → Od\ntwo : Ev\nisZ : (x0 : Ev) → Nat\nunOd : (x0 : Od) → Ev\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\ncon((#0, (tt, tt)))\n" },
-    { name := "structures and projections, checked in Wiz", run := fun _ =>
-        selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\nstructure Pair (A B : Type) where\n  fst : A\n  snd : B\n#check Pair.mk\ndef p : Pair Nat (Pair Nat Nat) := .mk .zero (.mk (.succ .zero) .zero)\n#reduce Pair.fst (Pair.snd p)\ndef swap {A B : Type} (q : Pair A B) : Pair B A := .mk (Pair.snd q) (Pair.fst q)\n#reduce Pair.fst (swap p)\n#reduce p.snd.fst\ndef swap2 {A B : Type} (q : Pair A B) : Pair B A := .mk q.snd q.fst\n#reduce (swap2 p).fst\n"
-          "Nat : U0\nPair : (x0 : U0) → (x1 : U0) → U0\nPair.fst : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → x0\nPair.snd : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → x1\n(x0 :0 U0) → (x1 :0 U0) → (x2 : x0) → (x3 : x1) → ((Pair x0) x1)\np : ((Pair Nat) ((Pair Nat) Nat))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nswap : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → ((Pair x1) x0)\ncon((#0, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (refl((x0 :0 Enum1) → Unit0, λx0. tt), tt)))))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nswap2 : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → ((Pair x1) x0)\ncon((#0, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (refl((x0 :0 Enum1) → Unit0, λx0. tt), tt)))))\n" },
+    { name := "structures and projections (the value ends in the 22i marker's index proof), checked in Wiz", run := fun _ =>
+        structuresProjTest },
     { name := "numerals and match as a term, checked in Wiz", run := fun _ =>
         selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\ndef add : Nat → Nat → Nat\n  | 0, n => n\n  | .succ m, n => .succ (add m n)\n#reduce add 2 3\ndef isSmall : Nat → Nat\n  | 0 => 1\n  | 1 => 1\n  | _ => 0\n#reduce isSmall 1\n#reduce isSmall 5\ninductive Bool where\n  | false\n  | true\ndef lt : Nat → Nat → Bool\n  | _, 0 => .false\n  | 0, .succ _ => .true\n  | .succ m, .succ n => lt m n\n#reduce lt 1 3\ndef pick (b : Bool) (x y : Nat) : Nat := add (match b with\n  | .true => x\n  | .false => y) 1\n#reduce pick .false 2 5\ndef both (a b : Bool) : Bool := match a, b with\n  | .true, .true => .true\n  | _, _ => .false\n#reduce both .true .false\n"
           "Nat : U0\nadd : (x0 : Nat) → (x1 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nisSmall : (x0 : Nat) → Nat\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\ncon((#0, (tt, tt)))\nBool : U0\nlt : (x0 : Nat) → (x1 : Nat) → Bool\ncon((#1, (tt, tt)))\npick : (x0 : Bool) → (x1 : Nat) → (x2 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nboth : (x0 : Bool) → (x1 : Bool) → Bool\ncon((#0, (tt, tt)))\n" },
@@ -3127,13 +3188,20 @@ def selfHostGroup : Group where
     { name := "the selfhost checker: the parser's mutual block stays under 512 MB", run := fun _ => do
         -- the selfhost sources are wrapped in the explicit-global `namespace __root__`;
         -- this snippet concatenates two of them and cuts the second, so drop the wrapper
-        -- (both lines) rather than inherit an unclosed block.
+        -- (both lines) rather than inherit an unclosed block. The closing line is a bare
+        -- `end` in the current files: drop it from a whole file (Lex) only — Parse's head
+        -- ends inside a `mutual`, whose `end` must stay.
+        let dropFinalEnd := fun (s : String) =>
+          let ls := (s.splitOn "\n").reverse.dropWhile (fun l => l == "")
+          match ls with
+          | "end" :: rest => "\n".intercalate rest.reverse
+          | _ => s
         let strip := fun (s : String) => "\n".intercalate ((s.splitOn "\n").filter fun l =>
           !l.startsWith "import" && l != "namespace __root__" && l != "end __root__")
         let lex ← IO.FS.readFile "selfhost/Lex.wiz"
         let parse ← IO.FS.readFile "selfhost/Parse.wiz"
         let parseHead := (parse.splitOn "\ndef sexpr").headD parse
-        let src := "import Prelude\n" ++ strip lex ++ "\n" ++ strip parseHead
+        let src := "import Prelude\n" ++ dropFinalEnd (strip lex) ++ "\n" ++ strip parseHead
         let some out ← selfhostOutputPeak src 512
           | pure ()
         for l in out.splitOn "\n" do
@@ -3470,6 +3538,13 @@ def selfHostGroup : Group where
           ("class Default (A : Type) where\n  d : A\ninstance instDefaultNat : Default Nat := Default.mk 7\ninstance instDefaultNat2 : Default Nat := Default.mk 8\n", true, false),
           -- (an output parameter rewrites a class parameter's type; not implemented here)
           ("class MyAdd (A B : Type) (C : outParam Type) where\n  add : A → B → C\ninstance instMyAdd : MyAdd Nat Nat Nat := MyAdd.mk Nat.add\ndef three : Nat := MyAdd.add 1 2\n", true, false)] },
+    { name := "the self-hosted frontend: `++` is `Append` on String and List, as in the Lean frontend (String ++)", run := fun _ => do
+        selfhostAgrees appendHeader [
+          ("def s : String := \"a\" ++ \"b\"\n", true),
+          ("def xs : List Nat := List.cons 1 List.nil ++ List.cons 2 List.nil\n", true),
+          -- (the operands fix the instance: a string append is not a list append)
+          ("def bad : List Nat := \"a\" ++ \"b\"\n", false)]
+        selfhostSameNats appendHeader appendCases },
     { name := "the self-hosted backend: a class's dictionary passing compiles and runs (A10)", run := fun _ =>
         selfhostCompileRun classProgram "7\n1\n" },
     { name := "the proof surface: Prop, Sort, equality, refl/rfl, cast and transp, as in the Lean frontend (A16)", run := fun _ => do
@@ -3577,7 +3652,7 @@ def selfHostGroup : Group where
           ("inductive Bad.{u} : Type u where\n  | mk (a : Type u)\n", false)] },
     { name := "U2: an undeclared universe in a data type is a positioned error (U2/A15)", run := fun _ => do
         match ← selfhostCompiler with
-        | .error e => if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+        | .error e => if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
         | .ok exe =>
           let dir ← IO.FS.createTempDir
           IO.FS.writeFile (dir / "bad.wiz") "import Prelude\ninductive Bad : Type u where\n  | mk\n"
@@ -3905,6 +3980,12 @@ def selfHostGroup : Group where
         let input := "def f (x : Nat) : Nat := x + 1 -- a comment\n/- a /- nested -/ block -/ #eval f 41\n" ++
           "inductive T where | a | b (t : T)\ndef s : String := \"hi\\n\" -- strings\ndef α₁ : List.cons → Nat.add := λ x => x.1\n" ++
           "0x3F 0b1010 0XfF 0B1 0x 0b2 0xg 007 0x7FFFFFFFFFFFFFFF 0x8000000000000000 " ++
+          -- (the radix is converted in decimal-string arithmetic: a literal above 2^63 is
+          -- not clamped, and one above 2^64-1 is still its exact value; decimal literals
+          -- keep their digits, so the same values read the same way)
+          "0xFFFFFFFFFFFFFFFF 0x10000000000000000 0x0000000000000001 " ++
+          "0b1111111111111111111111111111111111111111111111111111111111111111 " ++
+          "14695981039346656037 18446744073709551615 18446744073709551616 " ++
           -- every escape, then a bad one (both lexers stop there with the same message)
           "def e := \"a\\r\\t\\\\\\\"\\'\\x41\\u{3bb}\\u{1F600}z\" \"bad \\q\""
         let toks := Builtin.tables.tokens

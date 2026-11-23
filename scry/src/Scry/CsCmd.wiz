@@ -906,10 +906,10 @@ def Scry.Cs.parseArgs (args : List String) : Except String Scry.Cs.Opts :=
     (Scry.Cs.Opts.mk "" .false .none .none .true .none) args
 
 /-- The default C# rule pack: the corpus pack first (a checkout), then an installed
-`lib/Scry/rules/csharp.scry`. A tree with no pack still gets its coverage report. -/
+`rules/csharp.scry`. A tree with no pack still gets its coverage report. -/
 def Scry.Cs.defaultPackCandidates : List String :=
   ["scry/corpus/csharp/csharp.scry", "../scry/corpus/csharp/csharp.scry",
-   "lib/Scry/rules/csharp.scry", "../lib/Scry/rules/csharp.scry"]
+   "scry/rules/csharp.scry", "rules/csharp.scry"]
 
 def Scry.Cs.loadPack (rules : Option String) : EIO (Option (String × Scry.RulePack)) :=
   match rules with

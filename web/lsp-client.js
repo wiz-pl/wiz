@@ -71,6 +71,95 @@ export function withoutToken(url) {
   return u.toString();
 }
 
+// ## Text edits (`WorkspaceEdit`), in UTF-16 offsets
+
+// The UTF-16 offset of an LSP position in `text`. LSP's default position encoding is
+// UTF-16 code units, which is what a JavaScript string index counts; a character past
+// the line's end clamps to the line end (a client convention, as `ofPos` in the server).
+export function textOffset(text, position) {
+  const value = typeof text === "string" ? text : "";
+  const line = Math.max(0, Math.trunc((position && position.line) || 0));
+  const character = Math.max(0, Math.trunc((position && position.character) || 0));
+  let offset = 0;
+  for (let l = 0; l < line; l++) {
+    const newline = value.indexOf("\n", offset);
+    if (newline < 0) return value.length;
+    offset = newline + 1;
+  }
+  const newline = value.indexOf("\n", offset);
+  return Math.min(newline < 0 ? value.length : newline, offset + character);
+}
+
+// The LSP position of a UTF-16 offset (the inverse of `textOffset`).
+export function textPosition(text, offset) {
+  const value = typeof text === "string" ? text : "";
+  const at = Math.max(0, Math.min(value.length, Math.trunc(offset || 0)));
+  const before = value.slice(0, at);
+  const line = (before.match(/\n/g) || []).length;
+  return { line, character: at - (before.lastIndexOf("\n") + 1) };
+}
+
+// The text `edits` make of `text`. Each edit's range is converted with `offsetOf`
+// (UTF-16 by default), and the edits are applied from the end so earlier ranges stay
+// valid. Overlapping edits are refused (LSP forbids them) instead of corrupting text.
+export function applyTextEdits(text, edits, offsetOf = textOffset) {
+  const value = typeof text === "string" ? text : "";
+  const spans = (Array.isArray(edits) ? edits : []).map((edit) => {
+    const range = (edit && edit.range) || {};
+    const start = offsetOf(value, range.start || {});
+    const end = offsetOf(value, range.end || {});
+    return {
+      start: Math.min(start, end),
+      end: Math.max(start, end),
+      text: edit && typeof edit.newText === "string" ? edit.newText : "",
+    };
+  }).sort((a, b) => b.start - a.start);
+  let out = value;
+  let limit = value.length;
+  for (const span of spans) {
+    if (span.end > limit) {
+      throw new LspError(LSP_ERROR.invalidParams, "overlapping text edits");
+    }
+    out = out.slice(0, span.start) + span.text + out.slice(span.end);
+    limit = span.start;
+  }
+  return out;
+}
+
+// Where `offset` (a UTF-16 index in the text *before* the edits) is after `edits`: an
+// offset outside every edited span shifts by that span's length change; one inside keeps
+// its distance from the span's start, clamped to the replacement text. Formatting uses
+// this to keep the caret in the same place in the text it was in.
+export function mapOffset(edits, offset, text, offsetOf = textOffset) {
+  const value = typeof text === "string" ? text : "";
+  let out = Math.max(0, Math.trunc(offset || 0));
+  const spans = (Array.isArray(edits) ? edits : []).map((edit) => {
+    const range = (edit && edit.range) || {};
+    const start = offsetOf(value, range.start || {});
+    const end = offsetOf(value, range.end || {});
+    return {
+      start: Math.min(start, end),
+      end: Math.max(start, end),
+      length: edit && typeof edit.newText === "string" ? edit.newText.length : 0,
+    };
+  }).sort((a, b) => a.start - b.start);
+  for (const span of spans) {
+    if (out <= span.start) break;
+    if (out >= span.end) {
+      out += span.length - (span.end - span.start);
+      continue;
+    }
+    out = span.start + Math.min(out - span.start, span.length);
+    break;
+  }
+  return Math.max(0, out);
+}
+
+// A `FormattingOptions` object with the playground's defaults.
+export function formattingOptions(options) {
+  return Object.assign({ tabSize: 2, insertSpaces: true }, options || {});
+}
+
 // The endpoint from a location's query string (`location.search`, or any `?…` text);
 // its `token` parameter is the server's token. `fallback` is the endpoint when `name`
 // is absent (a page's own `--lsp`); `?token=` applies to it too.
@@ -240,6 +329,8 @@ export class LspClient {
           synchronization: { dynamicRegistration: false, willSave: false, didSave: false },
           publishDiagnostics: { relatedInformation: false, versionSupport: true },
           hover: { contentFormat: ["markdown", "plaintext"] },
+          formatting: { dynamicRegistration: false },
+          rangeFormatting: { dynamicRegistration: false },
           // Snippets are not expanded by the playground's popup, so say so; a server may
           // still send them and acceptCompletion strips the placeholders.
           completion: {
@@ -441,6 +532,60 @@ export class LspClient {
     return doc ? doc.text : null;
   }
 
+  // ## Workspace edits
+
+  // Apply a `WorkspaceEdit` to the open documents: `changes` (per URI) and
+  // `documentChanges` (text edits with an optional version). The one applier serves
+  // formatting now and code actions/rename later. It returns per-document
+  // `{uri, text, previousText, version}` and sends no `didChange`: the caller writes the
+  // text (the page's textarea) and its normal input path sends it, so there is one
+  // synchronisation path. A stale edit is refused with `ContentModified`; file
+  // operations (create/rename/delete) are refused, since this client edits open
+  // documents only.
+  applyWorkspaceEdit(edit, options = {}) {
+    const offsetOf = typeof options.offsetOf === "function" ? options.offsetOf : textOffset;
+    const expected = options.expectedVersion;
+    const groups = [];
+    if (edit && edit.changes && typeof edit.changes === "object") {
+      for (const uri of Object.keys(edit.changes)) {
+        groups.push({ uri, edits: Array.isArray(edit.changes[uri]) ? edit.changes[uri] : [], version: expected });
+      }
+    }
+    if (edit && Array.isArray(edit.documentChanges)) {
+      for (const change of edit.documentChanges) {
+        if (!change || typeof change !== "object") continue;
+        if (change.textDocument && Array.isArray(change.edits)) {
+          groups.push({
+            uri: change.textDocument.uri,
+            edits: change.edits,
+            version: typeof change.textDocument.version === "number"
+              ? change.textDocument.version : expected,
+          });
+        } else if (change.kind) {
+          throw new LspError(LSP_ERROR.invalidParams,
+            "the playground client edits open documents, not files (" + change.kind + ")");
+        }
+      }
+    }
+    if (!groups.length) {
+      throw new LspError(LSP_ERROR.invalidParams, "the edit changes no document");
+    }
+    return groups.map((group) => {
+      const doc = this.docs.get(group.uri);
+      if (!doc) throw new LspError(LSP_ERROR.invalidParams, "no open document " + group.uri);
+      if (typeof group.version === "number" && doc.version !== group.version) {
+        throw new LspError(LSP_ERROR.contentModified,
+          "the document changed before the edit was applied");
+      }
+      return {
+        uri: group.uri,
+        text: applyTextEdits(doc.text, group.edits, offsetOf),
+        previousText: doc.text,
+        version: doc.version,
+      };
+    });
+  }
+
   // ## The Wiz infoview requests (docs/playground-lsp.md)
 
   positionParams(uri, position) {
@@ -452,6 +597,20 @@ export class LspClient {
   // them answers `MethodNotFound`; `web/hover.js` treats that as "nothing to show".
   hover(uri, position) { return this.request("textDocument/hover", this.positionParams(uri, position)); }
   definition(uri, position) { return this.request("textDocument/definition", this.positionParams(uri, position)); }
+
+  // `wiz fmt` through the server: a `TextEdit[]` (or null for "no change"), applied by
+  // `applyWorkspaceEdit`. The server advertises `documentFormattingProvider` and
+  // `documentRangeFormattingProvider`; a server that does not answers `MethodNotFound`.
+  formatting(uri, options) {
+    return this.request("textDocument/formatting", {
+      textDocument: { uri }, options: formattingOptions(options),
+    });
+  }
+  rangeFormatting(uri, range, options) {
+    return this.request("textDocument/rangeFormatting", {
+      textDocument: { uri }, range, options: formattingOptions(options),
+    });
+  }
 
   plainGoal(uri, position) { return this.request("wiz/plainGoal", this.positionParams(uri, position)); }
   plainTermGoal(uri, position) { return this.request("wiz/plainTermGoal", this.positionParams(uri, position)); }

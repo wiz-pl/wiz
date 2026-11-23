@@ -372,18 +372,31 @@ its exit code and stderr. Never match the program's stderr: a program may print 
 file or directory" itself, and that is then a failing test, not a missing toolchain. `what`
 prefixes the failure (`"(llvm) "`). -/
 def failRun (e : Build.RunError) (what : String := "") : IO Unit :=
-  if e.isToolchain then skip "no toolchain" else throw (IO.userError (what ++ e.message))
+  if e.isToolchain then skipMissing "no toolchain" else throw (IO.userError (what ++ e.message))
 
-/-- Build `main` with the C backend and compare its printed value. Skipped (passes) if
-the C toolchain can't find GMP: give the suite a toolchain (`Tests/Main.lean`) to run these. -/
-def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat := 0) : IO Unit := do
-  let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← preludeLoader }
+/-- `cRun` with `loader` resolving `src`'s imports. -/
+def cRunWith (loader : Name → Option String) (src : String) (expected : String) (llvm : Bool := false)
+    (split : Nat := 0) : IO Unit := do
+  let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   let dir ← IO.FS.createTempDir
   match ← Build.runGlobal (← toolchain) s "main" dir llvm (split := split) with
   | .ok v => checkEq expected v
   | .error e => failRun e
+
+/-- Build `main` with the C backend and compare its printed value. Skipped (passes) if
+the C toolchain can't find GMP: give the suite a toolchain (`Tests/Main.lean`) to run these. -/
+def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat := 0) : IO Unit := do
+  cRunWith (← preludeLoader) src expected llvm split
+
+/-- `cRun` for a program that imports a module `preludeLoader` does not carry
+(`WordArray`, `Intern`, `Data.PMap`, `Web.EditorModel`, …): the suite's cached
+whole-library loader resolves it from disk. -/
+def cRunOnDisk (src : String) (expected : String) (llvm : Bool := false) : IO Unit := do
+  -- `Tests.libLoader` directly: the `Tests.Elab.libLoader` alias is defined below in this
+  -- file, after this point.
+  cRunWith (← Tests.libLoader) src expected llvm
 
 /-- (15f) Build `main` with the C compiler's optimiser off (`-O0`: it does no tail calls of
 its own) and run it on a 1 MB stack (`WIZ_STACK_MB`): deep recursion overflows it, a loop
@@ -403,7 +416,7 @@ def cRunSmallStack (src : String) (expected : String) (llvm : Bool := false) : I
     else Build.compileC tc (C.program decls false (Build.extraC s)) exe
   match built with
   | .error e =>
-    if Build.missingToolchain tc e then skip "no toolchain" else throw (IO.userError e)
+    if Build.missingToolchain tc e then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok () =>
     let out ← IO.Process.output { cmd := exe.toString, env := #[("WIZ_STACK_MB", some "1")] }
     unless out.exitCode == 0 do throw (IO.userError s!"the program failed ({out.exitCode}): {out.stderr.take 500}")
@@ -498,6 +511,39 @@ def linkRun (files : List (String × String)) (expected : String) (llvm : Bool :
   | .ok v => checkEq expected v
   | .error e => failRun e
 
+/-- `elabTree` with extra module roots (a package's `src`/`gen`, e.g. `scry/src`),
+after the toolchain's `lib` root and before the temp directory. This keeps `link_c` and
+`include_str` resolution relative to each module's own file, as `wiz` does. -/
+def elabTreeRoots (roots : List String) (files : List (String × String)) :
+    IO (CommandState ZeroOneMany × String × System.FilePath) := do
+  let dir ← IO.FS.createTempDir
+  for (p, text) in files do
+    let f := dir / p
+    if let some d := f.parent then IO.FS.createDirAll d
+    IO.FS.writeFile f text
+  let src ← IO.FS.readFile (dir / "main.wiz")
+  let mods ← Module.loadClosure ((("lib" :: roots).map System.FilePath.mk) ++ [dir]) src
+  let sources ← Module.cSourceTable dir src mods
+  let includes ← Module.includeTable dir src mods
+  let s := runFrontend (R := ZeroOneMany) src
+    { loader := fun m => (mods[m]?).map (·.2), cSources := some (Module.cSourceResolver sources),
+      includes := some (Module.includeResolver includes) }
+  pure (s, src, dir)
+
+/-- `elabTreeRoots`, then build and run `main` (through C, or LLVM) and compare its
+output. `timeout` is the program's limit (a project run parses and analyses several
+translation units). -/
+def linkRunRoots (roots : List String) (files : List (String × String)) (expected : String)
+    (llvm : Bool := false) (cflags : List String := []) (timeout : Nat := 300) : IO Unit := do
+  let (s, src, dir) ← elabTreeRoots roots files
+  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  let tc ← toolchain
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm
+      (timeout := some timeout) with
+  | .ok v => checkEq expected v
+  | .error e => failRun e
+
 /-- `linkRun`, expecting the program to fail: the error must mention `fragment`. -/
 def linkRunFails (files : List (String × String)) (fragment : String) (llvm : Bool := false) : IO Unit := do
   let (s, src, dir) ← elabTree files
@@ -506,7 +552,7 @@ def linkRunFails (files : List (String × String)) (fragment : String) (llvm : B
   match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
   | .ok v => throw (IO.userError s!"expected a failure, got {v}")
   | .error e =>
-    if e.isToolchain then skip "no toolchain"
+    if e.isToolchain then skipMissing "no toolchain"
     else unless (e.message.splitOn fragment).length > 1 do
       throw (IO.userError s!"error does not mention '{fragment}':\n{e.message}")
 
@@ -565,7 +611,7 @@ def ioRunC (src csrc expected : String) (fails : Option String := none) : IO Uni
     match ← Build.runGlobal tc s "main" dir llvm (timeout := some 120) with
     | .ok v => if fails.isSome then throw (IO.userError s!"expected a failure, got {v}") else checkEq expected v
     | .error e =>
-      if e.isToolchain then skip "no toolchain"
+      if e.isToolchain then skipMissing "no toolchain"
       else match fails with
         | some frag => unless (e.message.splitOn frag).length > 1 do throw (IO.userError s!"error does not mention '{frag}':\n{e.message}")
         | none => throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e.message}")
@@ -579,7 +625,7 @@ def libRunC (src csrc expected : String) : IO Unit := do
     let tc ← toolchain
     match ← Build.build tc s "main" (dir / "lib.o") llvm true with
     | .error e =>
-      if Build.missingToolchain tc e then skip "no toolchain"
+      if Build.missingToolchain tc e then skipMissing "no toolchain"
       else throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e}")
     | .ok _ =>
       IO.FS.writeFile (dir / "main.c") csrc
@@ -1973,7 +2019,7 @@ its output. -/
 def selfhostCheckFile (file expected : String) : IO Unit := do
   match ← selfhostChecker with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if Build.missingToolchain (← toolchain) e then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     IO.FS.writeFile (dir / "input.wiz") file
@@ -1985,8 +2031,8 @@ def selfhostCheckFile (file expected : String) : IO Unit := do
 def selfhostOutput (file : String) : IO (Option String) := do
   match ← selfhostChecker with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then
-      skip "no toolchain"
+    if Build.missingToolchain (← toolchain) e then
+      skipMissing "no toolchain"
       pure none
     else throw (IO.userError e)
   | .ok exe =>
@@ -2003,8 +2049,8 @@ the self-check pass 10 GB) is caught here rather than by a CI OOM. -/
 def selfhostOutputPeak (file : String) (boundMB : Nat) : IO (Option String) := do
   match ← selfhostChecker with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then
-      skip "no toolchain"
+    if Build.missingToolchain (← toolchain) e then
+      skipMissing "no toolchain"
       pure none
     else throw (IO.userError e)
   | .ok exe =>
@@ -2045,8 +2091,8 @@ def selfhostModuleOutput (files : List (String × String)) (args : Array String 
     IO (Option String) := do
   match ← selfhostChecker with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then
-      skip "no toolchain"
+    if Build.missingToolchain (← toolchain) e then
+      skipMissing "no toolchain"
       pure none
     else throw (IO.userError e)
   | .ok exe =>
@@ -2064,7 +2110,7 @@ files are written beside it, so its `import`s find them. -/
 def selfhostModuleCompileFails (files : List (String × String)) (phrases : List String) : IO Unit := do
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if Build.missingToolchain (← toolchain) e then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     for (name, text) in files do
@@ -2122,7 +2168,7 @@ def ioDiverges (src : String) (secs : Nat := 5) : IO Unit := do
     let exe := dir / "wiz_main"
     match ← Build.compileC (← toolchain) (C.program decls true (Build.extraC s)) exe with
     | .error e =>
-      if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+      if Build.missingToolchain (← toolchain) e then skipMissing "no toolchain" else throw (IO.userError e)
     | .ok () =>
       let out ← IO.Process.output { cmd := "sh", args := #["-c",
         s!"ulimit -v 8000000; exec timeout {secs} \"$0\"", exe.toString] }
@@ -2134,8 +2180,9 @@ def sealHeader : String :=
   "sealed inductive W (w : Nat) where\n  | mk (toNat : Nat)\ninductive L (w : Nat) where\n  | mk (toNat : Nat)\n" ++
   "sealed inductive V (w : Nat) where\n  | mk (toNat : Nat)\n"
 
-/-- Every `lib/*.wiz` and `lib/*/*.wiz` (as `D.X`), by module name (see
-`Tests.loadedModules`, which caches the load for the process). -/
+/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`), `scry/src/Scry/*.wiz` (as `Scry.X`)
+and `hdl/src/Hdl/*.wiz` (as `Hdl.X`), by module name (see `Tests.loadedModules`, which
+caches the load for the process). -/
 def libLoader : IO (Name → Option String) := Tests.libLoader
 
 /-- Every module of `lib/`, by import name (`D.X` for a subdirectory). -/

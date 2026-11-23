@@ -1,0 +1,18 @@
+{
+  "format": "wiz-gmp-pin/1",
+  "version": "6.3.0",
+  "releaseSrcSha256": "sha256-a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898",
+  "releaseSrcUrl": "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz",
+  "releaseSrcRecordedIn": "scripts/bundle-cc.sources",
+  "nixSrcSha256": "sha256-rCghGnz7YJuuLiyNYFjWbI/pZDT3QM9v4uR7AA0cIMs=",
+  "nixSrcUrl": "mirror://gnu/gmp/gmp-6.3.0.tar.bz2",
+  "nixSrcRecordedIn": "flake.nix gmpPin.nixSrcHash (nixpkgs' archive of the same release)",
+  "why": "Lean admits GMP into the kernel TCB and requires GMP >= 6.3.0 (older GMP can make it unsound); Wiz's Nat is a 62-bit scalar plus GMP on the host, so the bignum is part of the proof checker's trusted base. The release bundles the .tar.xz, nixpkgs builds the .tar.bz2; both are GMP 6.3.0 and each build path pins its own archive hash.",
+  "checkedBy": [
+    "flake.nix: gmpPin and the assert in `unwrapped` (nix eval fails with the actual and pinned nix hashes named)",
+    "Tests/Groups/Numerics.lean: the `numerics` group reads flake.nix, scripts/bundle-cc.sources and this file and fails with all three values on a disagreement",
+    "release.yml: the bundled GMP is built from the hash in scripts/bundle-cc.sources and recorded in the SBOM (wiz:resolved-gmp)"
+  ],
+  "owner": "recs-numerics-host",
+  "review": "2026-11-22"
+}

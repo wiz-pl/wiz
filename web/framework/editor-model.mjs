@@ -14,11 +14,14 @@
 //     runs past the text, a multi-line range, and two ranges that overlap.
 //   * **Completions.** The `textDocument/completion` result (an array or a
 //     `CompletionList`), the identifier prefix of the caret, filtering and ordering, the
-//     keyboard's index arithmetic, and the text an accepted item inserts.
+//     keyboard's command table and index arithmetic, and the text an accepted item
+//     inserts.
 //
 // The offset arithmetic is here, not in a second module: `web/goals.js` is the test
 // oracle for the runtime's `lib/Web/Goals.wiz` now.
 "use strict";
+
+import { definitionTarget, locationLabel } from "./hover.mjs";
 
 const clampNat = (n, lo, hi) => (n < lo ? lo : n > hi ? hi : n);
 const num = (x) => (typeof x === "number" && isFinite(x) ? Math.trunc(x) : 0);
@@ -367,6 +370,25 @@ export function completionPopupState(text, offset, items, index = 0) {
   return { items: filtered, index: selected, prefix };
 }
 
+// How many rows a page key moves: enough to browse, small enough that a PageDown is not
+// the whole list.
+export const COMPLETION_PAGE = 10;
+
+// The popup's response to a keydown, as the runtime computes it: a move carries the
+// selected index after `moveSelection`; Enter/Tab accept, Escape closes, everything else
+// is ignored. `index` and `count` are the popup's current state. The host has no key
+// table of its own.
+export function completionKey(key, index, count) {
+  const delta = key === "ArrowDown" ? 1
+    : key === "ArrowUp" ? -1
+      : key === "PageDown" ? COMPLETION_PAGE
+        : key === "PageUp" ? -COMPLETION_PAGE : 0;
+  if (delta !== 0) return { action: "move", index: moveSelection(index, delta, count) };
+  if (key === "Enter" || key === "Tab") return { action: "accept" };
+  if (key === "Escape") return { action: "close" };
+  return { action: "ignore" };
+}
+
 // The same surface the page gets from the runtime (`wiz_loom_editor_*`, see
 // `web/framework/mount.js`'s `ask`). The DOM tests pass this so they still exercise the
 // widgets with the real rules; production passes the runtime's.
@@ -387,12 +409,19 @@ export const rules = {
     };
   },
   move: (index, delta, count) => moveSelection(index, delta, count),
+  key: (key, index, count) => completionKey(key, index, count),
   accept: (item, text, offset) => {
     const a = acceptCompletion(item, text, offset);
     return { text: a.text, start: a.start, stop: a.end, caret: a.caret, insert: a.insert };
   },
   trigger: (text, offset, c) => completionTrigger(text, offset, c),
   position: (text, offset) => positionFromOffset(text, offset),
+  // A `textDocument/definition` answer's target, range and label (`Web.Hover`); the
+  // production page gets this from `wiz_loom_hover_target`.
+  target(result) {
+    const t = definitionTarget(result);
+    return t ? { uri: t.uri, range: t.range, label: locationLabel(t) } : null;
+  },
   // The popup's tooltip and ask key, and the goals pane's source spans (the runtime's
   // `Web.EditorModel` rules; these are the test oracle's).
   itemTitle(item) {

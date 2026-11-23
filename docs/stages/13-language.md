@@ -216,7 +216,7 @@ decide. `!b` is `Bool.not b`. Precedences are Lean's: `if` is a leading term lik
 `Bool.true && b` reduces to `b`, as `Bool.and Bool.true b` does, but a stuck `a && b` is a
 `match` on `a` and not convertible to `Bool.and a b` (state lemmas about `Bool.and` by
 cases on `a`). `if`, `then` and `else` are now reserved words in every program; `not` is
-not (constructors and class fields named `not` exist in `lib/Hdl`).
+not (constructors and class fields named `not` exist in `hdl/src/Hdl`).
 
 The self-hosted frontend doesn't read `lib/Prelude.wiz`: it embeds its own prelude
 (`preludeText`, selfhost/Frontend.wiz) and has had `if` since 19a (an application of `if`,
@@ -247,7 +247,7 @@ generic ones (7b), which is how a type that isn't a monad (an HDL signal) declar
 `Monad` itself is unchanged (it doesn't extend `Applicative`: classes have no `extends`
 yet), so `do`, `Monad1` and `do1` are as before. The module is separate from the Prelude
 because programs that import only the Prelude already define `List.map`, a class
-`Functor` and `Monad Option` instances of their own (`lib/Hdl/Core.wiz`, the tests).
+`Functor` and `Monad Option` instances of their own (`hdl/src/Hdl/Core.wiz`, the tests).
 Tests: group `language`.
 
 ## 13e: `∃ x, P`, `¬`, and ASCII spellings
@@ -522,7 +522,7 @@ declares the same `infixr`, so both frontends expand it to `List.cons` and the
 as a **default instance**: at a homogeneous type `++` therefore resolves to
 `Append.append`, and a heterogeneous instance (like `HMul Nat V V` in 7f) resolves
 without one. Other types get `++` by an `Append` instance or a heterogeneous `HAppend`
-one. (`lib/Hdl/Core.wiz`'s `<+>` and `selfhost/Parse.wiz`'s `+++` are older local
+one. (`hdl/src/Hdl/Core.wiz`'s `<+>` and `selfhost/Parse.wiz`'s `+++` are older local
 spellings of `String.append`; the self-hosted prelude keeps
 `infixr " ++ " => List.append`.) Tests: group `language` (`++` on lists and strings).
 
@@ -660,7 +660,7 @@ applies to it as to a kept field.
 Updates work for every structure, since all of them are Σ types read through
 `StructLayout`: with parameters, with dependent fields, and for bundles, structures
 over a representation `structure Tx (r : HwTy → Type) where line : r Bit; …`
-(`lib/Hdl/Core.wiz`): `{ s with line := v }` at `Tx r` keeps `r` abstract.
+(`hdl/src/Hdl/Core.wiz`): `{ s with line := v }` at `Tx r` keeps `r` abstract.
 
 **Hover and go to definition.** The field name of an update is recorded as a use of
 the projection `S.f`: a hover shows its type in the updated structure, and go to

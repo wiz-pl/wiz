@@ -1,0 +1,11 @@
+{
+  "format": "wizc-seed/1",
+  "note": "The chain's seed inputs, pinned (R2, wiz-notes/sota-compiler-trust.md). `self.wiz` is the assembled toolchain source: the exact program every stage compiles, so pinning it turns 'a fixed point' into 'the same fixed point'. Tables.wiz is the bootstrap ABI (a seed parses it), rt.c is the runtime the release's C is linked with, and the two Lean files are the assembly and version inputs. seed.c is an output of the Lean host, not an input; the behavioural gate checks the packed wizc itself. Regenerate with scripts/check-wizc-release.sh --write-pin --seed DIR and review the diff.",
+  "files": [
+    {"path": "self.wiz", "from": "seed", "sha256": "1c58c85632896079438620878b7e01512407249ee15ba5f094e4b7e1c82bdcf1"},
+    {"path": "selfhost/Tables.wiz", "from": "checkout", "sha256": "cf8fbd99196829757abd6385d416acef2184909915248854127883d0d7884f79"},
+    {"path": "selfhost/rt.c", "from": "checkout", "sha256": "6af9b4ef4db6cf9091260e2edfc330d26dce7f22d386d6dc56ae8b838d74fb74"},
+    {"path": "Wiz/Selfhost.lean", "from": "checkout", "sha256": "ea1069d136d36b78134d897b199d407eaabf808914c4c5aa0cc34923bfa935d1"},
+    {"path": "Wiz/Version.lean", "from": "checkout", "sha256": "7ab3b160b1a53ffd8e79065c6b7ba5d08ed90eef6dd66492b08b30a9b0e68ecd"}
+  ]
+}

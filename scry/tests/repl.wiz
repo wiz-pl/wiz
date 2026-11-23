@@ -9,8 +9,8 @@ import Scry.Repl
 -- (it is the package root): a left-over cache changes the output (the triage state
 -- persists in findings.json) and a missing one hid the first `load`'s write. So the
 -- session runs in a fresh temporary directory, with `tests` linked to this package's
--- (so the paths it prints are the same) and `lib` to the repository's (where `taint`
--- finds the default rule pack, lib/Scry/rules/default.scry).
+-- (so the paths it prints are the same) and `rules` to the package's (`rules/default.scry`
+-- is the default rule pack the session's `taint` finds).
 def session : IO Unit := do
   Scry.Repl.load "tests/fixtures/taint-unsafe.c";
   Scry.Repl.facts;
@@ -32,7 +32,7 @@ def main : IO Unit := do
   r ← EIO.bind FS.currentDir (fun here =>
         EIO.bind FS.createTempDir (fun tmp =>
           EIO.bind (FS.symlink (Path.join here "tests") (Path.join tmp "tests")) (fun _ =>
-          EIO.bind (FS.symlink (Path.join here "../lib") (Path.join tmp "lib")) (fun _ =>
+          EIO.bind (FS.symlink (Path.join here "rules") (Path.join tmp "rules")) (fun _ =>
             EIO.bind (FS.setCurrentDir tmp) (fun _ =>
               EIO.bind (EIO.lift session) (fun _ =>
                 EIO.bind (FS.setCurrentDir here) (fun _ => FS.removeAll tmp)))))));

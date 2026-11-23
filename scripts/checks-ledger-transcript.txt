@@ -1,0 +1,147 @@
+checks-ledger: transcript of the three behaviours
+=================================================
+
+Captured 2026-11-23 from a clean worktree at commit 858da25, the feature
+commit before the demo's final amend.  The first steps show the reminder for a
+commit with no records; then every registered check is run and the reminder is
+silent; the last steps amend the commit and show that the new SHA needs new
+runs.  The amend replaces 858da25 with fcc14d8 (the branch's feature commit),
+so 858da25 is intentionally not in the final history: that is what the reminder
+is about.  Output is merged from stdout and stderr, and `[exit N]` is the
+status of each command line (the hook always exits 0: it warns, it does not
+block).  Branch names in the captured output are normalised to
+`checks-ledger-demo`.
+
+commit under test: 858da25
+
+$ python3 scripts/checks-ledger.py status
+checks-ledger: HEAD 858da25 (checks-ledger-demo)
+  check                state              record   when                  exit  command
+  docs-style           missing            -        -                     -     -
+  companion-lists      missing            -        -                     -     -
+  repo-subsets         missing            -        -                     -     -
+  legacy-names-digest  missing            -        -                     -     -
+  repo-subsets-write   missing            -        -                     -     -
+checks-ledger: warning: 0 of 5 registered check(s) clean for 858da25; run `python3 scripts/checks-ledger.py run NAME`
+checks-ledger: local, untrusted reminder; not a security or merge gate
+[exit 0]
+
+$ printf '%s refs/heads/checks-ledger-demo refs/heads/checks-ledger-demo 0000000000000000000000000000000000000000\n' "$(git rev-parse HEAD)" | sh .githooks/pre-push
+checks-ledger: no clean record for 858da25 (refs/heads/checks-ledger-demo) for these registered check(s):
+  docs-style: missing
+  companion-lists: missing
+  repo-subsets: missing
+  legacy-names-digest: missing
+  repo-subsets-write: missing
+  local reminder only; the push is not blocked. Run: python3 scripts/checks-ledger.py run NAME
+[exit 0]
+
+$ python3 scripts/checks-ledger.py run docs-style
+checks-ledger: running docs-style: python3 scripts/check-docs-style.py
+check-docs-style: clean (87 checked file(s))
+checks-ledger: recorded docs-style on 858da25 (exit 0, clean)
+[exit 0]
+
+$ python3 scripts/checks-ledger.py run companion-lists
+checks-ledger: running companion-lists: python3 scripts/check-companion-lists.py
+check-companion-lists: clean (5 companion list(s); skipped test-shards (no .lake/build/bin/tests))
+checks-ledger: recorded companion-lists on 858da25 (exit 0, clean)
+[exit 0]
+
+$ python3 scripts/checks-ledger.py run repo-subsets
+checks-ledger: running repo-subsets: python3 scripts/repo-subsets.py --check
+repo-subsets: current (6 subsets, 1680 files)
+checks-ledger: recorded repo-subsets on 858da25 (exit 0, clean)
+[exit 0]
+
+$ python3 scripts/checks-ledger.py run legacy-names-digest
+checks-ledger: running legacy-names-digest: python3 scripts/gen-legacy-names.py --update-digest
+gen-legacy-names: legacy-names.tsv
+  lib: 5553 declaration(s)
+  scry/src: 4497 declaration(s)
+  scry/gen: 33 declaration(s)
+  hdl/src: 1893 declaration(s)
+  tower: 169 declaration(s)
+  web: 245 declaration(s)
+  selfhost: 0 declaration(s)
+  12390 row(s) in 236 file(s)
+  module-prefixed: 1186
+  first-prefixed: 4188
+  leaf-prefixed: 1667
+  other-dotted: 4371
+  principal: 26
+  bare: 952
+  sha256 e766ead0a21b8b017bd3e70898347aa717b809667dcf6c2460231d33393f05d8
+  Wiz/LegacyNames.lean: digest already current
+checks-ledger: recorded legacy-names-digest on 858da25 (exit 0, clean)
+[exit 0]
+
+$ python3 scripts/checks-ledger.py run repo-subsets-write
+checks-ledger: running repo-subsets-write: python3 scripts/repo-subsets.py --write
+repo-subsets: wrote .github/repo-subsets.json (6 subsets, 1680 files, git 858da25866d6e31daad851c6b6e64ee63da69aa4)
+checks-ledger: recorded repo-subsets-write on 858da25 (exit 0, clean)
+checks-ledger: the command changed the worktree after a clean start; commit or discard its output (dirty_after)
+[exit 0]
+
+$ git checkout -- .github/repo-subsets.json
+(no output)
+[exit 0]
+
+$ git status --porcelain
+(no output)
+[exit 0]
+
+$ python3 scripts/checks-ledger.py status
+checks-ledger: HEAD 858da25 (checks-ledger-demo)
+  check                state              record   when                  exit  command
+  docs-style           clean              858da25  2026-11-22T23:05:18Z  0     python3 scripts/check-docs-style.py
+  companion-lists      clean              858da25  2026-11-22T23:05:20Z  0     python3 scripts/check-companion-lists.py
+  repo-subsets         clean              858da25  2026-11-22T23:05:20Z  0     python3 scripts/repo-subsets.py --check
+  legacy-names-digest  clean              858da25  2026-11-22T23:05:21Z  0     python3 scripts/gen-legacy-names.py --update-digest
+  repo-subsets-write   clean              858da25  2026-11-22T23:05:21Z  0     python3 scripts/repo-subsets.py --write
+checks-ledger: 5 of 5 registered check(s) clean for 858da25
+checks-ledger: note: 1 clean record(s) modified the worktree after a clean start (an update script); commit or discard that output
+checks-ledger: local, untrusted reminder; not a security or merge gate
+[exit 0]
+
+$ python3 scripts/checks-ledger.py warn
+(no output)
+[exit 0]
+
+$ GIT_COMMITTER_DATE=2026-11-22T12:00:00Z git commit --amend --no-edit
+[checks-ledger-demo fcc14d8d] scripts: record the light checks per commit and warn before a push
+ Date: Mon Nov 23 01:03:31 2026 +0200
+ 4 files changed, 655 insertions(+), 4 deletions(-)
+ create mode 100755 .githooks/pre-push
+ create mode 100755 scripts/checks-ledger.py
+[exit 0]
+
+$ git rev-parse --short=7 HEAD
+fcc14d8
+[exit 0]
+
+$ printf '%s refs/heads/checks-ledger-demo refs/heads/checks-ledger-demo 0000000000000000000000000000000000000000\n' "$(git rev-parse HEAD)" | sh .githooks/pre-push
+checks-ledger: no clean record for fcc14d8 (refs/heads/checks-ledger-demo) for these registered check(s):
+  docs-style: last run on 858da25, not this commit
+  companion-lists: last run on 858da25, not this commit
+  repo-subsets: last run on 858da25, not this commit
+  legacy-names-digest: last run on 858da25, not this commit
+  repo-subsets-write: last run on 858da25, not this commit
+  local reminder only; the push is not blocked. Run: python3 scripts/checks-ledger.py run NAME
+[exit 0]
+
+$ python3 scripts/checks-ledger.py status
+checks-ledger: HEAD fcc14d8 (checks-ledger-demo)
+  check                state              record   when                  exit  command
+  docs-style           stale@858da25      858da25  2026-11-22T23:05:18Z  0     python3 scripts/check-docs-style.py
+  companion-lists      stale@858da25      858da25  2026-11-22T23:05:20Z  0     python3 scripts/check-companion-lists.py
+  repo-subsets         stale@858da25      858da25  2026-11-22T23:05:20Z  0     python3 scripts/repo-subsets.py --check
+  legacy-names-digest  stale@858da25      858da25  2026-11-22T23:05:21Z  0     python3 scripts/gen-legacy-names.py --update-digest
+  repo-subsets-write   stale@858da25      858da25  2026-11-22T23:05:21Z  0     python3 scripts/repo-subsets.py --write
+checks-ledger: warning: 0 of 5 registered check(s) clean for fcc14d8; run `python3 scripts/checks-ledger.py run NAME`
+checks-ledger: local, untrusted reminder; not a security or merge gate
+[exit 0]
+
+The ledger itself (`.checks/records.jsonl`) is gitignored and local.  It is
+untrusted by design: this transcript is evidence that the reminder works, not
+a claim that the checks were run on any other machine, and never a merge gate.

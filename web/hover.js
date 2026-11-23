@@ -1,7 +1,10 @@
 // Hover at the caret and go-to-definition: the page's half.
 //
-// The card's contents and markup are `lib/Web/Hover.wiz`'s; this module keeps what needs
-// a browser or a timer: when to ask (`schedule`), the request generation, the editor's
+// The card's contents and markup are `lib/Web/Hover.wiz`'s, and so are the two rules this
+// file used to carry: the caret's LSP position (`Web.EditorModel.position`, injected as
+// `options.position`) and a `textDocument/definition` answer's target, range and label
+// (`Web.Hover.targetJson`, injected as `options.target`). This module keeps what needs a
+// browser or a timer: when to ask (`schedule`), the request generation, the editor's
 // caret and the card's position. `show(raw, label)` is the page's way into the runtime:
 // `raw` is a `textDocument/hover` result as JSON (empty to close), `label` names a
 // definition the page cannot open. Nothing here builds DOM or interprets Markdown.
@@ -17,66 +20,28 @@ export function wantsHover(search) {
   }
 }
 
-// The caret as an LSP position (UTF-16, line 0-based).
-function positionAt(text, offset) {
-  const at = Math.max(0, Math.min(text ? text.length : 0, offset | 0));
-  const before = text ? text.slice(0, at) : "";
-  const line = (before.match(/\n/g) || []).length;
-  return { line, character: at - (before.lastIndexOf("\n") + 1) };
-}
-
-// The last path segment of a URI, for people.
-function documentName(uri) {
-  let text = String(uri || "").replace(/[?#].*$/, "");
-  const name = text.slice(text.lastIndexOf("/") + 1);
-  try { return decodeURIComponent(name) || "?"; } catch (_) { return name || "?"; }
-}
-
-// A `textDocument/definition` result's first usable location.
-function oneTarget(value) {
-  if (!value || typeof value !== "object") return null;
-  const uri = typeof value.uri === "string" ? value.uri
-    : (typeof value.targetUri === "string" ? value.targetUri : null);
-  if (!uri) return null;
-  const range = value.range || value.targetSelectionRange || value.targetRange;
-  if (!range || typeof range !== "object") return null;
-  return { uri, range };
-}
-
-function definitionTarget(result) {
-  if (Array.isArray(result)) {
-    for (const value of result) {
-      const target = oneTarget(value);
-      if (target) return target;
-    }
-    return null;
-  }
-  return oneTarget(result);
-}
-
-function locationLabel(target) {
-  if (!target) return "";
-  const start = (target.range && target.range.start) || {};
-  const line = typeof start.line === "number" && start.line >= 0 ? start.line + 1 : 1;
-  const character = typeof start.character === "number" && start.character >= 0 ? start.character + 1 : 1;
-  return documentName(target.uri) + ":" + line + ":" + character;
-}
-
 const NAVIGATION = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
   "Home", "End", "PageUp", "PageDown"]);
 
-// `mountHover({editor, onHover, onDefinition, onJump, document, delay, show})`: the
-// timing and the keyboard; `show(raw, label)` hands an answer to the runtime card.
+// `mountHover({editor, position, target, onHover, onDefinition, onJump, document, delay,
+// show})`: the timing and the keyboard; `position(text, offset)` is the runtime's caret
+// rule, `target(result)` its definition rule, and `show(raw, label)` hands an answer to
+// the runtime card. Without a position rule there is nothing to ask about; a definition
+// also needs the target rule, so `onDefinition` without it mounts no widget.
 export function mountHover(options = {}) {
   const editor = options.editor;
   const onHover = options.onHover;
   const onDefinition = options.onDefinition;
   const onJump = options.onJump;
+  const positionRule = options.position;
+  const targetRule = options.target;
   const show = typeof options.show === "function" ? options.show : () => {};
   const doc = options.document || (editor && editor.ownerDocument) ||
     (typeof document !== "undefined" ? document : null);
   if (!editor || !doc || typeof doc.createElement !== "function") return null;
+  if (typeof positionRule !== "function") return null;
   if (typeof onHover !== "function" && typeof onDefinition !== "function") return null;
+  if (typeof onDefinition === "function" && typeof targetRule !== "function") return null;
   const delay = typeof options.delay === "number" && options.delay >= 0 ? options.delay : 350;
 
   let timer = null;
@@ -88,7 +53,7 @@ export function mountHover(options = {}) {
     const at = typeof editor.selectionStart === "number" ? editor.selectionStart : 0;
     return Math.max(0, Math.min(value().length, Math.trunc(at)));
   };
-  const position = () => positionAt(value(), caret());
+  const position = () => positionRule(value(), caret());
 
   function cancel() {
     if (timer !== null) {
@@ -171,9 +136,10 @@ export function mountHover(options = {}) {
     timer = setTimeout(() => { timer = null; inquire(); }, delay);
   }
 
-  // F12 / Ctrl-⌘-click: where is the identifier at the caret declared?
+  // F12 / Ctrl-⌘-click: where is the identifier at the caret declared? The answer's
+  // target, range and label are the runtime's (`targetRule`).
   async function goToDefinition() {
-    if (typeof onDefinition !== "function") return null;
+    if (typeof onDefinition !== "function" || typeof targetRule !== "function") return null;
     cancel();
     const mine = ++seq;
     let result = null;
@@ -183,19 +149,20 @@ export function mountHover(options = {}) {
       result = null;
     }
     if (mine !== seq) return null;
-    const target = definitionTarget(result);
-    if (!target) return null;
+    const target = targetRule(result);
+    if (!target || typeof target.uri !== "string" || !target.range) return null;
+    const jump = { uri: target.uri, range: target.range };
     let jumped = false;
     if (typeof onJump === "function") {
-      try { jumped = onJump(target) === true; } catch (_) { jumped = false; }
+      try { jumped = onJump(jump) === true; } catch (_) { jumped = false; }
     }
     if (jumped) {
       close();
-      return target;
+      return jump;
     }
-    show("", locationLabel(target));
+    show("", target.label || "");
     place();
-    return target;
+    return jump;
   }
 
   function onKeydown(event) {

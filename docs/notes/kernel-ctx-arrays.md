@@ -1,0 +1,123 @@
+# The kernel context: arrays by level + sparse usages
+
+This note records the representation change in the Lean kernel (`Wiz/Core`), the callers
+that construct a `Ctx`, the probes written for it, and the measurements the queue lane
+must take. The audit inputs are `docs/notes/arrays-audit.md` (list indexing walks `i`
+cons cells; an array indexes in O(1)) and §20f of
+`docs/stages/20-selfhost-checks-itself.md` (usage vectors can stop early, so a zero
+vector should not allocate a list as long as the context). The code is on the
+`kernel-ctx` branch (base `integration/train10` d705b4578); no build, `lake`, `wiz` or
+`nix` job was run in the coding lane.
+
+## Representation
+
+`Wiz/Core/Check.lean`'s `Ctx` used four aligned lists (`env`, `names`, `qtys`, `types`)
+with the innermost entry at index 0. Indexing them was a `List` walk: `ctx.types[ix]`
+cost `ix` cons cells, and `Ctx.tys` rebuilt the level-indexed array (`types.reverse.toArray`)
+on every conversion or sort question.
+
+Now:
+
+| field | representation | order |
+| --- | --- | --- |
+| `names` | `Array Name` | level order, outermost at index 0 |
+| `qtys` | `Array (QPoly R)` | level order |
+| `types` | `Array (VTy R)` | level order |
+| `env` | `Env R` (a list, unchanged) | de Bruijn index order, innermost at the head |
+| `lvl` | `Nat` | number of locals / next fresh level |
+
+`Ctx.bind` and `Ctx.define` extend with `Array.push`, so extending is still O(1) amortised
+(the audit's warning in `docs/notes/dogfood-new-features.md` was about prepending to an
+array on every binder; storing level order avoids it). A de Bruijn index `ix` is read at
+`ctx.lvl - 1 - ix` through `Ctx.nameAt?`, `Ctx.qtyAt?` and `Ctx.typeAt?`. `ctx.tys` is
+now `ctx.types` itself, not a reversed copy, because conversion already wants the types
+indexed by level (`Wiz/Core/Conv.lean`).
+
+`env` stays a list: it is the evaluator's interface (`Eval.eval`, `Closure`, the
+elaborator's `LocalCtx` and the compiler interpret it head-first), and changing it would
+change the public `Env` API rather than the context bookkeeping. The context's own
+bookkeeping is what the checker indexes on every variable and every conversion.
+
+`Wiz/Core/Usage.lean`'s `Usage` stays an abbreviation for `List (QPoly R)` (the public
+API), but the vector is **sparse**: it stops after the last variable used and every entry
+after the end is zero. Consequently:
+
+* `Usage.zeros n` is `[]`, not `List.replicate n []` (the allocation the audit measured);
+* `Usage.single n ix` is `ix` zeros then a one (never padded to `n`);
+* `Usage.add` pads the shorter vector with zeros (implicit) and trims the trailing ones;
+  an interior zero is kept, because dropping it would shift the indices after it;
+* `Usage.scale q` trims after scaling (scaling by a constant 0 becomes `[]`);
+* `Usage.join?` is the pointwise `QPoly.join?`, used by the branches of a case;
+* `popUsage` on `[]` pops the missing entry, which is `0`, and checks it against the
+  binder's declared quantity (`0 ≤ q`); it is not an internal underflow. A stopped
+  vector therefore still rejects a linear binder used zero times (`0 ≤ 1` is false),
+  and accepts an erased (`q = 0`) or unrestricted binder.
+
+The meanings are unchanged: head = de Bruijn 0, the same `QPoly.le`/`join?` tests, the
+same shadowing (the arrays keep every level; lookups use the index, not the name).
+
+## Callers updated
+
+* `Wiz/Core/Check.lean`: `Ctx`, `bind`, `define`, `tys`, `showVal`/`showTerm`
+  (`prettyNames`), `methodUsage`, `projUsage`, `popUsage`, `Ctx.popUsageAt`,
+  `inferCore`'s variable rule, and the `ecase` branch join.
+* `Wiz/Core/Usage.lean`: the sparse operations above.
+* `Wiz/Elab/Mark.lean`: the variable rule reads `ctx.typeAt?`.
+* `Wiz/Compiler/Erase.lean`: `quickType` reads `ctx.typeAt?` instead of `ctx.types[ix]!`.
+* Kernel `Ctx` literals in the elaborator, converting its innermost-first `LocalCtx`
+  lists/arrays once at the boundary: `Wiz/Elab/Class.lean`,
+  `Wiz/Elab/Command.lean` (including the `zonkedTypes` updates, which are already
+  level-indexed arrays), and `Wiz/Elab/Tactic.lean` (`Goal.kernelCtx`).
+* `Tests/Groups/Prop.lean`: the generator's variable lookups use `typeAt?`/`prettyNames`.
+
+`LocalCtx` (the elaborator's own context) is unchanged; it is a different structure, and
+the queue lane's measurement is the kernel checking path.
+
+## Probes written (unrun)
+
+* `Tests/Groups/Context.lean` (group `context`, shard selector `"context"`): pins
+  `Usage.zeros = []`, the padding/interior-zero behaviour of `add`, `scale 0`, `join?`;
+  pins `Ctx` de Bruijn order, level order, shadowing and `prettyNames`; runs a 64-binder
+  context through the frontend with the innermost variable used (sparse), the outermost
+  used (interior zeros) and a linear outermost binder; and checks that a dropped linear
+  variable is still rejected. Run with `lake test -- '=context'`.
+* `Tests/data/kernel-ctx-probe.wiz` (generated by `scripts/gen-kernel-ctx-probe.py`): a
+  `#eval`-heavy file, 192 binders, 48 evaluations plus the three initial ones, covering
+  the innermost-used (sparse length 1), outermost-used (length 192, interior zeros) and
+  linear-outermost cases. Run with the `wiz` binary's normal file command, or through
+  the tests that read `Tests/data/` if the lane prefers.
+
+## Measurements the queue lane must take
+
+Run before (base `d705b4578`) and after (the `kernel-ctx` branch) with the same binary
+build flags, 2–3 interleaved rounds each; record wall time and peak RSS, not just one of
+them.
+
+1. **`#eval`-heavy file.** `wiz check --no-cache Tests/data/kernel-ctx-probe.wiz` (or the
+   equivalent `tests` case), wall time and peak RSS:
+   `/usr/bin/time -v <wiz> check --no-cache Tests/data/kernel-ctx-probe.wiz`.
+   Expect the outermost-used evaluations to improve (de Bruijn lookup and usage length
+   go from a list walk of 192 to O(1)/O(192) array operations, and zero vectors are
+   `[]`).
+2. **Memory peak.** The same runs' `Maximum resident set size` from `/usr/bin/time -v`;
+   also the selfhost check if the lane runs it (`=selfhost`), where the kernel is the
+   checker.
+3. **Core groups.** `lake test -- '=check' '=eval' '=elab' '=quantity' '=inductive'
+   '=observational' '=context' '=prop-kernels' '=audit-kernels'` must be green, and so
+   must the groups the sparse-usage regression hit: `=conc`, `=conc-model` and `=data`
+   (dropped/duplicated linear endpoints, tokens and erased fields, and case branches that
+   disagree on a linear variable). This change is a representation change, so the
+   verdicts and the error texts that mention quantities must be identical;
+   `=prop-kernels` is the generated-term differential against the selfhost kernel.
+4. **Conversion/sort-heavy files** (because `Ctx.tys` stopped copying an array on every
+   `typeSort?`/`subTy`): time `wiz check lib/Prelude.wiz` (or a representative `lib/`
+   file) and the existing `=audit` template cases; no semantic change is expected.
+5. **The core group list**: the groups above are the core set this lane touches; the
+   full CI shard `library` (which now selects `context`) is the gate, with `selfhost`
+   only if the queue lane has budget for the heavy job.
+
+Nothing here asserts a timing: the change is justified by the operation counts (list
+indexing is Θ(i), array indexing O(1); zero usages no longer allocate Θ(n)) and the
+verdicts must be identical. If the wall time is neutral or worse at 192 binders, the
+representation is still the one the audit measured, but the lane should report the
+number rather than claim a win.

@@ -391,6 +391,7 @@ already uses for `grail.lock`):
       (size 1042)
       (tree "…")
       (commands "…")
+      (commit "…")                     ; the release commit; a tag is not a pin
       (toolchain ">=0.1.0 <0.3.0")
       (deps (dep "std" "^0.1") (dep "text" "~1.0")))
     (yanked "1.2.1" "wrong tarball; use 1.2.2")))
@@ -398,9 +399,11 @@ already uses for `grail.lock`):
 
 * `source` is the immutable archive (an `https`, `file://` or plain path URL);
   `sha256` is the SHA-256 of its bytes. `size` is the archive's byte length (R19), `tree`
-  the SHA-256 of its unpacked file tree (R20) and `commands` a digest of the package's
-  declared `Package.command` set (R36); `grail publish` writes all three and a lock v3
-  records them. Older entries have none of them.
+  the SHA-256 of its unpacked file tree (R20), `commands` a digest of the package's
+  declared `Package.command` set (R36) and `commit` the release commit in `repo` (P0);
+  `grail publish` writes them (pass `--commit`) and a lock v3 records the first three.
+  Older entries have none of them. A build uses the locked tree, never `commit` alone:
+  `commit` binds the *source* claim, the tree binds the *content*.
 * `deps` is **authoritative for resolution**; it
   must agree with the published manifest, so a lock records the whole graph and a build
   never re-reads dependency manifests to resolve.
@@ -542,7 +545,10 @@ the index/integrity fields, flat sorted entries and machine-local overrides:
 * Fetching a registry package (`Grail/Registry.lean`) is: if
   `.grail/packages/NAME/.grail-pkg` already equals the archive hash, done; otherwise
   find `<cache>/grail/downloads/SHA256`, verify it (re-download if corrupt), download
-  and verify the hash **before** unpacking, unpack once into the shared store
+  and verify the hash **before** unpacking, list the archive first and refuse a member
+  whose name or link target could escape the unpack directory (absolute or `..` names,
+  absolute or escaping link targets, devices and fifos; relative links inside are fine),
+  unpack once into the shared store
   `<cache>/grail/packages/SHA256` (a temporary directory with
   `tar -xzf --strip-components=1 --no-same-owner`, the lock's `(tree …)` checked before
   the stamp, then a rename), and link `.grail/packages/NAME` to it. A second fetch is a
@@ -572,16 +578,25 @@ v1's 64-bit content hash (accident detection, not cryptographic); registry entri
 the strong path.
 
 **Signed index state (Stage 1).** An index may publish `index/snapshot.sexpr` — every
-`name@version` with its SHA-256 and size, a monotone `(seq)`, an `(updated)` time, the
-signing key's fingerprint `(key)` and its `(expires)` date — signed as
+`name@version` with its SHA-256, size, `tree`, `commit`, **entry digest** and yank
+reason, a monotone `(seq)`, an `(updated)` time, the signing key's fingerprint `(key)`
+and its `(expires)` date — signed as
 `index/snapshot.sexpr.sig` with `ssh-keygen -Y sign -n grail-index`. `grail update
 --require-signature --allowed-signers FILE` verifies the signature offline and writes an
 `(index-signature …)` entry in `grail.lock` with the key, fingerprint, sequence and
 snapshot digest. Later updates re-verify from that pinned key even without the flag, and
 refuse a changed key, a lower `(seq)` (rollback; `--allow-rewind` accepts a deliberate
-rewind), a same-sequence rewrite, an expired key, or an entry whose hash differs from the
-snapshot. `grail index verify INDEX [--locked]` is the standalone offline verifier, and
-`grail index check --require-signature` audits a repository. The `allowed_signers` file
+rewind), a same-sequence rewrite, an expired key, or an entry whose archive hash, tree,
+commit, entry digest or yank state differs from the snapshot. The **entry digest** is
+SHA-256 over the canonical `(version …)` node, so one signature covers the archive hash,
+size, tree, command digest, commit, toolchain range, modules/prefixes and dependency
+edges; `grail index snapshot` writes it, and an older snapshot without one still verifies
+a minimal entry but refuses an entry that carries those extra claims. `grail index verify INDEX [--locked]` is the standalone offline verifier: with
+`--locked` it also checks every `pkg` entry of `grail.lock` against the signed snapshot
+(name, version, archive SHA-256, and the tree hash/size when the snapshot has them), so
+a hand-edited lock — the lock itself is not signed — is refused even though
+`fetch --locked` (which reads no index) cannot see it. `grail index check
+--require-signature` audits a repository. The `allowed_signers` file
 is a trust root from outside the index: the copy inside a checkout proves nothing. This
 gives authorship for an index state, not freshness: there is no transparency log or
 gossip, key rotation needs a re-lock, and a mirror serving an old snapshot is only caught
@@ -594,19 +609,26 @@ The snapshot is additive: an index without one is read exactly as before.
   again whenever the cached file is used; a corrupt cache entry is re-downloaded.
   `grail vendor` files are looked up by that same hash.
 * **Every unpacked tree** is checked against the lock's `(tree SHA256)` when the lock
-  has one, in the shared store before the stamp/rename; a hand-edited file in
-  `.grail/packages/NAME` is refused.
+  has one, in the shared store before the stamp/rename. A tree that carries a matching
+  `.grail-pkg` stamp is trusted after that, so a hand edit to `.grail/packages/NAME` of
+  a package that has already been fetched is not detected by a later `fetch` or build;
+  removing the stamp (in the project and in the shared store) forces a re-unpack and the
+  tree check, and `grail cache verify` checks stamps, not tree contents. An override's
+  tree is re-hashed on every build.
 * **The lock's shape** is checked before a build: package versions satisfy the
   requirements, the transitive closure is complete, `sha256`/`tree`/`commands` are
   64 lowercase hex digits, and `--locked` refuses a stale lock, a recorded
   machine-local override, or an unsigned registry lock when `--require-signature` is
   given. `--locked` reads no index, so it checks a signature *entry's shape* only;
-  `grail index verify --locked` is the command that re-verifies the signature itself.
+  `grail index verify --locked` is the command that re-verifies the signature itself
+  **and** compares every `pkg` entry of the lock with the signed snapshot (the lock is
+  not signed, so a hand-edited archive or tree hash is refused there).
 * **A signed index** is verified with `ssh-keygen -Y verify` against an
   `allowed_signers` file passed from outside the index (or the key a `grail.lock`
   already pinned); the snapshot must cover every entry of the index with the same
-  SHA-256, `(seq)` must not go backwards, the key must not change, the same sequence
-  must not be rewritten, and `(expires)` must be in the future.
+  SHA-256, tree, commit, entry digest and yank state, `(seq)` must not go backwards,
+  the key must not change, the same sequence must not be rewritten, and `(expires)`
+  must be in the future.
 * **Not verified:** git `dep` entries keep a 64-bit content hash (accident detection,
   not cryptographic); there are no signed git tags, no transparency log, no gossip, no
   download size cap, and no build sandbox — `grail build` runs the package author's

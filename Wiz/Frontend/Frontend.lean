@@ -3,6 +3,7 @@ import Wiz.Module
 import Wiz.LegacyNames
 import Wiz.Rig.Instances
 import Wiz.Parser.DocComment
+import Wiz.Lint
 
 /-!
 # The frontend
@@ -90,6 +91,10 @@ partial def isoKey (base : CommandState R) (m : Name) : Option UInt64 := do
     base.trustNative, base.nativeFuel)
   let settings := mixHash settings (hash (g.assumed, g.quoteErasesProofs, g.pushCalls, g.strictPrivacy, g.module,
     g.pp.useNotation, ppKeys (g.pp.unexpanders.toList.map (·.1)), ppKeys (g.pp.formats.toList.map (·.1))))
+  -- (TT-04) a caller may start from a state with extra attributes/options
+  let registry := toString (repr (base.attrDecls, base.optDecls,
+    base.optValues.toList.mergeSort fun a b => decide (a.1 ≤ b.1)))
+  let settings := mixHash settings (hash registry)
   let (k, _) ← go [] m {}
   pure (mixHash settings k)
 where
@@ -245,7 +250,10 @@ the frontend — `Wiz.Format` and `Wiz.LSP` each held a 29–33 MB specialisatio
 cost is instance arguments in the frontend loop; the measurement is in
 `docs/building.md`, "The Lean build". -/
 @[nospecialize] partial def runFrontend (input : String) (s : CommandState R := {}) : CommandState R :=
-  (go input s input.toList.toArray 0 s).checkUnclosedNamespaces
+  let out := (go input s input.toList.toArray 0 s).checkUnclosedNamespaces
+  -- (lint) module-scope rules and per-site suppressions run once, after the target
+  -- is elaborated; the pass never changes a declaration
+  if out.lintEnabled then Lint.finish out input.toList.toArray else out
 where
   @[nospecialize] go (input : String) (base : CommandState R) (chars : Array Char) (pos : Nat) (s : CommandState R) : CommandState R :=
     -- a new text (a file, a REPL entry, a `:load`) has its own header: the state's
@@ -294,6 +302,7 @@ where
                     | none => let (e, checked, memo) := isolate (); (isoPut ref k e, checked, memo)
                   | _, _ => isolate ()
                 (e.errs, checked.insert m (some e.errs), some e.state, memo.insert m e.state)
+            let outerLint := s
             let s := { s with checked }
             let (inner, memo) := match iso? with
               -- (a pristine state may still list imports, of modules without commands; the
@@ -325,7 +334,17 @@ where
             -- (13u) `open import M` is `import M` plus a file-scope `open M`
             let s' := if openImport then
                 { s' with globals := { s'.globals with opens := s'.globals.opens ++ [m] } } else s'
-            go' input base chars stop { s' with messages := msgs, module := s.module, infos } memo
+            let out := { s' with messages := msgs, module := s.module, infos }
+            -- (lint) the target's direct imports, and whether one contributes an effect
+            -- that a name never shows: `W302` uses both
+            let out := if out.lintEnabled && out.module == "" then
+              { out with
+                lintImports := if out.lintImports.any (·.1 == m) then out.lintImports
+                  else out.lintImports.push (m, cmd.info)
+                lintEffectful := if Lint.effectfulImport outerLint inner then
+                  out.lintEffectful.insert m else out.lintEffectful }
+            else out
+            go' input base chars stop out memo
       else go' input base chars stop (step chars cmd s) memo
     | .error e =>
       -- (13o) a keyword where a name was expected: which notation, from which module
@@ -351,9 +370,14 @@ where
     let s' := ((elabCommand cmd).run { s with pristine := false }).2
     let added := s'.globals.order.extract before s'.globals.order.size
     -- (a command macro's located output may have placed them already: keep that)
-    { s' with declSites := added.foldl (fun m n => if m.contains n then m else m.insert n (cmd.info, s.module)) s'.declSites,
-              -- (import header) this is a command that is not an import: the header is over
-              headerDone := true,
-              declDocs := if added.isEmpty then s'.declDocs else declDocsOf chars cmd added s'.declDocs }
+    let out :=
+      { s' with declSites := added.foldl (fun m n => if m.contains n then m else m.insert n (cmd.info, s.module)) s'.declSites,
+                -- (import header) this is a command that is not an import: the header is over
+                headerDone := true,
+                declDocs := if added.isEmpty then s'.declDocs else declDocsOf chars cmd added s'.declDocs }
+    -- (lint) post-elaboration findings are ordinary messages; no declaration changes
+    if out.lintEnabled && out.module == "" then
+      { out with messages := out.messages ++ (Lint.runCommand out cmd chars added).map Lint.Finding.toMsg }
+    else out
 
 end Wiz

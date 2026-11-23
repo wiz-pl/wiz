@@ -1,6 +1,6 @@
 // The playground editor's model, **as the test oracle**: positions (UTF-16 versus code
 // points), the ranges diagnostics underline, and the completion list's filtering,
-// ordering, keyboard index and insertion. The runtime owns these rules now
+// ordering, keyboard commands and insertion. The runtime owns these rules now
 // (`lib/Web/EditorModel.wiz`, with the `=loom` cases); this test pins the oracle the DOM
 // widgets and the Wiz cases are compared against.
 //
@@ -12,7 +12,8 @@ import {
   squiggleSegments, mergeSegments, tokenEnd, splitAtLines, severityOf,
   identifierPrefix, isIdentifierChar, inLineComment, completionTrigger,
   completionItems, completionScore, filterCompletions, moveSelection,
-  stripSnippet, acceptCompletion, completionPopupState, COMPLETION_LIMIT,
+  stripSnippet, acceptCompletion, completionPopupState, completionKey,
+  COMPLETION_LIMIT, COMPLETION_PAGE,
 } from "./framework/editor-model.mjs";
 
 let failed = 0;
@@ -160,6 +161,17 @@ check("move: down wraps", moveSelection(2, 1, 3), 0);
 check("move: no items", moveSelection(0, 1, 0), -1);
 check("move: an out-of-range index is clamped", moveSelection(9, 0, 3), 2);
 check("move: from nothing, down is the first", moveSelection(-1, 1, 3), 0);
+
+// The key table: a move carries the selected index; the host has none of these names.
+check("key: down", completionKey("ArrowDown", 0, 3), { action: "move", index: 1 });
+check("key: up wraps", completionKey("ArrowUp", 0, 3), { action: "move", index: 2 });
+check("key: page down", completionKey("PageDown", 0, 3), { action: "move", index: COMPLETION_PAGE % 3 });
+check("key: page up wraps", completionKey("PageUp", 0, 3), { action: "move", index: (3 - COMPLETION_PAGE % 3) % 3 });
+check("key: Enter accepts", completionKey("Enter", 1, 3), { action: "accept" });
+check("key: Tab accepts", completionKey("Tab", 1, 3), { action: "accept" });
+check("key: Escape closes", completionKey("Escape", 1, 3), { action: "close" });
+check("key: anything else is ignored", completionKey("a", 1, 3), { action: "ignore" });
+check("key: no items", completionKey("ArrowDown", 0, 0), { action: "move", index: -1 });
 
 check("snippet: placeholders stripped", stripSnippet("foo ${1:bar} $2 ${0}"), "foo bar  ");
 check("snippet: an escaped dollar", stripSnippet("a \\$ b"), "a $ b");

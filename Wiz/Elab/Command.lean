@@ -12,6 +12,8 @@ import Wiz.Elab.Reflect
 import Wiz.Frontend.Parse
 import Wiz.Elab.Witness
 import Wiz.Elab.Info
+import Wiz.Lint.Basic
+import Wiz.Elab.Registry
 
 /-!
 # Elaborating commands
@@ -48,6 +50,10 @@ structure Msg where
   text : String
   /-- a stable name for the kind of error (`unknown-identifier`, …), or `""` -/
   code : String := ""
+  /-- (lint) a finding's stable baseline key (a declaration name plus an occurrence,
+  never a line); `""` for an ordinary message. `Lint.Finding.toMsg` carries it, so a
+  baseline can be compared without re-running the rule. -/
+  anchor : String := ""
   deriving Repr, Inhabited
 
 def Msg.render (input : String) (m : Msg) : String :=
@@ -81,6 +87,40 @@ structure DeclDoc where
   a `mutual` block's definitions each have their own -/
   start : Nat := 0
   deriving Inhabited, Repr, BEq
+
+/-- (lint P1) One rule a package lint module registered with a `lint` command. The
+metadata is the registry's data; `runner` names the module's pure `String → String`
+function, which reads the stable `Lint.Command` view and writes its findings. -/
+structure LintRuleDecl where
+  code : String := ""
+  name : String := ""
+  category : Lint.Category := .api
+  defaultSeverity : Lint.Severity := .warning
+  scope : Lint.Scope := .declaration
+  requires : List Lint.Capability := []
+  suppressible : Bool := true
+  runner : Name := "_"
+  deriving Repr, Inhabited
+
+/-- (lint P1) The header a package lint module declares with `lint-set`: the set's name,
+the ABI range it was written against, and the capabilities its rules may read. The
+registry checks every rule's `requires` against `capabilities`. -/
+structure LintSetDecl where
+  name : String := ""
+  abi : String := ""
+  capabilities : List Lint.Capability := []
+  rules : Array LintRuleDecl := #[]
+  deriving Repr, Inhabited
+
+/-- (lint P1) A validated package lint set: the metadata and the erased code of the
+set's module (its runners run in the interpreter, never as host code). -/
+structure LintPackageSet where
+  name : String
+  abi : String
+  capabilities : List Lint.Capability
+  rules : Array LintRuleDecl
+  code : Code := {}
+  deriving Inhabited
 
 structure CommandState (R : Type) where
   globals : Globals R := {}
@@ -141,6 +181,30 @@ structure CommandState (R : Type) where
   infos : Array (Info R) := #[]
   /-- record the expected type of every checked term (the language server turns it on) -/
   termInfo : Bool := false
+  /-- (lint) run `Wiz.Lint` after each command of the target. Off by default: `wiz lint`
+  turns it on; `wiz check`, `wiz build` and the language server do not. -/
+  lintEnabled : Bool := false
+  /-- (lint) the file being linted, for public-root decisions and reports -/
+  lintPath : String := ""
+  /-- (lint) the roots whose declarations are public (`lib/`, a package's library
+  roots); a path under one is linted by `W301` -/
+  lintPublicRoots : List String := ["lib"]
+  /-- (lint) only these rule ids (empty: the registry's defaults) -/
+  lintRules : List String := []
+  /-- (lint) the target's direct imports, with the `import` command's range -/
+  lintImports : Array (Name × SourceInfo) := #[]
+  /-- (lint) direct imports that contribute an effect (instance, syntax, notation,
+  builtin, attribute, export, FFI/link code), so `W302` never reports them -/
+  lintEffectful : Std.HashSet Name := {}
+  /-- (lint P1) the package lint sets the driver loaded (a package contributes one; the
+  loader validates it before it enters the state) -/
+  lintPackageSets : Array LintPackageSet := #[]
+  /-- (lint P1) the package set names enabled for this run (`wiz lint --set NAME`);
+  empty means none. A package set is opt-in and never transitive. -/
+  lintSets : List String := []
+  /-- (lint P1) what a package lint module's `lint-set`/`lint` commands declared; the
+  loader reads it once, and a target elaboration never carries it -/
+  lintSetDecl : LintSetDecl := {}
   declSites : Std.HashMap Name (SourceInfo × String) := {}
   /-- (11s) what each declaration is and its doc comment (`/-- … -/`), for `wiz doc` and
   hovers: filled by the frontend (`runFrontend.step`), replayed by the cache -/
@@ -205,6 +269,24 @@ structure CommandState (R : Type) where
   (numbered from the oldest) -/
   localSimps : List Nat := []
 
+  /-- the attribute registry, latest first: the built-in names and user no-ops
+  (`register_attribute`). `[inline]` and every no-op application are looked up here. -/
+  attrDecls : List AttributeDecl := builtinAttributes
+  /-- the option registry, latest first (`pp.notation`, `pp.all`, and user no-ops from
+  `register_option`). -/
+  optDecls : List OptDecl := builtinOptions
+  /-- the options explicitly set in this module; an option not here has its declared
+  default (`CommandState.optValue?`). A module's options end with its import. -/
+  optValues : Std.HashMap Name OptValue := {}
+  /-- no-op attribute applications `(attribute, target, arguments)`, latest first -/
+  attrUses : List (Name × Name × Array String) := []
+  /-- (local) the positions of no-op applications that end with the module -/
+  localAttrUses : List Nat := []
+  /-- (local) the positions of attributes registered by `local register_attribute` -/
+  localAttrDecls : List Nat := []
+  /-- (local) the positions of options registered by `local register_option` -/
+  localOptDecls : List Nat := []
+
   /-- (11r) unexpanders declared with `app_unexpander c` and `attribute [app_unexpander c] f`,
   latest first, and which of them are `local` (numbered from the oldest) -/
   ppUser : List UnexpanderEntry := []
@@ -235,6 +317,29 @@ def withMarksOnDemand (g : Globals R) (d : Decl R) (k : Decl R → TCM (Globals 
 /-- (11s) The doc comment of a declaration, if it has one. -/
 def CommandState.docOf? (s : CommandState R) (n : Name) : Option String :=
   (s.declDocs.get? n).bind (·.doc)
+
+/-- The registry entry for an attribute, if `n` is registered. -/
+def CommandState.attrDecl? (s : CommandState R) (n : Name) : Option AttributeDecl :=
+  s.attrDecls.find? (·.name == n)
+
+/-- The registry entry for an option, if `n` is registered. -/
+def CommandState.optDecl? (s : CommandState R) (n : Name) : Option OptDecl :=
+  s.optDecls.find? (·.name == n)
+
+/-- The value of an option in this state: what was set, or its declared default. -/
+def CommandState.optValue? (s : CommandState R) (n : Name) : Option OptValue :=
+  match s.optValues.get? n with
+  | some v => some v
+  | none => (s.optDecl? n).map (·.default)
+
+/-- Set an option's value in the state, and apply its action (`pp.notation`/`pp.all`
+update the pretty printer's `useNotation`). -/
+def CommandState.setOptValue (s : CommandState R) (d : OptDecl) (v : OptValue) : CommandState R :=
+  let s := { s with optValues := s.optValues.insert d.name v }
+  match d.action, v with
+  | .ppNotation, .bool b => { s with globals := { s.globals with pp := { s.globals.pp with useNotation := b } } }
+  | .ppAll, .bool b => { s with globals := { s.globals with pp := { s.globals.pp with useNotation := !b } } }
+  | _, _ => s
 
 /-- "'n' has already been declared", naming the module that declared it if that is not
 the one being elaborated (two modules, or a module and the file importing it). -/
@@ -375,13 +480,14 @@ def solveSortConstraints : ElabM R Unit := do
   let typeOf (ctx : LocalCtx R) (t : Term R) : ElabM R (Option (VTy R)) := do
     let t ← zonk ctx.lvl t
     if !t.mvars.isEmpty then return none
-    let kctx : Ctx R := { globals := { (← getGlobals) with sortHolesOk := true }, env := ctx.env, names := ctx.names,
-                          qtys := ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault,
-                          types := ctx.types, lvl := ctx.lvl, proof := true }
+    let kctx : Ctx R := { globals := { (← getGlobals) with sortHolesOk := true }, env := ctx.env,
+                          names := ctx.names.reverse.toArray,
+                          qtys := (ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault).reverse.toArray,
+                          types := ctx.types.reverse.toArray, lvl := ctx.lvl, proof := true }
     match Wiz.infer kctx t with
     | .ok (ty, _) => return some ty
     | .error _ =>
-      match Wiz.infer { kctx with types := (← zonkedTypes ctx).toList.reverse } t with
+      match Wiz.infer { kctx with types := (← zonkedTypes ctx) } t with
       | .ok (ty, _) => return some ty
       | .error _ => return none
   let solvedLevels : ElabM R Nat := do
@@ -513,6 +619,13 @@ def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : O
 universe parameters and the binders. -/
 def declInsertAt (cmd : Syntax) : Nat :=
   [1, 2, 3].foldl (fun acc i => max acc (cmd.getArg i).info.stop) 0
+
+/-- The number of leading λs of a declaration's value, through proof markers
+(`Decl.withTopMarks`): its parameters, as opposed to the Πs written in its type. -/
+private partial def declLeadingLambdas : Term R → Nat
+  | .lam _ b => declLeadingLambdas b + 1
+  | .prf _ v => declLeadingLambdas v
+  | _ => 0
 
 partial def syntaxMentions (n : Name) : Syntax → Bool
   | .ident _ m => m == n
@@ -1793,21 +1906,54 @@ def CommandState.endModule (inner outer : CommandState R) : CommandState R :=
   let insts := inner.localInsts.take (inner.localInsts.length - outer.localInsts.length)
   let simps := inner.localSimps.take (inner.localSimps.length - outer.localSimps.length)
   let pps := inner.localPP.take (inner.localPP.length - outer.localPP.length)
-  -- (11r) `set_option pp.…` is the module's own; (13t) so are its namespaces and opens
+  let useIxs := inner.localAttrUses.take (inner.localAttrUses.length - outer.localAttrUses.length)
+  let regAttrs := inner.localAttrDecls.take (inner.localAttrDecls.length - outer.localAttrDecls.length)
+  let regOpts := inner.localOptDecls.take (inner.localOptDecls.length - outer.localOptDecls.length)
+  -- (positions are numbered from the oldest, as `local` recorded them)
+  let atFromOldest {α : Type} (xs : List α) (i : Nat) : Option α := (xs.reverse.drop i).head?
+  let dropAt {α : Type} (xs : List α) (dropped : List Nat) : List α :=
+    let n := xs.length
+    (xs.zipIdx.filter fun (_, i) => !dropped.contains (n - 1 - i)).map (·.1)
+  -- (an application of a locally registered attribute ends with the registration)
+  let localAttrNames := regAttrs.filterMap fun i => (atFromOldest inner.attrDecls i).map (·.name)
+  -- (11r) `set_option pp.…` is the module's own; (13t) so are its namespaces and opens;
+  -- (TT-04) so is anything `local` registered
   let g2 : PPTable := { inner.globals.pp with useNotation := outer.globals.pp.useNotation }
   let g1 : Globals R := { inner.globals with pp := g2, namespacePrefix := outer.globals.namespacePrefix, opens := outer.globals.opens, aliases := outer.globals.aliases }
   let reset := { inner with localKinds := outer.localKinds, localCats := outer.localCats,
                             localRules := outer.localRules, localProcs := outer.localProcs,
                             localInsts := outer.localInsts, localSimps := outer.localSimps,
                             localPP := outer.localPP,
+                            localAttrUses := outer.localAttrUses,
+                            localAttrDecls := outer.localAttrDecls,
+                            localOptDecls := outer.localOptDecls,
+                            attrDecls := dropAt inner.attrDecls regAttrs,
+                            optDecls := dropAt inner.optDecls regOpts,
+                            attrUses := (dropAt inner.attrUses useIxs).filter
+                              fun (a, _, _) => !localAttrNames.contains a,
+                            optValues := outer.optValues,
                             -- (import header) the importer's header is not the module's
                             headerDone := outer.headerDone,
                             nsStack := outer.nsStack,
+                            -- (lint) the driver's configuration and its import facts belong
+                            -- to the importer, not the module: an isolated (cached) module
+                            -- state must not clear the consumer's enabled sets, sources or
+                            -- accumulated imports/effects
+                            lintEnabled := outer.lintEnabled,
+                            lintPath := outer.lintPath,
+                            lintPublicRoots := outer.lintPublicRoots,
+                            lintRules := outer.lintRules,
+                            lintImports := outer.lintImports,
+                            lintEffectful := outer.lintEffectful,
+                            lintPackageSets := outer.lintPackageSets,
+                            lintSets := outer.lintSets,
+                            lintSetDecl := outer.lintSetDecl,
                             globals := g1 }
   -- (11w) a `local instance` is found only in its module (its definition stays: a name)
   let reset := if insts.isEmpty then reset else
     { reset with instances := (reset.instances.zipIdx.filter fun (_, i) => !insts.contains i).map (·.1) }
-  if kinds.isEmpty && cats.isEmpty && rules.isEmpty && procs.isEmpty && pps.isEmpty && simps.isEmpty then reset else
+  if kinds.isEmpty && cats.isEmpty && rules.isEmpty && procs.isEmpty && pps.isEmpty && simps.isEmpty &&
+      useIxs.isEmpty && regAttrs.isEmpty && regOpts.isEmpty then reset else
   let t := inner.tables
   let cats' := t.cats.fold (init := ({} : Std.HashMap Name Category)) fun acc c cat =>
     if cats.contains c then acc else
@@ -2133,14 +2279,14 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       for c in (stx.getArg 1).args do
         if let some C := c.getId? then derive C T c.info
   let addDeclChecked (name : Name) (levelParams : List Name) (ty : Term R) (val : Option (Term R))
-      (impl : Option (Term R) := none) := do
-    match addDeclSorted s.globals { name, levelParams, type := ty, value := val, impl } with
+      (impl : Option (Term R) := none) (typeWritten : Bool := false) := do
+    match addDeclSorted s.globals { name, levelParams, type := ty, value := val, impl, typeWritten } with
     | .ok g => modify fun s => { s with globals := g }
     | .error e =>
       -- the implementation (a recursive definition's equations compiled a second time,
       -- `elabDefEqns`) is the elaborator's own: if only it fails, the bug is ours
       let ours := impl.isSome &&
-        (addDeclSorted s.globals { name, levelParams, type := ty, value := val }) matches .ok _
+        (addDeclSorted s.globals { name, levelParams, type := ty, value := val, typeWritten }) matches .ok _
       -- ...except a quantity error. The definition is checked through the eliminator, whose
       -- recursive results need none of the arguments, while the implementation calls
       -- itself, passing them: a parameter at ω (a data implicit's default, rule (b)) given a
@@ -2310,9 +2456,21 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let inner := cmd.getArg 1
     if ← rejectImportIn "`local`" inner then return
     unless ["command.syntax", "command.declareSyntaxCat", "command.notation", "command.infix",
-            "command.macroRules", "command.attrMacro", "command.attrSimp", "command.instance", "command.appUnexpander", "command.attrUnexpander"].contains inner.kind do
-      report .error cmd.info "only `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`, `macro_rules`, `attribute [macro …]`, `attribute [simp]`, `instance` and unexpanders can be `local`"
+            "command.macroRules", "command.attrMacro", "command.attrSimp", "command.attrHint",
+            "command.attrHintKind", "command.attr", "command.instance",
+            "command.appUnexpander", "command.attrUnexpander",
+            "command.registerAttribute", "command.registerOption", "command.setOption"].contains inner.kind do
+      report .error cmd.info "only `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`, `macro_rules`, `attribute [macro …]`/`[simp]`/`[hint]`/a no-op attribute, `register_attribute`/`register_option`, `set_option`, `instance` and unexpanders can be `local`"
       return
+    -- (TT-04) a semantic attribute (`[inline]`, `[macro]`, …) cannot be undone by
+    -- `endModule`; only a no-op registration records data that can be dropped
+    if inner.isOfKind "command.attr" then
+      match s.attrDecl? ((inner.getArg 2).getId?.getD "_") with
+      | some d =>
+        unless d.action == .noop do
+          report .error inner.info s!"only a no-op attribute can be `local`; '{d.name}' has an effect that outlives its module"
+          return
+      | none => pure ()
     let before ← get
     elabCommand inner
     modify fun s =>
@@ -2323,7 +2481,10 @@ a proposition is not data (proofs are erased and all its proofs are definitional
                localProcs := (List.range' before.procMacros.length (s.procMacros.length - before.procMacros.length)).reverse ++ s.localProcs
                localInsts := (List.range' before.instances.size (s.instances.size - before.instances.size)).reverse ++ s.localInsts
                localSimps := (List.range' before.simpLemmas.length (s.simpLemmas.length - before.simpLemmas.length)).reverse ++ s.localSimps
-               localPP := (List.range' before.ppUser.length (s.ppUser.length - before.ppUser.length)).reverse ++ s.localPP }
+               localPP := (List.range' before.ppUser.length (s.ppUser.length - before.ppUser.length)).reverse ++ s.localPP
+               localAttrUses := (List.range' before.attrUses.length (s.attrUses.length - before.attrUses.length)).reverse ++ s.localAttrUses
+               localAttrDecls := (List.range' before.attrDecls.length (s.attrDecls.length - before.attrDecls.length)).reverse ++ s.localAttrDecls
+               localOptDecls := (List.range' before.optDecls.length (s.optDecls.length - before.optDecls.length)).reverse ++ s.localOptDecls }
   | "command.def" | "command.axiom" =>
     let name := ((cmd.getArg 1).getId?).getD "_"
     let levelParams := ((cmd.getArg 2).getArg 1).args.toList.filterMap Syntax.getId?
@@ -2389,7 +2550,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     else match runElabS (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) (smt := { s.smt with trustNative := s.trustNative, nativeFuel := s.nativeFuel }) (smtDecl := name) s.globals (elabDeclTerms binders typeStx valStx cmd.info (declName? := some (name, (cmd.getArg 1).info, declInsertAt cmd))) levelParams with
       | (.ok ((ty, val), sides), hv) =>
         addInfos hv
-        if sides.isEmpty then addDeclChecked name levelParams ty val
+        if sides.isEmpty then addDeclChecked name levelParams ty val (typeWritten := typeStx.isSome)
         else
           -- (28) declarations a tactic added: definitions (28c, `TacticM.define`), checked
           -- by the kernel like any other, and axioms, checked as types (an axiom's
@@ -2418,7 +2579,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             | .ok g' => g := g'
             | .error e => report .error cmd.info s!"kernel rejected {d.name}: {e}"; ok := false; break
           if ok then
-            match addDeclSorted g { name, levelParams, type := ty, value := val } with
+            match addDeclSorted g { name, levelParams, type := ty, value := val, typeWritten := typeStx.isSome } with
             | .ok g' =>
               modify fun s => { s with globals := g' }
               let axs := sides.filter (·.value.isNone)
@@ -2530,7 +2691,15 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .ann tm _ => tm
         | t => t
       let g ← getGlobals
-      pure s!"{t.pretty [] (some g)} : {ty.pretty [] (some g)}"
+      -- A declaration's type as written keeps the names of the Π binders of its type
+      -- ascription, not only its parameters': the value's leading λs (its parameters)
+      -- print as arrows when unused, as before, but a Π beyond them was written in the
+      -- type (`def f (n : Nat) : (m : Nat) → … := by …`), so `#check` keeps their names.
+      let keepFrom : Option Nat := match t with
+        | .const n _ => (g.find? n).bind fun d =>
+          if d.typeWritten then d.value.map declLeadingLambdas else none
+        | _ => none
+      pure s!"{t.pretty [] (some g)} : {ty.pretty [] (some g) keepFrom}"
     match r with
     | .ok text => report .info cmd.info text
     | .error e => reportErr e
@@ -2587,7 +2756,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       match r with
       | (.ok (ty, val, impl), hv) =>
         addInfos hv
-        addDeclChecked name levelParams ty (some val) impl
+        addDeclChecked name levelParams ty (some val) impl (typeWritten := true)
       | (.error e, hv) => addInfos hv; reportErr e
   | "command.coinductive" =>
     let name := ((cmd.getArg 1).getId?).getD "_"
@@ -2719,7 +2888,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         match (Term.spine concl).1 with
         | .const C _ =>
           if s.classes.any (·.name == C) then
-            addDeclChecked name levelParams ty val
+            addDeclChecked name levelParams ty val (typeWritten := true)
             modify fun s => { s with instances := s.instances.push { name, cls := C, priority } }
           else reportC cmd.info s!"{C} is not a class" ErrorCode.unknownClass
         | _ => report .error cmd.info "an instance's type must be an application of a class"
@@ -2852,6 +3021,54 @@ a proposition is not data (proofs are erased and all its proofs are definitional
                                                                 else (key, n) :: s.globals.assumed } }
         unless trusted do
           report .warning cmd.info s!"builtin {key} := {n} is not checked: it is an axiom of every declaration that depends on {n} (see `#print axioms`)"
+  | "command.lintSet" =>
+    -- (P1) the header of a package lint set: `lint-set "scry" "wiz-lint/1" [decl, spans]`
+    let name := ((cmd.getArg 1).getStr?).getD ""
+    let abi := ((cmd.getArg 2).getStr?).getD ""
+    let mut caps : List Lint.Capability := []
+    for stx in ((cmd.getArg 3).getArg 1).args do
+      match stx.getId? with
+      | none => pure ()
+      | some n =>
+        match Lint.Capability.ofKey? n with
+        | some c => caps := c :: caps
+        | none => report .error stx.info s!"unknown lint capability '{n}'"
+    modify fun s => { s with lintSetDecl := { s.lintSetDecl with name, abi, capabilities := caps.reverse } }
+  | "command.lint" =>
+    -- (P1) one rule of a package lint set:
+    -- `lint W501 "no-raw-path" api warning declaration [decl, spans] noRawPath`
+    let code := ((cmd.getArg 1).getId?).getD "_"
+    let name := ((cmd.getArg 2).getStr?).getD ""
+    let catText := ((cmd.getArg 3).getId?).getD "_"
+    let sevText := ((cmd.getArg 4).getId?).getD "_"
+    let scopeText := ((cmd.getArg 5).getId?).getD "_"
+    let category ← match Lint.Category.ofKey? catText with
+      | some c => pure c
+      | none => report .error cmd.info s!"unknown lint category '{catText}'"; pure .api
+    let defaultSeverity ← match Lint.Severity.ofKey? sevText with
+      | some s => pure s
+      | none => report .error cmd.info s!"unknown lint severity '{sevText}'"; pure .warning
+    let scope ← match Lint.Scope.ofKey? scopeText with
+      | some sc => pure sc
+      | none => report .error cmd.info s!"unknown lint scope '{scopeText}'"; pure .declaration
+    let mut caps : List Lint.Capability := []
+    for stx in ((cmd.getArg 6).getArg 1).args do
+      match stx.getId? with
+      | none => pure ()
+      | some n =>
+        match Lint.Capability.ofKey? n with
+        | some c => caps := c :: caps
+        | none => report .error stx.info s!"unknown lint capability '{n}'"
+    -- the runner must be declared before the `lint` command (the loader looks it up in
+    -- this module's globals; a later definition would not be found)
+    let runnerStx := cmd.getArg 7
+    let runnerName := (runnerStx.getId?).getD "_"
+    let runner := (s.globals.resolveName runnerName).toOption.getD runnerName
+    if s.globals.find? runner |>.isNone then
+      report .error runnerStx.info s!"the lint rule {code} names '{runnerName}', which is not declared above it"
+    let rule : LintRuleDecl := { code, name, category, defaultSeverity, scope,
+                                 requires := caps.reverse, runner }
+    modify fun s => { s with lintSetDecl := { s.lintSetDecl with rules := s.lintSetDecl.rules.push rule } }
   | "command.printAxioms" =>
     let nStx := cmd.getArg 2
     match s.globals.resolveName ((nStx.getId?).getD "_") with
@@ -3352,19 +3569,142 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         return
       modify fun s => CommandState.refreshPP { s with ppUser := { head := c, arity := 0, how := .fn f } :: s.ppUser }
   | "command.setOption" =>
-    -- (11r) `set_option pp.notation false` (`pp.all true`: the same)
-    let opt := ((cmd.getArg 1).getId?).getD ""
-    let v : Option Bool := match cmd.getArg 2 with
-      | .ident _ "true" => some true
-      | .ident _ "false" => some false
+    -- (11r, TT-04) every option is looked up in the registry (`optDecls`) and parsed by
+    -- its declared type; `pp.notation`/`pp.all` keep their effect on the pretty printer
+    let optStx := cmd.getArg 1
+    let opt := (optStx.getId?).getD ""
+    let valueOf (kind : OptKind) (stx : Syntax) : Except String OptValue :=
+      match kind with
+      | .boolean => match stx with
+        | .ident _ "true" => .ok (.bool true)
+        | .ident _ "false" => .ok (.bool false)
+        | _ => .error kind.expects
+      | .natural => match stx.getNat? with
+        | some n => .ok (.nat n)
+        | none => .error kind.expects
+      | .string => match stx.getStr? with
+        | some s => .ok (.str s)
+        | none => .error kind.expects
+      | .name => match stx.getId? with
+        | some n => .ok (.name n)
+        | none => .error kind.expects
+    match s.optDecl? opt with
+    | none =>
+      report .error optStx.info
+        s!"unknown option '{opt}' (registered: {", ".intercalate (s.optDecls.map (·.name))})"
+    | some d =>
+      match valueOf d.kind (cmd.getArg 2) with
+      | .error e => report .error (cmd.getArg 2).info s!"option '{opt}' {e}"
+      | .ok v =>
+        match d.validate v with
+        | .error e => report .error (cmd.getArg 2).info s!"option '{opt}' {e}"
+        | .ok () => modify fun s => s.setOptValue d v
+  | "command.registerAttribute" =>
+    -- (TT-04) a user attribute: a no-op with a flag payload. Its applications are data
+    -- in the state, so `local` can drop them with the module.
+    let nameStx := cmd.getArg 1
+    let n := (nameStx.getId?).getD "_"
+    if n == "_" || n.isEmpty then
+      report .error nameStx.info "register_attribute needs a name"
+    else if let some d := s.attrDecl? n then
+      report .error nameStx.info s!"attribute '{d.name}' is already registered"
+    else
+      modify fun s => { s with attrDecls := { name := n, payload := .flag, action := .noop } :: s.attrDecls }
+  | "command.registerOption" =>
+    -- (TT-04) a user option: typed (Bool/Nat/String/Name) and a no-op unless it is one
+    -- of the printing options above.
+    let nameStx := cmd.getArg 1
+    let n := (nameStx.getId?).getD "_"
+    let kindStx := cmd.getArg 3
+    let kindName := (kindStx.getId?).getD ""
+    let kind? : Option OptKind := match kindName with
+      | "Bool" => some .boolean
+      | "Nat" => some .natural
+      | "String" => some .string
+      | "Name" => some .name
       | _ => none
-    let set (b : Bool) : StateM (CommandState R) Unit :=
-      modify fun s => { s with globals := { s.globals with pp := { s.globals.pp with useNotation := b } } }
-    match opt, v with
-    | "pp.notation", some b => set b
-    | "pp.all", some b => set !b
-    | "pp.notation", none | "pp.all", none => report .error (cmd.getArg 2).info "expected `true` or `false`"
-    | o, _ => report .error (cmd.getArg 1).info s!"unknown option {o} (there are pp.notation and pp.all)"
+    match kind? with
+    | none => report .error kindStx.info s!"unknown option type '{kindName}' (use Bool, Nat, String or Name)"
+    | some kind =>
+      let valueOf (stx : Syntax) : Except String OptValue :=
+        match kind with
+        | .boolean => match stx with
+          | .ident _ "true" => .ok (.bool true)
+          | .ident _ "false" => .ok (.bool false)
+          | _ => .error kind.expects
+        | .natural => match stx.getNat? with
+          | some m => .ok (.nat m)
+          | none => .error kind.expects
+        | .string => match stx.getStr? with
+          | some str => .ok (.str str)
+          | none => .error kind.expects
+        | .name => match stx.getId? with
+          | some name => .ok (.name name)
+          | none => .error kind.expects
+      match valueOf (cmd.getArg 5) with
+      | .error e => report .error (cmd.getArg 5).info s!"option '{n}' {e}"
+      | .ok v =>
+        if n == "_" || n.isEmpty then report .error nameStx.info "register_option needs a name"
+        else if let some d := s.optDecl? n then
+          report .error nameStx.info s!"option '{d.name}' is already registered"
+        else modify fun s => { s with optDecls := { name := n, kind, default := v } :: s.optDecls }
+  | "command.attr" =>
+    -- (TT-04) `attribute [foo args] x`: the registry says what `foo` takes and does
+    let aStx := cmd.getArg 2
+    let a := (aStx.getId?).getD "_"
+    let targetStx := cmd.getArg 5
+    let args := (cmd.getArg 3).args
+    let argText (x : Syntax) : String := match x with
+      | .ident _ n => n
+      | .atom _ v => v
+      | .node _ _ #[a] => match a.getStr? with
+        | some s => s
+        | none => (a.getNat?.map toString).getD (toString (repr x))
+      | _ => toString (repr x)
+    match s.attrDecl? a with
+    | none =>
+      report .error aStx.info
+        s!"unknown attribute '{a}' (registered: {", ".intercalate (s.attrDecls.map (·.name))})"
+    | some d =>
+      let parsed : Except String (Array Syntax) := match d.payload with
+        | .flag => if args.isEmpty then .ok #[] else .error s!"attribute '[{d.name}]' {d.payload.expects}"
+        | .name =>
+          if args.size == 1 && args[0]!.getId?.isSome then .ok args
+          else .error s!"attribute '[{d.name}]' {d.payload.expects}"
+        | .nameOptName =>
+          if args.size ≤ 2 && args.all (fun x => x.getId?.isSome) then .ok args
+          else .error s!"attribute '[{d.name}]' {d.payload.expects}"
+        | .nameOptNat =>
+          if args.isEmpty then .ok #[] else
+          if args.size == 1 && args[0]!.getNat?.isSome then .ok args
+          else .error s!"attribute '[{d.name}]' {d.payload.expects}"
+      match parsed with
+      | .error e => report .error cmd.info e
+      | .ok args =>
+        match d.action with
+        | .noop =>
+          let f := s.globals.resolve ((targetStx.getId?).getD "_")
+          match s.globals.find? f with
+          | none => reportC targetStx.info s!"unknown declaration '{f}'" ErrorCode.unknownDeclaration
+          | some _ =>
+            modify fun s => { s with attrUses := (d.name, f, args.map argText) :: s.attrUses }
+        | .inline =>
+          -- `attribute [inline] f` (22i): compiled code substitutes `f`'s body where `f`
+          -- is applied to all its arguments. Registered as the builtin key `inline`; the
+          -- kernel doesn't see it.
+          let f := s.globals.resolve ((targetStx.getId?).getD "_")
+          match s.globals.find? f with
+          | none => reportC targetStx.info s!"unknown declaration '{f}'" ErrorCode.unknownDeclaration
+          | some decl =>
+            if decl.value.isNone then report .error targetStx.info s!"{f} has no definition to inline"
+            else if s.builtins.any (fun (k, x) => x == f && !k.startsWith RVal.exportPrefix) then
+              report .error targetStx.info s!"{f} is a builtin, foreign or inline function already"
+            else
+              modify fun s => { s with builtins := s.builtins ++ [(inlineKey, f)],
+                                       globals := s.globals.addBuiltinBack inlineKey f }
+        | _ =>
+          report .error cmd.info s!"attribute '[{d.name}]' has no generic form"
+
   | "command.attrTactic" =>
     let k := ((cmd.getArg 3).getId?).getD "_"
     let f := ((cmd.getArg 5).getId?).getD "_"
@@ -3401,7 +3741,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .eq _ lhs rhs =>
           if conditional then
             reportC nStx.info s!"'{n}' is a conditional simp lemma (it has a premise before the equation); dischargers are S3, so it cannot be registered yet" ErrorCode.simpLemmaConditional
-          else if s.simpLemmas.any (·.name == n) then
+          else if s.simpLemmas.any fun e => !e.hint && e.name == n then
             report .warning nStx.info s!"duplicate `[simp]` registration for '{n}': it is already in the simp set (kept once, at its first priority)"
           else do
             if lhs == rhs then
@@ -3411,6 +3751,29 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             modify fun s => { s with simpLemmas := { name := n, priority := prio, rtl := false } :: s.simpLemmas }
         | _ =>
           reportC nStx.info s!"'{n}' is not an equation: a simp lemma must have the form `∀ x₁ … xₙ, lhs = rhs`" ErrorCode.simpLemmaNotEquation
+  | "command.attrHint" | "command.attrHintKind" =>
+    -- (P0) `attribute [hint] f`, `[hint 500] f`, `[hint intro] f`: a theorem that
+    -- `auto` may apply. It shares the registration array with `[simp]` but not the set.
+    let kindRule := cmd.isOfKind "command.attrHintKind"
+    let prio := if kindRule then 1000 else
+      if (cmd.getArg 3).isNone then 1000 else
+      (((if (cmd.getArg 3).isOfKind "null" then (cmd.getArg 3).getArg 0 else cmd.getArg 3).getNat?).getD 1000)
+    let kind := if kindRule then ((cmd.getArg 3).getId?).getD "apply" else "apply"
+    if !["apply", "intro", "elim"].contains kind then
+      reportC (cmd.getArg 3).info s!"'{kind}' is not a hint kind: use `apply`, `intro` or `elim`" ErrorCode.unknownDeclaration
+    let nStx := cmd.getArg 5
+    let n := (s.globals.resolveName ((nStx.getId?).getD "_")).toOption.getD ((nStx.getId?).getD "_")
+    match s.globals.find? n with
+    | none => reportC nStx.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
+    | some d =>
+      if (ctorInfo? s.globals n).isSome then
+        reportC nStx.info s!"'{n}' is a constructor, not a theorem: a hint must have a proof" ErrorCode.simpLemmaNotEquation
+      else if d.value.isNone && d.witness.isNone then
+        reportC nStx.info s!"'{n}' has no definition: a hint must be a theorem, not an axiom" ErrorCode.simpLemmaNotEquation
+      else if s.simpLemmas.any fun e => e.hint && e.name == n then
+        report .warning nStx.info s!"duplicate `[hint]` registration for '{n}': it is already in the hint set (kept once, at its first priority)"
+      else
+        modify fun s => { s with simpLemmas := { name := n, priority := prio, rtl := false, hint := true, kind := kind } :: s.simpLemmas }
   | "command.attrImplementedBy" =>
     -- `attribute [implemented_by g] f`: compiled code runs `g` wherever it would run `f`
     -- (erasure takes `g`'s code for `f`); the kernel and proofs keep `f`'s definition. So
@@ -3507,21 +3870,6 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           match setImpl s.globals f (.const impl us) with
           | .ok g' => modify fun s => { s with globals := g' }
           | .error e => report .error (cmd.getArg 3).info s!"kernel rejected {impl} as the implementation of {f}: {e}"
-  | "command.attrInline" =>
-    -- `attribute [inline] f` (22i): compiled code substitutes `f`'s body where `f` is
-    -- applied to all its arguments, so a lambda argument is applied directly (no
-    -- closure). Registered as the builtin key `inline`; the kernel doesn't see it.
-    let fStx := cmd.getArg 4
-    let f := (fStx.getId?).getD "_"
-    match s.globals.find? f with
-    | none => reportC fStx.info s!"unknown declaration '{f}'" ErrorCode.unknownDeclaration
-    | some d =>
-      if d.value.isNone then report .error fStx.info s!"{f} has no definition to inline"
-      else if s.builtins.any (fun (k, x) => x == f && !k.startsWith RVal.exportPrefix) then
-        report .error fStx.info s!"{f} is a builtin, foreign or inline function already"
-      else
-        modify fun s => { s with builtins := s.builtins ++ [(inlineKey, f)],
-                                 globals := s.globals.addBuiltinBack inlineKey f }
   | "command.attrDefaultInstance" =>
     -- (7f) `attribute [default_instance p] i`: when instance problems are stuck, the
     -- instance `i` is tried on those of its class, highest `p` (default 1000) first
@@ -3612,8 +3960,9 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           -- the interpreter can't fail: running a stub would print a wrong value
           report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
         | .ok (ty, e, code, []) =>
-          let v := run code [] e
-          report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
+          match run code [] e with
+          | .stuck m => report .error cmd.info s!"cannot run this: {m}"
+          | v => report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
         | .error err => report .error cmd.info s!"cannot run this: {err}"
       let hintOf (ty : VTy R) : Option Name := match whnf ty with
         | .mu _ _ _ _ _ (some (T, _, _)) _ => some T
@@ -3678,9 +4027,12 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .ok (_, _, _, (n, err) :: _) =>
           report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
         | .ok (_, e, code, []) =>
-          match (run code [] e).toString? with
-          | some text => report .info cmd.info text
-          | none => report .error cmd.info "#plot: the value is not a string (expected a Plot.Chart)"
+          match run code [] e with
+          | .stuck m => report .error cmd.info s!"#plot: {m}"
+          | v =>
+            match v.toString? with
+            | some text => report .info cmd.info text
+            | none => report .error cmd.info "#plot: the value is not a string (expected a Plot.Chart)"
         | .error err => report .error cmd.info s!"cannot run this: {err}"
   | "command.run" =>
     -- like `#eval`, but through the IR, with reference counting, on a checked heap

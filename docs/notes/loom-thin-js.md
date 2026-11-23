@@ -19,6 +19,13 @@ that for a page (`?ui=loom` at the time; it is the page now). The rule from here
 This note is the target API, the ownership boundary, the inventory that got us here, and
 the stages that remove the rest.
 
+> **Canonical model.** The host / Loom runtime / SSR shell / designer-builder split, the
+> data paths of each surface, the wire's role, the single validation table and the
+> adopt-and-listen contract are canonical in
+> [`loom-wire-protocol.md`](loom-wire-protocol.md). The ownership table below is this
+> note's JavaScript-line-budget view of the same boundary; when the two differ, the
+> protocol note wins.
+
 ## 1. The target API
 
 ```js
@@ -38,8 +45,10 @@ mount(document.body, {
 2. **loads and instantiates the runtime module** (the dynamic import's factory, with
    `print`/`printErr`), checks the ABI before touching the page, and throws on failure
    (the page shows a text reason);
-3. **mounts the SSR** (`wiz_loom_html`) into the element, installs `js_patch`'s applier
-   and the delegated event listeners;
+3. **decides adopt or replace** from the container's `data-wiz-*` island attributes
+   and the SSR hash (canonical in `loom-wire-protocol.md`); on replace it mounts the SSR
+   (`wiz_loom_html`) into the element, installs `js_patch`'s applier and the delegated
+   event listeners;
 4. **turns DOM events into steps** (`event "\n" index "\n" payload`, the existing
    driver ABI);
 5. **publishes the host capabilities** a Wiz program cannot reach — `clipboard`,
@@ -55,6 +64,7 @@ The runtime interface is therefore small and stable:
 ```
 wiz_loom_init : S
 wiz_loom_html : S -> String                    -- SSR, first paint
+wiz_loom_ssr_hash : S -> String                -- optional: the adopt hash (see the protocol note)
 wiz_loom_step : S -> String -> IO S            -- one DOM event, patched via js_patch
 wiz_loom_<effect> : S -> ... -> IO S           -- the page's effects, if it has any
 ```

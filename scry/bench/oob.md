@@ -1,15 +1,15 @@
 # Out-of-bounds writes and reads (CWE-787 / CWE-125)
 
-Status: new opt-in rule family. `lib/Scry/rules/oob.scry` is not in `default.scry`, so no
+Status: new opt-in rule family. `rules/oob.scry` is not in `default.scry`, so no
 default finding, benchmark baseline or safe-corpus count changes. The analysis is
-`lib/Scry/Bounds.wiz`; the C fixtures are `scry/tests/fixtures/oob-*.c` and the package
+`src/Scry/Bounds.wiz`; the C fixtures are `scry/tests/fixtures/oob-*.c` and the package
 test is `scry/tests/oob.wiz`.
 
 ```sh
 cd scry
 ../.lake/build/bin/grail build scry
 ../.lake/build/bin/grail test oob
-.grail/bin/scry taint tests/fixtures/oob-write-heap.c --rules ../lib/Scry/rules/oob.scry
+.grail/bin/scry taint tests/fixtures/oob-write-heap.c --rules rules/oob.scry
 ```
 
 ## What the rule claims
@@ -58,7 +58,7 @@ branch's build and the opt-in pack:
 ```sh
 scripts/cve-fetch.py assemble        # the cases, from pinned upstream source
 for c in cve-2021-23017 cve-2018-1000001 cve-2014-0160; do
-  scry taint build/cve-src/cases/$c/case.c --rules ../lib/Scry/rules/oob.scry
+  scry taint build/cve-src/cases/$c/case.c --rules rules/oob.scry
 done
 ```
 

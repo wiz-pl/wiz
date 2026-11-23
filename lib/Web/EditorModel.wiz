@@ -815,6 +815,38 @@ def EditorModel.askKey (key code : String) (ctrl meta : Bool) : Bool :=
   (String.eq key " " || String.eq key "Spacebar" || String.eq code "Space") &&
   (ctrl || meta)
 
+/-- How far a popup key moves the selection: `1`/`-1` for an arrow, `10`/`-10` for a page,
+`0` for a key that does not move. -/
+def EditorModel.completionDelta (key : String) : Int :=
+  if String.eq key "ArrowDown" then (1 : Int)
+  else if String.eq key "ArrowUp" then (-1 : Int)
+  else if String.eq key "PageDown" then (10 : Int)
+  else if String.eq key "PageUp" then (-10 : Int)
+  else (0 : Int)
+
+/-- The popup's response to a keydown, as JSON: `{"action":"move","index":N}` (the
+runtime's selected index after moving from `index` in `count` items), `{"action":"accept"}`,
+`{"action":"close"}`, or `{"action":"ignore"}`. The popup host only carries the action out
+and calls `preventDefault`; it keeps no key table of its own. -/
+def EditorModel.popupKeyJson (key index count : String) : String :=
+  let d := EditorModel.completionDelta key;
+  let j :=
+    if Int.beq d 0 then
+      if String.eq key "Enter" || String.eq key "Tab" then
+        Json.mkObj [("action", Json.mkStr "accept")]
+      else if String.eq key "Escape" then
+        Json.mkObj [("action", Json.mkStr "close")]
+      else Json.mkObj [("action", Json.mkStr "ignore")]
+    else
+      Json.mkObj
+        [ ("action", Json.mkStr "move")
+        , ("index", match EditorModel.moveSelection (EditorModel.intOf index) d
+              (EditorModel.intOf count) with
+            | .ofNat n => Json.ofNat n
+            | .negSucc k => Json.int .true (k + 1))
+        ];
+  Json.render j
+
 /-- Split `s` at exactly one `sep` (`none` otherwise). -/
 def EditorModel.split2 (s sep : String) : Option (String × String) :=
   match String.splitOn s sep with

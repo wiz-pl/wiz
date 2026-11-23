@@ -1,0 +1,182 @@
+-- test: run
+import Sys
+import Json
+import Text
+import Scry.Output
+import Scry.Sarif
+import Scry.Rules
+-- The per-finding output pipeline, without running the analyser:
+--
+-- * a finding's id is `Scry.semanticId` (the same value the web bundle and the HTML
+--   report use), and it is the id in both the JSON row and the SARIF
+--   `partialFingerprints.scry/v1` entry;
+-- * the id ignores the sink program point and the line, and changes with the file;
+-- * a baseline document is read from its own `ids` form, a previous JSON report, or a
+--   SARIF log, and an unsupported shape is an error (fail closed);
+-- * a budget counts findings and names the count in its message.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.ePrintln (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def jAt (j : Json) (path : List String) : Json :=
+  match path with
+  | .nil => j
+  | .cons k rest => match Json.get j k with
+    | .some x => jAt x rest
+    | .none => Json.mkNull
+
+def jStr (j : Json) (path : List String) : String :=
+  match jAt j path with
+  | .str s => s
+  | _ => ""
+
+def jNat (j : Json) (path : List String) : Nat :=
+  match jAt j path with
+  | .int _ n => n
+  | _ => 0
+
+def jList (j : Json) (path : List String) : List Json :=
+  match jAt j path with
+  | .arr xs => Jsons.toList xs
+  | _ => .nil
+
+partial def nthJ (xs : List Json) (i : Nat) : Json :=
+  match xs with
+  | .cons x _ => match Nat.beq i 0 with
+    | .true => x
+    | .false => nthJ (List.drop 1 xs) (Nat.sub i 1)
+  | .nil => Json.mkNull
+
+def path : List Scry.PathNode :=
+  List.cons (Scry.PathNode.mk "main" 1 0 Scry.PathKind.source)
+    (List.cons (Scry.PathNode.mk "main" 2 0 Scry.PathKind.flow)
+      (List.cons (Scry.PathNode.mk "main" 7 0 Scry.PathKind.sink) .nil))
+
+def findingAt (sink line : Nat) : Scry.RuleFinding :=
+  Scry.RuleFinding.mk "command-injection" .error "getenv reaches system" .taint
+    "main" sink "system" 0 path
+
+def originMap (sink line : Nat) (uri : String) : Scry.OriginMap :=
+  List.cons (Scry.OriginEntry.mk "main" sink
+    (Scry.Origin.mk uri line 3 line 12)) .nil
+
+def main : IO Unit := EIO.toIO (do
+  let pack := Scry.RulePack.mk .nil;
+  let f := findingAt 7 3;
+  let m := originMap 7 3 "a.c";
+  let e := Scry.emitFindingOf "a.c" m pack f .true .false;
+
+  check "id is the one semanticId" (String.eq e.id (Scry.semanticId f "a.c"));
+  check "id has the f_ prefix" (String.startsWith e.id "f_");
+  check "json row carries the same id" (String.eq (jStr e.json ["id"]) e.id);
+  check "json row carries the namespaced rule id"
+    (String.eq (jStr e.json ["ruleId"]) "scry/c/command-injection");
+  check "sarif fingerprint carries the same id"
+    (String.eq (jStr e.sarif ["partialFingerprints", "scry/v1"]) e.id);
+  check "sarif result carries the namespaced rule id"
+    (String.eq (jStr e.sarif ["ruleId"]) "scry/c/command-injection");
+  check "no baselineState without a baseline"
+    (Json.isNull (jAt e.json ["baselineState"]));
+
+  -- The id is independent of the sink program point and the line.
+  let f99 := findingAt 99 41;
+  let m99 := originMap 99 41 "a.c";
+  check "id ignores the sink point and line"
+    (String.eq (Scry.emitFindingId m f) (Scry.emitFindingId m99 f99));
+  check "id changes with the file"
+    (Bool.not (String.eq (Scry.emitFindingId m f)
+      (Scry.emitFindingId (originMap 7 3 "b.c") f)));
+
+  -- A baseline run marks the result `new` in both shapes.
+  let eb := Scry.emitFindingOf "a.c" m pack f .true .true;
+  check "baseline json says new" (String.eq (jStr eb.json ["baselineState"]) "new");
+  check "baseline sarif says new"
+    (String.eq (jStr eb.sarif ["baselineState"]) "new");
+  check "same id with and without baseline" (String.eq eb.id e.id);
+
+  -- Rendering is deterministic: no timestamp, sorted elsewhere, same bytes.
+  let text1 := Json.render e.json;
+  let text2 := Json.render (Scry.emitFindingOf "a.c" m pack f .true .false).json;
+  check "json rendering is byte-stable" (String.eq text1 text2);
+  check "sarif log is byte-stable"
+    (String.eq (Json.render (Scry.sarifLog "scry" pack .nil [e.sarif]))
+      (Json.render (Scry.sarifLog "scry" pack .nil
+        [(Scry.emitFindingOf "a.c" m pack f .true .false).sarif])));
+
+  -- Baseline documents: bare array, {"ids":…}, a findings report, and a SARIF log.
+  let readIds : String → Except String (List String) := fun text => match Json.parse text with
+    | .error _ => .error "parse"
+    | .ok j => Scry.baselineIdsOfJson j;
+  let idsOf : Except String (List String) → List String := fun r => match r with
+    | .ok ids => ids
+    | .error _ => .nil;
+  check "baseline: bare array"
+    (Nat.beq (List.length (idsOf (readIds ("[\"f_a\",\"f_b\"]")))) 2);
+  check "baseline: ids object"
+    (Nat.beq (List.length (idsOf (readIds "{\"schema\":\"scry-baseline/1\",\"ids\":[\"f_a\"]}"))) 1);
+  check "baseline: previous json report"
+    (Nat.beq (List.length (idsOf (readIds
+      (Json.render (Scry.emitJson { Scry.emptyOutputOpts with path := "a.c" }
+        pack .nil [e] .nil .nil 1 0 1 .false .none))))) 1);
+  check "baseline: SARIF log"
+    (Nat.beq (List.length (idsOf (readIds
+      (Json.render (Scry.sarifLog "scry" pack .nil [e.sarif]))))) 1);
+  match readIds "{\"nope\":true}" with
+  | .error _ => check "baseline: unknown shape is an error" .true
+  | .ok _ => check "baseline: unknown shape is an error" .false;
+
+  -- Budgets: N is total, SCOPE=N is one severity; the count is in the message.
+  let two := [e, { e with severity := .warning }];
+  let total1 := Scry.BudgetLimit.mk .total 1;
+  let err1 := Scry.BudgetLimit.mk (.severity "error") 1;
+  let err0 := Scry.BudgetLimit.mk (.severity "error") 0;
+  match Scry.parseBudgetLimit "2" with
+  | .ok l => check "budget: N is a total cap"
+      (Bool.and (Nat.beq l.limit 2) (String.eq (Scry.BudgetScope.show l.scope) "total"))
+  | .error _ => check "budget: N is a total cap" .false;
+  match Scry.parseBudgetLimit "error=0" with
+  | .ok l => check "budget: SCOPE=N is a severity cap"
+      (Bool.and (Nat.beq l.limit 0) (String.eq (Scry.BudgetScope.show l.scope) "error"))
+  | .error _ => check "budget: SCOPE=N is a severity cap" .false;
+  match Scry.parseBudgetLimit "bogus" with
+  | .error _ => check "budget: a bad scope is an error" .true
+  | .ok _ => check "budget: a bad scope is an error" .false;
+  check "budget: total exceeded" (Scry.budgetFailed [total1] two);
+  check "budget: total message names the count"
+    (String.contains (Scry.budgetMessage total1 two) "2");
+  check "budget: one error is within error=1" (Bool.not (Scry.budgetFailed [err1] two));
+  check "budget: error=0 fails with the count"
+    (Bool.and (Scry.budgetFailed [err0] two)
+      (String.contains (Scry.budgetMessage err0 two) "1"));
+  check "budget: JSON carries limit, count and the verdict"
+    (Bool.and (Nat.beq (jNat (nthJ (jList (Scry.emitBudgetJson [total1] two) ["limits"]) 0)
+          ["count"]) 2)
+      (Nat.beq (jNat (nthJ (jList (Scry.emitBudgetJson [total1] two) ["limits"]) 0)
+          ["limit"]) 1));
+
+  -- A warning has the same b_ id in JSON and SARIF.
+  let w := Scry.BoundaryFinding.mk "scry/memory/use-after-free" "freed then used"
+    "main" 5 (.some (Scry.Origin.mk "a.c" 9 1 9 5));
+  let ew := Scry.emitWarningOf "a.c" w;
+  check "warning id is boundaryId" (String.eq ew.id
+    (Scry.boundaryId "scry/memory/use-after-free" "a.c" "main" "freed then used"));
+  check "warning json id matches" (String.eq (jStr ew.json ["id"]) ew.id);
+  check "warning sarif fingerprint matches"
+    (String.eq (jStr ew.sarif ["partialFingerprints", "scry/v1"]) ew.id);
+
+  -- The report's counts and arrays come from the same set.
+  let report := Scry.emitJson { Scry.emptyOutputOpts with path := "a.c" }
+    pack [Scry.EmitFileReport.mk "a.c" 0 1 .false] [e] [ew] .nil 1 0 1 .false .none;
+  check "report schema" (String.eq (jStr report ["schema"]) "scry-findings/1");
+  check "report counts one finding"
+    (Nat.beq (jNat report ["counts", "findings"]) 1);
+  check "report array has the row"
+    (String.eq (jStr (nthJ (jList report ["findings"]) 0) ["id"]) e.id);
+  check "report warnings has the warning"
+    (String.eq (jStr (nthJ (jList report ["warnings"]) 0) ["id"]) ew.id);
+  check "report budget is reported"
+    (Nat.beq (jNat report ["budget", "findings"]) 1)
+)

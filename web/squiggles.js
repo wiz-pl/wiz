@@ -33,9 +33,9 @@
 // arrive through `options.segments(text, diagnostics)`; this widget paints them.
 "use strict";
 
-// The class suffix for a severity (the runtime sends `severityName` too; this is the
-// paint fallback).
-const SEVERITY_NAME = { 1: "error", 2: "warning", 3: "info", 4: "hint" };
+// The severity class is the runtime's: `Web.EditorModel.segmentJson` sends
+// `severityName` (`error`, `warning`, `info`, `hint`) beside the number, so this widget
+// paints the name it was given and never maps a number to a class itself.
 
 // The properties that change where a character sits. Copied from the textarea's computed
 // style; web/playground.css has the same declarations so a page without
@@ -157,7 +157,7 @@ export function mountSquiggles(editor, options = {}) {
       if (start > at) text.appendChild(doc.createTextNode(value.slice(at, start)));
       if (end > start) {
         const mark = doc.createElement("span");
-        attr(mark, "class", "squiggle sev-" + (span.severityName || SEVERITY_NAME[span.severity] || "info"));
+        attr(mark, "class", "squiggle" + (span.severityName ? " sev-" + span.severityName : ""));
         if (span.message) attr(mark, "title", span.message);
         mark.appendChild(doc.createTextNode(value.slice(start, end)));
         text.appendChild(mark);

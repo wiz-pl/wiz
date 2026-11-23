@@ -2,6 +2,7 @@ import Json
 import Optic
 import Tagged
 import Text
+import Web.Style
 /-!
 # Web.Loom
 
@@ -29,6 +30,11 @@ Updates are **VDOM patches addressed by a child-index path** (`"0.2.1"`), throug
 same `js_*` FFI the infoview uses: `Loom.patchesJson` gives JavaScript a list of
 operations, and `web/framework/runtime.js` applies them. Nothing in this file is
 `unsafe`, and no proof in it is evaluated natively (it trusts no native axiom).
+
+The split between this runtime, the JavaScript host, the static SSR shell and the
+designer/builder, the data path of each surface, the single validation table, the wire
+envelope and the adopt contract are canonical in `docs/notes/loom-wire-protocol.md`.
+This comment states only what the renderer guarantees; it does not restate that model.
 
 ## Components and local state
 
@@ -138,6 +144,24 @@ def Loom.raw {M : Type} (html : String) : Loom.VNode M := .raw html .nil
 /-- An element: a tag, attributes and children. -/
 def Loom.el {M : Type} (tag : String) (attrs : List Loom.Attr) (kids : List (Loom.VNode M)) : Loom.VNode M :=
   .el tag "" attrs (Loom.ofList kids) .nil
+
+/-- A styled element: `classes` becomes exactly one sorted `class` attribute, which is
+the value an SSR page carries and a state change patches with one `setAttr "class"`.
+`attrs` must not contain another `class`; the view test rejects a second one (the
+generator cannot attach a diagnostic to a pure function). The declarations stay in the
+build-time `Style.Styled` values, so a view imports only keys. -/
+def Loom.styled {M : Type} (tag : String) (classes : List Style.Class)
+    (attrs : List Loom.Attr) (kids : List (Loom.VNode M)) : Loom.VNode M :=
+  Loom.el tag (List.append [Style.Class.attr classes] attrs) kids
+
+/-- The class attribute alone: the bridge for a caller that builds its own element. -/
+def Loom.classes (classes : List Style.Class) : List Loom.Attr :=
+  [Style.Class.attr classes]
+
+/-- The one class attribute's value (`""` for no classes), for a test or a patch. -/
+def Loom.classNames (classes : List Style.Class) : String :=
+  (Style.Class.attr classes).2
+
 /-- A keyed element: its key is matched across renders when its siblings are reordered
 (`Loom.diffChildren`). Only elements take keys; a key on anything else is ignored, and
 keys must be unique among their siblings (a duplicate is matched to the first). -/

@@ -1,3 +1,4 @@
+import Wiz.Compiler.IR
 import Wiz.Compiler.Inline
 import Wiz.Core.Pretty
 
@@ -60,6 +61,11 @@ inductive RVal where
   /-- lazy coinductive values -/
   | coit (D step i s : RVal)
   | scofix (f i a : RVal)
+  /-- a term the interpreter could not evaluate: a declaration with no erased body, or
+  an application of something that is not a function. It carries the reason (instead of
+  panicking and continuing with a default value) so `#eval` reports it and readback
+  never prints a value built from `◾` in its place. -/
+  | stuck (reason : String)
   deriving Inhabited
 
 namespace RVal
@@ -77,12 +83,27 @@ def natView : Nat → RVal
   | 0 => .obj 0 #[.obj 0 #[], .obj 0 #[.erased, .erased]]
   | n + 1 => .obj 0 #[.obj 1 #[], .obj 0 #[.nat n, .obj 0 #[.erased, .erased]]]
 
+/-- A value's shape, for an error message (the interpreter has no value printer). -/
+def describe : RVal → String
+  | .erased => "◾ (an erased proof or type)"
+  | .obj t _ => s!"the object ⟨{t} …⟩"
+  | .clo .. => "a function"
+  | .fixv .. => "a recursive function"
+  | .pap op _ => s!"a partial application of {repr op}"
+  | .nat n => s!"the number {n}"
+  | .bytes b => s!"a Bytes value of {b.size} bytes"
+  | .arr xs => s!"an Array value of {xs.size} elements"
+  | .native op _ => s!"the native operation `{op}`"
+  | .coit .. | .scofix .. => "a codata value"
+  | .stuck m => m
+
 def field (v : RVal) (i : Nat) : RVal :=
   match v with
   | .obj _ fs => fs[i]?.getD .erased
   | .nat n => match natView n with
     | .obj _ fs => fs[i]?.getD .erased
     | _ => .erased
+  | .stuck m => .stuck m
   | _ => .erased
 
 /-- The number a value denotes, if it is one (native, or a unary payload). -/
@@ -254,10 +275,11 @@ def nativeArity (key : Name) : Nat :=
   -- the erased term keeps the application, and `C.lean`/`Wasm.lean` skip the value
   -- when they marshal it (`argIndices` below gives the other parameters' positions)
   | some sig => sig.params.length + (if sig.io then 1 else 0)
-  | none => match key with
-    | "nat.zero" => 0
-    | "nat.succ" | "nat.pred" | "nat.log2" => 1
-    | _ => 2
+  | none => match IR.PrimOp.ofKey? key with
+    -- the typed registry (IR.PrimOp) is the source of the arities; this is its only
+    -- string-keyed reader, for the erased natives of the interpreters
+    | some p => p.arity
+    | none => 2
 
 /-- The positions of the parameters that carry a run-time value: `e` (an erased type
 argument, passed as `◾`) is skipped. The positions index the call's argument array,
@@ -463,7 +485,11 @@ partial def run (code : Code) (env : List RVal) : ETerm → RVal
       | some v => v
       | none => if RVal.nativeArity op == 0 then .nat 0 else .native op #[]
     | some t => run code [] t
-    | none => panic! s!"no code for {n}"
+    | none =>
+      -- a declaration with no erased body (an axiom, or a global that is not in the
+      -- compiled code): there is no value to compute. This used to `panic!`, which
+      -- returns a default value here, so `#eval` went on with a value built from `◾`.
+      .stuck s!"no code for `{n}` (it is a declaration with no erased body, such as an axiom)"
   | .lam _ b => .clo env b
   | .app f a => apply code (run code env f) (run code env a)
   | .letE _ v b => run code (run code env v :: env) b
@@ -471,6 +497,7 @@ partial def run (code : Code) (env : List RVal) : ETerm → RVal
   | .proj i t => (run code env t).field i
   | .case s bs => match run code env s with
     | .obj t _ => run code env (bs[t]?.getD (.prim .unreachable #[]))
+    | .stuck m => .stuck m
     | _ => panic! "case on a non-object"
   | .fix _ b => .fixv env b
   | .prim op as => runPrim code op (as.map (run code env))
@@ -490,7 +517,11 @@ partial def apply (code : Code) (f a : RVal) : RVal :=
   | .native op args =>
     let args := args.push a
     if args.size < RVal.nativeArity op then .native op args else fireNative op args
-  | _ => .erased
+  -- (a failure in the function position is the failure to report, not a new one)
+  | .stuck m => .stuck m
+  -- applying something that is not a function is a runtime type error; it used to
+  -- answer `◾`, which the caller then used as if it were a value
+  | v => .stuck s!"the interpreter cannot apply {RVal.describe v} to an argument: it is not a function"
 
 /-- Native arithmetic. `nat.beq` returns a tag of the prelude's `Bool` (`false`, `true`). -/
 partial def fireNative (op : Name) (args : Array RVal) : RVal :=
@@ -628,6 +659,9 @@ strings of the registered `nat` and `string` types print as literals. -/
 partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy R) (v : RVal) : Term R :=
   let readback := readback g builtins
   match whnf ty, v with
+  -- a value the interpreter could not produce prints its reason, not a value built
+  -- from `◾` (the type tells nothing about a stuck term)
+  | _, .stuck m => .const s!"<error: {m}>" []
   | .mu _ _ _ _ _ hint _ , v =>
     -- (the same test as erasure's: a type shaped like `Nat` is a number, R3)
     if isNatTy (g.setBuiltins builtins) ty then

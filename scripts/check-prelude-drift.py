@@ -14,7 +14,8 @@ There are two preludes, and they are not meant to be equal:
 
 The embedded copy is a subset by design. Its arithmetic is monomorphic
 (`infixl " + " => Nat.add`, where the host goes through `HAdd`/`Add` and an instance),
-it declares no classes, and it does not carry the transport names (`castRefl`,
+its only class is `Append` (so `++` is a class problem where the host's is
+`HAppend`/`[default_instance]`), and it does not carry the transport names (`castRefl`,
 `Eq.cast`, `Eq.subst`). Comparing bytes, or hashing
 either file, would therefore fail forever, and generating the embedded copy from
 `lib/Prelude.wiz` is impossible while the frontend cannot check the host prelude. What
@@ -100,7 +101,7 @@ EXEMPT: dict[str, str] = {
     "apply": "a known gap, next to `pipe`: `def apply` and its `infixr` line (for `<|`) "
              "are not in the embedded copy; lib/ files that use `<|` are libdiff gaps",
     "outParam": "class plumbing (`outParam A` in a class declaration); the "
-                "embedded prelude has no classes",
+                "embedded prelude's only class is the homogeneous `Append`",
 }
 
 #: The namespaces of the host prelude's metaprogramming layer: the declarations after
@@ -109,7 +110,7 @@ EXEMPT: dict[str, str] = {
 #: reviewed decision. It is the roots the current file uses, and a root that no longer
 #: appears is an error (the usual staleness rule).
 META_ROOTS: set[str] = {
-    "Append", "BinderKind", "CommandMacro", "CtorView", "Deriver", "Expr",
+    "Append", "Auto", "BinderKind", "CommandMacro", "CtorView", "Deriver", "Expr",
     "ExprView", "FieldView", "HAppend", "IndView", "List", "ListLit", "Macro",
     "MacroM", "Monad", "Monad1", "ParamView", "RewriteResult", "SatAnswer", "Simp",
     "String", "Syntax", "SyntaxF", "Tac", "Tactic", "TacticM", "PipeProj",

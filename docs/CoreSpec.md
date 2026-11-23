@@ -135,13 +135,18 @@ also carry a *display hint* (the nominal name to print) that conversion ignores.
 ⊢ l ≡ l'             level equivalence                                               (Level.equiv, Level.lean:291)
 ```
 
-**Contexts** (`Ctx`, `Check.lean:169`): a list of entries `x :p A` (a quantity polynomial
+**Contexts** (`Ctx`, `Check.lean:169`): entries `x :p A` (a quantity polynomial
 `p` and a type value `A`) or `x :p A := v` (a `let`), together with a flag `erased`
-(written `Γ⁰` when set). Index 0 is the innermost entry.
+(written `Γ⁰` when set). The names, quantities and types are arrays indexed by **level**
+(the outermost entry is index `0`); a de Bruijn index `ix` is read at `lvl - 1 - ix`
+(`Ctx.nameAt?`, `Ctx.qtyAt?`, `Ctx.typeAt?`). The evaluator's environment is the list the
+closures take, with the innermost entry at its head.
 
-**Usage vectors** `U` (`Usage.lean`) have one quantity polynomial per context entry. `0ₙ`
-is the zero vector, `𝟙ₓ` is "x used once" (`Usage.single`), `U + V` is pointwise sum,
-`p·U` is pointwise scaling. The rules below write `⊣ 0` for `⊣ 0ₙ`.
+**Usage vectors** `U` (`Usage.lean`) have one quantity polynomial per context entry. They
+are **sparse**: a vector stops after the last entry the term uses, and every entry after
+the end is `0`, so `0ₙ` is `[]` (`Usage.zeros` ignores the context's size). `𝟙ₓ` is
+"x used once" (`Usage.single`), `U + V` is pointwise sum (a shorter vector is extended by
+zeros), `p·U` is pointwise scaling. The rules below write `⊣ 0` for `⊣ 0ₙ`.
 
 **Erased mode** `Γ⁰` is a light version of Atkey's σ = 0 (§5.4). It is switched on for
 type positions, proofs and sizes, and for every position whose usage is scaled by a

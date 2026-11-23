@@ -53,7 +53,7 @@ otherwise hide a name change.  `scripts/gen-legacy-names.py --update-digest`
 refreshes it.
 
 Usage
-  scripts/check-names.py                  check the six roots against legacy-names.tsv
+  scripts/check-names.py                  check the seven roots against legacy-names.tsv
   scripts/check-names.py --quiet          summary; the CI gate
   scripts/check-names.py --strict-names   fail on every name outside its prefix
   scripts/check-names.py --baseline FILE  use another baseline
@@ -456,6 +456,9 @@ def collect(roots: list[Path], repo: Path) -> Scan:
         for hit in sorted(root.rglob("*.wiz")):
             if any(part in SKIP_DIRS for part in hit.relative_to(root).parts):
                 continue
+            # the dev shell writes this beside a package manifest; it is not a module
+            if hit.name == "grail.local.wiz":
+                continue
             resolved = hit.resolve()
             if resolved in seen:
                 continue
@@ -484,7 +487,7 @@ def under_module_prefix(decl: Decl) -> bool:
     return decl.full.startswith(decl.module + ".")
 
 
-DEFAULT_ROOTS = ("lib", "scry/src", "scry/gen", "tower", "web", "selfhost")
+DEFAULT_ROOTS = ("lib", "scry/src", "scry/gen", "hdl/src", "tower", "web", "selfhost")
 
 
 def default_roots(repo: Path) -> list[Path]:
@@ -946,7 +949,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--root", type=Path, action="append", metavar="DIR",
-        help="module root to scan (repeatable; default: lib, scry/src, scry/gen, tower, web, selfhost)",
+        help="module root to scan (repeatable; default: lib, scry/src, scry/gen, hdl/src, tower, web, selfhost)",
     )
     parser.add_argument("--baseline", type=Path, metavar="FILE",
                         help="baseline file (default: legacy-names.tsv)")
