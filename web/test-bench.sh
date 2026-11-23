@@ -28,6 +28,14 @@ done
 : > "$WEB/wiz-playground.wasm"
 : > "$WEB/wiz-playground-ui.mjs"
 : > "$WEB/wiz-playground-ui.wasm"
+# build-site publishes the generated static-complete page, not the source template.
+cat > "$WEB/playground.html" <<'PAGE'
+<!doctype html><html><body>
+<div id="app" data-wiz-island="loom/1" data-wiz-ssr="t1-00000000-0-0">
+<header></header><main><textarea id="editor"></textarea><select id="preset"></select></main><footer></footer>
+</div>
+</body></html>
+PAGE
 
 sh "$ROOT/web/build-site.sh" "$SITE" "$WEB" >/dev/null
 sh "$ROOT/web/check-site.sh" "$SITE"

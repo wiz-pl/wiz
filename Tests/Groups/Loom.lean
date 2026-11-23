@@ -87,6 +87,18 @@ def loomGroup : Group where
           "#eval String.eq (Loom.App.html app (Model.mk 2)) (Loom.App.html app (Model.mk 2))")
           [r#""<div class=\"counter\"><p>count 2</p><button data-wiz-on-click=\"0\">+</button></div>""#,
            ".true"] },
+    { name := "SSR hash: the normalised tree, not the HTML spelling, is the identity", run := fun _ =>
+        okLoom (loomPrelude ++
+          "def hashA : Loom.VNode Msg := Loom.el \"div\" [Loom.attr \"class\" \"x\", Loom.attr \"id\" \"y\"] [Loom.text \"a   b\"]\n" ++
+          "def hashB : Loom.VNode Msg := Loom.el \"div\" [Loom.attr \"id\" \"y\", Loom.attr \"class\" \"x\"] [Loom.text \"a b\"]\n" ++
+          "def hashC : Loom.VNode Msg := Loom.el \"div\" [Loom.attr \"class\" \"x\", Loom.attr \"id\" \"z\"] [Loom.text \"a   b\"]\n" ++
+          "def keyA : Loom.VNode Msg := Loom.keyed \"a\" (Loom.el \"li\" List.nil [Loom.text \"x\"])\n" ++
+          "def keyB : Loom.VNode Msg := Loom.keyed \"b\" (Loom.el \"li\" List.nil [Loom.text \"x\"])\n" ++
+          "#eval String.eq (Loom.Rendered.ssrHash (Loom.render hashA)) (Loom.Rendered.ssrHash (Loom.render hashB))\n" ++
+          "#eval String.eq (Loom.Rendered.ssrHash (Loom.render hashA)) (Loom.Rendered.ssrHash (Loom.render hashC))\n" ++
+          "#eval String.eq (Loom.Rendered.ssrHash (Loom.render keyA)) (Loom.Rendered.ssrHash (Loom.render keyB))\n" ++
+          "#eval String.startsWith (Loom.Rendered.ssrHash (Loom.render hashA)) \"t1-\"")
+          [".true", ".false", ".false", ".true"] },
     { name := "state: a dispatch is a lens update, and its patch is one text node", run := fun _ =>
         okLoom (loomPrelude ++
           "#eval Loom.App.html app (Loom.App.dispatch app (Model.mk 2) 0)\n" ++
