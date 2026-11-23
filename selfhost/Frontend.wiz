@@ -10743,8 +10743,8 @@ def setOptionCmd (cats : List Cat) (tokens : List String) (stx : Syntax) : Tab0 
   | .ident o => match Bool.or (strEq o "pp.notation") (strEq o "pp.all") with
     | .true => match setOptionBool (kid stx 2) with
       | .some _ => .mk cats tokens .nil .none
-      | .none => .mk cats tokens .nil (.some "expected `true` or `false`")
-    | .false => .mk cats tokens .nil (.some ("unknown option " +++ o +++ " (there are pp.notation and pp.all)"))
+      | .none => .mk cats tokens .nil (.some ("option '" +++ o +++ "' expects `true` or `false`"))
+    | .false => .mk cats tokens .nil (.some ("unknown option '" +++ o +++ "' (registered: pp.notation, pp.all)"))
   | _ => .mk cats tokens .nil (.some "a set_option needs an option name")
 def unwrapLocal (s : Syntax) : Syntax := match strEq (kindOf s) "command.local" with
   | .true => kid s 1
@@ -10846,16 +10846,34 @@ def deriverCmd (gs : Globals) (stx : Syntax) : LinkR :=
           +++ " arguments, expected one (String → MacroM (List Syntax))")) gs
 -- (stage 21u) `attribute [inline] f`: a hint to the Lean compiler, checked as the Lean
 -- frontend does (`f` must have a definition); it changes nothing here
-def attrStep (gs : Globals) (stx : Syntax) : Option LinkR := match strEq (kindOf stx) "command.attrInline" with
-  | .true => .some (match kid stx 4 with
-    | .ident f => match Scope.lookup (Globals.scope gs) f with
-      | .none => LinkR.mk (.some (String.append "error: unknown declaration " f)) gs
-      | .some i => match globalTm .false gs i with
-        | .const _ _ _ v _ => match isAxiomTm v with
-          | .false => LinkR.mk .none gs
-          | .true => LinkR.mk (.some (String.append "error: " (String.append f " has no definition to inline"))) gs
-        | _ => LinkR.mk (.some (String.append "error: " (String.append f " has no definition to inline"))) gs
-    | _ => LinkR.mk (.some "error: attribute [inline] needs a name") gs)
+def inlineCheck (gs : Globals) (f : String) : LinkR :=
+  match Scope.lookup (Globals.scope gs) f with
+  | .none => LinkR.mk (.some (String.append "error: unknown declaration " f)) gs
+  | .some i => match globalTm .false gs i with
+    | .const _ _ _ v _ => match isAxiomTm v with
+      | .false => LinkR.mk .none gs
+      | .true => LinkR.mk (.some (String.append "error: " (String.append f " has no definition to inline"))) gs
+    | _ => LinkR.mk (.some (String.append "error: " (String.append f " has no definition to inline"))) gs
+
+-- (TT-04) Attributes are looked up in the host's registry now, so `[inline]` parses in
+-- the generic `command.attr` form: `attribute [ name payload* ] target` (name child 2,
+-- payload child 3, target child 5). This frontend has no user registrations, so the
+-- registered names are exactly the host's `builtinAttributes`; an unknown name is
+-- reported with the host's message, not silently accepted. `attrDeriver` still parses
+-- in its own form.
+def attrStep (gs : Globals) (stx : Syntax) : Option LinkR := match strEq (kindOf stx) "command.attr" with
+  | .true => .some (match kid stx 2 with
+    | .ident a => match strEq a "inline" with
+      | .true => match kid stx 3 with
+        | .node _ payload => match payload with
+          | .nil => match kid stx 5 with
+            | .ident f => inlineCheck gs f
+            | _ => LinkR.mk (.some "error: attribute [inline] needs a name") gs
+          | _ => LinkR.mk (.some "error: attribute '[inline]' takes no arguments") gs
+        | _ => LinkR.mk (.some "error: attribute '[inline]' takes no arguments") gs
+      | .false => LinkR.mk (.some ("error: unknown attribute '" +++ a
+          +++ "' (registered: macro, tactic, implemented_by, inline, default_instance, binop, deriver, app_unexpander, simp, hint)")) gs
+    | _ => LinkR.mk (.some "error: an attribute needs a name") gs)
   | .false => match strEq (kindOf stx) "command.attrDeriver" with
     | .true => .some (deriverCmd gs stx)
     | .false => .none

@@ -167,6 +167,7 @@
       "data",
       "desceq",
       "elab",
+      "elab-ext",
       "eval",
       "format",
       "=fmt",
