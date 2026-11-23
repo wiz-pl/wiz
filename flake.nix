@@ -562,62 +562,71 @@ EOF
           # links GMP (the flags below), so the closure grows by GMP and glibc only.
           # Wrapped with the programs it runs (git, tar, curl; `nix` and `lake` are the
           # user's), and told its own path for the shims it writes.
-          tower-unwrapped = pkgs.stdenv.mkDerivation {
-            pname = "tower-unwrapped";
-            inherit (unwrapped) version;
-            src = fs.toSource {
-              root = ./.;
-              fileset = fs.unions [ ./tower ./scripts/build-tower-wiz.sh ];
+          #
+          # `towerFor wizPkg` builds it with a particular `wiz`: the pure `.#tower` is
+          # `towerFor wiz`, and `lib.towerWith <store path>` is CI's seeded build. The
+          # seeded path is a store input, not the `wiz` derivation, so Nix substitutes it
+          # and never starts `wiz-unwrapped` (the cold compile the old job fell into).
+          towerFor = wizPkg:
+            let
+              tower-unwrapped = pkgs.stdenv.mkDerivation {
+                pname = "tower-unwrapped";
+                inherit (unwrapped) version;
+                src = fs.toSource {
+                  root = ./.;
+                  fileset = fs.unions [ ./tower ./scripts/build-tower-wiz.sh ];
+                };
+                nativeBuildInputs = [ wizPkg ];
+                buildPhase = ''
+                  runHook preBuild
+                  export HOME=$TMPDIR
+                  # only what tower uses: the C compiler, and GMP's headers and library (the
+                  # generated C links no Boehm collector, so the closure stays GMP + glibc)
+                  sh scripts/build-tower-wiz.sh tower-bin grail ${lib.escapeShellArgs [
+                    "--cc" "${pkgs.stdenv.cc}/bin/cc" "--cflags" tc.cflags "--ldflags" tc.ldflags ]}
+                  runHook postBuild
+                '';
+                installPhase = ''
+                  runHook preInstall
+                  install -Dm755 tower-bin $out/bin/tower
+                  runHook postInstall
+                '';
+              };
+            in
+            pkgs.stdenv.mkDerivation {
+              pname = "tower";
+              inherit (unwrapped) version;
+              dontUnpack = true;
+              nativeBuildInputs = [ pkgs.makeWrapper ];
+              installPhase = ''
+                makeWrapper ${tower-unwrapped}/bin/tower $out/bin/tower \
+                  --suffix PATH : ${lib.makeBinPath [ pkgs.coreutils pkgs.git pkgs.gnutar pkgs.gzip pkgs.curl ]} \
+                  --add-flags ${addFlags [ "--self" "${placeholder "out"}/bin/tower" ]}
+                # The `wiz` and `grail` shims, so installing the package puts them on PATH. They
+                # call the `tower` on PATH (the user's), falling back to this package's own, and
+                # use tower's default home, ~/.tower, where the toolchains live.
+                for t in wiz grail; do
+                  cat > $out/bin/$t <<EOF
+              #!/bin/sh
+              # tower shim: runs \`$t\` of the toolchain for this directory (\`tower show\`).
+              # It asks the \`tower\` on PATH (the user's), else this package's own.
+              tower=\$(command -v tower) || tower='$out/bin/tower'
+              case "\$1" in
+                +*) tc=\$("\$tower" resolve "\$1") || exit; shift ;;
+                *) tc=\$("\$tower" resolve) || exit ;;
+              esac
+              exec "\$tc/bin/$t" "\$@"
+              EOF
+                  chmod +x $out/bin/$t
+                done
+              '';
+              meta = {
+                description = "tower, the Wiz toolchain manager, with the wiz and grail shims: installs toolchains, and the shims run the one a project asks for";
+                mainProgram = "tower";
+                platforms = systems;
+              };
             };
-            nativeBuildInputs = [ wiz ];
-            buildPhase = ''
-              runHook preBuild
-              export HOME=$TMPDIR
-              # only what tower uses: the C compiler, and GMP's headers and library (the
-              # generated C links no Boehm collector, so the closure stays GMP + glibc)
-              sh scripts/build-tower-wiz.sh tower-bin grail ${lib.escapeShellArgs [
-                "--cc" "${pkgs.stdenv.cc}/bin/cc" "--cflags" tc.cflags "--ldflags" tc.ldflags ]}
-              runHook postBuild
-            '';
-            installPhase = ''
-              runHook preInstall
-              install -Dm755 tower-bin $out/bin/tower
-              runHook postInstall
-            '';
-          };
-          tower = pkgs.stdenv.mkDerivation {
-            pname = "tower";
-            inherit (unwrapped) version;
-            dontUnpack = true;
-            nativeBuildInputs = [ pkgs.makeWrapper ];
-            installPhase = ''
-              makeWrapper ${tower-unwrapped}/bin/tower $out/bin/tower \
-                --suffix PATH : ${lib.makeBinPath [ pkgs.coreutils pkgs.git pkgs.gnutar pkgs.gzip pkgs.curl ]} \
-                --add-flags ${addFlags [ "--self" "${placeholder "out"}/bin/tower" ]}
-              # The `wiz` and `grail` shims, so installing the package puts them on PATH. They
-              # call the `tower` on PATH (the user's), falling back to this package's own, and
-              # use tower's default home, ~/.tower, where the toolchains live.
-              for t in wiz grail; do
-                cat > $out/bin/$t <<EOF
-            #!/bin/sh
-            # tower shim: runs \`$t\` of the toolchain for this directory (\`tower show\`).
-            # It asks the \`tower\` on PATH (the user's), else this package's own.
-            tower=\$(command -v tower) || tower='$out/bin/tower'
-            case "\$1" in
-              +*) tc=\$("\$tower" resolve "\$1") || exit; shift ;;
-              *) tc=\$("\$tower" resolve) || exit ;;
-            esac
-            exec "\$tc/bin/$t" "\$@"
-            EOF
-                chmod +x $out/bin/$t
-              done
-            '';
-            meta = {
-              description = "tower, the Wiz toolchain manager, with the wiz and grail shims: installs toolchains, and the shims run the one a project asks for";
-              mainProgram = "tower";
-              platforms = systems;
-            };
-          };
+          tower = towerFor wiz;
 
           # ---- the remaining CI-built artifacts as Nix outputs ---------------------
           #
@@ -1221,6 +1230,9 @@ EOF
                    wiz-web wiz-playground wiz-playground-ui wiz-source-ui release-tarball
                    wasm-fixtures web-bundle docs-site pages release-bin
                    release-unwrapped release-tower;
+          # a function, not a package: `tower` is `towerFor wiz`, and `lib.towerWith`
+          # is CI's seeded build. `packages` removes it (see below).
+          inherit towerFor;
           # The trusted Lake seed as a package: `withLakeCache empty-lake`'s `lake`
           # output (the compiled `.lake` directory without the linked binaries). A master
           # push builds this and publishes the store path to the trusted Cachix; a pull
@@ -1237,8 +1249,8 @@ EOF
         };
     in {
       # (packages without the function set, which is not a derivation)
-      packages = forAll (pkgs: builtins.removeAttrs (packagesFor pkgs) [ "bootstrapChain" ]);
-      legacyPackages = forAll (pkgs: { inherit (packagesFor pkgs) bootstrapChain; });
+      packages = forAll (pkgs: builtins.removeAttrs (packagesFor pkgs) [ "bootstrapChain" "towerFor" ]);
+      legacyPackages = forAll (pkgs: { inherit (packagesFor pkgs) bootstrapChain towerFor; });
 
       # The function set (a flake output cannot be a function, so `packages` cannot hold
       # `withLakeCache`). CI's producer and consumer both call it through
@@ -1249,6 +1261,10 @@ EOF
       lib = forAll (pkgs: {
         withLakeCache = lakeCache: packagesWith pkgs lakeCache;
         empty-lake = emptyLake pkgs;
+        # `lib.towerWith wizPkg` is `.#tower` built with that `wiz` package. CI passes
+        # the lean job's store path through `builtins.storePath`, so the seeded compiler
+        # is a build input and `wiz-unwrapped` is never instantiated.
+        towerWith = wizPkg: (packagesWith pkgs null).towerFor wizPkg;
       });
 
       apps = forAll (pkgs:

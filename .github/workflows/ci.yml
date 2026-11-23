@@ -669,9 +669,11 @@ jobs:
   # here too. It runs only when `scry/`, `hdl/` or `tower/` changed.
   #
   # It substitutes the lean job's `wiz`/`grail` (a pull request's seeded path from the
-  # PR cache; anything else from the trusted cache), so the package builds use exactly
-  # the compiler this commit publishes. On a fork, or with no PR cache, the fallback
-  # builds the pure `.#wiz`, as every other substituting job does.
+  # PR cache; anything else from the trusted cache) with
+  # `nix build --option max-jobs 0`, so the package builds use exactly the compiler this
+  # commit publishes and the substitution never falls back to a cold `wiz-unwrapped`.
+  # Tower is built with `lib.towerWith (builtins.storePath <seeded wiz>)` and guarded by
+  # `scripts/check-seeded-wiz.py`; Hdl and Scry keep their in-job `$wiz`/`grail` path.
   packages:
     name: packages (hdl, scry, tower)
     needs: [changes, lean]
@@ -714,16 +716,23 @@ jobs:
           path: scry/.grail
           key: ${{ steps.subset-key.outputs.key }}
           restore-keys: ${{ steps.subset-key.outputs.prefix }}
-      - name: nix build (wiz and grail, from the lean job or Cachix)
+      - name: wiz (the lean job's seeded compiler, substituted from Cachix)
+        # The seeded compiler is a store path: `nix build --option max-jobs 0` is
+        # substitution only (the configured trusted/PR caches; no local build jobs), so
+        # a cache miss fails here instead of falling back to the pure `.#wiz` and
+        # cold-building `wiz-unwrapped`.
         id: nix
         run: |
-          # The lean job's compiler (a PR's seeded build); a store path substitutes
-          # directly, and a miss falls back to the pure derivation the trusted cache
-          # carries. `grail` is installed beside `wiz` in the same store path.
           wiz='${{ needs.lean.outputs.wiz }}'
-          if [ -z "$wiz" ] || ! nix build --no-link "$wiz"; then
-            wiz=$(nix build .#wiz --no-link --print-out-paths)
+          if [ -z "$wiz" ]; then
+            echo "::error title=packages::the lean job produced no wiz store path"
+            exit 1
           fi
+          if ! nix build --no-link "$wiz" --option max-jobs 0; then
+            echo "::error title=packages::the seeded wiz $wiz is not substitutable from the PR or trusted cache; refusing a cold wiz-unwrapped build"
+            exit 1
+          fi
+          echo "wiz: substituted $wiz"
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           du -sh "$wiz"
           mkdir -p .lake/build/bin
@@ -748,8 +757,25 @@ jobs:
           cd scry
           cp ../grail.local.wiz .
           "$GRAIL" build scry
-      - name: tower is the third package build
-        run: nix build .#tower --no-link -L
+      - name: "tower is the third package build (seeded with the lean job's wiz)"
+        # `lib.towerWith (builtins.storePath <seeded wiz>)` makes the seeded compiler an
+        # input source of tower-unwrapped, so Nix substitutes it and never starts
+        # `wiz-unwrapped`. The guard asserts that on the derivation graph before the
+        # build; it is what the old `nix build .#tower` lacked.
+        id: tower
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}
+        run: |
+          set -eu
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          expr="let f = builtins.getFlake \"$PWD\"; in f.lib.\"$sys\".towerWith (builtins.storePath \"$WIZ\")"
+          drv=$(nix eval --impure --raw --expr "($expr).drvPath")
+          nix derivation show "$drv" > "$RUNNER_TEMP/tower.json"
+          python3 scripts/check-seeded-wiz.py --self-test
+          python3 scripts/check-seeded-wiz.py "$RUNNER_TEMP/tower.json" "$WIZ" --through tower-unwrapped
+          out=$(nix build --impure --no-link --print-out-paths --expr "$expr")
+          "$out/bin/tower" --help > /dev/null
+          du -sh "$out"
       - name: The example index validates offline
         # stage 23m: entries, archive SHA-256s, semver ranges, module-prefix conflicts and
         # index.wiz; no network (the sources are relative paths).
