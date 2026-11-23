@@ -1,0 +1,931 @@
+namespace __root__
+-- FeEval: the self-hosted elaboration-time evaluator (extensibility Item 4).
+--
+-- **Status: design + skeleton, not wired.** This file is not in
+-- `Wiz/Selfhost.frontendFiles`, no frontend declaration calls it, and it deletes or
+-- replaces nothing. It is the shape `elab-evaluator-plan.md` §3 describes, written
+-- against the base's Kernel/Frontend types so that E1/E2/E3 can fill it in without
+-- moving the interfaces. The design note is `wiz-notes/feeval.md`.
+--
+-- What is settled and implemented here:
+--   * `EvalEnv`: the running `Globals`, the constructor-value table, the partial-body
+--     table, the native table, an optional `NatB` registration, the fuel, and the
+--     `getInductive` callback (so this file has no definition-order dependency on
+--     `Globals.view`).
+--   * constructor lookup and application through the prelude's own kernel values
+--     (`addCtors` made them; the layouts cannot drift);
+--   * encoders/decoders for `Nat`, `Bool`, `Char`, `String`, `List`, `Option`,
+--     `SyntaxF`, `IndView`; `Expr` decodes the settled lib/Prelude constructors and
+--     leaves the handle semantics to Item 3;
+--   * `whnfE` with stuck-head repair (partial, native, out-of-steps) and the refusal
+--     of IO/unknown axioms;
+--   * the request loop over `Tac` tags 0/1/2/3/4/21/22, with the tactic-only tags
+--     refused and named;
+--   * the fuel contract over `proofStart`/`proofTick`/`proofEnd`;
+--   * small pure checks at the end (no `Globals`, so they can run before wiring).
+--
+-- What is deliberately not here (marked TODO):
+--   * TODO(Item 2): the `assign`/`exact`/`mainGoal`/`elabInfer`/`newGoal` arms and the
+--     `Expr → Tm` conversion in a goal context. `TermElab` is `Syntax → TacticM Unit`
+--     on `agent/ext-term-elab`; the loop's default arm refuses those tags by number.
+--   * TODO(Item 3): the structured-view request (no tag yet; `agent/structured-view`
+--     has no commits past the base). The default arm is the one to extend.
+--   * TODO(E2): hygiene (`scopeQuoted`) and synthetic ranges. The host does this in
+--     `runProcMacro`; it is FeMacro's job, not the evaluator's.
+--   * TODO(E3): `getType`, which needs a `Tm → Syntax` delaborator (plan §3.2).
+--   * TODO(E1): moving the natives into the repair loop so a native's argument is
+--     itself repaired. Here `Nat.toString` decodes only a value (`feDecNatPure`).
+--   * TODO(E-C): the per-global `Val` cache. `EvalEnv` is the record it will join.
+--
+-- No new trusted code: a metaprogram's output is re-elaborated and kernel-checked by
+-- the caller; the evaluator only computes.
+
+-- the kernel's budget marker (`Kernel.outOfSteps`)
+def feOutOfStepsName : String := " out of steps"
+-- the default `--meta-steps`; one β-step is one `instC` (Kernel.wiz:1454)
+def feMetaSteps : Nat := 10000000
+
+-- the `Tac` tag numbers (`Wiz/Elab/Tactic.lean` `TacTag`, append-only). The f48
+-- prelude slice uses the same numbers for the requests it declares (0/1/2/3/21).
+def feTacDone : Nat := 0
+def feTacResult : Nat := 1
+def feTacFail : Nat := 2
+def feTacTrace : Nat := 3
+def feTacFresh : Nat := 4
+def feTacGetInductive : Nat := 21
+def feTacGetType : Nat := 22
+
+-- a constructor's kernel value, looked up once from `Globals`: the name (for a
+-- diagnostic), the application, and the arities the encoder needs. `nparams` is the
+-- inductive's parameter count (`List` 1, `Option` 1, `Prod` 2, the rest 0); the
+-- encoder passes dummy type values for them, because evaluation ignores types.
+inductive CtorRef where
+  | mk (name : String) (value : Val) (nparams : Nat) (nfields : Nat)
+
+-- `whnfE`'s result: a value that is not stuck on an axiom to repair, or a message.
+inductive EvR where
+  | ok (v : Val)
+  | err (msg : String)
+
+-- what a native repaired to: not ours, a value, or a refusal with its reason.
+inductive NativeR where
+  | notNative
+  | ok (v : Val)
+  | refused (msg : String)
+
+-- the request loop's result: the syntax a `result`/`done` request returned (`none` for
+-- `done`), or the metaprogram's error. Traces travel with either.
+inductive MRes where
+  | ok (stx : Option Syntax)
+  | err (msg : String)
+inductive MetaR where
+  | mk (traces : List String) (res : MRes)
+
+def MetaR.traces : MetaR → List String
+  | .mk ts _ => ts
+def MetaR.res : MetaR → MRes
+  | .mk _ r => r
+
+-- The request-handler extension point. The loop answers the requests every macro or
+-- deriver can make (`done`/`result`/`fail`/`trace`/`fresh`/`getInductive`); a `Handler`
+-- answers the ones that belong to another lane:
+--
+--   * `getType` (22): the frontend's `Tm → Syntax` delaborator (E3). `none` means "no
+--     handler", and the loop reports the stable refusal; `some none` means "no such
+--     declaration", encoded as `Option.none`; `some (some s)` is the answer;
+--   * `tactic` (5, 11, 12, 13, 14, …): Item 2's goal requests. The handler gets the
+--     tag and the whole `Tac` value, so it can decode continuations with the same
+--     `feVConField`/`feDec*` used here; `none` means "not answered" and the loop
+--     reports the stable refusal.
+--
+-- Item 3's structured view, when it appends a tag, lands in `tactic` (or in a sibling
+-- field, if its answer side needs one); the loop's default arm is the only place to
+-- change.
+inductive Handler where
+  | mk (getType : String → Option (Option Syntax))
+       (tactic : Nat → Val → Option MetaR)
+def Handler.getType : Handler → String → Option (Option Syntax)
+  | .mk g _ => g
+def Handler.tactic : Handler → Nat → Val → Option MetaR
+  | .mk _ t => t
+-- the macro/deriver handler: no delaborator, no goal requests
+def Handler.macro : Handler := .mk (fun _ => .none) (fun _ _ => .none)
+
+-- the evaluator's state. It is a value: a command builds one, runs it, and drops it.
+-- `view` is `Globals.view` (passed in so this module can be placed before it);
+-- `partials` is filled by `partialCmd`; `natives` is the implemented-axiom table;
+-- `natb` is the `builtin nat` registration when B1 lands (unary fallback when `none`).
+inductive EvalEnv where
+  | mk (gs : Globals) (view : String → Option IndView) (ctors : List CtorRef)
+       (partials : List (String × Tm)) (natives : List String) (natb : Option NatB)
+       (fuel : Nat)
+
+def EvalEnv.gs : EvalEnv → Globals
+  | .mk g _ _ _ _ _ _ => g
+def EvalEnv.view : EvalEnv → String → Option IndView
+  | .mk _ v _ _ _ _ _ => v
+def EvalEnv.ctors : EvalEnv → List CtorRef
+  | .mk _ _ c _ _ _ _ => c
+def EvalEnv.partials : EvalEnv → List (String × Tm)
+  | .mk _ _ _ p _ _ _ => p
+def EvalEnv.natives : EvalEnv → List String
+  | .mk _ _ _ _ n _ _ => n
+def EvalEnv.natb : EvalEnv → Option NatB
+  | .mk _ _ _ _ _ b _ => b
+def EvalEnv.fuel : EvalEnv → Nat
+  | .mk _ _ _ _ _ _ f => f
+def EvalEnv.withNatb (ee : EvalEnv) (b : Option NatB) : EvalEnv :=
+  .mk (EvalEnv.gs ee) (EvalEnv.view ee) (EvalEnv.ctors ee) (EvalEnv.partials ee)
+    (EvalEnv.natives ee) b (EvalEnv.fuel ee)
+
+-- ## Constructor values
+
+-- the global with the kernel name `key`, from the latest declaration down (the same
+-- index arithmetic as `Globals.hasDeclUnder`/`globalNameOf`)
+def feGlobal (gs : Globals) (key : String) : Option Global :=
+  match Scope.find (Globals.scope gs) key with
+  | .none => .none
+  | .some i => .some (Array.getD (Globals.all gs)
+      (Array.size (Globals.all gs) - 1 - i)
+      (.mk "?" .nil .star .star .star .nil .nil))
+
+def feFindCtor : List Ctor → String → Option Ctor
+  | .nil, _ => .none
+  | .cons (.mk n fields res qs impl lifts) rest, x => match strEq n x with
+    | .true => .some (.mk n fields res qs impl lifts)
+    | .false => feFindCtor rest x
+
+-- `T.ctor`'s value as the kernel sees it. `eval .nil (.const …)` keeps the definition
+-- glued; `vapp` extends the spine and `whnf` unfolds it when an encoder observes it.
+-- Substituting the (identity) level parameters is what `eval` would do at a use.
+def feCtorRef (gs : Globals) (T ctor : String) : Option CtorRef :=
+  match Globals.ind gs T with
+  | .none => .none
+  | .some (.mk np _ _ _ _ ctors _ _ _) => match feFindCtor ctors ctor with
+    | .none => .none
+    | .some (.mk _ fields _ _ _ _) => match feGlobal gs (T +++ "." +++ ctor) with
+      | .none => .none
+      | .some (.mk _ ps ty v _ _ _) =>
+        .some (.mk (T +++ "." +++ ctor)
+          (eval .nil (.const (T +++ "." +++ ctor) ps (lparamLvls ps) v ty))
+          np (List.length fields))
+
+-- the constructors the encoders name. A missing entry is not an error here: the
+-- encoder that needs it returns `.none`, so a prelude without `Expr` (or `Tac`) still
+-- type-checks and reports at the use.
+def feCtorNat : List (String × String) :=
+  .cons ("Nat", "zero") (.cons ("Nat", "succ") .nil)
+def feCtorBool : List (String × String) :=
+  .cons ("Bool", "false") (.cons ("Bool", "true") .nil)
+def feCtorList : List (String × String) :=
+  .cons ("List", "nil") (.cons ("List", "cons") .nil)
+def feCtorOption : List (String × String) :=
+  .cons ("Option", "none") (.cons ("Option", "some") .nil)
+def feCtorData : List (String × String) :=
+  .cons ("Prod", "mk") (.cons ("Char", "mk") (.cons ("String", "mk") .nil))
+def feCtorSyntax : List (String × String) :=
+  .cons ("SyntaxF", "missing") (.cons ("SyntaxF", "atom")
+  (.cons ("SyntaxF", "ident") (.cons ("SyntaxF", "node")
+  (.cons ("SyntaxF", "nil") (.cons ("SyntaxF", "cons") .nil)))))
+def feCtorView : List (String × String) :=
+  .cons ("BinderKind", "default") (.cons ("BinderKind", "implicit")
+  (.cons ("BinderKind", "instImplicit")
+  (.cons ("ParamView", "mk") (.cons ("FieldView", "mk")
+  (.cons ("CtorView", "mk") (.cons ("IndView", "mk") .nil))))))
+def feCtorExpr : List (String × String) :=
+  .cons ("Expr", "var") (.cons ("Expr", "const")
+  (.cons ("Expr", "sort") (.cons ("Expr", "pi")
+  (.cons ("Expr", "lam") (.cons ("Expr", "app")
+  (.cons ("Expr", "lit") (.cons ("Expr", "opaque") .nil)))))))
+
+def feAppendAll : List (List (String × String)) → List (String × String)
+  | .nil => .nil
+  | .cons xs rest => List.append xs (feAppendAll rest)
+
+def feCtorNames : List (String × String) :=
+  feAppendAll
+    (.cons feCtorNat
+    (.cons feCtorBool
+    (.cons feCtorList
+    (.cons feCtorOption
+    (.cons feCtorData
+    (.cons feCtorSyntax
+    (.cons feCtorView
+    (.cons feCtorExpr
+    .nil))))))))
+
+def feCtorsOf (gs : Globals) : List (String × String) → List CtorRef
+  | .nil => .nil
+  | .cons (T, c) rest => match feCtorRef gs T c with
+    | .none => feCtorsOf gs rest
+    | .some r => .cons r (feCtorsOf gs rest)
+
+def feCtorOf : List CtorRef → String → Option CtorRef
+  | .nil, _ => .none
+  | .cons (.mk n v np nf) rest, x => match strEq n x with
+    | .true => .some (.mk n v np nf)
+    | .false => feCtorOf rest x
+
+-- the dummy values for an inductive's type parameters. Evaluation ignores them; they
+-- are only there because the constructor's value is a λ over `nparams + nfields`.
+def feDummyParams : Nat → List Val
+  | .zero => .nil
+  | .succ k => .cons (.vsort (.lnum 0)) (feDummyParams k)
+
+def feAppVals : Val → List Val → Val
+  | v, .nil => v
+  | v, .cons a rest => feAppVals (vapp v a) rest
+
+def feApplyCtor (ee : EvalEnv) (T ctor : String) (args : List Val) : Option Val :=
+  match feCtorOf (EvalEnv.ctors ee) (T +++ "." +++ ctor) with
+  | .none => .none
+  | .some (.mk _ v np _) => .some (feAppVals v (List.append (feDummyParams np) args))
+
+def feMem : List String → String → Bool
+  | .nil, _ => .false
+  | .cons x rest, y => match strEq x y with
+    | .true => .true
+    | .false => feMem rest y
+
+def feFindPartial : List (String × Tm) → String → Option Tm
+  | .nil, _ => .none
+  | .cons (k, body) rest, n => match strEq k n with
+    | .true => .some body
+    | .false => feFindPartial rest n
+
+def fePartialBody (ee : EvalEnv) (n : String) : Option Tm :=
+  feFindPartial (EvalEnv.partials ee) n
+
+-- the arguments of a native's spine, oldest first. A non-application spine means the
+-- native is not being fully applied, which the table refuses.
+def feSpineArgs : Spine → Option (List Val)
+  | .snil => .some .nil
+  | .sapp sp a => match feSpineArgs sp with
+    | .some as => .some (List.append as (.cons a .nil))
+    | .none => .none
+  | _ => .none
+
+-- ## Encoders (host data → kernel value)
+
+-- `Nat` is unary unless a `builtin nat` registration is supplied: then a numeral is one
+-- `Val.vnat`. The literal is the E-K shape (`Tm.nlit`/`natLit` in the Lean kernel);
+-- `nb` must come from the same `Globals` as the values.
+def feEncNat (ee : EvalEnv) : Nat → Option Val
+  | .zero => match EvalEnv.natb ee with
+    | .some nb => .some (.vnat (knOfNat 0) nb)
+    | .none => feApplyCtor ee "Nat" "zero" .nil
+  | .succ k => match EvalEnv.natb ee with
+    | .some nb => .some (.vnat (knOfNat (Nat.succ k)) nb)
+    | .none => match feEncNat ee k with
+      | .none => .none
+      | .some v => feApplyCtor ee "Nat" "succ" (.cons v .nil)
+
+def feEncBool (ee : EvalEnv) : Bool → Option Val
+  | .false => feApplyCtor ee "Bool" "false" .nil
+  | .true => feApplyCtor ee "Bool" "true" .nil
+
+def feEncChar (ee : EvalEnv) (c : Char) : Option Val := match c with
+  | .mk n => match feEncNat ee n with
+    | .some v => feApplyCtor ee "Char" "mk" (.cons v .nil)
+    | .none => .none
+
+def feEncList {A : Type} (ee : EvalEnv) (enc : A → Option Val) : List A → Option Val
+  | .nil => feApplyCtor ee "List" "nil" .nil
+  | .cons x xs => match enc x with
+    | .none => .none
+    | .some vx => match feEncList ee enc xs with
+      | .none => .none
+      | .some vxs => feApplyCtor ee "List" "cons" (.cons vx (.cons vxs .nil))
+
+def feEncOption {A : Type} (ee : EvalEnv) (enc : A → Option Val) : Option A → Option Val
+  | .none => feApplyCtor ee "Option" "none" .nil
+  | .some a => match enc a with
+    | .none => .none
+    | .some v => feApplyCtor ee "Option" "some" (.cons v .nil)
+
+def feEncString (ee : EvalEnv) (s : String) : Option Val := match s with
+  | .mk cs => match feEncList ee (feEncChar ee) cs with
+    | .some v => feApplyCtor ee "String" "mk" (.cons v .nil)
+    | .none => .none
+
+-- `SyntaxF` is indexed (`true` a tree, `false` a list of trees), so the encoder is two
+-- mutually recursive functions; `Syntax` is the `true` index. The selfhost's `SyntaxF`
+-- has no hidden range fields (the host's `encodeSyntax` adds two), so nothing is lost.
+mutual
+partial def feEncSyntax (ee : EvalEnv) : Syntax → Option Val
+  | .missing => feApplyCtor ee "SyntaxF" "missing" .nil
+  | .atom s => match feEncString ee s with
+    | .some v => feApplyCtor ee "SyntaxF" "atom" (.cons v .nil)
+    | .none => .none
+  | .ident s => match feEncString ee s with
+    | .some v => feApplyCtor ee "SyntaxF" "ident" (.cons v .nil)
+    | .none => .none
+  | .node k args => match feEncString ee k with
+    | .some vk => match feEncArgs ee args with
+      | .some va => feApplyCtor ee "SyntaxF" "node" (.cons vk (.cons va .nil))
+      | .none => .none
+    | .none => .none
+  | _ => .none
+
+partial def feEncArgs (ee : EvalEnv) : SyntaxF .false → Option Val
+  | .nil => feApplyCtor ee "SyntaxF" "nil" .nil
+  | .cons h t => match feEncSyntax ee h with
+    | .some vh => match feEncArgs ee t with
+      | .some vt => feApplyCtor ee "SyntaxF" "cons" (.cons vh (.cons vt .nil))
+      | .none => .none
+    | .none => .none
+end
+
+def feEncOptionSyntax (ee : EvalEnv) (o : Option Syntax) : Option Val :=
+  feEncOption ee (feEncSyntax ee) o
+
+-- `IndView` (`lib/Prelude.wiz:538`, the f48 prelude slice): the only reflection the
+-- deriver slice needs. `Globals.view` returns the host `IndView`; this maps it
+-- constructor by constructor onto the prelude's. The field *types* are syntax and may
+-- be `.missing` for indices today (`Globals.view`'s `idxViews`); that is the view's
+-- limitation, not an encoder bug.
+def feEncBinderKind (ee : EvalEnv) : BinderKind → Option Val
+  | .default => feApplyCtor ee "BinderKind" "default" .nil
+  | .implicit => feApplyCtor ee "BinderKind" "implicit" .nil
+  | .instImplicit => feApplyCtor ee "BinderKind" "instImplicit" .nil
+
+def feEncParamView (ee : EvalEnv) (p : ParamView) : Option Val := match p with
+  | .mk n k t => match feEncString ee n with
+    | .some vn => match feEncBinderKind ee k with
+      | .some vk => match feEncSyntax ee t with
+        | .some vt => feApplyCtor ee "ParamView" "mk" (.cons vn (.cons vk (.cons vt .nil)))
+        | .none => .none
+      | .none => .none
+    | .none => .none
+
+def feEncFieldView (ee : EvalEnv) (f : FieldView) : Option Val := match f with
+  | .mk n k t r p => match feEncString ee n with
+    | .some vn => match feEncBinderKind ee k with
+      | .some vk => match feEncSyntax ee t with
+        | .some vt => match feEncBool ee r with
+          | .some vr => match feEncBool ee p with
+            | .some vp => feApplyCtor ee "FieldView" "mk"
+                (.cons vn (.cons vk (.cons vt (.cons vr (.cons vp .nil)))))
+            | .none => .none
+          | .none => .none
+        | .none => .none
+      | .none => .none
+    | .none => .none
+
+def feEncCtorView (ee : EvalEnv) (c : CtorView) : Option Val := match c with
+  | .mk n fs is => match feEncString ee n with
+    | .some vn => match feEncList ee (feEncFieldView ee) fs with
+      | .some vfs => match feEncList ee (feEncSyntax ee) is with
+        | .some vis => feApplyCtor ee "CtorView" "mk" (.cons vn (.cons vfs (.cons vis .nil)))
+        | .none => .none
+      | .none => .none
+    | .none => .none
+
+def feEncIndView (ee : EvalEnv) (v : IndView) : Option Val := match v with
+  | .mk n us ps is cs strct => match feEncString ee n with
+    | .some vn => match feEncList ee (feEncString ee) us with
+      | .some vus => match feEncList ee (feEncParamView ee) ps with
+        | .some vps => match feEncList ee (feEncParamView ee) is with
+          | .some vis => match feEncList ee (feEncCtorView ee) cs with
+            | .some vcs => match feEncBool ee strct with
+              | .some vb => feApplyCtor ee "IndView" "mk"
+                  (.cons vn (.cons vus (.cons vps (.cons vis (.cons vcs (.cons vb .nil))))))
+              | .none => .none
+            | .none => .none
+          | .none => .none
+        | .none => .none
+      | .none => .none
+    | .none => .none
+
+def feEncOptionIndView (ee : EvalEnv) (o : Option IndView) : Option Val :=
+  feEncOption ee (feEncIndView ee) o
+
+-- TODO(Item 3): `Expr` encoding is the frontend's answer side (goal types, hypotheses),
+-- which Item 3's structured view and the T lane's handle table own. The stub is here so
+-- the shape is visible; its body must not be filled in before the ABI is settled. The
+-- only `Expr` path the deriver slice exercises is *decoding* the `Tac` payloads a
+-- macro happens to carry; the loop does not interpret them.
+def feEncExpr (ee : EvalEnv) (e : Expr) : Option Val := .none
+
+-- ## `whnfE`: whnf plus stuck-head repair (plan §3.4)
+
+-- the constructor index of a `vcon`, peeling the `up` of a lifted tag. This is used by
+-- the pure nat decoder too, so it is defined before the repair loop.
+-- TODO(E1): return the constructor count `k` as well and check it in each decoder. A
+-- well-typed metaprogram cannot reach the wrong decoder, but a malformed value should
+-- be an error rather than a reinterpretation (e.g. a `String` tag 1 read as `Nat.succ`).
+def feVConTag (v : Val) : Option Nat := match v with
+  | .vcon x => match whnf (vfst x) with
+    | .vtag _ i => .some i
+    | .vup t => match whnf t with
+      | .vtag _ i => .some i
+      | _ => .none
+    | _ => .none
+  | _ => .none
+
+-- the `i`th field of a constructor payload, without forcing the field itself.
+-- TODO(E1): a lifted field is stored as `up x` (`addCtors`' `payloadPL`); decoding it
+-- needs the constructor's `lifts` flags from `IndInfo`. Every type the deriver slice
+-- encodes (`Nat`, `Bool`, `String`, `List`, `Option`, `SyntaxF`, `IndView`) is at
+-- Type 0, so none of their fields is lifted.
+def fePayloadNth (i : Nat) (p : Val) : Option Val := match i with
+  | .zero => match whnf p with
+    | .vpair a _ => .some a
+    | _ => .none
+  | .succ k => match whnf p with
+    | .vpair _ rest => fePayloadNth k rest
+    | _ => .none
+
+def feVConField (i : Nat) (v : Val) : Option Val := match v with
+  | .vcon x => fePayloadNth i (vsnd x)
+  | _ => .none
+
+def feBudgetMsg (n : Nat) : String :=
+  "the metaprogram did not finish within " +++ Nat.toString n
+    +++ " evaluation steps (--meta-steps)"
+
+-- a native's argument, without repair: a literal or the unary constructors. A native
+-- whose argument itself needs repair waits for E1's move of the natives into the loop.
+--
+-- TODO(E1/C13): a kernel `KNat` is exact; the host `Nat` wraps at 63 bits. `knToNatL`
+-- below is silent about a too-large literal, so a metaprogram that computes above
+-- 2^63 - 1 would be decoded wrapped. Either carry `KNat` in the codec or refuse such a
+-- literal (the deriver slice's counters are small; BitVec-scale code is not).
+partial def feDecNatPure (ee : EvalEnv) (v : Val) : Option Nat := match whnf v with
+  | .vnat n _ => .some (knToNatL (knLimbs n))
+  | x => match feVConTag x with
+    | .some tag => match tag with
+      | 0 => .some 0
+      | 1 => match feVConField 0 x with
+        | .some pred => match feDecNatPure ee pred with
+          | .some k => .some (Nat.succ k)
+          | .none => .none
+        | .none => .none
+      | _ => .none
+    | .none => .none
+
+-- TODO(E1): the full native table (`Array.*`, `StrMap.*`, `String.decEq`, …). The
+-- deriver slice needs `Nat.toString` (for generated names) and nothing else. IO and
+-- foreign calls are refused by name, and every refusal says why.
+def feNativeEval (ee : EvalEnv) (n : String) (sp : Spine) : NativeR :=
+  match strEq n "Nat.toString" with
+  | .true => match feSpineArgs sp with
+    | .some (.cons a .nil) => match feDecNatPure ee a with
+      | .some k => match feEncString ee (Nat.toString k) with
+        | .some v => .ok v
+        | .none => .refused "Nat.toString: the prelude has no String/String.mk constructor"
+      | .none => .refused "Nat.toString: its argument is not a Nat"
+    | .some _ => .refused "Nat.toString: applied to the wrong number of arguments"
+    | .none => .refused "Nat.toString: stuck in a non-application spine"
+  | .false => match strEq n "IO.println" with
+    | .true => .refused "a metaprogram reached IO.println; IO and foreign calls are refused by the self-hosted evaluator"
+    | .false => match strEq n "IO.print" with
+      | .true => .refused "a metaprogram reached IO.print; IO and foreign calls are refused by the self-hosted evaluator"
+      | .false => match feMem (EvalEnv.natives ee) n with
+        | .true => .refused ("a metaprogram reached the native " +++ n
+            +++ ", which this evaluator does not implement yet (E1)")
+        | .false => .notNative
+
+-- The repair loop. Each iteration is one replay of the spine:
+--   * a glued value unfolds (`whnf`'s own rule);
+--   * `haxiom n` with `n` a partial body: `forceSp (eval .nil body) sp`;
+--   * `haxiom n` with `n` a native: compute, then replay the remaining spine;
+--   * `haxiom n` otherwise: the error the plan specifies (IO included);
+--   * `haxiom " out of steps"`: the budget ran out (`instC` made it);
+--   * anything else is a whnf.
+-- No kernel change; values stuck deeper are repaired when a decoder or a later
+-- `whnfE` reaches them (CBV keeps stuck arguments in spines).
+partial def whnfE (ee : EvalEnv) (v : Val) : EvR := match v with
+  | .vglued _ _ g => whnfE ee (g ())
+  | .vnatglue _ _ _ _ g => whnfE ee (g ())
+  | .vne (.haxiom n _) sp => match strEq n feOutOfStepsName with
+    | .true => .err (feBudgetMsg (EvalEnv.fuel ee))
+    | .false => match fePartialBody ee n with
+      | .some body => whnfE ee (forceSp (eval .nil body) sp)
+      | .none => match feNativeEval ee n sp with
+        | .ok v' => whnfE ee v'
+        | .refused m => .err m
+        | .notNative => .err ("a metaprogram reached the axiom " +++ n)
+  -- a `.const` that was not kept glued is not a value the evaluator should meet; it
+  -- is a bug in the caller, reported rather than unfolded silently.
+  | .vne (.hconst n _ _ _ _) _ => .err ("a metaprogram is stuck on the constant " +++ n)
+  -- proof-dependent computations are not run (plan §3.6.5): report the cast/proof
+  -- rather than let a decoder call the value malformed.
+  | .vne (.hcast _ _ _ _) _ => .err "a metaprogram is stuck on a cast (a proof-dependent computation is not run)"
+  | .vne (.hprf _ _) _ => .err "a metaprogram is stuck on a suspended proof"
+  | _ => .ok v
+
+-- ## Decoders (kernel value → host data)
+
+def feDecNat (ee : EvalEnv) (v : Val) : Option Nat := match whnfE ee v with
+  | .err _ => .none
+  | .ok w => feDecNatPure ee w
+
+def feDecBool (ee : EvalEnv) (v : Val) : Option Bool := match whnfE ee v with
+  | .err _ => .none
+  | .ok w => match feVConTag w with
+    | .some tag => match tag with
+      | 0 => .some .false
+      | 1 => .some .true
+      | _ => .none
+    | .none => .none
+
+partial def feDecList {A : Type} (ee : EvalEnv) (dec : Val → Option A) (v : Val) :
+    Option (List A) := match whnfE ee v with
+  | .err _ => .none
+  | .ok w => match feVConTag w with
+    | .some tag => match tag with
+      | 0 => .some .nil
+      | 1 => match feVConField 0 w with
+        | .some head => match dec head with
+          | .some h => match feVConField 1 w with
+            | .some tail => match feDecList ee dec tail with
+              | .some t => .some (.cons h t)
+              | .none => .none
+            | .none => .none
+          | .none => .none
+        | .none => .none
+      | _ => .none
+    | .none => .none
+
+partial def feDecOption {A : Type} (ee : EvalEnv) (dec : Val → Option A) (v : Val) :
+    Option (Option A) := match whnfE ee v with
+  | .err _ => .none
+  | .ok w => match feVConTag w with
+    | .some tag => match tag with
+      | 0 => .some .none
+      | 1 => match feVConField 0 w with
+        | .some a => match dec a with
+          | .some x => .some (.some x)
+          | .none => .none
+        | .none => .none
+      | _ => .none
+    | .none => .none
+
+def feDecChar (ee : EvalEnv) (v : Val) : Option Char := match whnfE ee v with
+  | .err _ => .none
+  | .ok w => match feVConTag w with
+    | .some 0 => match feVConField 0 w with
+      | .some code => match feDecNat ee code with
+        | .some n => .some (Char.mk n)
+        | .none => .none
+      | .none => .none
+    | _ => .none
+
+def feDecString (ee : EvalEnv) (v : Val) : Option String := match whnfE ee v with
+  | .err _ => .none
+  | .ok w => match feVConTag w with
+    | .some 0 => match feVConField 0 w with
+      | .some data => match feDecList ee (feDecChar ee) data with
+        | .some cs => .some (String.mk cs)
+        | .none => .none
+      | .none => .none
+    | _ => .none
+
+mutual
+partial def feDecSyntax (ee : EvalEnv) (v : Val) : Option Syntax := match whnfE ee v with
+  | .err _ => .none
+  | .ok w => match feVConTag w with
+    | .some tag => match tag with
+      | 0 => .some .missing
+      | 1 => match feVConField 0 w with
+        | .some s => match feDecString ee s with
+          | .some str => .some (.atom str)
+          | .none => .none
+        | .none => .none
+      | 2 => match feVConField 0 w with
+        | .some s => match feDecString ee s with
+          | .some str => .some (.ident str)
+          | .none => .none
+        | .none => .none
+      | 3 => match feVConField 0 w with
+        | .some k => match feVConField 1 w with
+          | .some args => match feDecString ee k with
+            | .some kind => match feDecArgs ee args with
+              | .some as => .some (.node kind as)
+              | .none => .none
+            | .none => .none
+          | .none => .none
+        | .none => .none
+      -- `nil`/`cons` at the true index is malformed
+      | _ => .none
+    | .none => .none
+
+partial def feDecArgs (ee : EvalEnv) (v : Val) : Option (SyntaxF .false) := match whnfE ee v with
+  | .err _ => .none
+  | .ok w => match feVConTag w with
+    | .some tag => match tag with
+      | 0 => .some .nil
+      | 1 => match feVConField 0 w with
+        | .some h => match feVConField 1 w with
+          | .some t => match feDecSyntax ee h with
+            | .some vh => match feDecArgs ee t with
+              | .some vt => .some (.cons vh vt)
+              | .none => .none
+            | .none => .none
+          | .none => .none
+        | .none => .none
+      | _ => .none
+    | .none => .none
+end
+
+-- the `IndView` decoder (the request's answer side; the encoder above is the input
+-- side for `getInductive` answers the evaluator gives)
+def feDecBinderKind (ee : EvalEnv) (v : Val) : Option BinderKind := match whnfE ee v with
+  | .err _ => .none
+  | .ok w => match feVConTag w with
+    | .some tag => match tag with
+      | 0 => .some .default
+      | 1 => .some .implicit
+      | 2 => .some .instImplicit
+      | _ => .none
+    | .none => .none
+
+def feDecParamView (ee : EvalEnv) (v : Val) : Option ParamView := match whnfE ee v with
+  | .err _ => .none
+  | .ok w => match feVConTag w with
+    | .some 0 => match feVConField 0 w with
+      | .some nv => match feVConField 1 w with
+        | .some kv => match feVConField 2 w with
+          | .some tv => match feDecString ee nv with
+            | .some n => match feDecBinderKind ee kv with
+              | .some k => match feDecSyntax ee tv with
+                | .some t => .some (ParamView.mk n k t)
+                | .none => .none
+              | .none => .none
+            | .none => .none
+          | .none => .none
+        | .none => .none
+      | .none => .none
+    | _ => .none
+
+def feDecFieldView (ee : EvalEnv) (v : Val) : Option FieldView := match whnfE ee v with
+  | .err _ => .none
+  | .ok w => match feVConTag w with
+    | .some 0 => match feVConField 0 w with
+      | .some nv => match feVConField 1 w with
+        | .some kv => match feVConField 2 w with
+          | .some tv => match feVConField 3 w with
+            | .some rv => match feVConField 4 w with
+              | .some pv => match feDecString ee nv with
+                | .some n => match feDecBinderKind ee kv with
+                  | .some k => match feDecSyntax ee tv with
+                    | .some t => match feDecBool ee rv with
+                      | .some r => match feDecBool ee pv with
+                        | .some p => .some (FieldView.mk n k t r p)
+                        | .none => .none
+                      | .none => .none
+                    | .none => .none
+                  | .none => .none
+                | .none => .none
+              | .none => .none
+            | .none => .none
+          | .none => .none
+        | .none => .none
+      | .none => .none
+    | _ => .none
+
+def feDecCtorView (ee : EvalEnv) (v : Val) : Option CtorView := match whnfE ee v with
+  | .err _ => .none
+  | .ok w => match feVConTag w with
+    | .some 0 => match feVConField 0 w with
+      | .some nv => match feVConField 1 w with
+        | .some fv => match feVConField 2 w with
+          | .some iv => match feDecString ee nv with
+            | .some n => match feDecList ee (feDecFieldView ee) fv with
+              | .some fs => match feDecList ee (feDecSyntax ee) iv with
+                | .some is => .some (CtorView.mk n fs is)
+                | .none => .none
+              | .none => .none
+            | .none => .none
+          | .none => .none
+        | .none => .none
+      | .none => .none
+    | _ => .none
+
+def feDecIndView (ee : EvalEnv) (v : Val) : Option IndView := match whnfE ee v with
+  | .err _ => .none
+  | .ok w => match feVConTag w with
+    | .some 0 => match feVConField 0 w with
+      | .some nv => match feVConField 1 w with
+        | .some usv => match feVConField 2 w with
+          | .some psv => match feVConField 3 w with
+            | .some isv => match feVConField 4 w with
+              | .some csv => match feVConField 5 w with
+                | .some strctv => match feDecString ee nv with
+                  | .some n => match feDecList ee (feDecString ee) usv with
+                    | .some us => match feDecList ee (feDecParamView ee) psv with
+                      | .some ps => match feDecList ee (feDecParamView ee) isv with
+                        | .some is => match feDecList ee (feDecCtorView ee) csv with
+                          | .some cs => match feDecBool ee strctv with
+                            | .some strct => .some (IndView.mk n us ps is cs strct)
+                            | .none => .none
+                          | .none => .none
+                        | .none => .none
+                      | .none => .none
+                    | .none => .none
+                  | .none => .none
+                | .none => .none
+              | .none => .none
+            | .none => .none
+          | .none => .none
+        | .none => .none
+      | .none => .none
+    | _ => .none
+
+-- The lib/Prelude `Expr` constructors are settled mechanically; what they *mean* in a
+-- goal (contexts, metavariables, `opaque` handles) is Item 3's and the T lane's ABI.
+-- This decoder is here so the loop can hand an `Expr` to the frontend; it deliberately
+-- does not interpret handles.
+partial def feDecExpr (ee : EvalEnv) (v : Val) : Option Expr := match whnfE ee v with
+  | .err _ => .none
+  | .ok w => match feVConTag w with
+    | .some tag => match tag with
+      | 0 => match feVConField 0 w with
+        | .some i => match feDecNat ee i with
+          | .some n => .some (Expr.var n)
+          | .none => .none
+        | .none => .none
+      | 1 => match feVConField 0 w with
+        | .some s => match feDecString ee s with
+          | .some n => .some (Expr.const n)
+          | .none => .none
+        | .none => .none
+      | 2 => match feVConField 0 w with
+        | .some u => match feDecNat ee u with
+          | .some n => .some (Expr.sort n)
+          | .none => .none
+        | .none => .none
+      | 3 => match feVConField 0 w with
+        | .some xv => match feVConField 1 w with
+          | .some iv => match feVConField 2 w with
+            | .some qv => match feVConField 3 w with
+              | .some dv => match feVConField 4 w with
+                | .some bv => match feDecString ee xv with
+                  | .some x => match feDecBool ee iv with
+                    | .some im => match feDecExpr ee qv with
+                      | .some q => match feDecExpr ee dv with
+                        | .some d => match feDecExpr ee bv with
+                          | .some b => .some (Expr.pi x im q d b)
+                          | .none => .none
+                        | .none => .none
+                      | .none => .none
+                    | .none => .none
+                  | .none => .none
+                | .none => .none
+              | .none => .none
+            | .none => .none
+          | .none => .none
+        | .none => .none
+      | 4 => match feVConField 0 w with
+        | .some xv => match feVConField 1 w with
+          | .some bv => match feDecString ee xv with
+            | .some x => match feDecExpr ee bv with
+              | .some b => .some (Expr.lam x b)
+              | .none => .none
+            | .none => .none
+          | .none => .none
+        | .none => .none
+      | 5 => match feVConField 0 w with
+        | .some fv => match feVConField 1 w with
+          | .some av => match feDecExpr ee fv with
+            | .some f => match feDecExpr ee av with
+              | .some a => .some (Expr.app f a)
+              | .none => .none
+            | .none => .none
+          | .none => .none
+        | .none => .none
+      | 6 => match feVConField 0 w with
+        | .some nv => match feDecNat ee nv with
+          | .some n => .some (Expr.lit n)
+          | .none => .none
+        | .none => .none
+      | 7 => match feVConField 0 w with
+        | .some idv => match feDecNat ee idv with
+          | .some id => .some (Expr.opaque id)
+          | .none => .none
+        | .none => .none
+      | _ => .none
+    | .none => .none
+
+-- ## The request loop
+
+-- One iteration answers one request. `next` is the fresh counter (started at the
+-- invocation's scope + 1 by the caller); `traces` is the info messages so far. `h`
+-- answers the requests that are another lane's (see `Handler`).
+partial def feRunMeta (h : Handler) (ee : EvalEnv) (next : Nat) (traces : List String)
+    (v : Val) : MetaR :=
+  match whnfE ee v with
+  | .err m => .mk traces (.err m)
+  | .ok w => match feVConTag w with
+    | .none => .mk traces (.err "the metaprogram's value is not a Tac request")
+    | .some tag => match tag with
+      | 0 => .mk traces (.ok .none)
+      | 1 => match feVConField 0 w with
+        | .some stx => match feDecSyntax ee stx with
+          | .some s => .mk traces (.ok (.some s))
+          | .none => .mk traces (.err "the metaprogram returned a malformed syntax tree")
+        | .none => .mk traces (.err "result: malformed request")
+      | 2 => match feVConField 0 w with
+        | .some msg => match feDecString ee msg with
+          | .some s => .mk traces (.err s)
+          | .none => .mk traces (.err "fail: malformed message")
+        | .none => .mk traces (.err "fail: malformed request")
+      | 3 => match feVConField 0 w with
+        | .some msg => match feVConField 1 w with
+          | .some nextTac => match feDecString ee msg with
+            | .some s => feRunMeta h ee next (List.append traces (.cons s .nil)) nextTac
+            | .none => .mk traces (.err "trace: malformed message")
+          | .none => .mk traces (.err "trace: malformed request")
+        | .none => .mk traces (.err "trace: malformed request")
+      | 4 => match feVConField 0 w with
+        | .some k => match feEncNat ee next with
+          | .some arg => feRunMeta h ee (Nat.succ next) traces (vapp k arg)
+          | .none => .mk traces (.err "fresh: the prelude's Nat constructors are missing")
+        | .none => .mk traces (.err "fresh: malformed request")
+      | 21 => match feVConField 0 w with
+        | .some nv => match feVConField 1 w with
+          | .some k => match feDecString ee nv with
+            | .some n => match feEncOptionIndView ee (EvalEnv.view ee n) with
+              | .some answer => feRunMeta h ee next traces (vapp k answer)
+              | .none => .mk traces (.err "getInductive: the prelude's IndView constructors are missing")
+            | .none => .mk traces (.err "getInductive: malformed name")
+          | .none => .mk traces (.err "getInductive: malformed request")
+        | .none => .mk traces (.err "getInductive: malformed request")
+      | 22 => match feVConField 0 w with
+        | .some nv => match feVConField 1 w with
+          | .some k => match feDecString ee nv with
+            | .some n => match Handler.getType h n with
+              | .none => .mk traces (.err ("getType is not answered by this runner: "
+                  +++ "it needs a Tm → Syntax delaborator (elab-evaluator-plan §3.2; E3)"))
+              | .some o => match feEncOptionSyntax ee o with
+                | .some answer => feRunMeta h ee next traces (vapp k answer)
+                | .none => .mk traces (.err "getType: the prelude's Option/Syntax constructors are missing")
+            | .none => .mk traces (.err "getType: malformed name")
+          | .none => .mk traces (.err "getType: malformed request")
+        | .none => .mk traces (.err "getType: malformed request")
+      | _ => match Handler.tactic h tag w with
+        | .some r => r
+        | .none => .mk traces (.err ("the metaprogram made a request only tactics can make ("
+            +++ Nat.toString tag +++ "); FeEval answers macros and derivers in this slice"))
+
+-- the budget wrapper: exactly one `proofStart` per invocation; a nested invocation
+-- (`proofStart .false`: a proof read-back is running) counts on the outer budget and
+-- must not end it. The outer `match` on the `MetaR` forces the work before `proofEnd`,
+-- whose argument depends on the result (the extern's argument is ignored; it is there
+-- to order the call after the read-back, as `Kernel.forceProof` does).
+def feRunMetaTop (h : Handler) (ee : EvalEnv) (next : Nat) (v : Val) : MetaR :=
+  match proofStart (EvalEnv.fuel ee) with
+  | .false => feRunMeta h ee next .nil v
+  | .true => match feRunMeta h ee next .nil v with
+    | .mk ts res => match proofEnd (match res with | .ok _ => 1 | .err _ => 0) with
+      | .true => .mk ts res
+      | .false => .mk ts (.err (feBudgetMsg (EvalEnv.fuel ee)))
+
+-- ## Entries
+
+-- Run the deriver `fname` (a source name, as `Globals.deriver` records it) on `T`.
+-- The value is applied to the encoded `String`; `feRunMeta` answers the requests. The
+-- result is a `Syntax` (the deriver's `Tac.result` wrapper); the caller takes `kids`
+-- to get the commands, as the host's `CommandMacro.run` → `.args` does.
+def feEvalDeriver (ee : EvalEnv) (fname : String) (T : String) : MetaR :=
+  match feGlobal (EvalEnv.gs ee) (globalKeyOf (EvalEnv.gs ee) fname) with
+  | .none => .mk .nil (.err ("unknown deriver " +++ fname))
+  | .some (.mk n ps ty v _ _ _) => match feEncString ee T with
+    | .none => .mk .nil (.err "the prelude has no String/String.mk constructor")
+    | .some arg => feRunMetaTop Handler.macro ee 0
+        (vapp (eval .nil (.const n ps (lparamLvls ps) v ty)) arg)
+
+-- The `term_elab` entry (Item 2): the shape is the same, but the goal requests the
+-- handler sends (`assign`/`exact`/`mainGoal`/…) are refused by the loop until the
+-- caller supplies a `Handler`. Item 2 adds the arms; the loop stays as it is.
+def feEvalTermElab (h : Handler) (ee : EvalEnv) (fname : String) (stx : Syntax) : MetaR :=
+  match feGlobal (EvalEnv.gs ee) (globalKeyOf (EvalEnv.gs ee) fname) with
+  | .none => .mk .nil (.err ("unknown term elaborator " +++ fname))
+  | .some (.mk n ps ty v _ _ _) => match feEncSyntax ee stx with
+    | .none => .mk .nil (.err "the prelude has no SyntaxF constructors")
+    | .some arg => feRunMetaTop h ee 0
+        (vapp (eval .nil (.const n ps (lparamLvls ps) v ty)) arg)
+
+-- ## Pure checks (no `Globals`)
+
+-- These are Wiz functions, not a test group: E1's `=selfhost` case calls
+-- `feSelfChecksPass` and fails if it is `.false`. They cover the parts that do not
+-- need a checked prelude: the literal round-trip, the spine walk and the tag table.
+def feSelfCheck_knat : Bool :=
+  Nat.beq (knToNatL (knLimbs (knOfNat 10013))) 10013
+
+def feSelfCheck_spine : Bool :=
+  match feSpineArgs (.sapp (.sapp .snil (.vsort (.lnum 0))) .vtt) with
+  | .some (.cons _ (.cons _ .nil)) => .true
+  | _ => .false
+
+def feSelfCheck_tags : Bool :=
+  Bool.and (Nat.beq feTacDone 0)
+    (Bool.and (Nat.beq feTacResult 1)
+      (Bool.and (Nat.beq feTacFresh 4)
+        (Bool.and (Nat.beq feTacGetInductive 21) (Nat.beq feTacGetType 22))))
+
+def feSelfChecksPass : Bool :=
+  Bool.and feSelfCheck_knat (Bool.and feSelfCheck_spine feSelfCheck_tags)
+end
