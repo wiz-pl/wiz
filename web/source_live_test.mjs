@@ -1,10 +1,12 @@
 // The real-server half of the live reader's proof, without a browser: start
-// `wiz lsp --ws`, open the bundle's Wiz files with the bundle's text, and ask the exact
+// `wiz lsp --ws`, open the bundle's Wiz file with the bundle's text, and ask the exact
 // two questions the page asks (`textDocument/hover`, `textDocument/definition`) at the
-// exact token the browser smoke uses (`EditorModel.slice` in `lib/Web/Source/Span.wiz`).
-// Span.wiz is the lighter of the reader's files to elaborate (`wiz check` 3.6 s, where
-// `lib/Web/Source/Model.wiz` is 52 s); the server's term-info elaboration is the larger
-// cost, and the first hover on the probe took 51 s with a 60 ms definition after it.
+// exact token the browser smoke uses (`Source.Span.contains` in
+// `lib/Web/Source/Facts.wiz`). Facts.wiz and its target Span.wiz are small: the Wasm
+// reader's JSON parser overflows its stack on a single string of about 50 KB, so the
+// demo bundle does not carry a large source (EditorModel.wiz is 52 KB). The server's
+// term-info elaboration dominates the first answer (51 s in the probe; the definition
+// 60 ms after).
 //
 // The page's position rules are `Web.EditorModel`'s through `wiz_loom_editor_position`;
 // this test has no runtime, so the few lines of line/character arithmetic below are the
@@ -40,10 +42,10 @@ const readJson = (p) => JSON.parse(readFileSync(p, "utf-8"));
 const files = readJson(join(bundle, "data", "files.json")).files || [];
 const bySuffix = (suffix) =>
   files.find((f) => String(f.path).replace(/\\/g, "/").endsWith(suffix));
-const source = bySuffix("Web/Source/Span.wiz");
-const target = bySuffix("Web/EditorModel.wiz");
+const source = bySuffix("Web/Source/Facts.wiz");
+const target = bySuffix("Web/Source/Span.wiz");
 if (!source || !target) {
-  console.error("source live: the bundle has no Web/Source/Span.wiz + Web/EditorModel.wiz (--source them)");
+  console.error("source live: the bundle has no Web/Source/Facts.wiz + Web/Source/Span.wiz (--source them)");
   process.exit(2);
 }
 const sourceData = readJson(join(bundle, "data", "f", source.id + ".json"));
@@ -62,15 +64,15 @@ function positionOf(text, offset) {
   return { line, character: offset - lineStart };
 }
 
-const needle = "slice i start stop";
-const marker = "EditorModel.slice i start stop";
+const needle = "contains r.span offset";
+const marker = "Source.Span.contains r.span offset";
 const markerAt = text.indexOf(marker);
 const useAt = markerAt + marker.indexOf(needle);
-ok(markerAt >= 0, "the bundle's Span.wiz has the `EditorModel.slice` use", String(markerAt));
+ok(markerAt >= 0, "the bundle's Facts.wiz has the `Source.Span.contains` use", String(markerAt));
 
 const defLine = targetData.source.split("\n")
-  .findIndex((line) => line.includes("def EditorModel.slice"));
-ok(defLine >= 0, "the bundle's EditorModel.wiz has `def EditorModel.slice`", String(defLine));
+  .findIndex((line) => line.includes("def Source.Span.contains"));
+ok(defLine >= 0, "the bundle's Span.wiz has `def Source.Span.contains`", String(defLine));
 
 let srv = null;
 let client = null;
@@ -94,27 +96,27 @@ try {
   const pos = positionOf(text, useAt);
   const hover = await client.hover(uriOf(source), pos);
   const hoverText = hover ? JSON.stringify(hover) : "null";
-  ok(hover && /slice/.test(hoverText), "the real server answers a hover on `slice`",
+  ok(hover && /contains/.test(hoverText), "the real server answers a hover on `contains`",
     hoverText.slice(0, 300));
   ok(hover && /contents/.test(hoverText), "the hover is the LSP contents shape",
     hoverText.slice(0, 120));
 
   const definition = await client.definition(uriOf(source), pos);
-  const target = Array.isArray(definition) ? definition[0] : definition;
-  ok(!!target, "the real server answers a definition on `slice`",
+  const loc = Array.isArray(definition) ? definition[0] : definition;
+  ok(!!loc, "the real server answers a definition on `contains`",
     JSON.stringify(definition).slice(0, 300));
-  const targetUri = target && (target.uri || target.targetUri);
-  const range = target && (target.range || target.targetSelectionRange || target.targetRange);
-  ok(!!targetUri && String(targetUri).endsWith("Web/EditorModel.wiz"),
-    "the definition names EditorModel.wiz", String(targetUri));
+  const targetUri = loc && (loc.uri || loc.targetUri);
+  const range = loc && (loc.range || loc.targetSelectionRange || loc.targetRange);
+  ok(!!targetUri && String(targetUri).endsWith("Web/Source/Span.wiz"),
+    "the definition names Span.wiz", String(targetUri));
   ok(!!range && range.start && range.start.line === defLine,
-    "the definition range is `def EditorModel.slice`'s line",
+    "the definition range is `def Source.Span.contains`'s line",
     range ? JSON.stringify(range) : "no range");
 
   // The same question at a position with no identifier (an empty line) is answered
   // `null`, not an error: the reader's "no answer" path.
   const blankLine = text.split("\n").findIndex((line) => line.trim() === "");
-  ok(blankLine >= 0, "the bundle's Span.wiz has an empty line", String(blankLine));
+  ok(blankLine >= 0, "the bundle's Facts.wiz has an empty line", String(blankLine));
   const blank = await client.hover(uriOf(source), { line: Math.max(0, blankLine), character: 0 });
   ok(blank === null || blank === undefined,
     "a hover with nothing under it is null", JSON.stringify(blank));

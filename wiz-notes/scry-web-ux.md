@@ -7,11 +7,11 @@ about the Wiz file it displays, and the answer lands in the reader's existing pa
 
 ## What the slice does
 
-1. `scry web DIR --out BUNDLE --source lib/Web/Source/Span.wiz --source
-   lib/Web/EditorModel.wiz` adds the two Wiz files to the bundle verbatim, with no
+1. `scry web DIR --out BUNDLE --source lib/Web/Source/Facts.wiz --source
+   lib/Web/Source/Span.wiz` adds the two Wiz files to the bundle verbatim, with no
    analysis (`--source` is repeatable; `Source.File.language` is `wiz`). The finding
-   pipeline for the analysed C/C# target is untouched. Span.wiz is the reader's span
-   type; its use of `EditorModel.slice` gives the cross-file definition in the demo.
+   pipeline for the analysed C/C# target is untouched. Facts.wiz is the reader's fact
+   table; its use of `Source.Span.contains` gives the cross-file definition in the demo.
 2. `index.html` is the same static, complete, no-JavaScript page as before. `app.js`
    adds one branch: `?lsp=PORT` (or `?lsp=ws://HOST:PORT`, `?token=` for a
    `--token-file` server) loads `source-live.js`, which mounts **the same**
@@ -86,9 +86,9 @@ findings on one line, or a definition range inside a finding, used to fail the
 * **`wiz lsp` has no `-I`.** Its `libs` are the toolchain's `lib/` (for a checkout
   binary, `<checkout>/lib`). A Wiz file under `scry/src/` imports `Scry.*`, which is
   not on that root, so its hover/definition would fail. The demo therefore displays
-  `lib/Web/Source/Span.wiz` (the reader's span type) and `lib/Web/EditorModel.wiz` (its
-  imported line table); both resolve. Making `scry/src` usable needs a toolchain search
-  path for the server, not a page change.
+  `lib/Web/Source/Facts.wiz` (the reader's fact table) and `lib/Web/Source/Span.wiz`
+  (its imported span type); both resolve. Making `scry/src` usable needs a toolchain
+  search path for the server, not a page change.
 * **No completion, no diagnostics panel, no editor.** Click/hover only; the reader is
   still not an editor. `wiz/interactiveInfo` is not used: the info view stays scry's
   fact/definition rows.
@@ -101,6 +101,17 @@ findings on one line, or a definition range inside a finding, used to fail the
   by one per astral character, and fixing that belongs in the server, not the page.
 * Only pointer positions on a rendered line are live: a file not currently open is not
   hit-testable, and a selection made with the keyboard has no live behaviour yet.
+* **A single source string of about 50 KB breaks the Wasm runtime's bundle load.**
+  `Json.parse` in `lib/Json.wiz` reads a string with a per-character recursion
+  (`Json.strBody`/`Json.revApp`); the Wasm module's 32 MB stack is gone at that size.
+  Measured: a bundle payload of 64 759 bytes (which included `lib/Web/EditorModel.wiz`,
+  52 KB) threw `RangeError: Maximum call stack size exceeded` inside the module during
+  the `bundle` effect, and the page stayed on "loading the bundle…"; the same bundle with
+  that file removed (10 129 bytes) loaded and produced 3 patches. The demo therefore
+  carries only `Facts.wiz` (2 KB) and `Span.wiz` (7 KB), and `scry web` now warns on
+  stderr for any bundle file over 40 000 characters. This is a pre-existing limit of the
+  static parser, not of the live interaction; it is the next thing to fix for real
+  projects (an iterative/string-slice parser, or a smaller per-file payload).
 * **The first live answer is slow.** `wiz lsp` elaborates a document with term info on
   `didOpen`; on this machine the first hover on the reader's Span.wiz took **51 s**
   (the definition after it, 60 ms). The page's request timeout is 180 s and its footer
@@ -130,7 +141,7 @@ heavy --sshfs --nodelist=win3 -- sh -c '
     sh web/build-source-ui.sh web/out/ui --gmp-src "$gmp"
   web/source-bundle.sh scry/.grail/bin/scry web/out/fixtures --ui web/out/ui
   web/source-bundle.sh scry/.grail/bin/scry web/out/live --ui web/out/ui \
-    --source lib/Web/Source/Span.wiz --source lib/Web/EditorModel.wiz
+    --source lib/Web/Source/Facts.wiz --source lib/Web/Source/Span.wiz
   node web/source_static_test.mjs web/out/fixtures
   node web/source_live_test.mjs web/out/live .lake/build/bin/wiz
   chrome=$(nix shell --inputs-from . nixpkgs#chromium -c sh -c "command -v chromium")

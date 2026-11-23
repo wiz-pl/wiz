@@ -108,13 +108,13 @@ const taintFile = readJson(join(bundle, "data", "f", taint.fileId + ".json"));
 const taintLine = (String(taintFile.source || "").split("\n")[Math.max(0, (taint.line || 1) - 1)] || "").trim();
 const count = (html, re) => (html.match(re) || []).length;
 
-// The Wiz file the live section reads: the reader's span type. A Wiz file under `lib/`
+// The Wiz file the live section reads: the reader's fact table. A Wiz file under `lib/`
 // matters: `wiz lsp` loads `lib/` as its module root, so the file's `import`s resolve
-// (a file under `scry/` would need `-I scry/src`, which `wiz lsp` does not take). Span.wiz
-// is chosen over Web/Source/Model.wiz because its own import closure is small (`wiz check`
-// 3.6 s vs 52 s); the server's term-info elaboration still dominates the first answer
-// (~51 s, measured), so the live waits below are minutes, not seconds.
-const wiz = wizFiles.find((f) => String(f.path).replace(/\\/g, "/").endsWith("Web/Source/Span.wiz"))
+// (a file under `scry/` would need `-I scry/src`, which `wiz lsp` does not take). Facts.wiz
+// is small, and its use of `Source.Span.contains` jumps to the bundled Span.wiz: a
+// cross-file definition without a large source in the bundle (the Wasm JSON parser
+// overflows its stack on a single string of about 50 KB; EditorModel.wiz is 52 KB).
+const wiz = wizFiles.find((f) => String(f.path).replace(/\\/g, "/").endsWith("Web/Source/Facts.wiz"))
   || wizFiles[0] || null;
 const wizData = wiz ? readJson(join(bundle, "data", "f", wiz.id + ".json")) : null;
 
@@ -330,10 +330,14 @@ try {
       files: document.querySelectorAll("li.file-row").length,
       findings: document.querySelectorAll("li.finding-row").length,
       patch: typeof globalThis.wizPatch === "function",
+      note: document.querySelector(".reader-foot .note")?.textContent || "",
+      loading: document.querySelector(".loading")?.textContent || "",
+      mode: document.querySelector(".source-reader")?.getAttribute("data-mode") || "",
     })`);
     ok(!state.error, "the mounted page has no data-wiz-error");
     ok(state.readers === 1, "the mounted page has one .source-reader", String(state.readers));
-    ok(state.files === fileCount, "the mounted page keeps every file row", String(state.files));
+    ok(state.files === fileCount, "the mounted page keeps every file row",
+      JSON.stringify({ files: state.files, note: state.note, loading: state.loading, mode: state.mode }));
     ok(state.findings === 2, "the mounted page keeps both finding rows", String(state.findings));
     ok(state.patch, "the driver installed the patch applier (the wiz_loom_* ABI ran)");
 
@@ -416,8 +420,8 @@ try {
         `document.querySelector('section.source-pane')?.getAttribute('data-file') === "${wiz.id}"`, 5000);
       ok(onFile, "the Wiz file opens in the source pane", String(wiz.path));
 
-      // Hover the `slice` of `EditorModel.slice` in the reader's span type.
-      const over = await pointerAt(page, "EditorModel.slice i start stop", "slice i start stop", "mouseover");
+      // Hover the `contains` of `Source.Span.contains` in the reader's fact table.
+      const over = await pointerAt(page, "Source.Span.contains r.span offset", "contains r.span offset", "mouseover");
       ok(!over || !over.error, "the pointer lands on a Wiz identifier",
         over && over.error ? over.error : "");
       // The first answer pays the server's term-info elaboration (~51 s measured).
@@ -426,7 +430,7 @@ try {
       const cardText = await page.evaluate(
         `document.querySelector(".hover-host")?.textContent || ""`);
       if (lsp.kind === "wiz") {
-        ok(card && /slice/.test(cardText), "hovering a Wiz name returns its LSP signature",
+        ok(card && /contains/.test(cardText), "hovering a Wiz name returns its LSP signature",
           cardText.slice(0, 200));
         ok(/LSP hover at/.test(cardText), "the card says it is a live LSP answer",
           cardText.slice(0, 120));
@@ -437,7 +441,7 @@ try {
 
       // Click the same name: `textDocument/definition`, parsed by Web.Hover, mapped to a
       // bundle file and outlined there.
-      const clicked = await pointerAt(page, "EditorModel.slice i start stop", "slice i start stop", "click");
+      const clicked = await pointerAt(page, "Source.Span.contains r.span offset", "contains r.span offset", "click");
       ok(!clicked || !clicked.error, "the click lands on a Wiz identifier",
         clicked && clicked.error ? clicked.error : "");
       const definition = await page.waitFor(
@@ -461,17 +465,17 @@ try {
       ok(definition && def, "the definition answer lands in the reader's info panel",
         JSON.stringify(def));
       if (lsp.kind === "wiz") {
-        ok(def && /EditorModel\.wiz/.test(def.target), "the definition names EditorModel.wiz",
+        ok(def && /Span\.wiz/.test(def.target), "the definition names Span.wiz",
           def && def.target);
         const targetFile = (filesJson.files || []).find(
-          (f) => String(f.path).replace(/\\/g, "/").endsWith("Web/EditorModel.wiz"));
+          (f) => String(f.path).replace(/\\/g, "/").endsWith("Web/Source/Span.wiz"));
         if (targetFile) {
           ok(def && def.file === targetFile.id,
-            "the definition jumps to the bundled EditorModel.wiz", def && def.file);
-          ok(def && /^169:/.test(String(def.focus || "")),
+            "the definition jumps to the bundled Span.wiz", def && def.file);
+          ok(def && /^59:/.test(String(def.focus || "")),
             "the definition range is outlined in the source pane", def && def.focus);
         } else {
-          console.log("skip: EditorModel.wiz is not in the bundle (the jump cannot land)");
+          console.log("skip: Span.wiz is not in the bundle (the jump cannot land)");
         }
       } else {
         ok(def && def.focus, "the mock definition outlines its range", def && def.focus);
@@ -488,7 +492,7 @@ try {
       await lsp.close();
       lsp = null;
       await sleep(300);
-      await pointerAt(page, "EditorModel.slice i start stop", "slice i start stop", "mouseover");
+      await pointerAt(page, "Source.Span.contains r.span offset", "contains r.span offset", "mouseover");
       const survived = await page.waitFor(
         `(document.querySelector(".reader-foot .note")?.textContent || "").includes("live: hover failed")`,
         15000);
