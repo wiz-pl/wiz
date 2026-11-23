@@ -75,6 +75,11 @@ the 2.43 glibc floor and rebuilds the archive in a second environment. It has no
 GitHub `release.yml` tarball: the contents, C++ runtime and glibc floor (2.43 versus
 2.27) differ, so do not publish the two under the same name.
 
+The Nix output has four files and all four must be published together: the
+tarball, its `.sha256`, `gcc-16.2.0-nixpkgs-source.tar.gz` and its `.sha256`.
+The source archive is the GPLv3 §6(d) Corresponding Source for the bundled
+libstdc++/libgcc.
+
 ## The tagging commit
 
 On a branch off the commit to tag, open one PR that:

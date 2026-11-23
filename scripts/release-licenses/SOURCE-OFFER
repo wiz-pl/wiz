@@ -28,14 +28,16 @@ Lean's static libc++ (Apache-2.0 WITH LLVM-exception), while its bundled
 and libz.so.1 under the zlib licence. Their sources:
 
   Lean 4.35.0: https://github.com/leanprover/lean4/releases/tag/v4.35.0
-  cc/ libgcc_s and libatomic: the GCC build bundled with Lean 4.35.0
-    (`lean --print-prefix`/lib), not the nixpkgs 16.2.0 build above. The
-    Lean 4.35.0 source asset is attached to the same release; its toolchain
-    sources carry the exact GCC source and patches.
+  cc/ libgcc_s and libatomic: GCC 7.3.0 from Lean 4.35.0's Nix toolchain
+    (glibc 2.26-131), not the nixpkgs 16.2.0 build above. The Lean tarball
+    does not contain the GCC 7.3.0 source or patches. Publishing the GitHub
+    artifact with cc/ requires adding that source to the release (the
+    bundle-inputs release is the natural place); the Nix `.#release-bin`
+    artifact does not ship cc/ and its source archive above is complete.
   zlib: https://zlib.net/
 
-The GitHub tarball's cc/ source is therefore the attached Lean 4.35.0
-source, not the nixpkgs archive (which belongs to the Nix artifact).
+The GitHub tarball's cc/ source is not covered by the Nix archive above;
+  it needs the GCC 7.3.0 provenance from Lean's toolchain build.
 
 The Wiz packaging scripts (scripts/release-tarball.sh,
 scripts/scrub-store-paths.py) and the Wiz source are at
