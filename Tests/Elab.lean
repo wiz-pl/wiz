@@ -1943,11 +1943,25 @@ def selfhostLoader : IO (Name → Option String) := do
     else if m == "Text" then some textLib
     else if m == "Std" then some stdLib else if m == "Sys" then some sysLib else none
 
-/-- A binary to use instead of building the pipeline's `name` (`compiler` or `checker`),
-from `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER`; `none` in a normal run. The case
-"an echoing stub compiler fails every =selfhost case" (`Tests/Groups/SelfHost.lean`) sets
-them to a stub, so the pipeline group cannot quietly stop testing the pipeline. -/
+/-- This run's cache directory for the self-hosted programs: `--selfhost-cache DIR` when
+given, else `WIZ_SELFHOST_CACHE`, else the system temp directory. Flag first, environment
+second (the flag is forwarded to each case's process, so a run cannot end up with cases
+using different caches), and the default last. -/
+def selfhostCacheDir : IO System.FilePath := do
+  if let some d ← selfhostCacheRef.get then return d
+  if let some d ← IO.getEnv "WIZ_SELFHOST_CACHE" then return System.FilePath.mk d
+  return "/tmp"
+
+/-- A binary to use instead of building the pipeline's `name` (`compiler` or `checker`):
+`--selfhost-<name> PATH` first, then `WIZ_SELFHOST_<NAME>`; `none` in a normal run. The
+flag is the supported form; the environment variables are kept because the case "an
+echoing stub compiler fails every =selfhost case" (`Tests/Groups/SelfHost.lean`) sets them
+for a child process, so the pipeline group cannot quietly stop testing the pipeline. -/
 def selfhostBinaryOverride (name : String) : IO (Option System.FilePath) := do
+  match name with
+  | "compiler" => if let some p ← selfhostCompilerRef.get then return some p
+  | "checker"  => if let some p ← selfhostCheckerRef.get then return some p
+  | _ => pure ()
   let var := "WIZ_SELFHOST_" ++ name.toUpper
   return (← IO.getEnv var).map System.FilePath.mk
 
@@ -1961,7 +1975,7 @@ def selfhostChecker : IO (Except String System.FilePath) := do
   let src ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
   let prog := Selfhost.checkerSource src
   let stamp := toString (← (← IO.appPath).metadata).modified.sec
-  let dir : System.FilePath := s!"/tmp/wiz-selfhost-{hash (prog ++ stamp)}"
+  let dir : System.FilePath := (← selfhostCacheDir) / s!"wiz-selfhost-{hash (prog ++ stamp)}"
   let exe := dir / "checker"
   note "uses checker"
   if ← exe.pathExists then return .ok exe
@@ -1992,7 +2006,7 @@ def selfhostCompiler : IO (Except String System.FilePath) := do
   let src ← Selfhost.compilerFiles.mapM (fun (f : String) => IO.FS.readFile f)
   let prog := Selfhost.compilerSource src
   let stamp := toString (← (← IO.appPath).metadata).modified.sec
-  let dir : System.FilePath := s!"/tmp/wiz-selfhost-{hash (prog ++ stamp)}"
+  let dir : System.FilePath := (← selfhostCacheDir) / s!"wiz-selfhost-{hash (prog ++ stamp)}"
   let exe := dir / "compiler"
   note "uses compiler"
   if ← exe.pathExists then return .ok exe

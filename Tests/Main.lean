@@ -262,6 +262,18 @@ def mainImpl (args : List String) : IO UInt32 := do
     | IO.eprintln "--jobs needs a count of at least 1"; return 2
   caseJobsRef.set jobs
   caseJobsSetRef.set jobsArg.isSome
+  -- `--selfhost-cache DIR`: the directory the self-hosted compiler and checker are built
+  -- in and kept (default: the system temp directory). A flag, not an environment
+  -- variable, so a run states where its cache lives and every case's process inherits it.
+  let (cacheArg, args) := takeFlag "--selfhost-cache" args
+  selfhostCacheRef.set (cacheArg.map System.FilePath.mk)
+  -- `--selfhost-compiler PATH` / `--selfhost-checker PATH`: use these binaries instead of
+  -- building them (they win over `WIZ_SELFHOST_COMPILER`/`_CHECKER`, which stay as the
+  -- stub-compiler escape hatch for a child process).
+  let (compilerArg, args) := takeFlag "--selfhost-compiler" args
+  selfhostCompilerRef.set (compilerArg.map System.FilePath.mk)
+  let (checkerArg, args) := takeFlag "--selfhost-checker" args
+  selfhostCheckerRef.set (checkerArg.map System.FilePath.mk)
   -- `--part i/n`: the part of a split sweep to run (`=selfhost-libdiff`), passed on to
   -- each case's process; not given, a case runs the whole sweep (`1/1`)
   let (partArg, args) := takeFlag "--part" args
@@ -274,7 +286,10 @@ def mainImpl (args : List String) : IO UInt32 := do
   toolchainRef.set tc
   flagsRef.set (tc.toFlags ++ (if traceGuesses then ["--trace-guess-fallback"] else [])
     ++ (if statsArg then ["--stats"] else [])
-    ++ (if allowMissing then ["--allow-missing-deps"] else []))
+    ++ (if allowMissing then ["--allow-missing-deps"] else [])
+    ++ (match cacheArg with | some d => ["--selfhost-cache", d] | none => [])
+    ++ (match compilerArg with | some p => ["--selfhost-compiler", p] | none => [])
+    ++ (match checkerArg with | some p => ["--selfhost-checker", p] | none => []))
   match args' with
   -- one case in this process: what `Group.run` starts for each case
   | ["--run-case", group, ix] =>

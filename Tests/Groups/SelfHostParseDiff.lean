@@ -115,7 +115,7 @@ def selfhostParser (t : ParserTables) : IO (Except String System.FilePath) := do
     Selfhost.wizTables t ++
     s!"def tokens : List String := {Selfhost.wizList (t.tokens.toList.map Selfhost.wizLit)}\n" ++ driver
   let stamp := toString (← (← IO.appPath).metadata).modified.sec
-  let dir : System.FilePath := s!"/tmp/wiz-selfhost-{hash (prog ++ stamp)}"
+  let dir : System.FilePath := (← Tests.Elab.selfhostCacheDir) / s!"wiz-selfhost-{hash (prog ++ stamp)}"
   let exe := dir / "parser"
   if ← exe.pathExists then return .ok exe
   let start ← IO.monoMsNow

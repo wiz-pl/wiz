@@ -15,6 +15,18 @@ namespace Tests
 initialize toolchainRef : IO.Ref Wiz.Toolchain ← IO.mkRef {}
 /-- The toolchain flags, given again to each case's process. -/
 initialize flagsRef : IO.Ref (List String) ← IO.mkRef []
+
+/-- `--selfhost-cache DIR`: where the self-hosted compiler/checker are built and kept.
+A flag rather than an environment variable, and the value is forwarded to each case's
+process with the other driver flags, so a run that gives it keeps every case on the same
+cache. Default: the system temp directory (`/tmp`). -/
+initialize selfhostCacheRef : IO.Ref (Option System.FilePath) ← IO.mkRef none
+
+/-- `--selfhost-compiler PATH` / `--selfhost-checker PATH`: use this binary instead of
+building one. The flag wins over the `WIZ_SELFHOST_*` environment variables, which are
+kept for the stub-compiler case that sets them for a child process. -/
+initialize selfhostCompilerRef : IO.Ref (Option System.FilePath) ← IO.mkRef none
+initialize selfhostCheckerRef : IO.Ref (Option System.FilePath) ← IO.mkRef none
 /-- The driver's `--jobs N`, for a case that runs alone (a group that did not opt in to
 `Group.parallel`): such a case may use up to N workers of its own (`=selfhost-libdiff`
 checks its files N at a time). `Group.run` passes it to each case's process; the cases
