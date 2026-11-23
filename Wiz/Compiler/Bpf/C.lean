@@ -761,9 +761,12 @@ sizeof(\"wiz-probe data=%s\\n\"), ({de}).b);"
   | .cast ty _ v =>
     let ve ← operand env prog ind v
     line s!"{ind}{dst} = (({cTy env ty})({ve}));"
-  | .call _ f args =>
+  | .call ty f args =>
     let es ← args.toList.mapM (operand env prog ind)
-    line s!"{ind}{dst} = {cName f}({commaSep es});"
+    if ty == .unit then
+      line s!"{ind}{cName f}({commaSep es});"
+    else
+      line s!"{ind}{dst} = {cName f}({commaSep es});"
   | .helper _ h args =>
     let es ← args.toList.mapM (operand env prog ind)
     let e ← match helperCall h es with
@@ -805,7 +808,13 @@ partial def emitRet (env : Env) (prog : Program) (ind : String) (ret : Ty) (top 
     if top && prog.kind.isTracing then "return 0;" else "return;"
   match t.node with
   | .ret v =>
-    if ret == .unit then
+    if ret == .unit then do
+      -- A unit value has no C result, but its `let`/`match`/`Probe.emit` sequence has
+      -- effects: emit it into a scratch byte (the `Unit` literal assigns it) and then
+      -- return. Without this the body of a tracing probe is silently dropped.
+      let tmp ← fresh "u"
+      line s!"{ind}__u8 {tmp} = 0;"
+      emitTm env prog ind tmp v
       line s!"{ind}{unitReturn}"
     else
       let e ← operand env prog ind v
