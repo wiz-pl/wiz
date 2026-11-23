@@ -3509,16 +3509,46 @@ def tailKinds : List BKind → List BKind
 def scopeNames : Scope → List String
   | .mk ls _ _ _ _ _ _ => List.reverseOf ls .nil
 
+-- (D8 goals) a goal as `GoalView.show` prints it (`x : T` per hypothesis, then `⊢ T`),
+-- from a declaration's type peeled at its body: the diagnostics path already computes
+-- the type for a definition's line, and this is its body's expected-type view
+partial def goalShowHyps (names : List String) (types : List Val) (d : Nat) : Nat → Bool → String → String
+  | i, first, acc => match Nat.lt i d with
+    | .false => acc
+    | .true =>
+      let line := String.append (String.append (nthStr names i) " : ")
+        (show names d (match nthVal types (d - 1 - i) with
+          | .some v => quote d v
+          | .none => .star));
+      let acc' := match first with
+        | .true => line
+        | .false => String.append (String.append acc "\n") line;
+      goalShowHyps names types d (i + 1) .false acc'
+def goalShowCtx (names : List String) (c : TCtx) (target : Val) : String :=
+  let d := TCtx.lvl c;
+  let ctx := goalShowHyps names (envToList (TCtx.types c)) d 0 .true "";
+  let body := String.append "⊢ " (show names d (quote d target));
+  match strEq ctx "" with
+  | .true => body
+  | .false => String.append (String.append ctx "\n") body
+
 -- (playground LSP, stage 2) record a checked node's expected type for the position index.
 -- `sp` is the node's span from the parser's side table; `none` (spans off, or a node the
 -- parser did not build — a macro expansion, a rewrite) records nothing. The text is the
--- type as the kernel prints it in the node's own context, which is what `plainTermGoal`
--- shows; entries are kept in `ES` and end up in the language server's entries when the
--- command succeeds.
-def recordTerm (es : ES) (sp : Option SpT) (cx : Cx) (ty : Val) : ES := match sp with
+-- type as the kernel prints it in the node's own context, which is what the playground's
+-- `expected` shows; the external language server asks for the host's goal shape
+-- (`x : T` per hypothesis, then `⊢ T`, as `plainTermGoal` answers), so it gets
+-- `goalShowCtx` instead. Entries are kept in `ES` and end up in the language server's
+-- entries when the command succeeds.
+def recordTerm (gs : Globals) (es : ES) (sp : Option SpT) (cx : Cx) (ty : Val) : ES := match sp with
   | .none => es
-  | .some t => ES.addSnap es (.term (SpT.start t) (SpT.stop t)
-      (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) ty)))
+  | .some t =>
+    let names := scopeNames (Cx.sc cx);
+    let d := Cx.lvl cx;
+    let text := match Globals.lspOn gs with
+      | .true => goalShowCtx names (Cx.c cx) ty
+      | .false => show names d (quote d ty);
+    ES.addSnap es (.term (SpT.start t) (SpT.stop t) text)
 -- the spans of the arguments of a node's `i`th child (the `null` of an application, say),
 -- one per argument; empty when the node has no span
 def argSpans (sp : Option SpT) (i : Nat) : List (Option SpT) := spKidsOpt (spKid sp i)
@@ -5078,7 +5108,10 @@ def runTacticSteps (gs : Globals) (es : ES) (st : STacState) (endSp : Option SpT
     match evalTacticStx gs esB st t with
     | .ok st' es' =>
       let es'' := match Globals.lspOn gs with
-        | .true => ES.addSnap es' (.goal at (Globals.lspStop gs) (tacGoalsList es' st'))
+        -- the state after the step, keyed from its second character: at the step's
+        -- first character the host answers with the state *before* it (its
+        -- `goalsAt`'s `starting` case), which `recordGoal`'s entry already holds
+        | .true => ES.addSnap es' (.goal (at + 1) (Globals.lspStop gs) (tacGoalsList es' st'))
         | .false => es';
       runTacticSteps gs es'' st' endSp (at + 1) rest (spTail sps)
     | .err m => .err (errMarkIf (spHead sps) (String.append m (String.append "\nremaining goals:\n" (tacGoalsShow es st))))
@@ -5167,7 +5200,11 @@ def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
         | .true => .ok .ptrue (.vsort (.lnum 0)) es .nil
         | .false => match strEq n "False" with
           | .true => .ok .pfalse (.vsort (.lnum 0)) es .nil
-          | .false => .err (String.append "unknown identifier " n)
+          -- (A19) `Size : Type`, like the host's builtin (`Wiz/Elab/Term.lean`): the
+          -- surface `Size`, `Size<`, `∞` and `↑` elaborate to the kernel's size terms
+          | .false => match strEq n "Size" with
+            | .true => .ok .size (.vsort (.lnum 1)) es .nil
+            | .false => .err (String.append "unknown identifier " n)
   | .ok i => match Nat.lt i d with
     | .true => .ok (.var i) (lookup (TCtx.types (Cx.c cx)) i) es .nil
     | .false => match globalUse gs es cx (i - d) .nil with
@@ -6122,7 +6159,7 @@ def checkUnitVal (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE
 -- stage 2), recorded with `ty` for `wiz/plainTermGoal`
 def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp0 : Option SpT) : TE :=
   let sp := spCheck sp0 s;
-  let es := recordTerm es sp cx ty;
+  let es := recordTerm gs es sp cx ty;
   let k := kindOf s;
   markTE sp (match strEq k "term.letUnit" with
   | .true => letUnitT gs es cx s (.some ty)
@@ -6756,29 +6793,6 @@ def peelCtx : Nat → TCtx → Val → Peeled
     | .vpi _ _ _ dom env cod => peelCtx k (TCtx.bind c dom) (eval (.cons (fresh (TCtx.lvl c)) env) cod)
     | v' => .mk c v'
 
--- (D8 goals) a goal as `GoalView.show` prints it (`x : T` per hypothesis, then `⊢ T`),
--- from a declaration's type peeled at its body: the diagnostics path already computes
--- the type for a definition's line, and this is its body's expected-type view
-partial def goalShowHyps (names : List String) (types : List Val) (d : Nat) : Nat → Bool → String → String
-  | i, first, acc => match Nat.lt i d with
-    | .false => acc
-    | .true =>
-      let line := String.append (String.append (nthStr names i) " : ")
-        (show names d (match nthVal types (d - 1 - i) with
-          | .some v => quote d v
-          | .none => .star));
-      let acc' := match first with
-        | .true => line
-        | .false => String.append (String.append acc "\n") line;
-      goalShowHyps names types d (i + 1) .false acc'
-def goalShowCtx (names : List String) (c : TCtx) (target : Val) : String :=
-  let d := TCtx.lvl c;
-  let ctx := goalShowHyps names (envToList (TCtx.types c)) d 0 .true "";
-  let body := String.append "⊢ " (show names d (quote d target));
-  match strEq ctx "" with
-  | .true => body
-  | .false => String.append (String.append ctx "\n") body
-
 -- (D8 goals) the body's span: after the command's top-level `:=`, to the command's end
 partial def lspBodyStartGo (input : Array Nat) (i stop depth : Nat) : Option Nat :=
   match Nat.lt i stop with
@@ -6811,6 +6825,9 @@ def lspBodyRange (input : Array Nat) (cmdStart cmdStop : Nat) : Option LspSpan :
   match lspBodyStartGo input cmdStart cmdStop 0 with
   | .some start => .some (LspSpan.mk start (lspTrimEnd input start cmdStop))
   | .none => .none
+-- (`ES.snaps` is newest-first; `Globals.addLsp` conses, so add the reversed list to keep
+-- the entries newest-first too — `lspGoalAt`/`lspTermAt` break a tie toward the newer
+-- entry, which is what the host's "the last recorded among equal ranges" means)
 def lspAddSnaps : List LspEntry → Globals → Globals
   | .nil, gs => gs
   | .cons e rest, gs => lspAddSnaps rest (Globals.addLsp gs e)
@@ -6826,7 +6843,7 @@ def lspAddCommand (gs : Globals) (stx : Syntax) (tyT : Tm) (es : ES) : Globals :
         let names := fieldNames (fieldsOf (kids (kid stx 3)));
         match peelCtx (List.length names) empty (eval .nil tyT) with
         | .mk c rest => Globals.addLsp gs (.term r.start r.stop (goalShowCtx names c rest));
-    lspAddSnaps (ES.snaps es) gs1
+    lspAddSnaps (List.reverseOf (ES.snaps es) .nil) gs1
 
 -- (playground LSP, completion/hover/definition) a new declaration's entry: its source
 -- name, the type as the kernel prints it, and its source span. `gs` is the state after
@@ -11617,16 +11634,18 @@ def stepCommand (inlineImports : Bool) (header : Bool) (cats : List Cat) (tokens
         | LinkR.mk line gs' => StepR.next (atLine start line) stop (Globals.setPrivate gs' .false) cats tokens notes)
       | .none =>
       -- (the kernel step budget, see `kernelSteps`; it covers the command's elaboration
-      -- and checking, not its parse. The match on `kernelStart` forces the extern before
-      -- the command is evaluated: a lazy `let` would otherwise run the step first.)
+      -- and checking, not its parse. Wiz's `let` is call by value, so `armed` must be
+      -- bound before `step`: in the `match` below it would be too late — `step` has
+      -- already elaborated and every `kernelTick` during it would see no budget.)
       let budget := commandSteps stx;
+      let armed := kernelStart budget;
       -- (13t) a namespace command changes the state (and validates it), not the globals;
       -- it takes the step's place when it is one, as on train9's side.
       let step : Step := match commandStep gs0 stx sp with
         | .mk line gs' => match nsCommand gs0 stx start with
           | .some s => s
           | .none => .mk line gs'
-      match kernelStart budget with
+      match armed with
       | .false =>
         match step with
         | .mk line gs' => finishStep stop start gs gs' input sp line cats tokens notes stx

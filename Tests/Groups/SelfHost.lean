@@ -3127,13 +3127,22 @@ def selfHostGroup : Group where
     { name := "the selfhost checker: the parser's mutual block stays under 512 MB", run := fun _ => do
         -- the selfhost sources are wrapped in the explicit-global `namespace __root__`;
         -- this snippet concatenates two of them and cuts the second, so drop the wrapper
-        -- (both lines) rather than inherit an unclosed block.
+        -- rather than inherit an unclosed block. Its closer is the file's *last* line
+        -- (`end`; an older tree spelled it `end __root__`, which the filter drops too),
+        -- and `Parse.wiz`'s final `end` closes its outer `mutual`, not the wrapper, so
+        -- only Lex's trailing `end` goes (the cut leaves Parse's wrapper closer out of
+        -- the excerpt).
         let strip := fun (s : String) => "\n".intercalate ((s.splitOn "\n").filter fun l =>
           !l.startsWith "import" && l != "namespace __root__" && l != "end __root__")
         let lex ← IO.FS.readFile "selfhost/Lex.wiz"
         let parse ← IO.FS.readFile "selfhost/Parse.wiz"
         let parseHead := (parse.splitOn "\ndef sexpr").headD parse
-        let src := "import Prelude\n" ++ strip lex ++ "\n" ++ strip parseHead
+        let lexBody := strip lex
+        -- the wrapper's closer is the file's last line; the cut leaves Parse's out
+        let lexBody := match (lexBody.splitOn "\n").reverse.dropWhile (fun l => l.trimAscii.toString.isEmpty) with
+          | "end" :: rest => "\n".intercalate rest.reverse
+          | _ => lexBody
+        let src := "import Prelude\n" ++ lexBody ++ "\n" ++ strip parseHead
         let some out ← selfhostOutputPeak src 512
           | pure ()
         for l in out.splitOn "\n" do
@@ -3363,15 +3372,26 @@ def selfHostGroup : Group where
            ("def bad : Nat := cocon (0, ())\n", false),
            ("def good (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => good (n + 1)\n", true)] },
     { name := "A19: surface sizes (∞, ↑, Size<, `T ^ s`) are accepted by the self-hosted frontend (selfhost-only: the Lean frontend does not implement them yet)", run := fun _ => do
+        -- (`T^s` has no space before `^`: a spaced `^` is the library's operator,
+        -- `term.sized` is a `noWs` trailing parser in both frontends)
         let src := "import Prelude\n" ++
           "def szInf : Size := ∞\ndef szSuc (s : Size) : Size := ↑s\n" ++
           "def szLt (s : Size< ∞) : Size< ∞ := s\n" ++
-          "inductive N2 where\n  | z\ncoinductive S2 where\n  | h : N2\n" ++
-          "def nSized : Type := N2 ^ ∞\ndef sSized : Type := S2 ^ ∞\n"
+          "inductive N2 where\n  | z\ncoinductive S2 where\n  h : N2\n" ++
+          "def nSized : Type := N2^∞\ndef sSized : Type := S2^∞\n"
         let some out ← selfhostOutput src | return
         let bad := (out.splitOn "\n").filter fun l => l.startsWith "error" || l.startsWith "parse error"
         unless bad.isEmpty do
-          throw (IO.userError s!"the self-hosted frontend rejects surface sizes:\n{"\n".intercalate bad}\n{out}") },
+          throw (IO.userError s!"the self-hosted frontend rejects surface sizes:\n{"\n".intercalate bad}\n{out}")
+        -- the checker's declarations, not its input (a stub that echoes the source must
+        -- not pass this pin; the pipeline group checks that no =selfhost case is vacuous)
+        checkChecked src out
+        let has (frag : String) : Bool := (out.splitOn frag).length > 1
+        for want in ["szInf : Size", "szSuc : (x0 : Size) → Size",
+                     "szLt : (x0 : Size<(∞)) → Size<(∞)",
+                     "N2 : U0", "S2 : U0", "nSized : U0", "sSized : U0"] do
+          unless has want do
+            throw (IO.userError s!"the checker did not print `{want}`:\n{out}") },
     -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
     { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
         selfhostCheckModules

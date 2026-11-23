@@ -159,7 +159,9 @@ def selfhostLspGroup : Group where
         checkEq ["wiz/elaborated"]
           (lspStrs init ["result", "capabilities", "experimental", "wizInfoview", "notifications"])
         checkEq "wiz-selfhost" (lspStr init ["result", "serverInfo", "name"])
-        -- didOpen: the error, positioned at its command, with `check`'s code and source
+        -- didOpen: the error, positioned at the failing term, as `check` positions it
+        -- (`bad.wiz:3:18`, the same message and position the host's `Msg` carries) with
+        -- `check`'s code and source
         let diag ← lspAt msgs 1
         checkEq "textDocument/publishDiagnostics" (lspStr diag ["method"])
         checkEq uri (lspStr diag ["params", "uri"])
@@ -167,9 +169,10 @@ def selfhostLspGroup : Group where
         checkEq "wiz" (lspStr diag ["params", "diagnostics", "0", "source"])
         checkEq "unknown-identifier" (lspStr diag ["params", "diagnostics", "0", "code"])
         checkEq "unknown identifier nope" (lspStr diag ["params", "diagnostics", "0", "message"])
-        -- the third line of the document, 0-based (import, def one, def two)
+        -- the third line of the document, 0-based (import, def one, def two), at the
+        -- column of `nope` (`:18` in `check`'s 1-based output)
         checkEq 2 (lspNat diag ["params", "diagnostics", "0", "range", "start", "line"])
-        checkEq 0 (lspNat diag ["params", "diagnostics", "0", "range", "start", "character"])
+        checkEq 17 (lspNat diag ["params", "diagnostics", "0", "range", "start", "character"])
         -- wiz/elaborated: the session the client asked for
         let elabMsg ← lspAt msgs 2
         checkEq "wiz/elaborated" (lspStr elabMsg ["method"])
