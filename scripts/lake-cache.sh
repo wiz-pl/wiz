@@ -9,8 +9,10 @@
 #              `withLakeCache empty-lake`: a cold compile *inside* the derivation, so
 #              the sandbox — not an assertion about cache restores — enforces it. Its
 #              `unwrapped.lake` output is the seed; the job publishes that store path
-#              (`.#lake-seed`) to the trusted Cachix. Its `bin` is byte-identical to
-#              the pure build's (measured).
+#              (`.#lake-seed`) to the trusted Cachix. Its `bin` is **expected** to be
+#              byte-identical to the pure build's; the seed measurement's `cmp` is the
+#              evidence and has not yet run (see `wiz-notes/fixpoint-research.md`), so
+#              this is a design expectation, not a measured fact.
 #   consumer   A pull request restores its own untrusted seed first (a previous run)
 #              and otherwise names its base commit's `.#lake-seed` derivation and
 #              **substitutes** it from the trusted Cachix (`trusted` below); it builds
