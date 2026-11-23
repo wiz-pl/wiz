@@ -1469,6 +1469,10 @@ EOF
           # a function, not a package: `tower` is `towerFor wiz`, and `lib.towerWith`
           # is CI's seeded build. `packages` removes it (see below).
           inherit towerFor;
+          # Likewise a function: `lib.selfhostWith { wiz, tests }` is the seeded build
+          # of the two self-hosted programs, and it needs the builder itself to be an
+          # attribute of this set (a `let` binding is not reachable from `lib`).
+          inherit selfhostProgramWith;
           # The trusted Lake seed as a package: `withLakeCache empty-lake`'s `lake`
           # output (the compiled `.lake` directory without the linked binaries). A master
           # push builds this and publishes the store path to the trusted Cachix; a pull
