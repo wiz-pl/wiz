@@ -4,6 +4,7 @@ import Word
 import WordArray
 import Intern
 import Scry.ProjectIO
+import Scry.ProjectCache
 import Scry.Project
 import Scry.ProjectTaint
 import Scry.CstStore
@@ -40,19 +41,9 @@ the cache statistics that must differ are in `manifest.txt` only.
 
 -- ## Small formatting helpers
 
-/-- A line for the canonical dump. -/
-def Scry.adLine (xs : List String) : String := String.intercalate "\t" xs
-
-/-- Lines joined with a final newline. -/
-def Scry.adLines (ls : List String) : String :=
-  List.foldr (fun l acc => l ++ "\n" ++ acc) "" ls
-
-/-- `f 0, f 1, …, f (n-1)`, by index (structural on the fuel). -/
-partial def Scry.adRangeGo (f : Nat → String) : Nat → Nat → List String
-  | .zero, _ => .nil
-  | .succ k, i => List.cons (f i) (Scry.adRangeGo f k (Nat.succ i))
-
-def Scry.adRange (n : Nat) (f : Nat → String) : List String := Scry.adRangeGo f n 0
+-- (`adLine`, `adLines`, `adRange` and the canonical Wil dump live in
+-- `Scry.ProjectCache`: the lowering cache stores the same TU content, and the tests
+-- compare this dump cold against warm.)
 
 /-- A zero-padded three-digit unit number. -/
 def Scry.adPad3 (n : Nat) : String :=
@@ -172,161 +163,14 @@ def Scry.adStoreDump (s : Scry.CstStore) : String :=
 
 -- ## The lowered TU
 
-/-- A type. -/
-def Scry.adTy : Wil.Ty → String
-  | .int w s => "int" ++ Nat.repr w ++ (match s with | .true => "s" | .false => "u")
-  | .ptr t => "ptr(" ++ Scry.adTy t ++ ")"
-  | .fn n t => "fn(" ++ Nat.repr n ++ "," ++ Scry.adTy t ++ ")"
-  | .record i => "record" ++ Nat.repr i
-  | .dyn => "dyn"
-  | .unknown => "unknown"
-
-/-- A concrete value. -/
-def Scry.adVal : Wil.Val → String
-  | .int w s b => "int" ++ Nat.repr w ++ (match s with | .true => "s" | .false => "u")
-      ++ ":" ++ Nat.repr b
-  | .ptr b o => "ptr:" ++ Nat.repr b ++ ":" ++ Nat.repr o
-  | .nul => "null"
-  | .undef => "undef"
-
-/-- A register: index and declared type. -/
-def Scry.adVar (v : Wil.Var) : String :=
-  Nat.repr v.index ++ ":" ++ Scry.adTy v.ty
-
-/-- An operator. -/
-def Scry.adOp : Wil.Op → String
-  | .add => "add" | .sub => "sub" | .mul => "mul" | .div => "div" | .rem => "rem"
-  | .and => "and" | .or => "or" | .xor => "xor" | .shl => "shl" | .shr => "shr"
-  | .eq => "eq" | .ne => "ne" | .lt => "lt" | .le => "le" | .gt => "gt" | .ge => "ge"
-  | .neg => "neg" | .not => "not"
-
-/-- A condition. -/
-def Scry.adCond : Wil.Cond → String
-  | .const b => "const" ++ (match b with | .true => "1" | .false => "0")
-  | .cmp op a b => "cmp:" ++ Scry.adOp op ++ ":" ++ Scry.adVar a ++ ":" ++ Scry.adVar b
-  | .not c => "not(" ++ Scry.adCond c ++ ")"
-  | .and a b => "and(" ++ Scry.adCond a ++ "," ++ Scry.adCond b ++ ")"
-  | .or a b => "or(" ++ Scry.adCond a ++ "," ++ Scry.adCond b ++ ")"
-
-/-- A right-hand side. -/
-def Scry.adRhs : Wil.Rhs → String
-  | .use v => "use:" ++ Scry.adVar v
-  | .cst v => "cst:" ++ Scry.adVal v
-  | .bin op a b => "bin:" ++ Scry.adOp op ++ ":" ++ Scry.adVar a ++ ":" ++ Scry.adVar b
-  | .un op a => "un:" ++ Scry.adOp op ++ ":" ++ Scry.adVar a
-  | .load p => "load:" ++ Scry.adVar p
-  | .gep p k => "gep:" ++ Scry.adVar p ++ ":" ++ Nat.repr k
-  | .alloc n => "alloc:" ++ Nat.repr n
-  | .havoc t => "havoc:" ++ Scry.adTy t
-  | .slot n => "slot:" ++ Nat.repr n
-  | .globalRef n => "global:" ++ n
-  | .fnptr n => "fnptr:" ++ n
-  | .gepVar p i k => "gepvar:" ++ Scry.adVar p ++ ":" ++ Scry.adVar i ++ ":" ++ Nat.repr k
-
-/-- A callee. -/
-def Scry.adCallee : Wil.Callee → String
-  | .direct n => "direct:" ++ n
-  | .indirect v => "indirect:" ++ Scry.adVar v
-
-/-- An origin: file, byte range, CST node, line, column. -/
-def Scry.adSpan (sp : Wil.Span) : String :=
-  Scry.adLine [Nat.repr sp.file, Nat.repr sp.start, Nat.repr sp.stop, Nat.repr sp.node,
-    Nat.repr sp.line, Nat.repr sp.col]
-
-/-- A statement (one line). -/
-def Scry.adStmt : Wil.Stmt → String
-  | .assign x e o => "assign\t" ++ Scry.adVar x ++ "\t" ++ Scry.adRhs e ++ "\t" ++ Scry.adSpan o
-  | .assume c o => "assume\t" ++ Scry.adCond c ++ "\t" ++ Scry.adSpan o
-  | .store p v o => "store\t" ++ Scry.adVar p ++ "\t" ++ Scry.adVar v ++ "\t" ++ Scry.adSpan o
-  | .free p o => "free\t" ++ Scry.adVar p ++ "\t" ++ Scry.adSpan o
-  | .call r c args o => "call\t"
-      ++ (match r with | .some v => Scry.adVar v | .none => "-")
-      ++ "\t" ++ Scry.adCallee c
-      ++ "\t" ++ String.intercalate "," (List.map Scry.adVar args)
-      ++ "\t" ++ Scry.adSpan o
-  | .nop o => "nop\t" ++ Scry.adSpan o
-
-/-- A terminator (one line). -/
-def Scry.adTerm : Wil.Term → String
-  | .goto b o => "goto\t" ++ Nat.repr b.index ++ "\t" ++ Scry.adSpan o
-  | .br c t f o => "br\t" ++ Scry.adCond c ++ "\t" ++ Nat.repr t.index ++ "\t"
-      ++ Nat.repr f.index ++ "\t" ++ Scry.adSpan o
-  | .ret v o => "ret\t" ++ (match v with | .some x => Scry.adVar x | .none => "-")
-      ++ "\t" ++ Scry.adSpan o
-  | .unreachable o => "unreachable\t" ++ Scry.adSpan o
-
-/-- One block's statements and terminator, each prefixed with its block and statement
-index. -/
-partial def Scry.adStmtsGo (b i : Nat) : List Wil.Stmt → List String
-  | .nil => .nil
-  | .cons s rest => List.cons
-      ("b" ++ Nat.repr b ++ "\ts" ++ Nat.repr i ++ "\t" ++ Scry.adStmt s)
-      (Scry.adStmtsGo b (Nat.succ i) rest)
-
-/-- Every block of a function, in order. -/
-partial def Scry.adBlocksGo (i : Nat) : List Wil.Block → List String
-  | .nil => .nil
-  | .cons blk rest => List.append
-      (Scry.adStmtsGo i 0 blk.stmts)
-      (List.cons ("b" ++ Nat.repr i ++ "\tterm\t" ++ Scry.adTerm blk.term)
-        (Scry.adBlocksGo (Nat.succ i) rest))
-
-/-- One function: name, entry, params, locals, origin, blocks. -/
-def Scry.adFunc (i : Nat) (f : Wil.Func) : List String :=
-  List.append
-    [ "func\t" ++ Nat.repr i ++ "\t" ++ f.name
-    , "entry\t" ++ Nat.repr f.entry.index
-    , "origin\t" ++ Scry.adSpan f.origin
-    , "params\t" ++ String.intercalate "," (List.map Scry.adVar f.params)
-    , "locals\t" ++ String.intercalate "," (List.map Scry.adVar f.locals) ]
-    (Scry.adBlocksGo 0 f.blocks)
-
-/-- Every function of a TU, with its index. -/
-partial def Scry.adFuncsGo (i : Nat) : List Wil.Func → List String
-  | .nil => .nil
-  | .cons f rest => List.append (Scry.adFunc i f) (Scry.adFuncsGo (Nat.succ i) rest)
-
-/-- One warning: function, message, origin. -/
-def Scry.adWarning (w : Scry.Warning) : String :=
-  "warning\t" ++ w.func ++ "\t" ++ w.message ++ "\t" ++ Scry.adSpan w.span
-
-/-- Every warning, in the TU's order (newest first). -/
-def Scry.adWarnings (ws : List Scry.Warning) : List String :=
-  List.map (fun w => Scry.adWarning w) ws
-
-/-- Every external call, in the TU's order. -/
-def Scry.adExternals (xs : List (String × String)) : List String :=
-  List.map (fun p => "external\t" ++ p.1 ++ "\t" ++ p.2) xs
-
-/-- The source files of a TU: index, path, text length, and a 64-bit digest of the text
-(so a line-map/text change is visible even when the CST is identical). -/
-def Scry.adFiles (tu : Scry.TU) : List String :=
-  List.append [ "files\t" ++ Nat.repr (List.length tu.files) ]
-    (List.map (fun p =>
-      let i := p.1;
-      let text := p.2;
-      "file\t" ++ Nat.repr i ++ "\t" ++ Scry.cstEnc (List.getD tu.paths i "")
-        ++ "\t" ++ Nat.repr (String.length text) ++ "\t" ++ Nat.repr (Scry.fnv text))
-      (Scry.zipIdx tu.files 0))
-
+-- The canonical Wil dump lives in `Scry.ProjectCache` (`Scry.adTy` … `Scry.tuDump`):
+-- the lowering cache stores the same content, and `scry/tests/project.wiz` compares
+-- this dump cold against warm. Only the project-unit wrapper (which also names the CST
+-- store digest) is artifact-tool-specific.
 /-- The canonical dump of one project unit. -/
 def Scry.adUnit (u : Scry.ProjectUnit) : String :=
-  let tu := u.tu;
-  let files := Scry.adFiles tu;
-  let funcs := Scry.adFuncsGo 0 tu.funcs;
-  let warnings := Scry.adWarnings tu.warnings;
-  let externals := Scry.adExternals tu.externalCalls;
-  Scry.adLines (List.concat
-    [ [ "unit\t" ++ Scry.cstEnc u.path
-      , "errors\t" ++ Nat.repr u.errors
-      , "store-digest\t" ++ Scry.cstFullDigest u.store ]
-    , files
-    , [ "funcs\t" ++ Nat.repr (List.length tu.funcs) ]
-    , funcs
-    , [ "warnings\t" ++ Nat.repr (List.length tu.warnings) ]
-    , warnings
-    , [ "externals\t" ++ Nat.repr (List.length tu.externalCalls) ]
-    , externals ])
+  Scry.tuDump u.tu u.path u.errors (Scry.cstFullDigest u.store)
+
 
 -- ## The command
 
