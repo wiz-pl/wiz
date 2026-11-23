@@ -564,3 +564,33 @@ Server sources:
 - Serena: <https://github.com/oraios/serena>
 - Context7: <https://github.com/upstash/context7>
 - Official GitHub MCP: <https://github.com/github/github-mcp-server>
+
+## Addendum (2026-11-23, after this survey): `bus_wait` is implemented
+
+The separate lane did land, and it is live on this machine (applied by `nrs`):
+`ghostbus-wait`, a dependency-free stdio MCP proxy in the dotfiles repo
+(`agent-bus-wait` @ `afa3a450a`). It spawns the existing `ghostbus --store
+~/.local/share/ghostbus/bus.json`, forwards the 29 tools unchanged, and adds one:
+
+```text
+bus_wait({ agent, timeoutMs = 30000 (max 600000), sinceSeq?, afterId?, unreadOnly? })
+  -> { messages: [...], timedOut: bool, headSeq, ... }
+```
+
+- It waits for a new **direct message to `agent` or a broadcast**, excludes the agent's
+  own sends, and returns the messages **without marking them read** (`bus_inbox` is
+  still the reader).
+- Timeouts are normal results (`timedOut: true`), not errors. `sinceSeq`/`afterId` are
+  cursors; `unreadOnly` filters by `readBy`.
+- It watches the store **directory** (`fs.watch` plus a 1 s fallback) because the store is
+  replaced by atomic rename; it is not implemented on the relay's `/api/wait`.
+- Tested through the Nix-built wrapper: 30 tools (`bus_wait` added), a ~302 ms timeout,
+  a real `ghostbus-cli` message woke it and stayed unread until `bus_inbox`, broadcast
+  vs own-message filtering, both cursors, malformed-frame recovery and child-exit error.
+  Both clients are configured to the same `/nix/store/...-ghostbus-wait` path.
+
+Contract differences from §7's proposal: the default is 30 s (clamp 600 s) rather than
+25 s/55 s, and it is store-driven rather than relay/sequence-driven. For an interactive
+call keep `timeoutMs` below the client's tool timeout (OpenCode's `agent-bus` execution
+timeout is 120 s), so 30–55 s remains the sensible range. This resolves the
+“`bus_wait` exact contract” row in §8; the client-side wake gap (S1/S2/S5) is unchanged.
