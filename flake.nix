@@ -1320,6 +1320,45 @@ EOF
               platforms = systems;
             };
           };
+          # `scry`, the analysis CLI, as a derivation: the same `grail build scry` the
+          # `docs` job and `scry.yml` run today (68 imperative jobs in a job step), but
+          # with a store path as the result, so the docs job can take it as an input and a
+          # future `.#source-bundle` can depend on it. The one thing the dev shell does
+          # that this must repeat is write `grail.local.wiz` (the GMP flags), because that
+          # file is generated and not committed.
+          scry = pkgs.stdenv.mkDerivation {
+            pname = "scry";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [ ./scry ./lib ];
+            };
+            nativeBuildInputs = [ wiz ];
+            buildInputs = [ pkgs.gmp ];
+            buildPhase = ''
+              runHook preBuild
+              cat > grail.local.wiz <<EOF
+import Grail
+def settings : Settings := Settings.empty
+  |> Settings.set "cflags" "-I/include"
+  |> Settings.set "ldflags" "-L/lib -Wl,-rpath,/lib"
+EOF
+              # the C/C# grammar the vendored shim links; the job did this with
+              # `nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp`
+              ln -s  scry/native/tree-sitter-c-sharp
+              ( cd scry && HOME=$TMPDIR /bin/grail build scry )
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 scry/.grail/bin/scry $out/bin/scry
+              runHook postInstall
+            '';
+            meta = {
+              description = "scry, the C/C# analysis CLI (grail build scry, as a store path)";
+              platforms = systems;
+            };
+          };
           # The self-hosted toolchain chain (docs/bootstrap-chain.md): a prototype, not built
           # by CI and not pinned by any commit until the chain's root is declared.
           # `wizc` is the fixpoint compiler built from the Lean host's seed, `wizc-release`
@@ -1332,7 +1371,7 @@ EOF
             inherit (unwrapped) version;
           };
         in {
-          inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native
+          inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native scry
                    wiz-web wiz-playground wiz-playground-ui wiz-landing-ui wiz-source-ui release-tarball
                    wasm-fixtures web-bundle docs-site pages release-bin
                    release-unwrapped release-tower;
