@@ -1163,7 +1163,7 @@ jobs:
           jobs=()
           if [ -n "$JOBS" ]; then jobs=(--jobs "$JOBS"); fi
           jobs_s="${jobs[*]-}"
-          echo "tests -- --cache ~/.cache/wiz --cache-ro <wiz>/share/wiz/cache ${jobs_s:+$jobs_s }${allow[*]-}${allow:+ }${sel[*]}"
+          echo "tests -- --cache ~/.cache/wiz --cache-ro ${ro[1]} ${jobs_s:+$jobs_s }${allow[*]-}${allow:+ }${sel[*]}"
           # the Nix-built driver, exactly as `lake test -- …` would run it; every case's
           # time as JSON lines (scripts/ci.py summary and baseline read them)
           "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${ro[@]}" "${allow[@]}" "${jobs[@]}" \
