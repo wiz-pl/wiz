@@ -226,6 +226,10 @@ jobs:
   # (scripts/check-complexity --diff HEAD^1), so a new append-in-loop or eraseDups fails
   # a PR before the build starts. A bounded site is excused inline, on the line or the
   # line above it (`-- complexity: ok (why it is bounded)`); there is no allowlist file.
+  # `scripts/check-fixtures.py` checks the test fixtures' `.expected` anchors against
+  # the current sources and every grail test's marker against its `.expected` beside it
+  # (the textual half of the `=fixtures` group), so a moved `file:line` or a stale
+  # golden fails here in seconds, not in a 400-second shard.
   # Early in the job, scripts/check-companion-lists.py checks the lists a commit must
   # move with its source (libdiff corpus, legacy names + digest, collision baseline),
   # and scripts/check-release-consistency.py checks the release packet and that the
@@ -254,13 +258,15 @@ jobs:
         run: |
           python3 scripts/check-companion-lists.py --self-test
           python3 scripts/check-companion-lists.py
-      - name: Check the docs, and the checker's fixtures
+      - name: Check the docs, the checker's fixtures, and the test fixtures
         shell: bash
         run: |
           python3 scripts/check-docs-style.py --self-test
           python3 scripts/check-docs-style.py
           python3 scripts/check-doc-links.py --self-test
           python3 scripts/check-doc-links.py --quiet
+          python3 scripts/check-fixtures.py --self-test
+          python3 scripts/check-fixtures.py --quiet
           python3 scripts/check-complexity --self-test
           python3 scripts/check-complexity --diff HEAD^1
           python3 scripts/check-name-collisions.py --self-test

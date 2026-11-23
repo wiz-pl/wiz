@@ -483,8 +483,10 @@ def ioFails (src : String) (fragment : String) : IO Unit := do
 
 /-- (9f) Elaborate `main.wiz` in a fresh directory holding `files` (modules under it are
 importable), resolving `link_c` files as `wiz` does, relative to each file, and
-(include_str) `include_str` files too. -/
-def elabTree (files : List (String × String)) : IO (CommandState ZeroOneMany × String × System.FilePath) := do
+(include_str) `include_str` files too. `trustNative` is `--trust-native`, for a fixture
+that uses `native_refl`; the default is the flag off, as `wiz check` has it. -/
+def elabTree (files : List (String × String)) (trustNative : Bool := false) :
+    IO (CommandState ZeroOneMany × String × System.FilePath) := do
   let dir ← IO.FS.createTempDir
   for (p, text) in files do
     let f := dir / p
@@ -496,7 +498,7 @@ def elabTree (files : List (String × String)) : IO (CommandState ZeroOneMany ×
   let includes ← Module.includeTable dir src mods
   let s := runFrontend (R := ZeroOneMany) src
     { loader := fun m => (mods[m]?).map (·.2), cSources := some (Module.cSourceResolver sources),
-      includes := some (Module.includeResolver includes) }
+      includes := some (Module.includeResolver includes), trustNative }
   pure (s, src, dir)
 
 /-- `elabTree`, then build and run `main` (through C, or LLVM) and compare its output.
@@ -514,7 +516,8 @@ def linkRun (files : List (String × String)) (expected : String) (llvm : Bool :
 /-- `elabTree` with extra module roots (a package's `src`/`gen`, e.g. `scry/src`),
 after the toolchain's `lib` root and before the temp directory. This keeps `link_c` and
 `include_str` resolution relative to each module's own file, as `wiz` does. -/
-def elabTreeRoots (roots : List String) (files : List (String × String)) :
+def elabTreeRoots (roots : List String) (files : List (String × String))
+    (trustNative : Bool := false) :
     IO (CommandState ZeroOneMany × String × System.FilePath) := do
   let dir ← IO.FS.createTempDir
   for (p, text) in files do
@@ -527,7 +530,7 @@ def elabTreeRoots (roots : List String) (files : List (String × String)) :
   let includes ← Module.includeTable dir src mods
   let s := runFrontend (R := ZeroOneMany) src
     { loader := fun m => (mods[m]?).map (·.2), cSources := some (Module.cSourceResolver sources),
-      includes := some (Module.includeResolver includes) }
+      includes := some (Module.includeResolver includes), trustNative }
   pure (s, src, dir)
 
 /-- `elabTreeRoots`, then build and run `main` (through C, or LLVM) and compare its

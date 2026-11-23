@@ -49,6 +49,7 @@ def withSelfhostCli (k : System.FilePath → IO Unit) : IO Unit := do
   | .ok exe => k exe
 
 def cliHello : String := "import Prelude
+import IO
 def main : IO Unit := do
   IO.println \"hello from the selfhost driver\";
   IO.println (Nat.toString (Nat.add 40 2))

@@ -83,6 +83,7 @@
       "=doc",
       "=feral",
       "=finger-tree",
+      "=fixtures",
       "=grail",
       "=grail-commands",
       "=grail-deps",

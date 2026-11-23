@@ -322,6 +322,13 @@ Adding a test group touches no shared file:
   (`groups` at their end, concatenated by `Tests/Main.lean`); a new group goes in
   `Tests/Groups/` all the same.
 
+`=fixtures` (`Tests/Groups/Fixtures.lean`) is the compile-only gate for the Wiz programs
+the suite builds from Lean strings: it calls the same builders and frontend helper
+(`elabTree`/`elabTreeRoots`) as the long cases but only checks the elaboration errors, so
+a broken `scryProjectSource`, struct or CLI fixture fails in one named, fast case instead
+of a shard that spends minutes before compiling it. Its textual half is
+`scripts/check-fixtures.py` in `docs_style` (`.expected` anchors and `-- test:` markers).
+
 ### Differential fuzzing for erasure and optimisation (`=diff-fuzz`)
 
 `scripts/diff-fuzz.py` generates closed Wiz programs from a seed and checks that the
@@ -1063,6 +1070,12 @@ setup action keeps the elan cache for those
   those files and in `docs/**/*.html` must resolve, using GitHub's heading slugs. Links
   to `wiz-notes/...` are reported as external notes (the notes live outside the
   repository) and `http(s)` links are reported but not fetched, so CI needs no network.
+  It also runs `scripts/check-fixtures.py` (`--self-test` and then the check): every
+  `path:line[:col]` in a `.expected` golden must resolve to that golden's own source and
+  agree with the source's current command lines, and every grail test's `-- test:` marker
+  must agree with its `.expected` beside it. It needs no build; the compile half of the
+  same gate is the `=fixtures` test group in the `library` shard, which elaborates the
+  long-case source builders without running their cases.
 * **The preludes** (the `prelude_drift` job): the self-hosted frontend's embedded
   prelude (`preludeText`, `selfhost/Frontend.wiz`) is a hand-written subset of
   `lib/Prelude.wiz`, and the Wasm playground compiles that frontend. Every CI run
