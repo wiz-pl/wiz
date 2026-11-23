@@ -460,9 +460,16 @@ The measurements so far are under "Measurements".
   tarball, its `.sha256` and the attestations; the FOD path is pushed to Cachix
   (`badlydrawnwizards`), so `fetchToolchain` substitutes it with GitHub down. A third
   mirror is any URL added to `urls`.
-* **Cost.** One link is three RC self-compiles plus three static cc runs, about
-  twenty minutes and 2 GB on one core. It runs only for commits that change
-  `selfhost/` (other commits re-pin the same toolchain; see "Pins").
+* **Cost.** Each `chain` mode runs three `wizc` runs and two static-musl `cc` runs;
+  self and cross are two modes, and `release` adds a third static `cc` for
+  `wizc-fixpoint`. The static `cc` is single-core, so a slower runner scales the wall
+  time almost linearly. Measured on `ubuntu-latest`: **92.6 min** on 2026-11-22
+  (self 46 min, cross 46 min), **75.1 min** on 2026-11-21, **35.7 min** on 2026-11-19,
+  and **57 s** on 2026-11-20 when the commit had not moved and every derivation was in
+  the store. About 2-3 GB. The job timeout is 240 min, about 2.6x the worst measured
+  run; the previous 180 min was only 1.9x it. `release` runs after every master CI run;
+  when `selfhost/`, the Lean host and nixpkgs are unchanged it substitutes in seconds
+  (47 s measured), and only a commit that changes them rebuilds the link.
 
 ## Pins
 

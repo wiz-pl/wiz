@@ -216,8 +216,12 @@ gh api repos/wiz-pl/wiz/actions/runners --jq '.runners[] | [.name, .status, (.la
 gh variable set WIZ_RUNNER_HEAVY -R wiz-pl/wiz -b wiz-heavy
 ```
 
-The next run's heavy shards queue for `wiz-heavy`. While the machine is off they wait in
-the queue (up to 24 hours, then fail), so switch back before switching it off for long:
+The next run's heavy shards queue for `wiz-heavy`. The scheduled `fixpoint.yml` job is a
+clean skip until this is set; the fixpoint has not run on the self-hosted runner yet
+(as of 2026-11-23). The same preflight pattern gates `repro.yml` and `bench.yml`. The
+weekly `ci.yml` fixpoint still runs on `ubuntu-latest` without it. While the machine is
+off the jobs wait in the queue (up to 24 hours, then fail), so switch back before
+switching it off for long:
 
 ```sh
 gh variable delete WIZ_RUNNER_HEAVY -R wiz-pl/wiz

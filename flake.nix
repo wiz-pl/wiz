@@ -12,7 +12,8 @@
   # manual, generated with that wiz (never committed); `wiz-web`, `wiz-playground`,
   # `wiz-playground-ui` and `wiz-source-ui`, the Wasm page modules (`web/build*.sh`)
   # built by a derivation instead of in each CI job. CI pushes them to the Cachix cache
-  # `badlydrawnwizards`; see docs/building.md for `nix run`.
+  # `badlydrawnwizards`; see docs/building.md for `nix run`. `wiz-env` is the devShell's
+  # WIZ_* toolchain environment as a sourceable file (scripts/wiz-env.sh), not a tool.
   description = "Wiz: a didactic dependently typed language";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -46,6 +47,23 @@
         gc-cflags = "-I${pkgs.boehmgc.dev}/include";
         gc-ldflags = "-L${pkgs.boehmgc}/lib -Wl,-rpath,${pkgs.boehmgc}/lib -lgc -lpthread";
       };
+
+      # The same values as shell exports, written once: the devShell sources this file
+      # and `packages.wiz-env` is the same text for a command that did not run the
+      # shellHook (`nix develop --command`). `scripts/wiz-env.sh` reads it for
+      # `scripts/fixpoint.sh`. Keep every WIZ_* addition here, not in the shellHook.
+      toolchainEnv = pkgs:
+        let
+          tc = toolchain pkgs;
+          lib = nixpkgs.lib;
+        in
+        pkgs.writeText "wiz-env.sh" ''
+          export WIZ_CFLAGS=${lib.escapeShellArg tc.cflags}
+          export WIZ_LDFLAGS=${lib.escapeShellArg tc.ldflags}
+          export WIZ_LLC=${lib.escapeShellArg tc.llc}
+          export WIZ_GC_CFLAGS=${lib.escapeShellArg tc.gc-cflags}
+          export WIZ_GC_LDFLAGS=${lib.escapeShellArg tc.gc-ldflags}
+        '';
 
       # The empty seed `withLakeCache` starts from: a real store path, so the function's
       # argument is never nullable and the producer is an ordinary derivation whose cold
@@ -1226,6 +1244,10 @@ EOF
                    wiz-web wiz-playground wiz-playground-ui wiz-source-ui release-tarball
                    wasm-fixtures web-bundle docs-site pages release-bin
                    release-unwrapped release-tower;
+          # The devShell's WIZ_* environment as a sourceable file: the same text the
+          # shellHook sources, so a job whose `nix develop --command` did not run the
+          # hook can still get the toolchain flags (scripts/wiz-env.sh).
+          wiz-env = toolchainEnv pkgs;
           # The trusted Lake seed as a package: `withLakeCache empty-lake`'s `lake`
           # output (the compiled `.lake` directory without the linked binaries). A master
           # push builds this and publishes the store path to the trusted Cachix; a pull
@@ -1294,13 +1316,11 @@ EOF
           ];
           # `wiz` and `grail` take the toolchain as flags (stage 23a); grail and the test
           # driver read this machine's paths from the uncommitted grail.local.wiz written
-          # here (when run from the repository root). Nothing reads the environment.
-          shellHook = let tc = toolchain pkgs; in ''
-            WIZ_CFLAGS="${tc.cflags}"
-            WIZ_LDFLAGS="${tc.ldflags}"
-            WIZ_LLC="${tc.llc}"
-            WIZ_GC_CFLAGS="${tc.gc-cflags}"
-            WIZ_GC_LDFLAGS="${tc.gc-ldflags}"
+          # here (when run from the repository root). The WIZ_* values are exported by
+          # toolchainEnv above: `nix develop --command` does not run this hook, so
+          # scripts/wiz-env.sh reads packages.wiz-env instead.
+          shellHook = ''
+            source ${toolchainEnv pkgs}
             if [ -f grail.wiz ]; then
               local_wiz=$(printf '%s\n' \
                 '-- This machine'"'"'s toolchain, written by the nix dev shell (flake.nix); not committed.' \

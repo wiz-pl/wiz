@@ -1848,6 +1848,10 @@ jobs:
             ~/.cache/wiz
           key: fixpoint-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ hashFiles('lakefile.lean', '**/*.lean', 'selfhost/*.wiz', 'lib/*.wiz') }}
           restore-keys: fixpoint-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-
+      - name: Toolchain environment
+        # `nix develop --command` does not run the shellHook. This resolves the WIZ_*
+        # variables from the flake and fails by name before the self-compile.
+        run: scripts/fixpoint.sh --check-env
       - name: Fixpoint
         run: scripts/fixpoint.sh .lake/fixpoint 2>&1 | tee fixpoint.log
       - name: Summary

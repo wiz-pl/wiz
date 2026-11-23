@@ -111,7 +111,8 @@ reminder, never as a security or merge gate.
 
 | script | does | called from |
 |---|---|---|
-| `fixpoint.sh` | the three-stage bootstrap fixpoint: stage N's C must equal stage 1's; records time and peak RSS | `ci.yml`, `fixpoint.yml` |
+| `wiz-env.sh` | prints the devShell's `WIZ_*` toolchain variables as shell exports, from the current environment, `grail.local.wiz` or the flake's `packages.wiz-env`; `--check` names an absent variable (exit 2), `--from FILE`, `--self-test` (no build) | `fixpoint.sh`, by hand |
+| `fixpoint.sh` | the three-stage bootstrap fixpoint: stage N's C must equal stage 1's; records time and peak RSS; resolves the toolchain environment first, `--check-env`/`--self-test` for the environment guard | `ci.yml`, `fixpoint.yml` |
 | `GenSelfhost.lean` | writes the fixpoint inputs (`compiler.wiz`, `self.wiz`) into `$OUT` | `fixpoint.sh`, `bench/selfhost-build.sh` |
 | `GenSelfhostTables.lean` | the `genSelfhostTables` Lake target: regenerates `selfhost/Tables.wiz` from the grammar | `lakefile.lean` |
 | `gen-semantics-matrix.py` | regenerates `docs/semantics-matrix.md` and `Tests/Semantics/cells.tsv` from the stage rules | by hand (`docs/semantics-matrix.md`) |

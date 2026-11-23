@@ -1392,12 +1392,16 @@ setup action keeps the elan cache for those
   does not show that the C is correct (it is compiled with `-w`), that the compiled
   toolchain behaves correctly (the test suite covers that), or anything about other
   inputs, flags, C compilers or GC versions.
-  The self-compile needs about 6 GiB; the script names that requirement if a stage is
-  killed for memory (exit 137). Run it locally with `nix develop -c
-  scripts/fixpoint.sh` and a 6 GiB reservation.
+  The self-compile needs about 7 GiB (stage 2 peaked at 6.3 GiB); the script names that
+  requirement if a stage is killed for memory (exit 137). Run it locally with
+  `nix develop -c scripts/fixpoint.sh` and a 7 GiB reservation.
+  The script resolves the devShell's `WIZ_*` toolchain flags itself
+  (`scripts/wiz-env.sh`): `nix develop --command` does not run the shellHook, so it
+  reads the generated `grail.local.wiz` or the flake's `packages.wiz-env`, and an
+  absent variable is an error before the first build (`--check-env`, `--self-test`).
   The weekly `fixpoint` job in `ci.yml` runs it on `ubuntu-latest`. The separate
   `.github/workflows/fixpoint.yml` runs it nightly on `master` and from "Run workflow" on
-  the self-hosted runner named by `WIZ_RUNNER_HEAVY`; it checks for 6 GiB free, is skipped
+  the self-hosted runner named by `WIZ_RUNNER_HEAVY`; it checks for 7 GiB free, is skipped
   when the variable is unset, and is not part of `CI result`.
 * **The compiler's own reproducibility** (`.github/workflows/repro.yml`) runs
   `scripts/check-repro.sh --compiler` nightly on `master` on the same self-hosted runner

@@ -14,6 +14,21 @@
 #     that does not exist;
 #   * never on a pull request, and not part of `CI result`.
 #
+# The default shell is `nix develop --command`, which does not run the devShell's
+# shellHook. `scripts/fixpoint.sh` resolves the WIZ_* toolchain environment itself
+# (scripts/wiz-env.sh) and the "Toolchain environment" step below checks it before the
+# memory check and the self-compile; a missing variable names itself there.
+#
+# As of 2026-11-23 every scheduled run has been a clean skip: `gh variable list` has no
+# WIZ_RUNNER_HEAVY, so no fixpoint has run on this workflow. To enable it (the exact
+# command; docs/ci-runner.md):
+#
+#     gh variable set WIZ_RUNNER_HEAVY -R wiz-pl/wiz -b wiz-heavy
+#
+# and to return to a clean skip:
+#
+#     gh variable delete WIZ_RUNNER_HEAVY -R wiz-pl/wiz
+#
 # The weekly `fixpoint` job in ci.yml still runs on ubuntu-latest as the fallback.
 name: fixpoint
 
@@ -80,7 +95,11 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.run == 'true'
     runs-on: ${{ vars.WIZ_RUNNER_HEAVY }}
-    # 240 min: up to four self-compiles at ~5.4 GiB peak
+    # 240 min: the Lean host build (3 min warm, up to ~30 min cold) plus up to four
+    # self-compiles and three static cc runs. The 2026-11-16 two-stage local run was
+    # ~21 min of stage work; a third stage adds ~16 min. No three-stage CI number
+    # exists: every scheduled run has skipped on WIZ_RUNNER_HEAVY. Memory, not time,
+    # is the binding constraint (6.3 GiB peak).
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -89,6 +108,11 @@ jobs:
           cachix-name: ${{ env.CACHIX_NAME }}
           cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
           lean: true
+      - name: Toolchain environment
+        # The same `nix develop --command` shell as the run: this is the control that
+        # catches an absent WIZ_* variable before the self-compile (the scheduled run of
+        # 2026-11-16 died at the first expansion of WIZ_GC_CFLAGS).
+        run: scripts/fixpoint.sh --check-env
       - name: Check the memory requirement
         shell: bash
         run: |

@@ -11,6 +11,7 @@
 #
 #   usage (from the repository root, in `nix develop`):
 #     scripts/fixpoint.sh [--rc] [--stages N] [--keep] [--compare-only] [OUTDIR]
+#     scripts/fixpoint.sh --check-env | --self-test
 #
 #   --rc            compile with reference counting (the compiler's flag, stage 21k), so
 #                   every stage is a reference-counted compiler that must free every object
@@ -18,7 +19,13 @@
 #   --keep          keep the artifacts: self*.c, the stage binaries and run/
 #   --compare-only  only compare self1.c ... selfN.c already in OUTDIR (with --keep),
 #                   without building or compiling; useful to re-check kept artifacts
+#   --check-env     resolve and print the toolchain environment, then exit; no build
+#   --self-test     test the environment resolver and its missing-variable errors; no build
 #   OUTDIR          default .lake/fixpoint
+#
+# The toolchain flags come from scripts/wiz-env.sh: the current environment, else
+# grail.local.wiz, else the flake's packages.wiz-env. A missing variable is an error
+# before any build (CI's `nix develop --command` does not run the shellHook).
 #
 # It prints each step's wall time and peak RSS (the self-compile stages need about
 # 7 GiB; stage 2 peaked at 6.3 GiB on 2026-11-16), and each stage's C size and md5 with PASS/FAIL.
@@ -26,6 +33,7 @@
 # Slow: two or more compilations of the whole toolchain (CI runs it on a schedule).
 set -euo pipefail
 
+here=$(cd "$(dirname "$0")" && pwd)
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
 die() { echo "fixpoint: $*" >&2; exit 2; }
 
@@ -33,6 +41,8 @@ mode=()
 stages=3
 keep=0
 compare_only=0
+check_env=0
+self_test=0
 out=
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -41,6 +51,8 @@ while [ $# -gt 0 ]; do
     --stages=*) stages=${1#--stages=}; shift ;;
     --keep) keep=1; shift ;;
     --compare-only) compare_only=1; shift ;;
+    --check-env) check_env=1; shift ;;
+    --self-test) self_test=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; break ;;
     -*) die "unknown option: $1 (try --help)" ;;
@@ -50,12 +62,71 @@ done
 case "$stages" in ''|*[!0-9]*) die "--stages must be a whole number" ;; esac
 [ "$stages" -ge 2 ] || die "--stages must be at least 2 (a fixpoint compares two C files)"
 
+# One resolver for every consumer (scripts/wiz-env.sh): the current environment, else
+# grail.local.wiz, else the flake's packages.wiz-env. Resolve before OUTDIR or any
+# build, so a missing WIZ_GC_CFLAGS is this message and not a C failure at stage 2.
+resolve_env() {
+  local env_out
+  if ! env_out=$("$here/wiz-env.sh"); then
+    echo "fixpoint: cannot determine the toolchain environment (scripts/wiz-env.sh explains what is missing)" >&2
+    exit 2
+  fi
+  eval "$env_out"
+  "$here/wiz-env.sh" --check || exit 2
+}
+
+show_env() {
+  echo "fixpoint: toolchain environment"
+  local v
+  for v in WIZ_CFLAGS WIZ_LDFLAGS WIZ_LLC WIZ_GC_CFLAGS WIZ_GC_LDFLAGS; do
+    printf '  %-16s %s\n' "$v" "${!v:-<unset>}"
+  done
+  local tool
+  for tool in cc lake python3; do
+    command -v "$tool" >/dev/null 2>&1 || die "$tool is not on PATH (run in 'nix develop')"
+    printf '  %-16s %s\n' "$tool" "$(command -v "$tool")"
+  done
+}
+
+self_test() {
+  echo "fixpoint: --self-test: the toolchain environment"
+  "$here/wiz-env.sh" --self-test || die "--self-test: the environment resolver failed"
+  # The regression: the scheduled run had no WIZ_GC_CFLAGS and died at the first
+  # expansion. Every required variable must fail the guard by name before any build.
+  local v e out
+  local -a envs=(WIZ_CFLAGS='-I/c' WIZ_LDFLAGS='-L/c' WIZ_GC_CFLAGS='-I/gc' WIZ_GC_LDFLAGS='-lgc')
+  for v in WIZ_CFLAGS WIZ_LDFLAGS WIZ_GC_CFLAGS WIZ_GC_LDFLAGS; do
+    local -a keep=()
+    for e in "${envs[@]}"; do [ "${e%%=*}" = "$v" ] || keep+=("$e"); done
+    if out=$(env -u "$v" "${keep[@]}" "$here/wiz-env.sh" --check 2>&1); then
+      die "--self-test: the environment check accepted an absent $v"
+    elif printf '%s\n' "$out" | grep -q "$v"; then
+      printf 'ok   an absent %s is rejected by name\n' "$v"
+    else
+      die "--self-test: the error for an absent $v does not name it"
+    fi
+  done
+  echo "fixpoint: --self-test: PASS"
+}
+
+if [ "$self_test" = 1 ]; then
+  [ -z "$out" ] || die "--self-test takes no OUTDIR"
+  self_test
+  exit 0
+fi
+if [ "$check_env" = 1 ]; then
+  [ -z "$out" ] || die "--check-env takes no OUTDIR"
+  resolve_env
+  show_env
+  exit 0
+fi
+
 out=${out:-.lake/fixpoint}
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 
 if [ "$compare_only" = 0 ]; then
-  : "${WIZ_GC_CFLAGS?needs the toolchain environment (nix develop)}"
+  resolve_env
   mkdir -p "$out/run"
 fi
 

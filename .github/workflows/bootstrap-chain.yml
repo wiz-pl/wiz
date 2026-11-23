@@ -6,15 +6,17 @@
 #            sha256 in the job summary, the store paths pushed to Cachix. It waits for
 #            CI (workflow_run) so the Lean host is already in Cachix: unchanged
 #            `selfhost/`, Lean host and nixpkgs make it a substitution (seconds), a change
-#            costs about 15 min and 3 GB. A CI run cancelled by a newer push is skipped
+#            costs 15-25 min and 3 GB. A CI run cancelled by a newer push is skipped
 #            (the newer run's release covers it); a failed CI run still gets its release.
 #   chain    nightly on master: scripts/chain-step-check.sh in self mode (the release
 #            fetched by hash rebuilds itself), then in cross mode from the previous
 #            night's release (two different compilers must give one tarball: the chain's
 #            diverse check). Each night's tarball is kept as the workflow artifact
 #            `wizc-nightly` and its fixed-output store path is pushed to Cachix, so the
-#            next night fetches it by (commit, hash); it is never committed. About 1 h,
-#            3 GB.
+#            next night fetches it by (commit, hash); it is never committed. Measured
+#            self+cross on ubuntu-latest: 35.7-92.6 min (92.6 min on a new commit,
+#            2026-11-22), 2-3 GB. The static musl cc is single-core; the job timeout is
+#            240 min, about 2.6x the worst measured run.
 #
 # A DIFFER fails this workflow, which blocks declaring a chain root
 # (docs/bootstrap-chain.md, "The root", requirement 8) but not merges: it is not part
@@ -124,7 +126,11 @@ jobs:
     name: chain step check (self, cross)
     if: github.event_name != 'workflow_run'
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # 240 min: measured self+cross is 35.7-92.6 min on ubuntu-latest (92.6 min on a new
+    # commit, 2026-11-22). The 180 min this used to be was only 1.9x the worst run; the
+    # static musl cc is single-core, so a 2x slower runner would have hit it. 240 min is
+    # ~2.6x and bounds a hung run.
+    timeout-minutes: 240
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
