@@ -323,6 +323,12 @@ and the only one that needs no evaluator. **Recommendation:** decouple `CORE-3.3
 `SH-2.1` in `roadmap/program-next.md`; the selfhost may refuse non-core entries by name
 until FeEval, which is fail-closed.
 
+**Implemented** on `agent/ext-registry`: `Wiz/Ext/Basic.lean` + `Wiz/Ext/Resolve.lean`,
+`--target` as five rows/six spellings, the D1 selfhost fix, and the cache-key change.
+`wiz-notes/ext-registry.md` records what is data, what is still a Lean branch, the exact
+refusal codes and the manifest gap (`Package.command` is a build-graph node, not a
+backend entry).
+
 ### Item 2 — Term elaborators and the data-primitive table
 
 **Change.** Add `[term_elab k]` (`TermElab := Syntax → TacticM Unit`) dispatched in

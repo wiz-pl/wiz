@@ -146,9 +146,10 @@ deriver *written in Wiz source* still waits on the evaluator, and a field's type
 constructor's result indices are not reflected yet (`.missing`/count only), which is
 enough for the derivers here but not for `Lens`/`Bundle`.
 
-It has the host's **table**: `Globals.derivers` maps a
-class name to a deriver name, `attribute [deriver C] f` records a pair, and `deriving C`
-looks `C` up and dispatches on the registered name. The five derivers `lib/Deriving.wiz`
+It has the host's **table**: `Globals.ders` maps a
+class name to a deriver reference, `attribute [deriver C] f` records a pair, and
+`deriving C` looks `C` up and dispatches on the *value* of the reference (a built-in kind
+or a user declaration), never on the registered spelling. The five derivers `lib/Deriving.wiz`
 registers in the Lean toolchain are implemented in `Frontend.wiz` under the same names
 (`deriveInhabited`, `deriveBEq`, `deriveRepr`, `deriveDecidableEq`, `deriveCompare`) and
 are pre-registered for the canonical class names, because the self-hosted prelude has no
@@ -162,11 +163,15 @@ global: no axiom, no new kernel rule, no change to the trust ledger.
   class's method shape: the host's `Lens` is a `def`, not a class). `attribute [deriver
   C] f` checks that `f` is declared with one argument (the host unifies its type with
   `Deriver`; this frontend checks the Π arity, since `Deriver`/`MacroM` are not in its
-  prelude) and records `(C, f)`. A built-in deriver's name needs no declaration, so a
-  look-alike class can reuse one: `attribute [deriver Eq2] deriveDecidableEq`. A
-  registered name that is not one of the five is accepted and reported as unrunnable
-  when `deriving C` uses it: *the deriver f cannot be run (this frontend has no
-  elaboration-time evaluator; …)*.
+  prelude) and records `(C, DeriverRef)`: `.builtinDeriver k` when the spelling names one of the
+  five and no declaration has that name, `.user f` when a declaration does (even one
+  called `deriveBEq`). A built-in deriver's spelling needs no declaration, so a look-alike
+  class can reuse one: `attribute [deriver Eq2] deriveDecidableEq`. A `.user` entry is
+  accepted and refused when `deriving C` uses it, with the registry code:
+  *entry-unsupported: the deriver f is a user declaration; this frontend has no
+  elaboration-time evaluator (SH-2.1) …*. The old name-keyed dispatch would have run the
+  built-in `deriveBEq` body for a user declaration of that name (D1 in
+  `wiz-notes/extensibility.md`).
 * **Class arity.** A derived instance is `C (T p…)`, so the class must take one type
   parameter; `class Pair (A B : Type)` is rejected with the class's arity in the
   message.

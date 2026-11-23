@@ -429,7 +429,8 @@ def elaborateHitsCore (tc : Toolchain) (path : String) (input : String)
           Cache.RegionOptions))
       else pure none
     let verify := (Cache.VerifyMode.ofString? tc.cacheVerify).getD .warn
-    pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀ (region := region)
+    pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀
+      (toolchain := tc.id) (region := region)
       (verify := verify) (rig := RigTag.tag (R := ZeroOneMany))
       (stats := if verify == .off then none else some verifyStats)
       (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := key₀Tag)
@@ -938,10 +939,6 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
     if m.severity == .error then IO.eprintln s!"{path}:{m.render input}"
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
-/-- The backend names `wiz build --target` accepts. `ebpf` is the tracing-flavoured
-alias of the tree spelling `bpf`; both resolve to `Wiz.Compiler.Bpf`. -/
-def targets : List String := ["c", "llvm", "wasm", "bpf", "js", "ebpf"]
-
 /-- `wiz verify [--attest FILE] [--artifact-only] ARTIFACT`. -/
 def verifyCmd (tc : Toolchain) (attest : Option String) (args : List String) : IO UInt32 := do
   let artifactOnly := args.contains "--artifact-only"
@@ -958,99 +955,149 @@ def verifyCmd (tc : Toolchain) (attest : Option String) (args : List String) : I
     IO.eprintln "usage: wiz verify [--attest FILE] [--artifact-only] ARTIFACT"
     pure 2
 
+/-- Resolve one `--target` spelling through the core table. The resolver's message is the
+CLI's message, so `unknown target …` and the capability refusals have one wording. -/
+def resolveTarget (name : String) : Except String Wiz.Ext.Entry :=
+  match Wiz.Ext.resolveBackend name with
+  | .ok e => pure e
+  | .error d => throw d.message
+
 /-- Take `--target NAME`, `--llvm` and `--wasm` out of the arguments; return the selected
-backend and the rest. A flag and a conflicting `--target` are an error, as is two
-different targets. -/
-def takeTarget : List String → Except String (Option String × List String)
+entry (with the spelling it was given, for a conflict message) and the rest. A flag and
+a conflicting `--target` are an error, as is two different targets. Resolution is through
+`Wiz.Ext`; a name that is not in the table never reaches a command. -/
+def takeTarget : List String → Except String (Option (String × Wiz.Ext.Entry) × List String)
   | [] => pure (none, [])
-  | "--target" :: [] => throw "--target needs c, llvm, wasm, bpf, js or ebpf"
+  | "--target" :: [] => throw s!"--target needs {Wiz.Ext.backendChoices}"
   | "--target" :: t :: rest => do
-    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm, wasm, bpf, js or ebpf)"
+    let e ← resolveTarget t
     let (other, rest) ← takeTarget rest
     match other with
-    | some u => if u != t then throw s!"two targets: {t} and {u}" else pure (some t, rest)
-    | none => pure (some t, rest)
+    | some (u, _) => if u != t then throw s!"two targets: {t} and {u}" else pure (some (t, e), rest)
+    | none => pure (some (t, e), rest)
   | "--llvm" :: rest => do
+    let e ← resolveTarget "llvm"
     let (other, rest) ← takeTarget rest
     match other with
-    | some u => if u != "llvm" then throw s!"two targets: llvm and {u}" else pure (some "llvm", rest)
-    | none => pure (some "llvm", rest)
+    | some (u, _) => if u != "llvm" then throw s!"two targets: llvm and {u}" else pure (some ("llvm", e), rest)
+    | none => pure (some ("llvm", e), rest)
   | "--wasm" :: rest => do
+    let e ← resolveTarget "wasm"
     let (other, rest) ← takeTarget rest
     match other with
-    | some u => if u != "wasm" then throw s!"two targets: wasm and {u}" else pure (some "wasm", rest)
-    | none => pure (some "wasm", rest)
+    | some (u, _) => if u != "wasm" then throw s!"two targets: wasm and {u}" else pure (some ("wasm", e), rest)
+    | none => pure (some ("wasm", e), rest)
   | a :: rest => do
     let (t, rest) ← takeTarget rest
     pure (t, a :: rest)
 
-def buildCmd (tc : Toolchain) (path out : String) (target : String) (lib : Bool := false)
-    (noMain : Bool := false) (split : Nat := 0) (attest : Option String := none) : IO UInt32 := do
-  -- `bpf` (and its `ebpf` alias) is the one target whose input is not the untyped IR: it
-  -- consumes the typed core (`bpf.toml` + `bpf-core/1`) and emits C for
-  -- `clang -target bpf` (§1.2, §3.2). A tracepoint/uprobe program also writes the
-  -- `wiz-probe/1` descriptor.
-  if target == "bpf" || target == "ebpf" then
-    if attest.isSome then
-      IO.eprintln "wiz build --attest: the bpf target does not emit a build attestation"
-      pure 2
-    else
-      Wiz.Compiler.Bpf.buildCmd path out lib noMain split
-  else if target == "js" then
-    if attest.isSome then
-      IO.eprintln "wiz build --attest: the js target does not emit a build attestation"
-      pure 2
-    else if lib || noMain || split != 0 then
-      IO.eprintln "wiz build --target js: one ES module with a `main`; `--lib`, `--no-main` and `--split` do not apply"
-      pure 2
-    else do
-      let some s ← elabFile tc path | pure 1
-      match ← Build.buildJs s "main" (System.FilePath.mk out) with
-      | .error e => IO.eprintln e; pure 1
-      | .ok _ => pure 0
-  else if target == "wasm" && attest.isSome then
-    IO.eprintln "wiz build --attest: the wasm target does not emit a build attestation"
-    pure 2
-  else do
-    let some s ← elabFile tc path | pure 1
-    match ← Build.build tc s "main" out (target == "llvm") lib noMain split (target == "wasm") with
-    | .error e => IO.eprintln e; pure 1
-    | .ok _ =>
-      match attest with
-      | none => pure 0
-      | some file =>
-        let file : System.FilePath := System.FilePath.mk (if file.isEmpty then out ++ ".attest.json" else file)
-        match ← Attest.emit tc path (System.FilePath.mk out) (target == "llvm") lib noMain split file with
-        | .error e => IO.eprintln s!"attest: {e}"; pure 1
-        | .ok () => IO.eprintln s!"wiz: attestation written to {file}"; pure 0
+/-- Print a refusal and exit with the driver's status: a missing capability is a usage
+error (2); an unknown/duplicate/unsupported entry is 1. The line carries the stable code;
+the legacy `--target NAME` refusal is thrown by `takeTarget` as its message alone (the
+selfhost prints the same sentence, and `=selfhost-cli-diff` compares them). -/
+def refuseTarget (d : Wiz.Ext.Diagnostic) : IO UInt32 := do
+  IO.eprintln s!"{d.code}: {d.message}"
+  pure (if d.code.endsWith "-capability" then 2 else 1)
 
-def runCmd (tc : Toolchain) (path : String) (target : String) (split : Nat := 0) : IO UInt32 := do
-  if target == "bpf" || target == "ebpf" then do
-    IO.eprintln "wiz run --target bpf: the bpf backend builds an object; the ubpf/hosted \
+/-- The capabilities a build invocation needs. A build always emits; `--lib`/`--no-main`
+need `library`, `--split` needs `split`, `--attest` needs `attest`. -/
+def buildNeeds (lib noMain : Bool) (split : Nat) (attest : Option String) : List Wiz.Ext.Capability :=
+  [.emit] ++ (if lib || noMain then [.library] else []) ++
+    (if split != 0 then [.split] else []) ++ (if attest.isSome then [.attest] else [])
+
+/-- Build `main` through the entry's core driver. Every capability the invocation needs
+is checked by the resolver first; the payload's own code then runs. There is no `else`
+that means C: a payload this driver cannot run was already refused with
+`entry-unsupported`, and a new `CoreDriver` constructor is a compile error here. -/
+def buildCmd (tc : Toolchain) (path out : String) (entry : Wiz.Ext.Entry) (lib : Bool := false)
+    (noMain : Bool := false) (split : Nat := 0) (attest : Option String := none) : IO UInt32 := do
+  match Wiz.Ext.resolveBackendFor entry.name (buildNeeds lib noMain split attest) with
+  | .error d => refuseTarget d
+  | .ok entry =>
+    match entry.coreDriver? with
+    | .error d => refuseTarget d
+    | .ok driver =>
+      match driver with
+      | .bpf =>
+        -- the input is the typed core (`bpf.toml` + `bpf-core/1`), not the untyped IR;
+        -- a tracepoint/uprobe program also writes the `wiz-probe/1` descriptor
+        Wiz.Compiler.Bpf.buildCmd path out lib noMain split
+      | .js => do
+        let some s ← elabFile tc path | pure 1
+        match ← Build.buildJs s "main" (System.FilePath.mk out) with
+        | .error e => IO.eprintln e; pure 1
+        | .ok _ => pure 0
+      | .wasm => do
+        let some s ← elabFile tc path | pure 1
+        match ← Build.build tc s "main" out false lib noMain split true with
+        | .error e => IO.eprintln e; pure 1
+        | .ok _ => pure 0
+      | .llvm => do
+        let some s ← elabFile tc path | pure 1
+        match ← Build.build tc s "main" out true lib noMain split false with
+        | .error e => IO.eprintln e; pure 1
+        | .ok _ =>
+          match attest with
+          | none => pure 0
+          | some file =>
+            let file : System.FilePath := System.FilePath.mk (if file.isEmpty then out ++ ".attest.json" else file)
+            match ← Attest.emit tc path (System.FilePath.mk out) true lib noMain split file with
+            | .error e => IO.eprintln s!"attest: {e}"; pure 1
+            | .ok () => IO.eprintln s!"wiz: attestation written to {file}"; pure 0
+      | .c => do
+        let some s ← elabFile tc path | pure 1
+        match ← Build.build tc s "main" out false lib noMain split false with
+        | .error e => IO.eprintln e; pure 1
+        | .ok _ =>
+          match attest with
+          | none => pure 0
+          | some file =>
+            let file : System.FilePath := System.FilePath.mk (if file.isEmpty then out ++ ".attest.json" else file)
+            match ← Attest.emit tc path (System.FilePath.mk out) false lib noMain split file with
+            | .error e => IO.eprintln s!"attest: {e}"; pure 1
+            | .ok () => IO.eprintln s!"wiz: attestation written to {file}"; pure 0
+
+/-- Build and run `main` through the entry's core driver. `.run` (and `.split` for a
+split build) is refused by the resolver before a module is read. -/
+def runCmd (tc : Toolchain) (path : String) (entry : Wiz.Ext.Entry) (split : Nat := 0) : IO UInt32 := do
+  match Wiz.Ext.resolveBackendFor entry.name ([.run] ++ (if split != 0 then [.split] else [])) with
+  | .error d => refuseTarget d
+  | .ok entry =>
+    match entry.coreDriver? with
+    | .error d => refuseTarget d
+    | .ok driver => do
+      let some s ← elabFile tc path | pure 1
+      let dir ← IO.FS.createTempDir
+      -- (F11) the build's scratch directory is removed on every path: the run's output and
+      -- exit status are the same either way, and a failed cleanup is not the program's error
+      try
+        let print (v : String) : IO UInt32 := do
+          IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
+        match driver with
+        | .wasm =>
+          match ← Build.runWasmGlobal s "main" dir with
+          | .error e => IO.eprintln e; pure 1
+          | .ok v => print v
+        | .js =>
+          match ← Build.runJsGlobal s "main" dir with
+          | .error e => IO.eprintln e; pure 1
+          | .ok v => print v
+        | .llvm =>
+          match ← Build.runGlobal tc s "main" dir true (split := split) with
+          | .error e => IO.eprintln e.message; pure 1
+          | .ok v => print v
+        | .c =>
+          match ← Build.runGlobal tc s "main" dir false (split := split) with
+          | .error e => IO.eprintln e.message; pure 1
+          | .ok v => print v
+        | .bpf =>
+          -- (defensive: `bpf` does not declare `.run`, so the resolver refuses above; a
+          -- future entry that does gets the honest answer rather than a C fallback)
+          IO.eprintln "wiz run --target bpf: the bpf backend builds an object; the ubpf/hosted \
 oracle is not wired in P0 (it needs the ELF reader and the helper harness)"
-    pure 2
-  else do
-    let some s ← elabFile tc path | pure 1
-    let dir ← IO.FS.createTempDir
-    -- (F11) the build's scratch directory is removed on every path: the run's output and
-    -- exit status are the same either way, and a failed cleanup is not the program's error
-    try
-      let print (v : String) : IO UInt32 := do
-        IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
-      if target == "wasm" then
-        match ← Build.runWasmGlobal s "main" dir with
-        | .error e => IO.eprintln e; pure 1
-        | .ok v => print v
-      else if target == "js" then
-        match ← Build.runJsGlobal s "main" dir with
-        | .error e => IO.eprintln e; pure 1
-        | .ok v => print v
-      else
-        match ← Build.runGlobal tc s "main" dir (target == "llvm") (split := split) with
-        | .error e => IO.eprintln e.message; pure 1
-        | .ok v => print v
-    finally
-      try IO.FS.removeDirAll dir catch _ => pure ()
+          pure 2
+      finally
+        try IO.FS.removeDirAll dir catch _ => pure ()
 
 /-- The modules the REPL can import, and the hooks the frontend needs: every module under
 the roots (so a `:reset` need not read them again), its C headers and `link_c` files. -/
@@ -1364,7 +1411,15 @@ def mainImpl (args : List String) : IO UInt32 := do
   let (target?, args) ← match takeTarget args with
     | .ok r => pure r
     | .error e => do IO.eprintln e; return 1
-  let target := target?.getD "c"
+  -- the entry, not its spelling: `--target ebpf` and `--target bpf` are one target, and
+  -- the canonical name is what enters the cache's target namespace
+  let targetEntry ← match target? with
+    | some (_, e) => pure e
+    | none =>
+      match Wiz.Ext.resolveBackend "c" with
+      | .ok e => pure e
+      | .error d => do IO.eprintln d.message; return 1
+  let tc := { tc with backend := targetEntry.name }
   match args with
   | ["parse", "--imports", path] => importsCmd path
   | ["parse", path] => parseCmd path
@@ -1373,34 +1428,30 @@ def mainImpl (args : List String) : IO UInt32 := do
   | "cache" :: "manifest" :: rest => cacheManifestCmd tc rest
   | ["check", path] => checkCmd tc path
   | "lint" :: rest => lintCmd tc rest
-  | ["build", path, "-o", out] => buildCmd tc path out target (split := split) (attest := attest)
-  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out target true (split := split) (attest := attest)
+  | ["build", path, "-o", out] => buildCmd tc path out targetEntry (split := split) (attest := attest)
+  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out targetEntry true (split := split) (attest := attest)
   | ["build", path, "-o", out, "--no-main"] =>
-    buildCmd tc path out target (noMain := true) (split := split) (attest := attest)
+    buildCmd tc path out targetEntry (noMain := true) (split := split) (attest := attest)
   | "verify" :: rest => verifyCmd tc attest rest
   | "doc" :: rest => docCmd tc rest
   | "fmt" :: rest => fmtCmd tc rest
-  | ["run", path] => runCmd tc path target (split := split)
-  -- `--llvm`/`--target llvm` are taken out above (`takeTarget`), so the REPL is LLVM
-  -- when the selected target is; there is no wasm REPL (no `:run` through that backend)
+  | ["run", path] => runCmd tc path targetEntry (split := split)
+  -- `--llvm`/`--target llvm` are taken out above (`takeTarget`); the REPL needs the
+  -- entry's `.repl` capability, so wasm/js/bpf are refused by the resolver, not by name
   | "repl" :: rest => do
-    if target == "wasm" then
-      IO.eprintln "wiz repl: targets are c, llvm and bpf (no wasm REPL)"
-      pure 2
-    else if target == "js" then
-      IO.eprintln "wiz repl: targets are c, llvm and bpf (no js REPL)"
-      pure 2
-    else if target == "bpf" || target == "ebpf" then
-      IO.eprintln "wiz repl: the bpf backend has no REPL (a kernel program has no world)"
-      pure 2
-    else match takePrelude rest with
-      | .error e => IO.eprintln e; pure 2
-      | .ok (preludes, rest) => match takeReplScript rest with
+    match Wiz.Ext.resolveBackendFor targetEntry.name [.repl] with
+    | .error d => refuseTarget d
+    | .ok entry =>
+      match entry.coreDriver? with
+      | .error d => refuseTarget d
+      | .ok driver => match takePrelude rest with
         | .error e => IO.eprintln e; pure 2
-        | .ok (script, init, []) => replCmd tc (target == "llvm") preludes script init
-        | .ok (_, _, a :: _) =>
-          IO.eprintln s!"wiz repl: unknown argument {a}"
-          pure 2
+        | .ok (preludes, rest) => match takeReplScript rest with
+          | .error e => IO.eprintln e; pure 2
+          | .ok (script, init, []) => replCmd tc (driver == .llvm) preludes script init
+          | .ok (_, _, a :: _) =>
+            IO.eprintln s!"wiz repl: unknown argument {a}"
+            pure 2
   | "test-driver" :: rest => testDriverCmd rest
   | "lsp" :: opts => do
     match lspOptions opts with
