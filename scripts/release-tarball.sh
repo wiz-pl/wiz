@@ -2,22 +2,28 @@
 # A release tarball of the Wiz toolchain (stage 26d): what `tower` installs from GitHub
 # Releases, and what you can untar by hand.
 #
-#   scripts/release-tarball.sh OUT.tar.gz [BINDIR] [REVISION] [CCDIR] [WEBDIR] [SRCDIR]
+#   scripts/release-tarball.sh OUT.tar.gz [BINDIR] [REVISION] [CCDIR] [WEBDIR] [SRCDIR] [LIBDIR]
 #
 # BINDIR (default .lake/build/bin) holds the built wiz, grail and tower; the standard
 # library, the nvim plugin and the docs come from the commit REVISION in SRCDIR, not
 # from whatever happens to be in the working tree (so an untracked file cannot change a
 # release). SRCDIR defaults to the current directory. CCDIR is the C toolchain
 # made by scripts/bundle-cc.sh (stage 26f; the release job passes it); WEBDIR the web
-# infoview built by web/build.sh (11w: `wiz lsp` serves it). The tarball is one
+# infoview built by web/build.sh (11w: `wiz lsp` serves it). LIBDIR is optional: a
+# directory holding libstdc++.so.6 and libgcc_s.so.1. When given, they are bundled
+# under lib/ and the ELF commands get a relative `$ORIGIN` RUNPATH, so the tarball
+# needs only the system glibc. The tarball is one
 # directory, wiz-ARCH-linux/:
 #
 #   bin/wiz, bin/grail       wrappers: the binary with -I share/wiz/lib (no other flags:
 #                            `wiz build` uses share/wiz/cc when it is there, else `cc` and
 #                            the system's GMP; tower rewrites them with your flags)
 #   bin/tower                the toolchain manager
+#   lib/libstdc++.so.6       the bundled C++ runtime (LIBDIR; RUNPATH `$ORIGIN`)
+#   lib/libgcc_s.so.1        its unwinder (LIBDIR; RUNPATH `$ORIGIN`)
 #   share/wiz/lib/           the standard library
-#   share/wiz/.lake/build/bin/{wiz,grail}   the binaries (grail finds lib/ from there)
+#   share/wiz/.lake/build/bin/{wiz,grail}   the binaries (grail finds lib/ from there;
+#                            RUNPATH `$ORIGIN/../../../../../lib` when LIBDIR is set)
 #   share/wiz/editors/       the editor plugins, when the checkout has them
 #   share/wiz/cc/            the C compiler, glibc 2.27 sysroot, static GMP and GC (CCDIR)
 #   share/wiz/web/           the web infoview: page, script, Wasm (WEBDIR), and the Wasm
@@ -44,6 +50,7 @@ rev=${3:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}
 ccdir=${4:-}
 webdir=${5:-}
 srcdir=${6:-.}
+libdir=${7:-}
 arch=$(uname -m)
 name=wiz-$arch-linux
 work=$(mktemp -d)
@@ -147,6 +154,38 @@ d=$(cd "$(dirname "$0")/.." && pwd)
 exec "$d/share/wiz/.lake/build/bin/grail" "$@"
 EOF
 chmod 755 "$top/bin/wiz" "$top/bin/grail"
+# Bundle the C++ runtime when LIBDIR is given. The ELF commands are the nested
+# share/wiz/.lake/build/bin/{wiz,grail} (bin/ holds the shell wrappers), so their
+# `$ORIGIN` RUNPATH points four directories up to share/wiz, then one more to the
+# tarball root. The libraries themselves use `$ORIGIN`, because DT_RUNPATH is not
+# transitive: libstdc++ must find libgcc_s in its own RUNPATH.
+if [ -n "$libdir" ]; then
+  libdir=$(cd "$libdir" && pwd)
+  command -v patchelf >/dev/null 2>&1 || {
+    echo "release-tarball: LIBDIR needs patchelf on PATH" >&2
+    exit 2
+  }
+  for lib in libstdc++.so.6 libgcc_s.so.1; do
+    [ -f "$libdir/$lib" ] || {
+      echo "release-tarball: $libdir has no $lib" >&2
+      exit 2
+    }
+  done
+  mkdir -p "$top/lib"
+  cp -L "$libdir/libstdc++.so.6" "$top/lib/libstdc++.so.6"
+  cp -L "$libdir/libgcc_s.so.1" "$top/lib/libgcc_s.so.1"
+  chmod u+w "$top/lib/libstdc++.so.6" "$top/lib/libgcc_s.so.1"
+  for b in wiz grail; do
+    elf=$top/share/wiz/.lake/build/bin/$b
+    [ -f "$elf" ] || continue
+    patchelf --set-rpath '$ORIGIN/../../../../../lib' "$elf"
+  done
+  # tower sits at the tarball root's bin/, one level below lib/. It is glibc-only
+  # today, but the relative RUNPATH keeps a future C++ dependency working.
+  [ -f "$top/bin/tower" ] &&
+    patchelf --set-rpath '$ORIGIN/../lib' "$top/bin/tower"
+  patchelf --set-rpath '$ORIGIN' "$top/lib/libstdc++.so.6" "$top/lib/libgcc_s.so.1"
+fi
 case $out in /*) ;; *) out=$(pwd)/$out ;; esac
 # The epoch is a property of the commit (its author time is not used: `%ct` is the
 # committer time, which a rebase/cherry-pick can change; for a tag it is the commit

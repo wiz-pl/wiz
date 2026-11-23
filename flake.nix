@@ -1010,15 +1010,27 @@ EOF
               cp ${release-unwrapped}/bin/wiz ${release-unwrapped}/bin/grail bin/
               cp ${release-tower}/bin/tower bin/
               chmod u+w bin/wiz bin/grail bin/tower
+              # Lean's executable link does not take the static-runtime flags, so
+              # bundle the matching C++ runtime from the GCC that releaseCC wraps
+              # and give it (and the commands) a relative RUNPATH. This keeps the
+              # tarball dependent on glibc alone without patching Lean's linker.
+              mkdir -p release-libs
+              cp -L ${pkgs.stdenv.cc.cc.lib}/lib/libstdc++.so.6 release-libs/
+              cp -L ${pkgs.stdenv.cc.cc.lib}/lib/libgcc_s.so.1 release-libs/
+              chmod u+w release-libs/libstdc++.so.6 release-libs/libgcc_s.so.1
+              patchelf --set-rpath '$ORIGIN' release-libs/libstdc++.so.6 release-libs/libgcc_s.so.1
+              strip --strip-unneeded release-libs/libstdc++.so.6 release-libs/libgcc_s.so.1
+              python3 ${./scripts}/scrub-store-paths.py release-libs/libstdc++.so.6 release-libs/libgcc_s.so.1
               # ------------------------------------------------------------------
               # LEAF ONLY. This deliberately breaks Nix convention: a normal store
               # path keeps its interpreter, RUNPATH and references, and Nix tracks
               # them. The final tarball leaves the store and must run on a machine
               # with only glibc, so here (and nowhere else) the ELF interpreter is
-              # the conventional one, the build RUNPATH is removed, debug data is
-              # dropped, and the build's absolute store paths are overwritten. The
-              # binaries were linked statically against every non-glibc library
-              # above; nothing outside this derivation is patched or stripped.
+              # the conventional one, the build RUNPATH is replaced by the bundled
+              # C++ runtime's relative one later, debug data is dropped, and the
+              # build's absolute store paths are overwritten. The binaries were
+              # linked statically against GMP/libuv/OpenSSL; the C++ runtime is in
+              # lib/, so nothing outside this derivation is patched or stripped.
               # ------------------------------------------------------------------
               for b in bin/wiz bin/grail bin/tower; do
                 patchelf --set-interpreter ${releaseInterp} "$b"
@@ -1032,7 +1044,7 @@ EOF
               RELEASE_SOURCE_DATE_EPOCH=${epoch} SOURCE_DATE_EPOCH=${epoch} \
                 sh ${./scripts}/release-tarball.sh \
                   "package/wiz-${releaseArch}-linux.tar.gz" bin "${revision}" "" \
-                  ${wiz-web} ${releaseSrc}
+                  ${wiz-web} ${releaseSrc} "$PWD/release-libs"
               runHook postBuild
             '';
             installPhase = ''
@@ -1056,12 +1068,12 @@ EOF
                   LC_ALL=C TZ=UTC SOURCE_DATE_EPOCH=1111111111 \
                   RELEASE_SOURCE_DATE_EPOCH=${epoch} \
                   sh ${./scripts}/release-tarball.sh repro/a/out/$name.tar.gz \
-                    repro/a/bin "${revision}" "" ${wiz-web} ${releaseSrc} )
+                    repro/a/bin "${revision}" "" ${wiz-web} ${releaseSrc} "$PWD/release-libs" )
               ( umask 077; HOME=$PWD/repro/b/home TMPDIR=$PWD/repro/b/tmp \
                   LC_ALL=C.UTF-8 TZ=Asia/Tokyo SOURCE_DATE_EPOCH=1700000000 \
                   RELEASE_SOURCE_DATE_EPOCH=${epoch} \
                   sh ${./scripts}/release-tarball.sh repro/b/out/$name.tar.gz \
-                    repro/b/bin "${revision}" "" ${wiz-web} ${releaseSrc} )
+                    repro/b/bin "${revision}" "" ${wiz-web} ${releaseSrc} "$PWD/release-libs" )
               cmp repro/a/out/$name.tar.gz repro/b/out/$name.tar.gz
               cmp repro/a/out/$name.tar.gz.sha256 repro/b/out/$name.tar.gz.sha256
               cmp package/$name.tar.gz repro/a/out/$name.tar.gz
