@@ -898,11 +898,167 @@ EOF
               -Wl,-Bstatic -lgmp -luv -lssl -lcrypto -lstdc++ -lgcc -lgcc_eh -latomic \
               -Wl,-Bdynamic -lm -ldl -pthread
           '';
+          releaseLoader =
+            if pkgs.stdenv.hostPlatform.isAarch64
+            then "ld-linux-aarch64.so.1"
+            else "ld-linux-x86-64.so.2";
           releaseInterp =
             if pkgs.stdenv.hostPlatform.isAarch64
-            then "/lib/ld-linux-aarch64.so.1"
-            else "/lib64/ld-linux-x86-64.so.2";
+            then "/lib/${releaseLoader}"
+            else "/lib64/${releaseLoader}";
           releaseArch = pkgs.stdenv.hostPlatform.parsed.cpu.name;
+
+          # ---- the bundled C toolchain as its own output (stage 26f) ---------------
+          #
+          # `share/wiz/cc` is a normal store path, not part of the leaf: it is built
+          # here, copied into `release-bin-cc`'s tarball by scripts/release-tarball.sh,
+          # and never patched by the leaf's interpreter/RUNPATH/strip step. `release-bin`
+          # (the default tarball) still has no `share/wiz/cc`, so its bytes are unchanged.
+          #
+          # scripts/bundle-cc.sh expects a Lean toolchain prefix with the toolchain's
+          # own clang, ld.lld, cadical, lib/clang and licence texts. nixpkgs' `lean4`
+          # builds Lean from source and does not install clang, so fetch the official
+          # release tarball (the same Lean release as `lean = pkgs.lean4`) by URL and
+          # sha256 for each architecture; it is a fixed-output fetch, so the build
+          # itself never reaches the network. The deb/GMP/GC downloads are the same
+          # list scripts/bundle-cc.sh reads, one fixed-output fetch per file; only the
+          # host architecture's debs are fetched.
+          releaseLeanVersion = lean.version;
+          releaseLeanArchSuffix =
+            if pkgs.stdenv.hostPlatform.isAarch64 then "_aarch64" else "";
+          releaseLeanSrc = pkgs.fetchurl {
+            name = "lean-${releaseLeanVersion}-linux${releaseLeanArchSuffix}.tar.zst";
+            url = "https://github.com/leanprover/lean4/releases/download/v${releaseLeanVersion}/lean-${releaseLeanVersion}-linux${releaseLeanArchSuffix}.tar.zst";
+            hash =
+              if pkgs.stdenv.hostPlatform.isAarch64
+              then "sha256-yPD4o5IOg5cYsTQ+Z4H9gKPpsQJPvNcHjrMPVOgGsCg="
+              else "sha256-colZekRUMkbJInuMrlAXZ+CVzhf21Ei5X8So3Jcmj20=";
+          };
+          ccSourceLines = lib.filter
+            (l: l != "" && !(lib.hasPrefix "#" l))
+            (lib.splitString "\n" (builtins.readFile ./scripts/bundle-cc.sources));
+          ccSourceEntries = map
+            (line:
+              let words = lib.filter (w: w != "") (lib.splitString " " line);
+              in {
+                file = builtins.elemAt words 0;
+                hash = builtins.elemAt words 1;
+                urls = lib.drop 2 words;
+              })
+            ccSourceLines;
+          ccDebArch = if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "amd64";
+          # scripts/bundle-cc.sources uses $U for the Ubuntu archive pool; Nix fetchers
+          # need the URL spelled out. The arm64 debs already carry their ports URL.
+          ccSourceUrls = urls: map
+            (u:
+              if lib.hasPrefix "$U/" u
+              then "http://archive.ubuntu.com/ubuntu/pool/main/${lib.removePrefix "$U/" u}"
+              else u)
+            urls;
+          releaseCcSources = map
+            (e: {
+              inherit (e) file;
+              src = pkgs.fetchurl {
+                name = e.file;
+                urls = ccSourceUrls e.urls;
+                sha256 = e.hash;
+              };
+            })
+            (lib.filter
+              (e: !(lib.hasSuffix ".deb" e.file) || lib.hasInfix "_${ccDebArch}.deb" e.file)
+              ccSourceEntries);
+          release-cc = pkgs.stdenv.mkDerivation {
+            pname = "wiz-release-cc";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./scripts;
+              fileset = fs.unions [ ./scripts/bundle-cc.sh ./scripts/bundle-cc.sources ];
+            };
+            nativeBuildInputs = [
+              pkgs.zstd pkgs.gnutar pkgs.gzip pkgs.xz pkgs.bzip2
+              pkgs.gnumake pkgs.m4 pkgs.binutils pkgs.patchelf
+              pkgs.coreutils pkgs.gnused pkgs.gnugrep pkgs.findutils
+              pkgs.diffutils pkgs.which
+            ];
+            # The bundle ships a compiler for a machine that has only glibc. Nix's
+            # fixup would rewrite the interpreter/RUNPATH of the copied toolchain to
+            # store paths, which is exactly what the release promises not to contain.
+            dontFixup = true;
+            dontStrip = true;
+            dontPatchELF = true;
+            # the script writes $out itself; there is no `make install` to run
+            dontInstall = true;
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR
+              mkdir -p "lean-${releaseLeanVersion}" downloads
+              tar --zstd -xf ${releaseLeanSrc} -C "lean-${releaseLeanVersion}" \
+                --strip-components=1
+              ${lib.concatMapStringsSep "\n" (s: ''
+              cp -L ${s.src} ${lib.escapeShellArg "downloads/${s.file}"}
+              '') releaseCcSources}
+              # The script copies the toolchain's clang/ld.lld/cadical and runs them
+              # while it builds GMP and the GC. A Nix sandbox has no conventional ELF
+              # interpreter, so build (and version) from copies pointed at this build's
+              # glibc, then restore the portable originals. The bundle itself is never
+              # patched: only the disposable copies are.
+              mkdir -p buildprefix/bin
+              for b in clang ld.lld cadical; do
+                cp -L "lean-${releaseLeanVersion}/bin/$b" "buildprefix/bin/$b"
+              done
+              chmod u+w buildprefix/bin/clang buildprefix/bin/ld.lld buildprefix/bin/cadical
+              for d in lib include LICENSE LICENSES; do
+                if [ -e "lean-${releaseLeanVersion}/$d" ]; then
+                  ln -s "../lean-${releaseLeanVersion}/$d" "buildprefix/$d"
+                fi
+              done
+              patchelf --set-interpreter ${pkgs.glibc}/lib/${releaseLoader} \
+                buildprefix/bin/clang buildprefix/bin/ld.lld buildprefix/bin/cadical
+              # Configure's compile-and-run probes are linked for this build's loader;
+              # the final toolchain is restored below and is not affected.
+              WIZ_BUNDLE_ARCH=${releaseArch} WIZ_BUNDLE_OFFLINE=1 WIZ_BUNDLE_SKIP_TEST=1 \
+                LDFLAGS=${lib.escapeShellArg "-Wl,--dynamic-linker=${pkgs.glibc}/lib/${releaseLoader}"} \
+                LEAN_PREFIX=$PWD/buildprefix \
+                sh bundle-cc.sh "$out" downloads
+              for b in clang ld.lld cadical; do
+                cp -L "lean-${releaseLeanVersion}/bin/$b" "$out/bin/$b"
+                chmod u+w "$out/bin/$b"
+              done
+              runHook postBuild
+            '';
+            doCheck = true;
+            checkPhase = ''
+              runHook preCheck
+              for f in bin/cc bin/llc bin/clang bin/ld.lld bin/cadical; do
+                [ -f "$out/$f" ] || { echo "release-cc: missing $f" >&2; exit 1; }
+              done
+              [ -f "$out/sysroot/usr/include/stdio.h" ] ||
+                { echo "release-cc: the sysroot has no libc headers" >&2; exit 1; }
+              for f in sysroot/usr/lib/libgmp.a sysroot/usr/lib/libgc.a; do
+                [ -f "$out/$f" ] || { echo "release-cc: missing $f" >&2; exit 1; }
+              done
+              ls "$out"/lib/clang/*/lib/libclang_rt* >/dev/null 2>&1 ||
+                { echo "release-cc: no compiler-rt in lib/clang" >&2; exit 1; }
+              got=$(readelf -l "$out/bin/clang" |
+                sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p')
+              [ "$got" = ${releaseInterp} ] ||
+                { echo "release-cc: clang interpreter '$got', expected ${releaseInterp}" >&2; exit 1; }
+              if find "$out" -type l -lname '/nix/store/*' | grep -q .; then
+                echo "release-cc: the bundle has a symlink into /nix/store" >&2
+                exit 1
+              fi
+              if grep -a -R '/nix/store' "$out" >/dev/null 2>&1; then
+                echo "release-cc: the bundle names /nix/store" >&2
+                exit 1
+              fi
+              runHook postCheck
+            '';
+            passthru.subset = "scripts/bundle-cc.sh + scripts/bundle-cc.sources + the pinned Lean toolchain tarball (clang, ld.lld, cadical, lib/clang, licences) + the pinned downloads (this architecture's libc6/libc6-dev/linux-libc-dev debs, GMP 6.3.0, Boehm GC 8.2.8)";
+            meta = {
+              description = "The release's bundled C toolchain (clang, glibc 2.27 sysroot, static GMP and GC, cadical) for share/wiz/cc";
+              platforms = systems;
+            };
+          };
           release-unwrapped = pkgs.stdenv.mkDerivation {
             pname = "wiz-unwrapped-release";
             inherit (unwrapped) version;
@@ -958,15 +1114,15 @@ EOF
             passthru.subset = "tower/ + scripts/build-tower-wiz.sh + release-unwrapped + release-static-libs";
           };
 
-          # The binary release tarball (scripts/release-tarball.sh): the portable
+          # The binary release tarballs (scripts/release-tarball.sh): the portable
           # wiz/grail/tower, the standard library, editors, licences and the infoview
           # module. This is the leaf: the only place that points the ELF interpreter at
           # the conventional path, removes the build RUNPATH, strips, and scrubs store
           # paths, so the archive runs on a machine with no /nix/store. Do not copy that
-          # step into an intermediate derivation. The leaf deliberately has no
-          # `share/wiz/cc`: `wiz build` falls back to the host `cc`/GMP, and
-          # `scripts/bundle-cc.sh` remains the release pipeline's portable compiler
-          # bundle.
+          # step into an intermediate derivation. `release-bin` is the default leaf and
+          # deliberately has no `share/wiz/cc`: `wiz build` falls back to the host
+          # `cc`/GMP. `release-bin-cc` is the same leaf with `release-cc` at
+          # `share/wiz/cc`, requested explicitly; the default tarball is unchanged.
           releaseSrc = fs.toSource {
             root = ./.;
             fileset = fs.unions [
@@ -975,8 +1131,9 @@ EOF
               ./scripts/release-tarball.sh
             ];
           };
-          release-bin = pkgs.stdenv.mkDerivation {
-            pname = "wiz-release-bin";
+          releaseTarballName = "wiz-${releaseArch}-linux";
+          mkReleaseBin = withCC: pkgs.stdenv.mkDerivation {
+            pname = if withCC then "wiz-release-bin-cc" else "wiz-release-bin";
             inherit (unwrapped) version;
             src = releaseSrc;
             nativeBuildInputs = [
@@ -1013,16 +1170,20 @@ EOF
             installPhase = ''
               runHook preInstall
               mkdir -p $out
+              ccdir=${lib.escapeShellArg (lib.optionalString withCC "${release-cc}")}
               RELEASE_SOURCE_DATE_EPOCH=${epoch} SOURCE_DATE_EPOCH=${epoch} \
+                WIZ_RELEASE_ARCH=${releaseArch} \
                 sh ${./scripts}/release-tarball.sh \
-                  "$out/wiz-${releaseArch}-linux.tar.gz" bin "${revision}" "" \
-                  ${wiz-web} ${releaseSrc}
+                  "$out/${releaseTarballName}${if withCC then "-cc" else ""}.tar.gz" \
+                  bin "${revision}" "$ccdir" ${wiz-web} ${releaseSrc}
               runHook postInstall
             '';
             doCheck = true;
             checkPhase = ''
               runHook preCheck
-              name=wiz-${releaseArch}-linux
+              name=${releaseTarballName}${if withCC then "-cc" else ""}
+              ccdir=${lib.escapeShellArg (lib.optionalString withCC "${release-cc}")}
+              export WIZ_RELEASE_ARCH=${releaseArch}
               # The archive layer is reproducible: the same patched binaries, commit
               # epoch and members from a second environment are byte-identical.
               for side in a b; do
@@ -1033,25 +1194,41 @@ EOF
                   LC_ALL=C TZ=UTC SOURCE_DATE_EPOCH=1111111111 \
                   RELEASE_SOURCE_DATE_EPOCH=${epoch} \
                   sh ${./scripts}/release-tarball.sh repro/a/out/$name.tar.gz \
-                    repro/a/bin "${revision}" "" ${wiz-web} ${releaseSrc} )
+                    repro/a/bin "${revision}" "$ccdir" ${wiz-web} ${releaseSrc} )
               ( umask 077; HOME=$PWD/repro/b/home TMPDIR=$PWD/repro/b/tmp \
                   LC_ALL=C.UTF-8 TZ=Asia/Tokyo SOURCE_DATE_EPOCH=1700000000 \
                   RELEASE_SOURCE_DATE_EPOCH=${epoch} \
                   sh ${./scripts}/release-tarball.sh repro/b/out/$name.tar.gz \
-                    repro/b/bin "${revision}" "" ${wiz-web} ${releaseSrc} )
+                    repro/b/bin "${revision}" "$ccdir" ${wiz-web} ${releaseSrc} )
               cmp repro/a/out/$name.tar.gz repro/b/out/$name.tar.gz
               cmp repro/a/out/$name.tar.gz.sha256 repro/b/out/$name.tar.gz.sha256
               cmp "$out/$name.tar.gz" repro/a/out/$name.tar.gz
               sh ${./scripts}/test-release-portability.sh \
                 "$out/$name.tar.gz" --glibc ${pkgs.glibc}
+              ${lib.optionalString withCC ''
+              # the variant really has the compiler where Wiz.Toolchain.withBundled
+              # looks for it (<release>/share/wiz/cc/bin/cc), and the portability scan
+              # above is what proves it names no /nix/store
+              tar -tzf "$out/$name.tar.gz" |
+                grep -qx "${releaseTarballName}/share/wiz/cc/bin/cc" ||
+                { echo "release-bin-cc: the tarball has no share/wiz/cc/bin/cc" >&2; exit 1; }
+              ''}
               runHook postCheck
             '';
-            passthru.subset = "release leaf: lib/ + editors/ + scripts/release-licenses + LICENSE + COPYING.RUNTIME + web/wasm-host.mjs, composed with release-unwrapped + release-tower + wiz-web";
+            passthru.subset =
+              if withCC
+              then "release leaf: lib/ + editors/ + scripts/release-licenses + LICENSE + COPYING.RUNTIME + web/wasm-host.mjs + release-cc (the bundled C toolchain at share/wiz/cc), composed with release-unwrapped + release-tower + wiz-web"
+              else "release leaf: lib/ + editors/ + scripts/release-licenses + LICENSE + COPYING.RUNTIME + web/wasm-host.mjs, composed with release-unwrapped + release-tower + wiz-web";
             meta = {
-              description = "The portable binary release tarball (wiz, grail, tower, library, editors and the infoview module)";
+              description =
+                if withCC
+                then "The portable binary release tarball with the bundled C toolchain at share/wiz/cc"
+                else "The portable binary release tarball (wiz, grail, tower, library, editors and the infoview module)";
               platforms = systems;
             };
           };
+          release-bin = mkReleaseBin false;
+          release-bin-cc = mkReleaseBin true;
 
           # A deterministic source tarball with a manifest and a CycloneDX SBOM
           # (scripts/source-tarball.py, docs/building.md "Reproducible source tarball"):
@@ -1225,7 +1402,7 @@ EOF
           inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native
                    wiz-web wiz-playground wiz-playground-ui wiz-source-ui release-tarball
                    wasm-fixtures web-bundle docs-site pages release-bin
-                   release-unwrapped release-tower;
+                   release-bin-cc release-cc release-unwrapped release-tower;
           # The trusted Lake seed as a package: `withLakeCache empty-lake`'s `lake`
           # output (the compiled `.lake` directory without the linked binaries). A master
           # push builds this and publishes the store path to the trusted Cachix; a pull

@@ -82,9 +82,11 @@ Its `doCheck` runs `scripts/test-release-portability.sh` (only glibc, no `/nix/s
 no RUNPATH) and rebuilds the archive twice in different environments and compares them.
 `release.yml` can publish these files instead of running `lake build`,
 `scripts/bundle-cc.sh` and `scripts/release-tarball.sh` itself. The Nix tarball has no
-`share/wiz/cc`; `wiz build` uses the host `cc`/GMP. `scripts/test-release-install.sh`'s
-bundled-compiler checks therefore apply only to a release.yml tarball that still ships
-`cc-bundle`.
+`share/wiz/cc`; `wiz build` uses the host `cc`/GMP. `release-bin-cc` (see
+[release-variants.md](release-variants.md)) is the explicit variant that ships
+`release-cc` at `share/wiz/cc`; it is a separate attribute, so the default tarball is
+unchanged. `scripts/test-release-install.sh`'s bundled-compiler checks therefore apply
+to `release-bin-cc` and to a release.yml tarball that still ships `cc-bundle`.
 
 ## Subset boundaries (for reuse across a failed run)
 
@@ -95,6 +97,8 @@ bundled-compiler checks therefore apply only to a release.yml tarball that still
 | `wiz-docs-site` | `docs/` + `bench/` + `examples/` + `tools/` + `editors/` + `drafts/` + `scry/` + `README.md`/`ROADMAP.md`/`CHANGELOG.md`/`LICENSE` + `siteAssetFiles` (the site scripts, enumerated in `flake.nix`) + `wiz` + `reference` + `wiz-web-bundle` |
 | `wiz-pages` | `wiz-docs-site` + `scry/` + `web/source-{bundle.sh,app.js,css,static.js}` + `web/framework/` + `wiz-source-ui` + `tree-sitter-c-sharp` |
 | `wiz-release-bin` | `lib/` + `editors/` + `scripts/release-licenses` + `LICENSE` + `COPYING.RUNTIME` + `web/wasm-host.mjs`, composed with `release-unwrapped` + `release-tower` + `wiz-web` |
+| `wiz-release-cc` | `scripts/bundle-cc.sh` + `scripts/bundle-cc.sources` + the pinned official Lean toolchain tarball (clang, `ld.lld`, `cadical`, `lib/clang`, licences) + the pinned downloads for the host architecture (libc6/libc6-dev/linux-libc-dev debs, GMP 6.3.0, Boehm GC 8.2.8) |
+| `wiz-release-bin-cc` | `wiz-release-bin`'s subset + `release-cc` |
 | `wiz-unwrapped-release` | `buildSrc`: `lakefile.lean`, `lake-manifest.json`, `lean-toolchain`, `Main.lean`, `Wiz/`, `Grail/`, `WizMeta/`, `STC/`, `Tests/`, `runtime/`, `c/` (the release is a leaf; Lake reads the package definition) |
 
 The release leaf is the only artifact allowed to depend on all of them. Its leaf step

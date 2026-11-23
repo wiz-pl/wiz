@@ -5,7 +5,10 @@
 # A $U in a URL is an Ubuntu pool (pool/main/...), $R the bundle-inputs release.
 #
 # The sysroot inputs (libc6, libc6-dev, linux-libc-dev) are glibc 2.27 and Linux 4.15
-# headers from Ubuntu 18.04, which is EOL (2023-05). They are link-time only:
+# headers from Ubuntu 18.04, which is EOL (2023-05). The debs are per architecture:
+# bundle-cc.sh fetches only the pair for the architecture it bundles (x86_64: _amd64
+# from archive.ubuntu.com, aarch64: _arm64 from ports.ubuntu.com), and flake.nix's
+# release-cc fetches only the matching pair from this same list. They are link-time only:
 # share/wiz/cc is `clang --sysroot=...`, and the programs it builds link the host's
 # glibc dynamically, so no 18.04 code runs in a release. 2.27 is a compatibility
 # *floor* for those programs, chosen so they run on the oldest distribution anyone
@@ -19,5 +22,9 @@
 libc6_2.27-3ubuntu1.6_amd64.deb 5b813d4512491cd8fb30b2eb9192349ee75ffe3c9f21ae136cc7b2429f70c3b2 $U/g/glibc/libc6_2.27-3ubuntu1.6_amd64.deb
 libc6-dev_2.27-3ubuntu1.6_amd64.deb 96ae7d2cf38f0547ca3cccb3344c8802fdf5bcd71c4b6d9aed09558ac8cc87db $U/g/glibc/libc6-dev_2.27-3ubuntu1.6_amd64.deb
 linux-libc-dev_4.15.0-213.224_amd64.deb 06d9f16644d3a1b2ab7dd01730e833d516b6f575d975855f496eea6463fef2f6 $U/l/linux/linux-libc-dev_4.15.0-213.224_amd64.deb
+# aarch64: the same bionic versions, from Ubuntu's arm64 port (ports.ubuntu.com)
+libc6_2.27-3ubuntu1.6_arm64.deb 0b4348723ff763cb5d256283a362fb1f4db0658df9331c19b29c63a94cbb00dc http://ports.ubuntu.com/ubuntu-ports/pool/main/g/glibc/libc6_2.27-3ubuntu1.6_arm64.deb
+libc6-dev_2.27-3ubuntu1.6_arm64.deb 69586108d590bdd350d115c1b4a58763d930b9776bd554fd14462ffbbd305d19 http://ports.ubuntu.com/ubuntu-ports/pool/main/g/glibc/libc6-dev_2.27-3ubuntu1.6_arm64.deb
+linux-libc-dev_4.15.0-213.224_arm64.deb 9e350db851f6cf12ae14d6a611ec2102e7d03004e9ea143c67e541fe7cf11f47 http://ports.ubuntu.com/ubuntu-ports/pool/main/l/linux/linux-libc-dev_4.15.0-213.224_arm64.deb
 gmp-6.3.0.tar.xz a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898 https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz https://ftpmirror.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz https://gmplib.org/download/gmp/gmp-6.3.0.tar.xz
 gc-8.2.8.tar.gz 7649020621cb26325e1fb5c8742590d92fb48ce5c259b502faf7d9fb5dabb160 https://github.com/ivmai/bdwgc/releases/download/v8.2.8/gc-8.2.8.tar.gz https://www.hboehm.info/gc/gc_source/gc-8.2.8.tar.gz

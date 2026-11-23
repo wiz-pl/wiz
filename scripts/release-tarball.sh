@@ -35,8 +35,9 @@
 # time. The same commit and the same build outputs then give the same bytes, wherever
 # they were built: the epoch is derived from REVISION, so an ambient SOURCE_DATE_EPOCH
 # (or a re-run of an old commit months later) cannot change the archive. Pass
-# RELEASE_SOURCE_DATE_EPOCH to override the epoch deliberately. OUT.tar.gz.sha256 is
-# written next to it.
+# RELEASE_SOURCE_DATE_EPOCH to override the epoch deliberately. WIZ_RELEASE_ARCH names
+# the target architecture when `uname -m` is the builder's (a Nix aarch64 build under
+# emulation); it defaults to `uname -m`. OUT.tar.gz.sha256 is written next to it.
 set -eu
 out=$1
 bindir=${2:-.lake/build/bin}
@@ -44,7 +45,13 @@ rev=${3:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}
 ccdir=${4:-}
 webdir=${5:-}
 srcdir=${6:-.}
-arch=$(uname -m)
+# `uname -m` is right on a native release job. A Nix build passes the target explicitly:
+# under emulation the kernel still reports the builder's architecture.
+arch=${WIZ_RELEASE_ARCH:-$(uname -m)}
+case $arch in
+  x86_64|aarch64) ;;
+  *) echo "release-tarball: unsupported architecture '$arch' (x86_64 or aarch64)" >&2; exit 2 ;;
+esac
 name=wiz-$arch-linux
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT

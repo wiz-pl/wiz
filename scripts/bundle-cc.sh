@@ -22,12 +22,25 @@
 # Programs it builds link GMP and the GC statically and need only glibc >= 2.27 (libc,
 # libm, libpthread) at run time. DOWNLOADS (default ~/.cache/wiz-bundle-cc) keeps the
 # fetched files (the list, with mirrors and sha256s, is scripts/bundle-cc.sources).
-# Runs outside Nix (the release job).
+# Runs outside Nix (the release job); a Nix build supplies DOWNLOADS from the same
+# pinned list and sets WIZ_BUNDLE_OFFLINE=1, so no fetch happens in the sandbox.
+#
+# The bundle is for x86_64 or aarch64 Linux. The architecture is `uname -m`, or
+# WIZ_BUNDLE_ARCH when the host does not report the build target (a Nix aarch64 build
+# under emulation, or a cross build). WIZ_BUNDLE_SKIP_TEST=1 skips the runnable self-test
+# for a build sandbox that has no conventional ELF interpreter; the tarball's own
+# portability test (scripts/test-release-portability.sh) is the release gate.
 set -eu
 out=$1
 dl=${2:-${HOME:-/tmp}/.cache/wiz-bundle-cc}
 lean=${LEAN_PREFIX:-$(lean --print-prefix)}
 jobs=$(nproc 2>/dev/null || echo 2)
+arch=${WIZ_BUNDLE_ARCH:-$(uname -m)}
+case $arch in
+  x86_64|amd64) arch=x86_64; debarch=amd64; host=x86_64-pc-linux-gnu; libdir=x86_64-linux-gnu ;;
+  aarch64|arm64) arch=aarch64; debarch=arm64; host=aarch64-linux-gnu; libdir=aarch64-linux-gnu ;;
+  *) echo "bundle-cc: unsupported architecture '$arch' (x86_64 or aarch64)" >&2; exit 2 ;;
+esac
 mkdir -p "$dl"
 case $out in /*) ;; *) out=$(pwd)/$out ;; esac
 case $dl in /*) ;; *) dl=$(pwd)/$dl ;; esac
@@ -41,6 +54,10 @@ inputs_release=${WIZ_BUNDLE_INPUTS:-https://github.com/wiz-pl/wiz/releases/downl
 fetch() { # FILE SHA256 URL…
   f=$1 sum=$2; shift 2
   [ -f "$dl/$f" ] && echo "$sum  $dl/$f" | sha256sum -c --quiet - >/dev/null 2>&1 && return 0
+  if [ -n "${WIZ_BUNDLE_OFFLINE:-}" ]; then
+    echo "bundle-cc: $f: no pinned copy in $dl (WIZ_BUNDLE_OFFLINE)" >&2
+    return 1
+  fi
   urls=
   for u in "$@"; do
     case $u in
@@ -64,6 +81,11 @@ fetch() { # FILE SHA256 URL…
 }
 grep -v '^#' "$here/bundle-cc.sources" | while read -r line; do
   [ -n "$line" ] || continue
+  # the debs are per architecture: fetch only this bundle's pair
+  case $line in
+    *_amd64.deb\ *) [ "$debarch" = amd64 ] || continue ;;
+    *_arm64.deb\ *) [ "$debarch" = arm64 ] || continue ;;
+  esac
   # shellcheck disable=SC2086
   fetch $line || exit 1
 done
@@ -97,7 +119,7 @@ copy_lib() { # soname
     sed -i 's|/nix/store|/nix/storE|g' "$tmp"
   fi
   if grep -aq /nix/store "$tmp"; then
-    for d in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib64 /usr/lib; do
+    for d in /usr/lib/$libdir /lib/$libdir /usr/lib64 /usr/lib; do
       if [ -f "$d/$1" ] && ! grep -aq /nix/store "$d/$1"; then
         cp -L "$d/$1" "$tmp"
         break
@@ -135,11 +157,11 @@ for f in "$out"/lib/*.so*; do
 done
 ver=$(ls "$lean/lib/clang")
 mkdir -p "$out/lib/clang/$ver/include"
-cp -R "$lean/lib/clang/$ver/lib" "$out/lib/clang/$ver/"
+cp -RL "$lean/lib/clang/$ver/lib" "$out/lib/clang/$ver/"
 cp "$lean/include/clang/"*.h "$out/lib/clang/$ver/include/"
 cp "$lean/LICENSE" "$out/LICENSES/lean4-LICENSE"
 # (a file in current Lean toolchains: the third-party licences, CaDiCaL's among them)
-[ -e "$lean/LICENSES" ] && cp -R "$lean/LICENSES" "$out/LICENSES/lean4-LICENSES"
+[ -e "$lean/LICENSES" ] && cp -RL "$lean/LICENSES" "$out/LICENSES/lean4-LICENSES"
 
 # the sysroot: glibc 2.27 and the kernel headers, only what compiling and linking need.
 # 2.27 (Ubuntu 18.04, EOL 2023-05) is a link-time-only compatibility floor for the
@@ -148,18 +170,19 @@ cp "$lean/LICENSE" "$out/LICENSES/lean4-LICENSE"
 # TODO(2026-11-17, wiz-pl maintainers) in scripts/bundle-cc.sources before changing it.
 sys=$out/sysroot
 mkdir -p "$work/deb" "$sys"
-for d in libc6_2.27-3ubuntu1.6_amd64.deb libc6-dev_2.27-3ubuntu1.6_amd64.deb linux-libc-dev_4.15.0-213.224_amd64.deb; do
+for d in "libc6_2.27-3ubuntu1.6_${debarch}.deb" "libc6-dev_2.27-3ubuntu1.6_${debarch}.deb" \
+         "linux-libc-dev_4.15.0-213.224_${debarch}.deb"; do
   rm -rf "$work/deb"/*
   (cd "$work/deb" && ar x "$dl/$d" && tar -xf data.tar.* -C "$sys")
 done
 mkdir -p "$out/LICENSES/glibc" "$out/LICENSES/linux"
 cp "$sys/usr/share/doc/libc6/copyright" "$out/LICENSES/glibc/copyright"
 cp "$sys/usr/share/doc/linux-libc-dev/copyright" "$out/LICENSES/linux/copyright"
-rm -rf "$sys/etc" "$sys/usr/share" "$sys/usr/bin" "$sys/usr/sbin" "$sys/sbin" "$sys/usr/lib/x86_64-linux-gnu/gconv" \
-  "$sys/usr/lib/x86_64-linux-gnu/audit" "$sys/lib/x86_64-linux-gnu/security"
+rm -rf "$sys/etc" "$sys/usr/share" "$sys/usr/bin" "$sys/usr/sbin" "$sys/sbin" "$sys/usr/lib/$libdir/gconv" \
+  "$sys/usr/lib/$libdir/audit" "$sys/lib/$libdir/security"
 # static libc and friends are not used (programs link libc dynamically)
-find "$sys/usr/lib/x86_64-linux-gnu" -name '*.a' ! -name '*_nonshared.a' -delete
-# absolute symlinks (libdl.so -> /lib/x86_64-linux-gnu/libdl.so.2) point into the sysroot
+find "$sys/usr/lib/$libdir" -name '*.a' ! -name '*_nonshared.a' -delete
+# absolute symlinks (libdl.so -> /lib/$libdir/libdl.so.2) point into the sysroot
 find "$sys" -type l | while read -r l; do
   t=$(readlink "$l")
   case $t in /*) ln -sfn "$(realpath -m --relative-to="$(dirname "$l")" "$sys$t")" "$l" ;; esac
@@ -210,11 +233,14 @@ chmod 755 "$out/bin/cc" "$out/bin/llc"
 # header (and so the tarball) depend on the bundle's build directory.
 cc=$out/bin/cc
 PATH="$out/bin:$PATH"; export PATH
+# --enable-fat is x86-64 only (code for every CPU, picked at run time); a build tuned
+# to one aarch64 core would not run on another.
+gmp_fat=
+if [ "$arch" = x86_64 ]; then gmp_fat=--enable-fat; fi
 tar -xJf "$dl/gmp-6.3.0.tar.xz" -C "$work"
 (cd "$work/gmp-6.3.0" &&
-  # --enable-fat: code for every x86-64 CPU, picked at run time (a build tuned to this
-  # machine's CPU would fail on older ones)
-  ./configure -q --host=x86_64-pc-linux-gnu --enable-fat --enable-static --disable-shared --with-pic \
+  # shellcheck disable=SC2086
+  ./configure -q --host="$host" $gmp_fat --enable-static --disable-shared --with-pic \
     --prefix="$sys/usr" CC=cc CFLAGS="-O2 -w" >/dev/null &&
   make -s -j"$jobs" >/dev/null && make -s install >/dev/null)
 cp "$work/gmp-6.3.0/COPYING.LESSERv3" "$out/LICENSES/gmp-COPYING.LESSERv3"
@@ -222,7 +248,7 @@ cp "$work/gmp-6.3.0/COPYINGv3" "$out/LICENSES/gmp-COPYINGv3"
 cp "$work/gmp-6.3.0/COPYINGv2" "$out/LICENSES/gmp-COPYINGv2"
 tar -xzf "$dl/gc-8.2.8.tar.gz" -C "$work"
 (cd "$work/gc-8.2.8" &&
-  ./configure -q --host=x86_64-pc-linux-gnu --enable-static --disable-shared --with-pic --enable-threads=posix \
+  ./configure -q --host="$host" --enable-static --disable-shared --with-pic --enable-threads=posix \
     --disable-docs --with-libatomic-ops=none --prefix="$sys/usr" CC=cc CFLAGS="-O2 -w" >/dev/null &&
   make -s -j"$jobs" >/dev/null && make -s install >/dev/null)
 # its licence is the top of README.QUICK
@@ -231,13 +257,15 @@ rm -rf "$sys/usr/share" "$sys/usr/lib/pkgconfig"
 find "$sys/usr/lib" -name '*.la' -delete
 
 cat > "$out/VERSIONS" <<EOF
+architecture: $arch ($host)
 clang, ld.lld, compiler-rt: from $(basename "$lean") ($("$out/bin/clang" --version | head -1))
 cadical: from $(basename "$lean") ($("$out/bin/cadical" --version))
 glibc 2.27 (libc6, libc6-dev 2.27-3ubuntu1.6), Linux headers 4.15 (linux-libc-dev 4.15.0-213.224): Ubuntu 18.04, link-time only
-GMP 6.3.0 (static, --enable-fat), Boehm GC 8.2.8 (static, threads)
+GMP 6.3.0 (static, $([ "$arch" = x86_64 ] && echo '--enable-fat' || echo 'portable')), Boehm GC 8.2.8 (static, threads)
 EOF
 
 # it works
+if [ -z "${WIZ_BUNDLE_SKIP_TEST:-}" ]; then
 cat > "$work/t.c" <<'EOF'
 #include <gmp.h>
 #include <gc.h>
@@ -251,4 +279,5 @@ EOF
 printf 'p cnf 1 2\n1 0\n-1 0\n' > "$work/t.cnf"
 st=0; "$out/bin/cadical" -q --lrat --no-binary "$work/t.cnf" "$work/t.lrat" >/dev/null || st=$?
 [ "$st" = 20 ] && [ -s "$work/t.lrat" ] || { echo "bundle-cc: cadical gave no LRAT proof (exit $st)" >&2; exit 1; }
+fi
 du -sh "$out"
