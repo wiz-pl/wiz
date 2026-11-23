@@ -835,7 +835,18 @@ EOF
           # (the `hdl` group and the HDL protocol hooks), so CI runs them instead of
           # skipping; nodejs: the WebAssembly backend's modules run under Node with
           # web/wasm-host.mjs (stage 8f) and skip without it
-          packages = [ pkgs.elan pkgs.gmp pkgs.boehmgc pkgs.llvm pkgs.python3 pkgs.git pkgs.neovim pkgs.z3 pkgs.cadical pkgs.yosys pkgs.nodejs ];
+          packages = [
+            # the Lean toolchain and the C/LLVM backend's libraries
+            pkgs.elan pkgs.gmp pkgs.boehmgc pkgs.llvm
+            # the test suite's tools (each one had a `skipMissing` before CI's image
+            # happened to provide it: node, yosys, iverilog/vvp, z3/cadical, ssh-keygen)
+            pkgs.python3 pkgs.git pkgs.neovim pkgs.nodejs
+            pkgs.z3 pkgs.cadical pkgs.yosys pkgs.iverilog pkgs.openssh
+            # the scripts' tools (release/tarball, fetch/vendor, docs, patches)
+            pkgs.curl pkgs.jq pkgs.rsync pkgs.gnumake pkgs.tree-sitter
+            pkgs.coreutils pkgs.diffutils pkgs.patch pkgs.which pkgs.file
+            pkgs.gnutar pkgs.gzip pkgs.xz pkgs.zip pkgs.unzip pkgs.time
+          ];
           # `wiz` and `grail` take the toolchain as flags (stage 23a); grail and the test
           # driver read this machine's paths from the uncommitted grail.local.wiz written
           # here (when run from the repository root). Nothing reads the environment.
