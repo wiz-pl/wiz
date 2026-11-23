@@ -103,6 +103,7 @@ async function connect(chromePath) {
   let id = 0;
   const pending = new Map();
   const errors = [];
+  const logs = [];
   ws.addEventListener("message", (m) => {
     const msg = JSON.parse(m.data);
     if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg.result); pending.delete(msg.id); }
@@ -110,12 +111,15 @@ async function connect(chromePath) {
       errors.push(msg.params.exceptionDetails.exception?.description ||
         msg.params.exceptionDetails.text || "exception");
     }
+    if (msg.method === "Runtime.consoleAPICalled") {
+      logs.push((msg.params.args || []).map((a) => a.value ?? a.description ?? "").join(" "));
+    }
   });
   const call = (method, params = {}) => new Promise((r) => {
     pending.set(++id, r);
     ws.send(JSON.stringify({ id, method, params }));
   });
-  return { call, errors, close: () => { try { ws.close(); } catch {} proc.kill("SIGKILL"); } };
+  return { call, errors, logs, close: () => { try { ws.close(); } catch {} proc.kill("SIGKILL"); } };
 }
 
 // A scripts-disabled navigation. Screen-reader-style evidence only: the DOM, the
@@ -156,7 +160,7 @@ async function noScriptPage(chromePath, url) {
 }
 
 async function session(chromePath, url) {
-  const { call, errors, close } = await connect(chromePath);
+  const { call, errors, logs, close } = await connect(chromePath);
   const evaluate = async (expression) => {
     const r = await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
     if (r && r.exceptionDetails) {
@@ -180,7 +184,7 @@ async function session(chromePath, url) {
   const island = await waitFor(`typeof globalThis.wizLoomMode === "string" &&
     document.getElementById("quantity-app") &&
     document.getElementById("quantity-app").hasAttribute("data-live")`);
-  return { call, evaluate, waitFor, errors, carousel, island, close };
+  return { call, evaluate, waitFor, errors, logs, carousel, island, close };
 }
 
 const { server, url } = await serve(root);
@@ -296,6 +300,8 @@ try {
       "one quantity panel is shown", JSON.stringify(stepped.shown));
     ok(page.errors.length === 0, "the console has no uncaught exception",
       page.errors.join("\n  "));
+    ok(!page.logs.some((line) => /SSR hash|replacing it|hash-collision/u.test(line)),
+      "adoption emitted no replace warning", page.logs.join("\n  "));
   } finally {
     page.close();
   }
