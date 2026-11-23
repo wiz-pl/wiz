@@ -57,18 +57,24 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 * HDL signal laws (P2.1): `hdl/src/Hdl/Signal.wiz` proves the knot's algebra
   (`fix_unfold`, `register_fixed_unique`, `fix_pure`, `fix_delay_eq_circuit`), the sized
   register (`registerS_head`, `registerS_eq_register`), the counter's `0, 1, 2, …` in both
-  the `Signal.fix` and `Circuit.loop` spellings, and `Signal.Eqv` congruence for
-  `map`/`zipWith`/`zipWith3`/`register`/`registerS`/`mealy`/`ofCircuit`. The
-  *sized-observation* laws (`mapS_at`, `zipWithS_at`, `mapS_id`, `mapS_comp`, the
-  `mapS_head`/`mapS_tail` forms and the `Eqv` congruences for the sized operators) are
-  documented as blocked, with the three body shapes that fail and the one-line
-  elaborator change that unblocks them (docs/stages/34-hdl-signals.md §34c): a split of a
-  neutral payload is stuck, two projections make a `Signal.fix` knot exponential (the L3
-  example stops finishing), and a single `let p := out a` is rejected by the kernel for a
-  sized `cocon` because surface `out` erases the payload's size and index. All proved laws
-  are pinned by `#check` and `#print axioms` in the `hdl-signal` group (the thirteen
-  algebraic ones list no axioms; the four that mention a `Circuit` or compute `BitVec`
-  literals inherit the library's trusted `Hw HwTy.El`/`UIntN` natives).
+  the `Signal.fix` and `Circuit.loop` spellings, `Signal.Eqv` congruence for
+  `map`/`zipWith`/`zipWith3`/`register`/`registerS`/`mealy`/`ofCircuit`, and the
+  *sized-observation* laws: `mapS_head`, `mapS_tail`, `mapS_at`, `mapS_id`, `mapS_comp`,
+  `zipWithS_head`, `zipWithS_at` and `zipWith3S_at` are `rfl` (pointwise for the `Eqv`
+  ones). All proved laws are pinned by `#check` and `#print axioms` in the `hdl-signal`
+  group (the algebraic ones list no axioms; the four that mention a `Circuit` or compute
+  `BitVec` literals inherit the library's trusted `Hw HwTy.El`/`UIntN` natives).
+
+* elab: surface `out` types its payload at the **predecessor** size, as the kernel has
+  it — `out x : Desc.interp D (ν^{s'}) i` for `x : ν^{↑s} D i`, `s' = sizePred? s`
+  (`∞ ↦ ∞`), in `Wiz/Elab/Term.lean`'s builtin `out` case and in the
+  `selfhost/Frontend.wiz` mirror. Before, the elaborator used the `ν^∞` family, so a
+  `let`-bound observation of a sized value carried a size the kernel's sized `cocon`
+  check rejects (`expected … ν (Signal.desc d A) … inferred … ν^j …`); a value at `∞`
+  was unaffected. This is what makes the sized-signal body `let p := out a` (one
+  observation per cycle, projected) check, so the laws above hold while a `Signal.fix`
+  knot stays linear; a value at a size *variable* is still not observable (the kernel's
+  rule, now reported by the elaborator too). No kernel change.
 
 * selfhost: the driver's `run` POSIX-quotes every component it puts in its `system(3)`
   command (`--cc`, `--llc`, `--rt`, each `--cflags`/`--ldflags` word, input/output

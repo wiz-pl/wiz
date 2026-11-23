@@ -29,7 +29,9 @@ def hdlSignalLaws : List String := [
   "Signal.counter", "Signal.counterLoop", "Signal.counter_sample",
   "Signal.counterLoop_sample", "Signal.Eqv.map", "Signal.Eqv.zipWith",
   "Signal.Eqv.zipWith3", "Signal.Eqv.register", "Signal.Eqv.registerS",
-  "Signal.Eqv.mealy", "Signal.Eqv.ofCircuit"]
+  "Signal.Eqv.mealy", "Signal.Eqv.ofCircuit",
+  "Signal.mapS_head", "Signal.mapS_tail", "Signal.mapS_at", "Signal.mapS_id",
+  "Signal.mapS_comp", "Signal.zipWithS_head", "Signal.zipWithS_at", "Signal.zipWith3S_at"]
 
 /-- The laws whose `#print axioms` is clean: the algebraic ones. The four that are only
 `#check`ed mention a `Circuit` or compute `BitVec` literals, so they inherit the
@@ -39,7 +41,9 @@ def hdlSignalCleanLaws : List String := [
   "Signal.fix_unfold", "Signal.register_fixed_unique", "Signal.fix_pure",
   "Signal.registerS_head", "Signal.registerS_eq_register", "Signal.Eqv.map",
   "Signal.Eqv.zipWith", "Signal.Eqv.zipWith3", "Signal.Eqv.register",
-  "Signal.Eqv.registerS", "Signal.Eqv.mealy"]
+  "Signal.Eqv.registerS", "Signal.Eqv.mealy",
+  "Signal.mapS_head", "Signal.mapS_tail", "Signal.mapS_at", "Signal.mapS_id",
+  "Signal.mapS_comp", "Signal.zipWithS_head", "Signal.zipWithS_at", "Signal.zipWith3S_at"]
 
 /-- `import Hdl.Signal`, the counter's value sample (the `0, 1, 2, …` datum through the
 named `Signal.counter`), then the laws. -/
@@ -69,6 +73,14 @@ def hdlSignalLawExpected : List String := [
   "Signal.Eqv.registerS : {d : ClockDomain} → {A : Type} → (init : A) → {s : Signal d A} → {s' : Signal d A} → Signal.Eqv d A s s' → Signal.Eqv d A (Signal.registerS d A ∞ init s) (Signal.registerS d A ∞ init s')",
   "Signal.Eqv.mealy : {d : ClockDomain} → {S : Type} → {I : Type} → {O : Type} → (f : S → I → S × O) → (st : S) → {xs : Signal d I} → {xs' : Signal d I} → Signal.Eqv d I xs xs' → Signal.Eqv d O (Signal.mealy d S I O f st xs) (Signal.mealy d S I O f st xs')",
   "Signal.Eqv.ofCircuit : {d : ClockDomain} → {i : HwTy} → {o : HwTy} → (c : Circuit i o) → {xs : Signal d (HwTy.El i)} → {xs' : Signal d (HwTy.El i)} → Signal.Eqv d (HwTy.El i) xs xs' → Signal.Eqv d (HwTy.El o) (Signal.ofCircuit d i o c xs) (Signal.ofCircuit d i o c xs')",
+  "Signal.mapS_head : {d : ClockDomain} → {A : Type} → {B : Type} → (f : A → B) → (s : Signal d A) → f (out s).1 = f (out s).1",
+  "Signal.mapS_tail : {d : ClockDomain} → {A : Type} → {B : Type} → (f : A → B) → (s : Signal d A) → scofix (fun j _ => Signal^j d A) (fun j rec idx a => cocon (f (out a).1, rec idx (out a).2.1, fun phantom✝ => (), ())) ∞ (fun phantom✝ => ()) (out s).2.1 = Signal.mapS d A B ∞ f (out s).2.1",
+  "Signal.mapS_at : {d : ClockDomain} → {A : Type} → {B : Type} → (f : A → B) → (s : Signal d A) → (t : Nat) → Signal.at d B (Signal.mapS d A B ∞ f s) t = f (Signal.at d A s t)",
+  "Signal.mapS_id : {d : ClockDomain} → {A : Type} → (s : Signal d A) → Signal.Eqv d A (Signal.mapS d A A ∞ (fun x => x) s) s",
+  "Signal.mapS_comp : {d : ClockDomain} → {A : Type} → {B : Type} → {C : Type} → (f : B → C) → (g : A → B) → (s : Signal d A) → Signal.Eqv d C (Signal.mapS d B C ∞ f (Signal.mapS d A B ∞ g s)) (Signal.mapS d A C ∞ (fun x => f (g x)) s)",
+  "Signal.zipWithS_head : {d : ClockDomain} → {A : Type} → {B : Type} → {C : Type} → (f : A → B → C) → (a : Signal d A) → (b : Signal d B) → f (out a).1 (out b).1 = f (out a).1 (out b).1",
+  "Signal.zipWithS_at : {d : ClockDomain} → {A : Type} → {B : Type} → {C : Type} → (f : A → B → C) → (a : Signal d A) → (b : Signal d B) → (t : Nat) → Signal.at d C (Signal.zipWithS d A B C ∞ f a b) t = f (Signal.at d A a t) (Signal.at d B b t)",
+  "Signal.zipWith3S_at : {d : ClockDomain} → {A : Type} → {B : Type} → {C : Type} → {D : Type} → (f : A → B → C → D) → (a : Signal d A) → (b : Signal d B) → (c : Signal d C) → (t : Nat) → Signal.at d D (Signal.zipWith3S d A B C D ∞ f a b c) t = f (Signal.at d A a t) (Signal.at d B b t) (Signal.at d C c t)",
   "'Signal.fix_unfold' does not depend on any axioms",
   "'Signal.register_fixed_unique' does not depend on any axioms",
   "'Signal.fix_pure' does not depend on any axioms",
@@ -79,7 +91,15 @@ def hdlSignalLawExpected : List String := [
   "'Signal.Eqv.zipWith3' does not depend on any axioms",
   "'Signal.Eqv.register' does not depend on any axioms",
   "'Signal.Eqv.registerS' does not depend on any axioms",
-  "'Signal.Eqv.mealy' does not depend on any axioms"]
+  "'Signal.Eqv.mealy' does not depend on any axioms",
+  "'Signal.mapS_head' does not depend on any axioms",
+  "'Signal.mapS_tail' does not depend on any axioms",
+  "'Signal.mapS_at' does not depend on any axioms",
+  "'Signal.mapS_id' does not depend on any axioms",
+  "'Signal.mapS_comp' does not depend on any axioms",
+  "'Signal.zipWithS_head' does not depend on any axioms",
+  "'Signal.zipWithS_at' does not depend on any axioms",
+  "'Signal.zipWith3S_at' does not depend on any axioms"]
 
 /-- Stage 34a: Clash-style signals (`hdl/src/Hdl/Signal.wiz`, lane L1 of the Clash HDL plan).
 The positive file is `hdl/examples/hdl-signal.wiz`: counters as Mealy machines, registers
@@ -131,6 +151,15 @@ def hdlSignalGroup : Group where
     { name := "34b: raw `scofix` is a term former (the primitive behind the sized definitions)", run := fun _ => do
         okLibs "import Hdl.Signal\ndef raw {d : ClockDomain} {A : Type} (g : (i : Size) → (Signal d A)^i → (Signal d A)^(↑i)) : Signal d A := scofix (fun (j : Size) => fun _ => Unit) (fun j rec idx a => g j (rec idx a)) ∞ () ()\n"
           [] },
+    { name := "34c.1: `out` of a sized value types its payload at the predecessor, so a shared `let` observation checks (HDL-2.2a)", run := fun _ => do
+        -- the body shape `mapS` uses: one observation, kept in a `let`, projected twice.
+        -- Before HDL-2.2a the elaborator typed `out`'s payload at `ν^∞` and the kernel
+        -- rejected `let p := out s` at `↑i` ("expected ... ν (Signal.desc d A) ...
+        -- inferred ... ν^i ...").
+        okLibs "import Hdl.Signal\ndef obsHead {d : ClockDomain} {A : Type} {i : Size} (s : (Signal d A)^(↑i)) : A :=\n  let p := out s\n  p.1\ndef obsTail {d : ClockDomain} {A : Type} {i : Size} (s : (Signal d A)^(↑i)) : (Signal d A)^i :=\n  let p := out s\n  p.2.1\ndef reg7 : (Signal ClockDomain.sys (BitVec 8))^(↑∞) :=\n  Signal.registerS (i := ∞) (BitVec.ofNat 8 7) (Signal.pureS (i := ∞) (BitVec.ofNat 8 0))\n#eval BitVec.toNat (obsHead (i := ∞) reg7)\n#eval Signal.sample 2 (Signal.map BitVec.toNat (obsTail (i := ∞) reg7))\n"
+          ["7", "[0, 0]"] },
+    { name := "34c.1: `out` of a value at a size variable is rejected (only ↑s or ∞ is observable)", run := fun _ => do
+        failsLibs "import Hdl.Signal\ndef obsVar {d : ClockDomain} {A : Type} {i : Size} (s : (Signal d A)^i) : (Signal d A)^i := (out s).2.1\n" "only a value of size ↑s or ∞ can be observed" },
     { name := "34c: P2.1: the fix/register laws, the counter's samples and Signal.Eqv congruence, pinned by #check and #print axioms (hdl/src/Hdl/Signal.wiz)", run := fun _ => do
         okLibs hdlSignalLawSource hdlSignalLawExpected } ]
 
