@@ -30,7 +30,9 @@ IR's closure for the exported definition (the C backend's `wiz.export.<name>` de
 `wizExtern` marshals (`n u f s b v p w`), and an `IO` export takes the world as its last
 argument and returns the pair's first field — the C wrapper's `callIntoWiz` and
 `wiz_io_value`, exactly. A zero-parameter export is the value itself (the entry is not
-applied), as in C. `main` cannot be an export name.
+applied), as in C. An export may be named neither `main` nor one of the runtime's own
+exports (`wizApply`, …): a duplicate ES binding makes the whole module fail to parse, so
+the emitter refuses it by name.
 
 The IR is the same `Wiz/Compiler/IR.lean` the C, LLVM and Wasm backends consume, after
 lowering, Perceus and `Simp`. Every construct has a lowering:
@@ -175,9 +177,9 @@ callback is refused for a `wiz_` native, whose C signature expects the C pair; a
    (`export function name(…)`, marshalled through the same FFI table as `wizExtern`), so a
    `--target js` module can present the Loom ABI (`wiz_loom_init/html/step/effect/
    requests/consume`) and be mounted by `web/framework/mount.js`. Two limits remain: an
-   export cannot be named `main` (the module's entry), and an export's signature is the
-   C ABI's subset — no parameter or result that is a C struct, a byte buffer, or a
-   callback (`ffiCallSig`).
+   export may be named neither `main` nor one of the runtime's own exports, and an
+   export's signature is the C ABI's subset — no parameter or result that is a C struct,
+   a byte buffer, or a callback (`ffiCallSig`).
 7. **Lazy cells are not memoised.** `coit`/`scofix` cells are ordinary constructors and
    `lazySet` returns the payload without rewriting the cell, so a second observation
    recomputes the same pure payload. The values agree; the work may be repeated.
