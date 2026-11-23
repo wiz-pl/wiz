@@ -1331,6 +1331,17 @@ that checks everything. Wiz's situation:
   not model quantities). Weakening and substitution are proved for its fragments T0 and
   T1; validity and subject reduction are stated, not proved. It models #40's `Desc`/`μ`
   rules; #123's rules have been in it since #135. Its review found D2 (§4).
+  The marking bridge and the open switches are tested, not assumed (group *meta*, "D3
+  (marking bridge)" and "D6 (open switches)"). The kernel checks the **marked** term and
+  WizMeta the **unmarked** one; marking preserves the kernel's verdict on all 537
+  differential terms, with a `fun` at a proposition as the negative control (rejected
+  unmarked, accepted after `Mark.infer`, accepted by WizMeta unmarked). For the 216
+  declaration types, `Mark.type`'s level is the kernel's `checkType` level, the marked
+  type is a type at the same level, `Mark.type` is idempotent, and `Mark.inferCore`
+  computes the kernel's type. Each open rule choice now has a distinguishing term —
+  `EqTyCross` vs `EqTyLevelled`, payload kernel/stuck/uniform, `kernelEqFormation`, and
+  quantities at a propositional Π/Σ (the kernel ignores them in `convTy`, WizMeta compares
+  them) — so a silent change to either side flips a case.
 * **Differential test** (group *selfhost*, "the Wiz kernel agrees with the Lean kernel (400
   random terms)", and "… declarations at symbolic levels like the Lean kernel"): the
   hand-picked `MTm.samples` (including the F1 and F2 attacks) and 400 random terms,

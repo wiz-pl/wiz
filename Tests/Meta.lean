@@ -533,14 +533,27 @@ always compares them (`WizMeta/Checker.lean`, `convTy`). `ann (ann f X) Y` check
 `X` and then `X` against `Y`, which is the comparison. -/
 def qtyAtPropPi : MTm := ann (ann (lam (var 0)) qtyPi0) qtyPi1
 
-/-- The same for Σ: `X ≡ Y` is `Iff X Y` in both implementations, and its comparison
-reaches `X` and `Y`; the kernel's `convTy` at the Σ ignores the quantity because the Σ is
-a proposition, the checker's does not. The cast is the context that forces
-`reflTy X : X ≡ X` to be checked at `X ≡ Y`. -/
+/-- `(0 _ : True) × True` and `(1 _ : True) × True`, both propositions. -/
 def qtySigma0 : MTm := sigmaq .zero ptrue ptrue
 def qtySigma1 : MTm := sigmaq .one ptrue ptrue
-def qtyAtPropSigma : MTm :=
+
+/-- The obvious route is *not* a distinction: `reflTy X : X ≡ X` checked at `X ≡ Y`
+compares `Iff X X` with `Iff X Y` by the kernel's `subTy`, whose Σ arm compares the
+quantities strictly (the `isProp` escape is only in `convTy`); the checker also rejects
+it. It is the control that keeps the term below honest. -/
+def qtySigmaCast : MTm :=
   ann (cast qtySigma0 qtySigma1 (reflTy qtySigma0) (ann (pair star star) qtySigma0)) qtySigma1
+
+/-- The Σ distinction needs a `convTy` on the two Σs. `convTy` is called on the two Πs
+`(x : X) → Unit 2` and `(x : Y) → Unit 2` when a neutral `f : (A : Sort 2) → Sort 1` is
+applied to them and its spines are compared; the Π case of `convTy` compares the domains
+with `convTy`, whose Σ case ignores the quantity when the Σ is a proposition (kernel) or
+compares it (checker). The lambda is the smallest closed term that builds that spine. -/
+def qtySigmaPi0 : MTm := pi qtySigma0 (unit 1)
+def qtySigmaPi1 : MTm := pi qtySigma1 (unit 1)
+def qtyAtPropSigma : MTm :=
+  ann (lam (reflTy (app (var 0) qtySigmaPi0)))
+    (pi (pi (univ 1) (univ 0)) (eqTy (app (var 0) qtySigmaPi0) (app (var 0) qtySigmaPi1)))
 
 end Bridge
 
@@ -988,7 +1001,7 @@ def group : Group where
         check (nDecl == 216) s!"the declaration corpus changed size: {nDecl}"
         check (nLevel == 216) s!"levels agree on {nLevel} declarations"
         check (nCore == 216) s!"`inferCore` types agree on {nCore} declarations" },
-    { name := "D6 (open switches): EqTyCross/Levelled, payload kernel/stuck/uniform, kernelEqFormation, and quantities at a propositional Π/Σ each have a distinguishing term (7 terms, 4 switches)", run := fun _ => do
+    { name := "D6 (open switches): EqTyCross/Levelled, payload kernel/stuck/uniform, kernelEqFormation, and quantities at a propositional Π/Σ each have a distinguishing term (4 switches, 7 terms + 1 control)", run := fun _ => do
         let sg ← match refSig with | .ok sg => pure sg | .error e => throw (IO.userError e)
         let g := leanGlobals ()
         -- 1. EqTyCross vs EqTyLevelled: the T4 term of `wiz-meta.md` §4.1 (the corpus does
@@ -1024,9 +1037,13 @@ def group : Group where
         --    difference; the open decision is `wiz-meta.md` §7 item 4.
         check (kernelAccepts Bridge.qtyAtPropPi g) "the kernel compares quantities at a propositional Π"
         rejects Bridge.qtyAtPropPi
+        --    the Σ control: the cast route compares two Iffs through `subTy`, whose Σ
+        --    arm is strict in both implementations, so it is not the distinction
+        check (!kernelAccepts Bridge.qtySigmaCast g) "the kernel accepts the Σ cast control"
+        rejects Bridge.qtySigmaCast
         check (kernelAccepts Bridge.qtyAtPropSigma g) "the kernel compares quantities at a propositional Σ"
         rejects Bridge.qtyAtPropSigma
-        IO.println "    4 switches, 7 terms: EqTy (1), payload (2 terms × 3 variants), kernelEqFormation (2), quantities at a propositional Π and Σ (2)" }
+        IO.println "    4 switches, 7 distinguishing terms + 1 control: EqTy (1), payload (2 terms × 3 variants), kernelEqFormation (2), quantities at a propositional Π and Σ (2; the Σ cast control is rejected by both)" }
   ]
 
 def groups : List Group :=
