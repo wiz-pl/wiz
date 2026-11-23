@@ -1007,6 +1007,15 @@ EOF
               for b in bin/wiz bin/grail bin/tower; do
                 patchelf --set-interpreter ${releaseInterp} "$b"
                 patchelf --remove-rpath "$b"
+                # The link names these dynamically even with the static archives in
+                # the link (Lean's executable driver still records its C++ runtime).
+                # The leaf removes the redundant NEEDED entries; doCheck then runs
+                # wiz/grail/tower under env -i with only glibc, so a genuinely
+                # unresolved symbol fails the build.
+                for lib in libstdc++.so.6 libgcc_s.so.1 libgmp.so.10 libuv.so.1 \
+                           libssl.so.3 libcrypto.so.3; do
+                  patchelf --remove-needed "$lib" "$b" 2>/dev/null || true
+                done
                 strip --strip-unneeded "$b"
                 python3 ${./scripts}/scrub-store-paths.py "$b"
               done

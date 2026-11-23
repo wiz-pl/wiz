@@ -898,7 +898,8 @@ the commit in their source links, not a build time.
 `.#release-bin` is the one leaf that may depend on all of the others. Its `buildPhase`
 is deliberately unlike a Nix package: the release has to leave the store, so that one
 step points each ELF interpreter at `/lib64/ld-linux-x86-64.so.2` (or the aarch64 path),
-removes the build RUNPATH, strips debug data and scrubs the remaining store-path strings
+removes the build RUNPATH, drops the redundant non-glibc NEEDED entries left by Lean's
+C++ link driver, strips debug data and scrubs the remaining store-path strings
 (`scripts/scrub-store-paths.py`). The binaries are linked before that step with every
 non-glibc library static — GMP, libuv, OpenSSL, libstdc++ and libgcc — so the archive
 needs only glibc; `scripts/test-release-portability.sh` checks the NEEDED lists, the
