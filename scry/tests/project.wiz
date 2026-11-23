@@ -307,7 +307,10 @@ def main : IO Unit := EIO.toIO (do
   check "cache: the strict entry warms too" (Nat.beq cs2.2.hit 3);
   -- a rule pack is not part of the CST key: findings are recomputed from the CST, so a
   -- changed pack on a warm cache must change the report rather than replay an old one
-  oob ← Scry.loadTaintPack (.some "scry/rules/oob.scry");
+  -- (package-relative, like every other fixture path here: `grail test` runs the test
+  -- with the package directory as the working directory, so `scry/rules/…` would be
+  -- `scry/scry/rules/…`)
+  oob ← Scry.loadTaintPack (.some "rules/oob.scry");
   let repOob := Scry.analyzeProject c2.1 oob s2;
   check "cache: a rule-pack change cannot replay stale findings" (Bool.not (String.eq (findingsText repWarm) (findingsText repOob)));
 
@@ -422,18 +425,29 @@ def main : IO Unit := EIO.toIO (do
   check "index: quire hit" (String.eq q2.reason "hit");
   jl ← Scry.findingsLoad fjson fid;
   ql ← Scry.findingsLoad fquire fid;
-  let sameKeys := match jl, ql with
+  -- The type is written out: a `let` gives its body no expected type, so the `.false`
+  -- term in the second branch has nothing to resolve against, and the elaborator no
+  -- longer guesses a constructor's type from the first branch (23cf4a314, "Error
+  -- messages: audit and the top 20 fixes"). `Bool.false` would do as well.
+  let sameKeys : Bool := match jl, ql with
     | .ok a, .ok b => Bool.and (Nat.beq (List.length a) (List.length b))
         (UIntN.beq (Scry.fiPrint a) (Scry.fiPrint b))
-    | _, _ => .false;
+    | _, _ => Bool.false;
   check "index: json and quire hold the same findings" sameKeys;
   let sev0 := List.length (List.filter (fun r => Nat.beq r.severity 0) frows);
   qc ← Scry.findingsQuery fquire fid 0;
-  check "index: quire severity query"
-    (match qc with | .ok n => Nat.beq n sev0 | .error _ => .false);
+  -- (as `sameKeys` above: a typed `let` gives the match its expected `Bool`. The
+  -- inline `(match …)` in `check`'s argument position did not elaborate here even with
+  -- `Bool.false` in the arm — it was reported as `check` applied to one argument.)
+  let qOk : Bool := match qc with
+    | .ok n => Nat.beq n sev0
+    | .error _ => Bool.false;
+  check "index: quire severity query" qOk;
   jc ← Scry.findingsQuery fjson fid 0;
-  check "index: json severity query"
-    (match jc with | .ok n => Nat.beq n sev0 | .error _ => .false);
+  let jOk : Bool := match jc with
+    | .ok n => Nat.beq n sev0
+    | .error _ => Bool.false;
+  check "index: json severity query" jOk;
   let qpath := Scry.findingsCachePath fquire fid;
   FS.writeFile qpath "not a quire image\n";
   q3 ← Scry.cacheFindings fquire fid frows;

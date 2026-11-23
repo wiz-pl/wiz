@@ -168,13 +168,15 @@ def main : IO Unit := EIO.toIO (do
       (Nat.beq (List.length bnd) (jNat j1 ["counts", "boundary"]));
     check "taint: the memory count is the sum of the files' entries"
       (Nat.beq (List.length mem) (jNat j1 ["counts", "memory"]));
+    -- (the source location is `boundary[].location` — `Scry.boundaryFields` writes
+    -- `uri`/`startLine`/… there via `Scry.originJson`, not at the entry's top level)
     check "taint: every boundary entry is a located scry/lowering/boundary warning"
       (List.all (fun b => Bool.and
         (String.eq (jStr b ["rule"]) "scry/lowering/boundary")
         (Bool.and (String.eq (jStr b ["severity"]) "warning")
           (Bool.and (Nat.lt 0 (String.length (jStr b ["message"])))
-            (Bool.and (Nat.lt 0 (String.length (jStr b ["uri"])))
-              (Nat.lt 0 (jNat b ["startLine"])))))) bnd);
+            (Bool.and (Nat.lt 0 (String.length (jStr b ["location", "uri"])))
+              (Nat.lt 0 (jNat b ["location", "startLine"])))))) bnd);
     check "taint: every memory entry names a scry/memory rule and a message"
       (List.all (fun b => Bool.and
         (String.startsWith (jStr b ["rule"]) "scry/memory/")
