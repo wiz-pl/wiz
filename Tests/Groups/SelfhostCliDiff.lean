@@ -30,8 +30,8 @@ group. A known parity difference is therefore an **expected difference**: the ca
 checks the exact symptom (the exit code, the message, the artifact) and records
 `expected-difference: …` with `Tests.note`, then passes. If the driver catches up the
 assertion stops holding and the case fails — the prompt to promote it — whereas a skip
-would stay silent. This group has no `.github/skip-allowlist.json` entry; the two `run`
-cases still skip on a host without the collector, as they must.
+would stay silent. This group has no `.github/skip-allowlist.json` entry; the cases that
+compile or run still skip on a host without the collector or `llc`, as they must.
 
 ## What "normalised" means here
 
@@ -553,7 +553,7 @@ def cliDiffGroup : Group where
         cliDiffSame spec h s
         checkEq 0 h.code
         checkEq 0 s.code
-        skip "backend: both accept `--target llvm` and `check` compiles nothing; the self-hosted LLVM path is a first slice (C5: a closed `main : Nat`) and is not exercised here" },
+        cliDiffKnown "backend: both accept `--target llvm` and `check` compiles nothing; the self-hosted LLVM path is a first slice (C5: a closed `main : Nat`) and is not exercised here" },
     { name := "--target wasm: the host selects WebAssembly, the driver refuses the name (C5)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("good.wiz", cliGood)]
@@ -563,7 +563,7 @@ def cliDiffGroup : Group where
         checkEq 1 s.code
         checkEq "" s.out
         cliCheck s.err "unsupported target wasm" "the driver's rejection"
-        skip "backend: --target wasm selects WebAssembly in the host (C5); the self-hosted backend emits C and LLVM (a first slice), so the driver refuses the name (exit 1) instead of silently building C" },
+        cliDiffKnown "backend: --target wasm selects WebAssembly in the host (C5); the self-hosted backend emits C and LLVM (a first slice), so the driver refuses the name (exit 1) instead of silently building C" },
     { name := "--cache-verify: the modes are accepted, and strict is warm in both", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("cv.wiz", cliGood)]
@@ -922,7 +922,7 @@ def cliDiffGroup : Group where
           | some b => check (cliDiffIsExe b) "the host's LLVM build is not an executable"
           | none => throw (IO.userError "the host's LLVM build wrote no artifact")
           Tests.check ((sll.splitOn "define i32 @main()").length > 1) "the driver's artifact is not LLVM IR"
-          skip "artifact: the lowered `w_main`/`w_wiz_2e_entry` text is equal to the host's (D4: the host links an executable, the driver writes the IR); the driver's `main` prints the scalar itself, where the host calls the runtime's `wiz_run_main` (C5's result protocol)" },
+          cliDiffKnown "artifact: the lowered `w_main`/`w_wiz_2e_entry` text is equal to the host's (D4: the host links an executable, the driver writes the IR); the driver's `main` prints the scalar itself, where the host calls the runtime's `wiz_run_main` (C5's result protocol)" },
     { name := "run --llvm: `main : Nat` prints the same value (C5's first slice)", run := fun _ => do
         match ← cliRunOptions with
         | none => skip "no garbage collector, --gc-cflags"
