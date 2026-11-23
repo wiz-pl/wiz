@@ -2990,6 +2990,20 @@ def lspHasChanges (o : Option J) : Bool := match o with
 
 -- ## The session
 
+def lspDbgGoals : List String → String
+  | .nil => ""
+  | .cons g rest => String.append (String.append g ";") (lspDbgGoals rest)
+def lspDbgEntry : LspEntry → String
+  | .term s t g => String.append "term " (String.append (Nat.toString s) (String.append "-" (String.append (Nat.toString t) (String.append " " g))))
+  | .goal s t gs => String.append "goal " (String.append (Nat.toString s) (String.append "-" (String.append (Nat.toString t) (String.append " [" (String.append (lspDbgGoals gs) "]")))))
+  | .decl s t n ty k => String.append "decl " (String.append (Nat.toString s) (String.append "-" (String.append (Nat.toString t) (String.append " " n))))
+partial def lspDbgEntriesGo : List LspEntry → IO Unit
+  | .nil => IO.pure ()
+  | .cons e rest => IO.bind (IO.ePrintln (lspDbgEntry e)) (fun _ => lspDbgEntriesGo rest)
+def lspDbgEntries (es : List LspEntry) : IO Unit := do
+  IO.ePrintln (String.append "LSPDBG entries " (Nat.toString (List.length es)));
+  lspDbgEntriesGo es
+
 -- elaborate the document and publish its diagnostics (`check`'s, on the buffer)
 def lspCheck (st : LspState) (doc : LspDoc) : IO LspState := do
   hs ← moduleHeaderTexts doc.text;
@@ -2998,6 +3012,7 @@ def lspCheck (st : LspState) (doc : LspDoc) : IO LspState := do
   let run := match modCheckRunHLsp cats tokens hs tab (.cons "Main" .nil) with
     | .mk r _ _ _ _ _ => r;
   -- (D8 goals) the document's entries: its body expected types and tactic snapshots
+  lspDbgEntries (Globals.lspEntries (Run.gs run));
   let doc := { doc with entries := Globals.lspEntries (Run.gs run) };
   let ds := lspOnlyFile doc.path (diagsOf tab (linesOf run));
   let session := Nat.succ st.session;
