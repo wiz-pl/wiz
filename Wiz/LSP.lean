@@ -147,15 +147,22 @@ def toPos (text : String) (off : Nat) : Json :=
   let col := (pre.reverse.takeWhile (· != '\n')).foldl (fun n c => n + Semantic.utf16Width c) 0
   Json.mkObj [("line", line), ("character", col)]
 
-/-- The character offset of an LSP position. -/
+/-- The character offset of an LSP position (`character` in UTF-16 code units). A
+`character` past the line's end is clamped to the end (LSP 3.17 `Position`); one that
+lands inside a surrogate pair rounds down to the character's start. A `line` past the
+end gives the end of the text. -/
 def ofPos (text : String) (line col : Nat) : Nat := Id.run do
-  let cs := text.toList
+  let cs := text.toList.toArray
   let mut l := 0
   let mut i := 0
-  while l < line && i < cs.length do
+  while l < line && i < cs.size do
     if cs[i]! == '\n' then l := l + 1
     i := i + 1
-  pure (i + col)
+  let mut u := 0
+  while i < cs.size && cs[i]! != '\n' && u + Semantic.utf16Width cs[i]! ≤ col do
+    u := u + Semantic.utf16Width cs[i]!
+    i := i + 1
+  pure i
 
 def range (text : String) (info : SourceInfo) : Json :=
   Json.mkObj [("start", toPos text info.start), ("end", toPos text (max info.stop (info.start + 1)))]
