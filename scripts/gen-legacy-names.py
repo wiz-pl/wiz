@@ -22,9 +22,10 @@ The row format is one tab-separated line per declaration:
 Rows are sorted by `(module, name)`, and the file is regenerated from the source,
 so it is deterministic: two runs on the same tree produce the same bytes.
 
-A `__root__.` declaration is not emitted: it already has the true-global name it
-will keep, so it needs no compatibility row (and the plan's count predates
-`__root__`).  A duplicate `(module, name)` inside one file is an error: the tree
+A `__root__.` declaration, and a declaration in a `namespace __root__` body, is
+not emitted: it already has the true-global name it will keep, so it needs no
+compatibility row (and the plan's count predates `__root__`).  A duplicate
+`(module, name)` inside one file is an error: the tree
 cannot elaborate two declarations of one name in one module.  The one duplicate
 module name in the tree (`Main` in `tower/Main.wiz` and `selfhost/Main.wiz`) is
 two packages that never load together; both rows are emitted (same key, same
