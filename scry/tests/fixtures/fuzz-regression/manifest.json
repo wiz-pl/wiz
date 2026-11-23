@@ -398,5 +398,21 @@
     "iteration": 351,
     "scry": "scry 0.1.0-dev (S1)",
     "timeout_s": 3.0
+  },
+  {
+    "file": "fuzz-regression-hang-analysis-location-depth.c",
+    "category": "hang",
+    "mode": "taint",
+    "signature": "hang:analysis-location-depth",
+    "origin": "analysis:location-depth-key-collision",
+    "sha256": "5e139322d471dd61d1b26066bf9fdab56c9b27a5322c698a63090e05f5e8b55f",
+    "bytes": 1776,
+    "wall_ms": 2006,
+    "peak_rss_mb": 15,
+    "memory_mb": 256,
+    "seed": 20261125,
+    "iteration": 2,
+    "scry": "scry 0.1.0-dev (S1)",
+    "timeout_s": 3.0
   }
 ]

@@ -926,13 +926,19 @@ printed as a boundary-style warning and written to SARIF, so a caller cannot mis
 truncated run for a complete one. -/
 def Scry.pointsToBudgetNotes (maxRounds : Option Nat) (pt : Scry.PtResult) :
     List Scry.BudgetNote :=
+  let depth : List Scry.BudgetNote := match pt.depthCapped with
+    | .true => List.cons (Scry.BudgetNote.mk "scry/budget/points-to-depth"
+        ("points-to location depth capped at " ++ Nat.repr Scry.maxLocDepth
+         ++ ": deeper field/wildcard chains are widened to unknown, so recall is reduced"))
+        .nil
+    | .false => .nil;
   match pt.complete with
-  | .true => .nil
-  | .false => List.cons (Scry.BudgetNote.mk "scry/budget/points-to-incomplete"
+  | .true => depth
+  | .false => List.append (List.cons (Scry.BudgetNote.mk "scry/budget/points-to-incomplete"
       ("points-to stopped after " ++ Nat.repr pt.rounds ++ " round(s) "
        ++ Scry.limitText maxRounds pt.rounds
        ++ ": the location sets are a lower bound, so recall is reduced (findings that"
-       ++ " are reported are still real derivations)")) .nil
+       ++ " are reported are still real derivations)")) .nil) depth
 
 /-- The `scry/budget/*` note a capped summary fixpoint earns. -/
 def Scry.summariesBudgetNotes (maxRounds : Option Nat) (rounds : Nat) (complete : Bool) :
@@ -1119,7 +1125,8 @@ def Scry.analyzeLowered (o : Scry.TaintOpts) (startMs : Nat) (text : String)
       (List.append
         (Scry.concatLists (fun r => r.plan.memWarnings) results)
         (Scry.concatLists (fun r => Scry.unmodelledWarningsOfModels models prog r) results)))
-    (List.append analyses.warnings nulls));
+    (List.append (List.append analyses.warnings nulls)
+      (Scry.pointsToWarningsAt pt (Scry.firstFuncName prog))));
   let memoryFindings := analyses.findings;
   let pr := Scry.ProgramResult.mk results run.summaries graph pt warnings memoryFindings;
   Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
@@ -1139,7 +1146,8 @@ def Scry.analyzeLowered (o : Scry.TaintOpts) (startMs : Nat) (text : String)
   let checks := List.map Scry.certVerified certificates;
   let notes := List.append (Scry.pointsToBudgetNotes o.maxRounds pr.pointsTo)
     (Scry.summariesBudgetNotes o.maxRounds run.rounds run.complete);
-  let truncated := Bool.or (Bool.not pr.pointsTo.complete) (Bool.not run.complete);
+  let truncated := Bool.or (Bool.not pr.pointsTo.complete)
+    (Bool.or (Bool.not run.complete) pr.pointsTo.depthCapped);
   endMs ← EIO.lift Scry.nowMs;
   EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks certificates origins
     boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs) truncated run.rounds

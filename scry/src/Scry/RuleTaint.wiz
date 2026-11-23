@@ -175,6 +175,11 @@ inductive Scry.MemWarnKind where
   /-- The rule pack or the analysis registry asks for something this build cannot run
   (an unknown `check`, or a registered analysis no check can select). -/
   | registry
+  /-- The points-to location-depth bound was reached: a depth-`maxLocDepth` location
+  exists, so a deeper field/wildcard chain is widened to `unknown`. The fixpoint is
+  still finite (that is the point of the bound); recall is reduced, so the run says so
+  instead of silently truncating the chain. -/
+  | locationDepth
 
 def Scry.MemWarnKind.show : Scry.MemWarnKind → String
   | .unknownMemory => "unknown-memory"
@@ -184,6 +189,7 @@ def Scry.MemWarnKind.show : Scry.MemWarnKind → String
   | .nullDereference => "null-dereference"
   | .nullableAssignment => "nullable-assignment"
   | .registry => "registry"
+  | .locationDepth => "location-depth"
 
 /-- The diagnostic id of a memory warning. `scry/memory/` is the family for the
 language-neutral memory checks (C and C#); the C# annotation check is the one whose
@@ -392,6 +398,33 @@ def Scry.memInter (xs ys : List Nat) : List Nat :=
 
 def Scry.memWarning (k : Scry.MemWarnKind) (func : String) (point : Nat) (detail : String) :
     Scry.MemWarning := Scry.MemWarning.mk k func point detail
+
+/-- The first function of a program, for attributing a program-wide diagnostic to a
+real source location. `"<points-to>"` when there is no function. -/
+def Scry.firstFuncName (p : Wil.Program) : String :=
+  match p.funcs with
+  | .cons fn _ => fn.name
+  | .nil => "<points-to>"
+
+/-- The points-to location-depth diagnostic: one program-wide warning when the finite
+location bound widened a deeper chain to `unknown`. It is a memory diagnostic (not a
+rule finding), so it appears in the project report's `memory` array and in the CLI's
+warnings with the rule id `scry/memory/location-depth`. `func`/`point` are the source
+location the diagnostic is displayed at (the first function's entry), not the only
+place the widening happened. -/
+def Scry.pointsToWarningsAt (pt : Scry.PtResult) (func : String) :
+    List Scry.MemWarning :=
+  match pt.depthCapped with
+  | .true => List.cons (Scry.memWarning Scry.MemWarnKind.locationDepth func 0
+      ("points-to location depth capped at " ++ Nat.repr Scry.maxLocDepth
+       ++ ": deeper field/wildcard chains are widened to unknown, so recall is reduced"))
+      List.nil
+  | .false => List.nil
+
+/-- `Scry.pointsToWarningsAt` for a caller that has no program (the warning then has no
+source location and is shown at the program level). -/
+def Scry.pointsToWarnings (pt : Scry.PtResult) : List Scry.MemWarning :=
+  Scry.pointsToWarningsAt pt "<points-to>"
 
 /-- The location closure of a pointer register and its unknown-memory diagnostic. -/
 def Scry.ptrAccess (pt : Scry.PtResult) (func : String) (point : Nat) (var : Nat)

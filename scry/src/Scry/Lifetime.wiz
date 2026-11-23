@@ -224,8 +224,10 @@ def Scry.uRhsLocs (st : Scry.UState) (pt : Scry.PtResult) (func : String) (point
     | .false => .nil
   | .load p => Scry.concatLists (fun l => Scry.memGet pt.state l)
       (Scry.uCurGet st pt func p.index)
-  | .gep p k => List.map (fun l => Scry.addOff l k) (Scry.uCurGet st pt func p.index)
-  | .gepVar p _ _ => List.map Scry.Loc.anyOff (Scry.uCurGet st pt func p.index)
+  | .gep p k => List.map (fun l => Scry.addOffBounded l k)
+      (Scry.uCurGet st pt func p.index)
+  | .gepVar p _ _ => List.map Scry.anyOffBounded
+      (Scry.uCurGet st pt func p.index)
   | .alloc _ => [(.heap func point)]
   | .slot _ => [(.stack func point)]
   | .globalRef n => [(.glob n)]
@@ -303,8 +305,10 @@ def Scry.uStep (models : Scry.ModelPack) (p : Wil.Program) (pt : Scry.PtResult)
       let ls := Scry.uRhsLocs st pt fn.name n x e;
       let d : List Scry.Loc := match e with
         | .use v => Scry.uDeadGet st fn.name v.index
-        | .gep p k => List.map (fun l => Scry.addOff l k) (Scry.uDeadGet st fn.name p.index)
-        | .gepVar p _ _ => List.map Scry.Loc.anyOff (Scry.uDeadGet st fn.name p.index)
+        | .gep p k => List.map (fun l => Scry.addOffBounded l k)
+            (Scry.uDeadGet st fn.name p.index)
+        | .gepVar p _ _ => List.map Scry.anyOffBounded
+            (Scry.uDeadGet st fn.name p.index)
         | .load p => List.filter (fun l => Scry.uHitsFreed l st.freed) ls
         | _ => .nil;
       let st1 := { st with cur := Scry.uCurPut st.cur (Scry.vk fn.name x.index) ls,

@@ -135,7 +135,9 @@ def Scry.stepByIdA {L : Type} (steps : Array (Scry.ProofStep L)) (id : Nat) :
   | .false => .none
 
 /-- Scan the heap newest first, by position (the fallback for a state built outside the
-add functions). `i` is the number of positions still to visit. -/
+add functions). `k` is the position to try; the caller starts it at
+`Array.size steps`, so the first `.succ` binds the last real index and each recursive
+call's pattern match decrements it to 0. -/
 def Scry.findStepA {L : Type} (eqL : L → L → Bool) (fact : Scry.PFact L) :
     Array (Scry.ProofStep L) → Nat → Option (Scry.ProofStep L)
   | steps, .zero => .none

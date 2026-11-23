@@ -724,7 +724,10 @@ def Scry.analyzeCoreBoundedModels (models : Scry.ModelPack) (p : Wil.Program)
         (Scry.concatLists (fun r => r.plan.memWarnings) results)
         (Scry.concatLists (fun r => Scry.unmodelledWarningsOfModelsIn models pix r)
           results)))
-    (List.append (List.append analyses.warnings nulls) (Scry.registryWarnings pack)));
+    (List.append
+      (List.append (List.append analyses.warnings nulls)
+        (Scry.pointsToWarningsAt pt (Scry.firstFuncName p)))
+      (Scry.registryWarnings pack)));
   let memoryFindings := analyses.findings;
   Scry.ProgramResult.mk results sums graph pt warnings memoryFindings
 

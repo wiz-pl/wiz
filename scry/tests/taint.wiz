@@ -2,6 +2,8 @@
 import Scry.NativeLink
 import Sys
 import Json
+import Word
+import Scry.PointsTo
 import Scry.TaintCmd
 import Scry.Interproc
 import Scry.Sarif
@@ -617,4 +619,24 @@ def main : IO Unit := EIO.toIO (do
   -- the JSON golden for a memory finding: the path has store/load nodes, the warning is a
   -- namespaced memory rule, and the counts include it
   rMem ← Scry.taintCmd ["tests/fixtures/mem-free.c", "--json"];
-  check "cli --json memory: exit 0" (Nat.beq rMem 0))
+  check "cli --json memory: exit 0" (Nat.beq rMem 0);
+  -- F54: this fixture used to make the points-to fixpoint add one nested location
+  -- per round (the `(fnv(name) XOR var)` key collided for `unit1`/`unit2`/`unit3`).
+  -- It must finish, and the location table must stay bounded.
+  -- The old `(fnv(name) XOR var)` key made these two keys equal.
+  let k1 := UIntN.toNat (Scry.vkKey (Scry.vk "unit1" 1));
+  let k2 := UIntN.toNat (Scry.vkKey (Scry.vk "unit2" 0));
+  check "location keys: adjacent names do not collide" (Bool.not (Nat.beq k1 k2));
+  oDepth ← opts ["tests/fixtures/fuzz-regression/fuzz-regression-hang-analysis-location-depth.c"];
+  repDepth ← Scry.analyzeFile oDepth;
+  check "location depth: points-to completes" repDepth.pointsTo.complete;
+  check "location depth: bounded location table"
+    (Nat.lt (Scry.ptLocCount repDepth.pointsTo) 1000);
+  -- The finite-lattice invariant: 20 field steps stop at the cap and widen to unknown.
+  let deep0 : Scry.Loc := Scry.Loc.stack "f" 0;
+  let wild := Scry.anyOffBounded deep0;
+  check "location depth: wildcard is idempotent"
+    (Scry.locEq (Scry.anyOffBounded wild) wild);
+  let deep := List.foldl (fun l _ => Scry.addOffBounded l 1) deep0 (Scry.range 20);
+  check "location depth: cap holds" (Nat.le (Scry.locDepth deep) Scry.maxLocDepth);
+  check "location depth: widened to unknown" (Scry.locEq deep Scry.Loc.unknown))

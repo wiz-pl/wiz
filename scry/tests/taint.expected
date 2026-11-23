@@ -205,3 +205,9 @@ cli --fail-on-finding: unsafe exits 1: ok
 cli --fail-on-finding: clean exits 0: ok
 {"tool":"scry","file":"tests/fixtures/mem-free.c","rules":7,"parseErrors":0,"truncated":false,"budget":{"nodes":115,"truncated":false,"pointsToRounds":2,"pointsToComplete":true,"summaryRounds":2,"summaryComplete":true,"notes":[]},"findings":[{"rule":"command-injection","severity":"error","kind":"taint","message":"Attacker-controlled data reaches a command interpreter","function":"main","point":8,"callee":"system","argument":0,"derivation":"checked","location":{"uri":"tests/fixtures/mem-free.c","startLine":12,"startColumn":3,"endLine":12,"endColumn":13},"path":[{"function":"main","point":3,"var":3,"kind":"source"},{"function":"main","point":4,"var":3,"kind":"store"},{"function":"main","point":7,"var":5,"kind":"load"},{"function":"main","point":8,"var":5,"kind":"sink"}]}],"boundary":[],"memory":[{"rule":"scry/memory/use-after-free","severity":"warning","kind":"memory","message":"load to a location freed by free at point 6","function":"main","point":7,"derivation":"unchecked","location":{"uri":"tests/fixtures/mem-free.c","startLine":12,"startColumn":10,"endLine":12,"endColumn":12}}],"counts":{"findings":1,"checked":1,"unchecked":0,"boundary":0,"memory":1}}
 cli --json memory: exit 0: ok
+location keys: adjacent names do not collide: ok
+location depth: points-to completes: ok
+location depth: bounded location table: ok
+location depth: wildcard is idempotent: ok
+location depth: cap holds: ok
+location depth: widened to unknown: ok

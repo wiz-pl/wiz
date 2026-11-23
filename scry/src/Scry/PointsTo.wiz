@@ -35,6 +35,13 @@ Offset `0` is the identity (`gep p 0` is `p`, so `*p` and `p[0]` are the same ce
 field sensitivity never splits a base from itself. `Loc.anyOff b` overlaps `b` itself and
 every `field b k`: an unknown index may be any index, including 0.
 
+The nesting of `field`/`anyOff` is bounded by `Scry.maxLocDepth` (8). The analysis
+constructs locations with `Scry.addOffBounded`/`Scry.anyOffBounded`, which widen past the
+bound to `Loc.unknown`; `anyOff` is idempotent on itself (a wildcard of a wildcard is the
+same wildcard). That finite domain is the termination invariant: a self-feeding
+`gep`/`gepVar` (a real recursive pointer, or a register-map key collision) adds no new
+location past the bound.
+
 **No alias is different from unknown.** An empty location set means the pointer is
 `null`/a constant (no target, no flow, no warning). A set containing `Loc.unknown` means
 the analysis *failed* to bound the target: the taint layer still propagates (a may
@@ -49,8 +56,8 @@ constraints:
 ```
 x = &y         pt(x) ⊇ {loc(y)}            (slot/global/fnptr/allocation, by the Rhs)
 x = y          pt(x) ⊇ pt(y)
-x = p + k      pt(x) ⊇ {addOff k l | l ∈ pt(p)}
-x = p[i]       pt(x) ⊇ {anyOff l | l ∈ pt(p)}
+x = p + k      pt(x) ⊇ {addOffBounded l k | l ∈ pt(p)}
+x = p[i]       pt(x) ⊇ {anyOffBounded l | l ∈ pt(p)}
 x = *p         pt(x) ⊇ ⋃ { mem(l) | l ∈ pt(p) }
 *p = y         mem(l) ⊇ pt(y)              for every l ∈ pt(p)   (y a pointer)
 free(p)        freed ⊇ pt(p)
@@ -152,12 +159,53 @@ def Scry.locUnknown : Scry.Loc → Bool
   | _ => .false
 
 /-- Offset 0 is the identity: `*p` and `p[0]` are the same cell. An offset into an
-`anyOff` stays that `anyOff` (one wildcard level is enough: the base is what matters). -/
+`anyOff` stays that `anyOff` (one wildcard level is enough: the base is what matters).
+The analysis uses `Scry.addOffBounded`; this is the unbounded constructor for tests and
+for callers that deliberately want a deep location. -/
 def Scry.addOff : Scry.Loc → Nat → Scry.Loc
   | l, .zero => l
   | .unknown, _ => .unknown
   | .anyOff b, _ => .anyOff b
   | l, k => .field l k
+
+/-- The nesting depth of an abstract location. A base location is depth 0; every
+`field`/`anyOff` constructor adds one. -/
+def Scry.locDepth : Scry.Loc → Nat
+  | .field b _ => Nat.succ (Scry.locDepth b)
+  | .anyOff b => Nat.succ (Scry.locDepth b)
+  | _ => 0
+
+/-- The deepest `field`/`anyOff` nesting the analysis keeps. A deeper location is a
+genuine recursive pointer chain, or (before 2026-11-23) the result of a key collision
+that merged two registers. Widening it to `unknown` is sound for a may-analysis and
+makes the location lattice finite: that finite domain is the termination invariant the
+round loop needs. -/
+def Scry.maxLocDepth : Nat := 8
+
+/-- `addOff` bounded by `Scry.maxLocDepth`: a field beyond the bound is the unknown
+location. Offset 0 is the identity; `anyOff` absorbs offsets (one wildcard level is
+enough). -/
+def Scry.addOffBounded (l : Scry.Loc) (k : Nat) : Scry.Loc :=
+  match l, k with
+  | l, .zero => l
+  | .unknown, _ => .unknown
+  | .anyOff b, _ => .anyOff b
+  | l, k =>
+    match Nat.lt (Scry.locDepth l) Scry.maxLocDepth with
+    | .true => .field l k
+    | .false => .unknown
+
+/-- The wildcard constructor with the finite-lattice laws: `anyOff (anyOff b)` is
+`anyOff b` (a wildcard of a wildcard is the same wildcard), and a base at the depth
+bound widens to `unknown`. `anyOff unknown` keeps its old value: the unknown location
+is already the top, and one wildcard level is finite. -/
+def Scry.anyOffBounded (l : Scry.Loc) : Scry.Loc :=
+  match l with
+  | .anyOff _ => l
+  | l =>
+    match Nat.lt (Scry.locDepth l) Scry.maxLocDepth with
+    | .true => .anyOff l
+    | .false => .unknown
 
 /-- Do two abstract locations possibly overlap? Constant offsets differ only when both
 are constant; `anyOff b` overlaps `b` and every `field b k`. -/
@@ -184,15 +232,29 @@ def Scry.locInsert (l : Scry.Loc) (ls : List Scry.Loc) : List Scry.Loc :=
 -- `Scry.fnvStr` (the key hash the maps below use) is `Scry.Identity`'s: the one
 -- 64-bit hash, over a string's code points, in `Word`. O(length of the name) per lookup.
 
-/-- Mix two words into one (a 64-bit odd multiplier and add). -/
-def Scry.mix64 (h x : U64) : U64 :=
-  UIntN.add (UIntN.mul (UIntN.xor h x) (U64.ofNat 1099511628211))
-    (U64.ofNat 1442695040888963407)
+/-- A 64-bit avalanche (the MurmurHash3 finalizer). It is applied after the combine so
+that adjacent inputs do not stay adjacent in the key. -/
+def Scry.mixFinal64 (x : U64) : U64 :=
+  let y := UIntN.xor x (UIntN.shiftRight x 33);
+  let y := UIntN.mul y (U64.ofNat 0xff51afd7ed558ccd);
+  let y := UIntN.xor y (UIntN.shiftRight y 33);
+  let y := UIntN.mul y (U64.ofNat 0xc4ceb9fe1a85ec53);
+  UIntN.xor y (UIntN.shiftRight y 33)
 
-/-- The map key of a register. Program points and registers are far below 2^32, and the
-name hash is 64-bit, so a collision is negligible. A collision can only **merge** two
-abstract registers (or two memory locations), which over-approximates: both are
-may-analyses, so a merge adds possible flow and never removes a real one. -/
+/-- Mix two words into one key. The combine is `h * FNV-prime + x`, **not** `h ^ x`:
+XOR cancels for related inputs. The old `(h XOR x) * c + d` made `(unit1, 1)` and
+`(unit2, 0)` the same key whenever the two name hashes differed by one (which the FNV
+hashes of sequential names like `unit1`/`unit2` do), so a program with sequential
+function names merged its registers. A merged register can feed a `gep`/`gepVar` back
+into itself, which grows a nested location every fixpoint round. -/
+def Scry.mix64 (h x : U64) : U64 :=
+  Scry.mixFinal64 (UIntN.add (UIntN.mul h (U64.ofNat 1099511628211)) x)
+
+/-- The map key of a register. A 64-bit collision is still possible, but it is now a
+2^-64 event instead of a systematic property of adjacent names; the location-depth
+bound keeps even a collision terminating. A collision can only **merge** two abstract
+registers (or two memory locations), which over-approximates: both are may-analyses, so
+a merge adds possible flow and never removes a real one. -/
 def Scry.vkKey (k : Scry.VarKey) : U64 :=
   Scry.mix64 (Scry.fnvStr k.func) (U64.ofNat k.var)
 
@@ -396,8 +458,10 @@ def Scry.rhsLocs (st : Scry.PtState) (func : String) (point : Nat) (x : Wil.Var)
     | .false => .nil
   | .load p => Scry.concatLists (fun l => Scry.memGet st l)
       (Scry.ptGet st (Scry.vk func p.index))
-  | .gep p k => List.map (fun l => Scry.addOff l k) (Scry.ptGet st (Scry.vk func p.index))
-  | .gepVar p _ _ => List.map Scry.Loc.anyOff (Scry.ptGet st (Scry.vk func p.index))
+  | .gep p k => List.map (fun l => Scry.addOffBounded l k)
+      (Scry.ptGet st (Scry.vk func p.index))
+  | .gepVar p _ _ => List.map Scry.anyOffBounded
+      (Scry.ptGet st (Scry.vk func p.index))
   | .alloc _ => .cons (.heap func point) .nil
   | .slot _ => .cons (.stack func point) .nil
   | .globalRef n => .cons (.glob n) .nil
@@ -692,6 +756,10 @@ structure Scry.PtResult where
   /-- False when the round cap stopped the fixpoint before it converged. The sets are
   then a lower bound: findings are real, recall is reduced, and the caller must say so. -/
   complete : Bool
+  /-- True when a location reached `Scry.maxLocDepth` and a deeper `field`/`anyOff`
+  was widened to `unknown`. This is the finite-lattice bound, not a round cap: the
+  fixpoint can still be `complete`, but recall is reduced and the caller must say so. -/
+  depthCapped : Bool
 
 def Scry.locId (r : Scry.PtResult) (l : Scry.Loc) : Option Nat :=
   match U64Map.find r.locIdx (Scry.locHash l) with
@@ -816,8 +884,10 @@ def Scry.pointsToBounded (p : Wil.Program) (maxRounds : Option Nat) : Scry.PtRes
           | .indirect v => .cons (Scry.CallKey.mk g.fn.name n,
               Scry.targetsOf (Scry.ptGet st (Scry.vk g.fn.name v.index))) .nil
         | _ => .nil) (Scry.range g.count)) gs;
+  let depthCapped := List.any
+    (fun l => Nat.le Scry.maxLocDepth (Scry.locDepth l)) locs;
   Scry.PtResult.mk st locs (Scry.locIdxOf locs 0) (Scry.fieldsIdxOf locs 0) indirect
-    solved.2.1 solved.2.2
+    solved.2.1 solved.2.2 depthCapped
 
 /-- The default analysis: the historical (finite) round bound. -/
 def Scry.pointsTo (p : Wil.Program) : Scry.PtResult :=
