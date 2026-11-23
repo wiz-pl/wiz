@@ -1,0 +1,11 @@
+{
+  "name": "goal-siblings-13b",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-siblings-13b.wiz",
+  "text": "import Prelude\ndef p : Nat → Nat := by\n  intro x\n  exact (Nat.add (by exact x) (by exact 1))\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 3, "character": 18 } } }
+  ],
+  "expected": [{ "match": "exact", "path": "result.goals", "value": ["x : Nat\n⊢ Nat"] }],
+  "note": "13b: the first sibling `by` itself (3:18). No knownGap: the selfhost answers `x : Nat ⊢ Nat` here today (through a word-searched fallback span, so only by luck), and 4b threads the step span so it matches for the right reason. A gap entry would XPASS today."
+}

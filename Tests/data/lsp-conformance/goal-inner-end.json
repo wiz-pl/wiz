@@ -13,12 +13,12 @@
     { "match": "exact", "path": "result.rendered", "value": "no goals" },
     { "match": "exact", "path": "result.goals", "value": ["⊢ Nat → Nat"] }
   ],
-  "note": "the two ends of the inner block, then the outer `by` itself (1:21)",
+  "note": "the two ends of the inner block, then the outer `by` itself (1:21); the inner ends agree, the outer goal is a function type",
   "knownGap": [
     {
       "server": "selfhost",
-      "reason": "the outer `by`'s goal prints its binder (`⊢ (x0 : Nat) → Nat`) where the host drops it (`⊢ Nat → Nat`); the inner ends agree",
-      "issue": "goal-printing"
+      "reason": "pretty-print: the selfhost spells a Pi with its binder, `⊢ (_ : Nat) → Nat` for the host's `⊢ Nat → Nat` (task 26); the inner ends agree",
+      "issue": "printer"
     }
   ]
 }

@@ -7,12 +7,12 @@
     { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 9 } } }
   ],
   "expected": [{ "match": "exact", "path": "result.goals", "value": ["⊢ Nat → Nat"] }],
-  "note": "the host prints a nondependent function type without its binder; the self-hosted server keeps the frontend's (`(x0 : Nat) → Nat`)",
+  "note": "the inner `by` itself. The selfhost does not find an inner block entry before 4b (a term elaborated inside a tactic gets no span, `Frontend.wiz:4850`); after 4b it does, and this expectation is then the printer's",
   "knownGap": [
     {
       "server": "selfhost",
-      "reason": "a goal whose target is a function type prints its binder (`⊢ (x0 : Nat) → Nat`) where the host drops it (`⊢ Nat → Nat`)",
-      "issue": "goal-printing"
+      "reason": "Pi printer (task 26): the selfhost spells a Pi with its binder, `⊢ (_ : Nat) → Nat` for the host's `⊢ Nat → Nat`",
+      "issue": "task 26"
     }
   ]
 }

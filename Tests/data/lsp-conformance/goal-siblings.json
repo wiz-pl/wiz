@@ -11,12 +11,12 @@
     { "match": "exact", "path": "result.goals", "value": ["x : Nat\n⊢ Nat"] },
     { "match": "exact", "path": "result.rendered", "value": "no goals" }
   ],
-  "note": "two sibling `by` blocks as arguments: the second block's state, then the first block's end",
+  "note": "two sibling `by` blocks as arguments: the second block's state (3:31, reliable after 4b), then the end of the first sibling's `exact x` (3:28)",
   "knownGap": [
     {
       "server": "selfhost",
-      "reason": "at 3:28 (the `)` closing `(by exact x)`) it answers the block's entry state `x : Nat ⊢ Nat` where the host reports no goals",
-      "issue": "goal-block-end"
+      "reason": "sibling divergence at 3:28 (the `)` closing `(by exact x)`): it answers the block's entry state `x : Nat ⊢ Nat` where the host reports no goals. Not a block-order gap: the block choice is the same, the step's after-state is simply not found at the closing paren",
+      "issue": "goal-siblings-end"
     }
   ]
 }
