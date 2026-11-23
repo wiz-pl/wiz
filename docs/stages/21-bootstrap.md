@@ -1614,9 +1614,13 @@ self-hosted prelude is what this frontend can check, not `lib/Prelude.wiz`". It 
 carries the reflection slice its own deriver runner names (`BinderKind`, `ParamView`,
 `FieldView`, `CtorView`, `IndView`, `Tac`, `TacticM`, `MacroM`, `Deriver` and
 `Syntax.mkNode`), because `selfhost/Frontend.wiz` uses them: without them the
-self-hosted compiler cannot read its own frontend. The rest of the host prelude's
-metaprogramming layer (`Expr`, `SatAnswer`, the tactic and macro registries, the
-`Syntax` builders) is still not carried.
+self-hosted compiler cannot read its own frontend. `Tac.getInductive` is a
+*higher-order* recursive field (`Option IndView → Tac`), so the plain `inductive`
+command carries stage 19e's `Desc.hrec` branch (`ctorDesc`/`hrecField`), not only a
+`mutual` block: without it `Tac` fails the positivity check and every declaration of
+the deriver runner is reported as an unknown identifier in turn. The rest of the host
+prelude's metaprogramming layer (`Expr`, `SatAnswer`, the tactic and macro registries,
+the `Syntax` builders) is still not carried.
 
 **The page's copy is the embedded one.** `web/build-playground.sh` concatenates
 `frontendFiles` from `Wiz/Selfhost.lean:123` (which includes `Frontend.wiz`) into the

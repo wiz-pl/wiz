@@ -1398,6 +1398,32 @@ def recField (T : String) (ps : List String) (nidx : Nat) (ty : Syntax) : RecF :
 def isRecField (T : String) (ps : List String) (ty : Syntax) : Bool := match recField T ps 0 ty with
   | .yes _ => .true
   | .no => .false
+-- (19e, F48) An **infinitary** recursive field of a plain `inductive`: its type is a
+-- function into `T` itself, `(h : H) → T ps i` (or `H → T ps i`), the shape Lean's
+-- `Desc.hrec` encodes (`lib/Prelude.wiz`'s `Tac.getInductive (k : Option IndView → Tac)`
+-- is one). The value is the domain, the binders the recursive occurrence's index lives
+-- under, and that index (`none` for a type without indices). `H` may not mention `T`
+-- (positivity, as for a recursive field's arguments).
+inductive HRecF where
+  | yes (H : Syntax) (binds : List String) (idx : Option Syntax)
+  | no
+def hrecField (T : String) (ps : List String) (nidx : Nat) (ty : Syntax) : HRecF :=
+  match strEq (kindOf ty) "term.arrow" with
+  | .true => match recField T ps nidx (kid ty 2) with
+    | .yes i => .yes (kid ty 0) (.cons "_" .nil) i
+    | .no => .no
+  | .false => match strEq (kindOf ty) "term.depArrow" with
+    -- a named arrow is one `Π`; a binder with several names is several nested `Π`s, and
+    -- its recursive occurrence would need the product of their domains (the host has no
+    -- `hrec` view of that either: its `Π` spine sees another `Π`)
+    | .true => match binderType (kid ty 0) with
+      | .some H => match binderNames (kid ty 0) with
+        | .cons b .nil => match recField T ps nidx (kid ty 2) with
+          | .yes i => .yes H (.cons b .nil) i
+          | .no => .no
+        | _ => .no
+      | .none => .no
+    | .false => .no
 -- the parameters as variables at depth `d`: `var (d - 1), …, var (d - np)`
 def pvars : Nat → Nat → Tms
   | .zero, _ => .tnil
@@ -1494,23 +1520,45 @@ def ctorDesc (inline : Bool) (gs : Globals) (T : String) (ps : List String) (nid
       | .ok jt => match ctorDesc inline gs T ps nidx res lv c sc d rest with
         | .ok D => .ok (.drec (.qlit q) jt D)
         | e => e
-    | .no => match typeOccurs T ty with
-      | .true => .err positivityError
-      | .false => match elab sc ty with
-        | .err m => .err m
-        | .ok A =>
-          let Acl : Tm := closeG .false gs d A;
-          let k : Option Lvl := sortOf c (eval (TCtx.env c) Acl);
-          let lifted : Bool := match k with
-            | .some k' => Bool.not (lvlEquiv k' (lsucc lv))
-            | .none => .false;
-          match ctorDesc inline gs T ps nidx res lv (TCtx.bind c (eval (TCtx.env c) Acl)) (Scope.bind sc x) (d + 1) rest with
+    | .no => match hrecField T ps nidx ty with
+      -- (19e, F48) `(h : H) → T ps i`: the description's infinitary field `dhrec`. Its
+      -- continuation `D` is *not* under the field (the field is a function value and the
+      -- fields after it may not depend on it, as the host's `strengthen`); the branch
+      -- function `fun h => i` is under the arrow's binder, so the index is closed one
+      -- binder deeper than the domain.
+      | .yes H binds idx => match typeOccurs T H with
+        | .true => .err positivityError
+        | .false => match elab sc H with
           | .err m => .err m
-          | .ok D => match lifted with
-            | .true => .ok (.darg (.qlit q) (.ulift (match k with
-                | .some k' => k'
-                | .none => .lhole) (lsucc lv) (closeG inline gs d A)) (.lam (downVar0 (d + 1) D)))
-            | .false => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
+          | .ok Ht =>
+            let scB := bindAll sc binds;
+            let jR : Elab := match idx with
+              | .none => .ok (.lam .star)
+              | .some i => match idxTm inline gs scB (d + List.length binds) (.some i) with
+                | .ok it => .ok (.lam it)
+                | e => e;
+            match jR with
+            | .err m => .err m
+            | .ok jt => match ctorDesc inline gs T ps nidx res lv c sc d rest with
+              | .err m => .err m
+              | .ok D => .ok (.dhrec (.qlit q) (closeG inline gs d Ht) jt D)
+      | .no => match typeOccurs T ty with
+        | .true => .err positivityError
+        | .false => match elab sc ty with
+          | .err m => .err m
+          | .ok A =>
+            let Acl : Tm := closeG .false gs d A;
+            let k : Option Lvl := sortOf c (eval (TCtx.env c) Acl);
+            let lifted : Bool := match k with
+              | .some k' => Bool.not (lvlEquiv k' (lsucc lv))
+              | .none => .false;
+            match ctorDesc inline gs T ps nidx res lv (TCtx.bind c (eval (TCtx.env c) Acl)) (Scope.bind sc x) (d + 1) rest with
+            | .err m => .err m
+            | .ok D => match lifted with
+              | .true => .ok (.darg (.qlit q) (.ulift (match k with
+                  | .some k' => k'
+                  | .none => .lhole) (lsucc lv) (closeG inline gs d A)) (.lam (downVar0 (d + 1) D)))
+              | .false => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
   --|ex
   --| | _, _, _, _ => .err "not implemented"
   --sol>
