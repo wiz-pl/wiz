@@ -426,7 +426,11 @@ def elab : Scope → Syntax → Elab
     | .privTo m => .err (("'" +++ privBase n) +++ "' is private to module " +++ m)
     | .missing => match strEq n "Unit" with
       | .true => .ok (.unit (ln 1))
-      | .false => .err ("unknown identifier " +++ n)
+      | .false => match strEq n "Size" with
+        -- (the size sort, as in the Lean frontend: `Size`, `∞`, `↑s` and `Size< s` are
+        -- terms; this path is the declaration scope checker)
+        | .true => .ok .size
+        | .false => .err ("unknown identifier " +++ n)
   | names, s => match strEq (kindOf s) "term.ident" with
     | .true => elab names (kid s 0)
     | .false => match strEq (kindOf s) "term.paren" with
@@ -5167,7 +5171,11 @@ def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
         | .true => .ok .ptrue (.vsort (.lnum 0)) es .nil
         | .false => match strEq n "False" with
           | .true => .ok .pfalse (.vsort (.lnum 0)) es .nil
-          | .false => .err (String.append "unknown identifier " n)
+          | .false => match strEq n "Size" with
+            -- (A19) the size sort, as in the Lean frontend (`Qty` is not a term here:
+            -- quantities are the `quantity` grammar's)
+            | .true => .ok .size (.vsort (.lnum 1)) es .nil
+            | .false => .err (String.append "unknown identifier " n)
   | .ok i => match Nat.lt i d with
     | .true => .ok (.var i) (lookup (TCtx.types (Cx.c cx)) i) es .nil
     | .false => match globalUse gs es cx (i - d) .nil with
@@ -5567,11 +5575,14 @@ def inferT1_0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp0 : Option SpT)
                           | .true => let d := Cx.lvl cx;
                             match inferT gs es cx (kid s 0) (spKid sp 0) with
                             | .err m => .err m
-                            | .ok t0 _ es1 => match checkT gs es1 cx (kid s 2) .vsize (spKid sp 2) with
+                            | .ok t0 ty0 es1 => match checkT gs es1 cx (kid s 2) .vsize (spKid sp 2) with
                               | .err m => .err m
                               | .ok sz0 _ es2 => match whnf (force es2 (eval (TCtx.env (Cx.c cx)) t0)) with
-                                | .vmu l I D i _ => .ok (.mus l (quote d I) (quote d D) (quote d i) sz0) (.vmu l I D i (eval (TCtx.env (Cx.c cx)) sz0)) es2
-                                | .vnu l I D i _ => .ok (.nu l (quote d I) (quote d D) (quote d i) sz0) (.vnu l I D i (eval (TCtx.env (Cx.c cx)) sz0)) es2
+                                -- (`ty0` is the head's own type (a sort), as in the Lean
+                                -- frontend's `term.sized`; the sized type is not its own
+                                -- sort, `T^s : Sort (l+1)` when `T : Sort (l+1)`)
+                                | .vmu l I D i _ => .ok (.mus l (quote d I) (quote d D) (quote d i) sz0) ty0 es2
+                                | .vnu l I D i _ => .ok (.nu l (quote d I) (quote d D) (quote d i) sz0) ty0 es2
                                 | v => .err (String.append "only inductive and coinductive types have sizes, not "
                                     (show (scopeNames (Cx.sc cx)) d (quote d v)))
                           | .false => inferT2 gs es cx s sp
