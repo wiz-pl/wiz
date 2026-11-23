@@ -245,9 +245,9 @@ about two minutes.
 
 The cache and native-representation work adds four `extern`s (`cListDir`, `cStat`,
 `cUnlink`, `cClockNs`) and two `partial def`s (`erasableTy`, `sealName`) to
-`selfhost/`. They are not in this tree yet; when they land, the `selfhost` root reports
-them as new sources and the gate fails until their reviewed rows (8 `axiom`/`builtin
-extern:` and 2 `partial`) are added — which is the point of the scope change.
+`selfhost/`; the `selfhost` root reports them as new sources, so their reviewed rows
+(8 `axiom`/`builtin extern:` and 2 `partial`) are in the ledger beside the rest of the
+programs' sources.
 
 ## Review cadence
 
