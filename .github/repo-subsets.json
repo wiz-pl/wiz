@@ -1,6 +1,6 @@
 {
   "generated_by": "scripts/repo-subsets.py",
-  "git": "e050f377493f0fe340ef0a247a9dcafc9eb59fc6",
+  "git": "unstaged",
   "subsets": {
     "docs": {
       "files": 117,
@@ -11,7 +11,7 @@
         "AGENTS.md",
         ".github/**"
       ],
-      "sha256": "c5351a6e4dded234a5f337c69c131bf149e5a69d6e5231c4a69cc7e1a7277689"
+      "sha256": "35c50093d74fe909482955212865a21270aae1bd6e162c111f326cbdfa05bc8b"
     },
     "lean": {
       "files": 162,
@@ -27,16 +27,16 @@
         "lake-manifest.json",
         "lean-toolchain"
       ],
-      "sha256": "7017e54fcb4891419bc72ebfbf7a5d55d608634e76e187c08ee5f458650e8acc"
+      "sha256": "9434df47e9d1ea3d3da9c89f4498ab7000433cde56d3ba1277ad3e915a930010"
     },
     "packages": {
-      "files": 916,
+      "files": 918,
       "paths": [
         "scry/**",
         "hdl/**",
         "tower/**"
       ],
-      "sha256": "b0f948aa2d6d2b979feec51a118b13206e35a91dd885b91ed0507dcae9ad5e03"
+      "sha256": "ed879a62ef584abdcf6ae49f3996b11fafd90be6f51d4ec2a057c68f1c7f9368"
     },
     "runtime": {
       "files": 11,
