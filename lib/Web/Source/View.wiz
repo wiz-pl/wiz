@@ -146,6 +146,10 @@ def Source.View.mergeSpansGo (prev : Option Source.Span) :
       | .true => Source.View.mergeSpansGo (.some (Source.Span.merge p x)) rest
       | .false => List.cons p (Source.View.mergeSpansGo (.some x) rest)
 
+/-- The sorted, disjoint spans of `ms` (the input may be in any order). -/
+def Source.View.mergeSpans (ms : List Source.Span) : List Source.Span :=
+  Source.View.mergeSpansGo .none (Source.View.sortSpans ms)
+
 /-- The marks on a line: the finding spans that overlap it and, when the reader focused
 a definition range in this file, that range too. The attributes carry the semantic id
 and the span, so a click can ask for the facts at that node without a second lookup. -/
@@ -184,7 +188,7 @@ def Source.View.lineRow (s : Source.Page) (f : Source.File) (i : EditorModel.Pos
     let finding := match Source.View.markFinding s f abs with
       | .some x => x
       | .none => Source.Finding.mk "" f.id f.path "" "" "" abs 0 0 .false "";
-    let focused := match s.focus with
+    let focused : Bool := match s.focus with
       | .some z => Source.Span.overlaps z abs
       | .none => .false;
     let payload := Source.spanPayload f.id abs;
