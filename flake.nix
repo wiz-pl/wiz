@@ -684,6 +684,7 @@ EOF
             pname = "wiz-web-bundle";
             inherit (unwrapped) version;
             dontUnpack = true;
+            nativeBuildInputs = [ pkgs.gnugrep ];
             installPhase = ''
               runHook preInstall
               mkdir -p $out
@@ -694,6 +695,9 @@ EOF
                        wiz-playground-ui.mjs wiz-playground-ui.wasm; do
                 [ -f "$out/$f" ] || { echo "web-bundle: missing $f" >&2; exit 1; }
               done
+              if grep -a -R '/nix/store' $out >/dev/null; then
+                echo "web-bundle: a module names a build store path" >&2; exit 1
+              fi
               runHook postInstall
             '';
             passthru.subset = "wiz-web + wiz-playground + wiz-playground-ui (their own filesets)";
@@ -733,7 +737,7 @@ EOF
             pname = "wiz-docs-site";
             inherit (unwrapped) version;
             src = docsSiteSource;
-            nativeBuildInputs = [ wiz pkgs.python3 ];
+            nativeBuildInputs = [ wiz pkgs.python3 pkgs.gnugrep ];
             buildPhase = ''
               runHook preBuild
               export HOME=$TMPDIR
@@ -754,6 +758,12 @@ EOF
             checkPhase = ''
               runHook preCheck
               sh web/check-site.sh site
+              if grep -a -R '/nix/store' site >/dev/null; then
+                echo "docs-site: a page names a build store path" >&2; exit 1
+              fi
+              if grep -a -R "$NIX_BUILD_TOP" site >/dev/null; then
+                echo "docs-site: a page names the build root" >&2; exit 1
+              fi
               runHook postCheck
             '';
             passthru.subset = "docs/ + bench/stdlib-{baseline,bench}.json + scry/bench/baseline.json + README/ROADMAP/CHANGELOG/LICENSE + the site scripts in siteAssetFiles + wiz + reference + web-bundle";
@@ -781,7 +791,7 @@ EOF
             pname = "wiz-pages";
             inherit (unwrapped) version;
             src = pagesSource;
-            nativeBuildInputs = [ wiz pkgs.python3 ];
+            nativeBuildInputs = [ wiz pkgs.python3 pkgs.gnugrep ];
             buildPhase = ''
               runHook preBuild
               export HOME=$TMPDIR
@@ -802,6 +812,12 @@ EOF
               mkdir -p site/source
               cp -R --no-preserve=mode bundle/. site/source/
               SITE_REQUIRE_SOURCE=1 sh ${docsSiteSource}/web/check-site.sh site
+              if grep -a -R '/nix/store' site >/dev/null; then
+                echo "pages: a page names a build store path" >&2; exit 1
+              fi
+              if grep -a -R "$NIX_BUILD_TOP" site >/dev/null; then
+                echo "pages: a page names the build root" >&2; exit 1
+              fi
               runHook postBuild
             '';
             installPhase = ''
