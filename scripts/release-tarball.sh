@@ -47,7 +47,7 @@ srcdir=${6:-.}
 arch=$(uname -m)
 name=wiz-$arch-linux
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+trap 'chmod -R u+w "$work" 2>/dev/null || true; rm -rf "$work"' EXIT
 top=$work/$name
 mkdir -p "$top/bin" "$top/share/wiz/.lake/build/bin"
 for b in wiz grail; do
