@@ -351,7 +351,7 @@ version = 1
           | .ok c =>
             check (has c "#define BPF_UPROBE 1") "the uprobe define is missing"
             check (has c "SEC(\"uprobe//bin/sh:readline\")") "the uprobe section is missing"
-            check (has c "_Static_assert(sizeof(struct bpf_pt_regs) == 168")
+            check (has header "_Static_assert(sizeof(struct bpf_pt_regs) == 168")
               "the pt_regs layout is not asserted"
             match probeDescriptor p with
             | .error e => throw (IO.userError e)
