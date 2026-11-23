@@ -59,7 +59,7 @@ def scryProjectSource (cc : String) : String :=
   "  let same := match jl, ql with\n" ++
   "    | .ok a, .ok b => Bool.and (Nat.beq (List.length a) (List.length b))\n" ++
   "        (UIntN.beq (Scry.fiPrint a) (Scry.fiPrint b))\n" ++
-  "    | _, _ => .false;\n" ++
+  "    | _, _ => Bool.false;\n" ++
   "  check \"index: json and quire hold the same findings\" same;\n" ++
   "  let sev0 := List.length (List.filter (fun r => Nat.beq r.severity 0) rows);\n" ++
   "  qc ← Scry.findingsQuery quire id 0;\n" ++
