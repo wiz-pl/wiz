@@ -1624,17 +1624,18 @@ jobs:
         run: |
           ref=$(nix build .#reference --no-link --print-out-paths)
           cp "$ref/index.md" doc-site/docs/reference.md
-      - name: The source reader (grail build scry + scry web)
+      - name: The source reader (nix build .#scry + scry web)
         # `/source/` is one static bundle: scry's report of the public C fixtures, the
-        # host files, and the reader's Loom runtime. `scry` is not a Nix package, so this
-        # is the job that has a scry binary: the same `grail build scry` path scry.yml
-        # uses (the tree-sitter shim and the dev shell's grail.local.wiz). The compiler
-        # is the lean job's seeded `wiz` (not a cold `.#wiz`), and the runtime is the
-        # seeded `wiz-source-ui` path `wasm` published; `web/source-bundle.sh`
-        # adds the .wasm beside it, because `--ui` alone copies only the .mjs.
+        # host files, and the reader's Loom runtime. `scry` is a derivation now
+        # (`.#scry`), so this step *substitutes* the CLI instead of running
+        # `grail build scry` here: that build was ~12 minutes and was the same build
+        # `packages (scry)` had already done in the same run (it keeps doing it in
+        # place, because building the package from a checkout is what that leg tests).
+        # The runtime is the seeded `wiz-source-ui` path `wasm` published;
+        # `web/source-bundle.sh` adds the `.wasm` beside it, because `--ui` alone copies
+        # only the .mjs.
         id: source
         env:
-          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
           # the path the modules step realised (substituted from Cachix or, on a fork
           # pull request, built); the producer's raw output string is not a store path
           # that exists on this runner
@@ -1644,13 +1645,10 @@ jobs:
             echo "docs: wasm produced no source_ui (the wasm modules job must build .#wiz-source-ui)" >&2
             exit 1
           }
-          nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp
-          mkdir -p .lake/build/bin
-          ln -sf "$WIZ" .lake/build/bin/wiz
-          ln -sf "$(dirname "$WIZ")/grail" .lake/build/bin/grail
-          ( cd scry && cp ../grail.local.wiz . && ../.lake/build/bin/grail build scry )
+          scry=$(nix build .#scry --no-link --print-out-paths)
+          echo "scry: $scry"
           bundle=$(mktemp -d)
-          sh web/source-bundle.sh ./scry/.grail/bin/scry "$bundle/b" \
+          sh web/source-bundle.sh "$scry/bin/scry" "$bundle/b" \
             --ui "$SOURCE_UI" --target scry/tests/fixtures/report
           echo "SOURCE_BUNDLE=$bundle/b" >> "$GITHUB_ENV"
           echo "ui=$SOURCE_UI" >> "$GITHUB_OUTPUT"
