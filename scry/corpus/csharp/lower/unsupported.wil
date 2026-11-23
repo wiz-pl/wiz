@@ -27,38 +27,39 @@ func Demo.Unsupported.Control.Flow(%0, %1)
     call System.Threading.Monitor.Enter(%0)
     %17 = call System.Console.WriteLine(%1)
     call System.Threading.Monitor.Exit(%0)
-    %19 = havoc u1
-    %20 = 0
-    br ne %19, %20 ? b1 : b2
+    %19 = null
+    %20 = havoc u1
+    %21 = 0
+    br (ne %1, %19) and (ne %20, %21) ? b1 : b2
   b1:
     %18 = %1
-    %21 = call System.Console.WriteLine(%18)
+    %22 = call System.Console.WriteLine(%18)
     goto b3
   b2:
     goto b3
   b3:
-    %22 = havoc u1
-    %23 = 0
-    br ne %22, %23 ? b4 : b5
+    %23 = havoc u1
+    %24 = 0
+    br ne %23, %24 ? b4 : b5
   b4:
-    %24 = call System.Console.WriteLine(%1)
+    %25 = call System.Console.WriteLine(%1)
     goto b6
   b5:
     goto b6
   b6:
-    %25 = call System.Exception..ctor()
+    %26 = call System.Exception..ctor()
     goto b7
   b7:
-    %26 = havoc u1
-    %27 = 0
-    br ne %26, %27 ? b9 : b11
+    %27 = havoc u1
+    %28 = 0
+    br ne %27, %28 ? b9 : b11
   b8:
     ret
   b9:
-    %28 = havoc dyn*
-    %29 = null
-    %30 = ne %28, %29
-    %31 = call System.Console.WriteLine(%28)
+    %29 = havoc dyn*
+    %30 = null
+    %31 = ne %29, %30
+    %32 = call System.Console.WriteLine(%29)
     goto b8
   b10:
     ret
