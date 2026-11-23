@@ -761,7 +761,7 @@ EOF
               if grep -a -R '/nix/store' site >/dev/null; then
                 echo "docs-site: a page names a build store path" >&2; exit 1
               fi
-              if grep -a -R "$NIX_BUILD_TOP" site >/dev/null; then
+              if grep -a -R "$PWD" site >/dev/null; then
                 echo "docs-site: a page names the build root" >&2; exit 1
               fi
               runHook postCheck
@@ -815,7 +815,7 @@ EOF
               if grep -a -R '/nix/store' site >/dev/null; then
                 echo "pages: a page names a build store path" >&2; exit 1
               fi
-              if grep -a -R "$NIX_BUILD_TOP" site >/dev/null; then
+              if grep -a -R "$PWD" site >/dev/null; then
                 echo "pages: a page names the build root" >&2; exit 1
               fi
               runHook postBuild
