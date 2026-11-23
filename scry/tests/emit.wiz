@@ -1,0 +1,233 @@
+-- test: run
+import Sys
+import Json
+import Text
+import Scry.ProjectIO
+-- `scry findings emit`: the e2e contract for the one output pipeline.
+--
+--   tests/fixtures/emit/one.c   one command-injection finding (the baseline)
+--   tests/fixtures/emit/two.c   the same rule in another function (the "new" one)
+--   tests/fixtures/emit/safe.c  no finding
+--
+-- What this pins:
+--
+-- * `--json` and `--sarif` in one command report the same ids (and two runs are
+--   byte-identical);
+-- * `--baseline` suppresses a known finding (exit 0) and names + exits 1 on a new one;
+-- * `--budget` fails with the count in the message, and accepts a severity cap;
+-- * `--fail-on-finding` gates a run without a baseline;
+-- * the web bundle's `data/findings.json` id is the SARIF id (one derivation).
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.ePrintln (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+structure Res where
+  code : Nat
+  out : String
+  err : String
+
+def run (args : List String) : EIO Res := do
+  r ← Process.output ".grail/bin/scry" args "";
+  let code := match r.status with
+    | .exited n => n
+    | .signaled _ => 99;
+  EIO.pure (Res.mk code r.stdout r.stderr)
+
+def jAt (j : Json) (path : List String) : Json :=
+  match path with
+  | .nil => j
+  | .cons k rest => match Json.get j k with
+    | .some x => jAt x rest
+    | .none => Json.mkNull
+
+def jStr (j : Json) (path : List String) : String :=
+  match jAt j path with
+  | .str s => s
+  | _ => ""
+
+def jNat (j : Json) (path : List String) : Nat :=
+  match jAt j path with
+  | .int _ n => n
+  | _ => 0
+
+def jList (j : Json) (path : List String) : List Json :=
+  match jAt j path with
+  | .arr xs => Jsons.toList xs
+  | _ => .nil
+
+def nthJ : List Json → Nat → Json
+  | .nil, _ => Json.mkNull
+  | .cons x _, .zero => x
+  | .cons _ xs, .succ k => nthJ xs k
+
+def parseJson (label text : String) : EIO Json :=
+  match Json.parse text with
+  | .ok j => EIO.pure j
+  | .error e => do
+    check (label ++ ": JSON parses (" ++ e ++ ")") .false;
+    EIO.pure Json.mkNull
+
+def readJson (path : String) : EIO Json := do
+  text ← FS.readFile path;
+  parseJson path text
+
+/-- The ids in a JSON report, in file order. -/
+def jsonIds (j : Json) : List String :=
+  List.map (fun r => jStr r ["id"]) (jList j ["findings"])
+
+/-- The `partialFingerprints.scry/v1` ids of a SARIF log, in result order. -/
+def sarifIds (j : Json) : List String :=
+  List.concat (List.map (fun run =>
+    List.map (fun r => jStr r ["partialFingerprints", "scry/v1"])
+      (jList run ["results"])) (jList j ["runs"]))
+
+def ensureBuild : EIO Unit := do
+  ok ← EIO.lift (FS.exists "build");
+  match ok with
+  | .true => EIO.pure ()
+  | .false => FS.createDir "build"
+
+def main : IO Unit := EIO.toIO (do
+  bin ← EIO.lift (FS.exists ".grail/bin/scry");
+  match bin with
+  | .false => EIO.lift (IO.println "emit: skip (.grail/bin/scry absent)")
+  | .true => do
+    ensureBuild;
+
+    -- 1. One command emits both formats for the same run; the ids match.
+    r1 ← run ["findings", "emit", "tests/fixtures/emit",
+      "--json", "build/emit-1.json", "--sarif", "build/emit-1.sarif"];
+    check "emit: exit 0 without a gate" (Nat.beq r1.code 0);
+    j1 ← readJson "build/emit-1.json";
+    s1 ← readJson "build/emit-1.sarif";
+    let ids1 := jsonIds j1;
+    let sids1 := sarifIds s1;
+    check "emit: two findings in the JSON" (Nat.beq (List.length ids1) 2);
+    check "emit: two results in the SARIF" (Nat.beq (List.length sids1) 2);
+    check "emit: ids match across JSON and SARIF"
+      (String.eq (String.intercalate "," ids1) (String.intercalate "," sids1));
+    check "emit: ids are distinct"
+      (match ids1 with
+        | .cons a (.cons b _) => Bool.not (String.eq a b)
+        | _ => .false);
+    check "emit: report counts match the arrays"
+      (Bool.and (Nat.beq (jNat j1 ["counts", "findings"]) 2)
+        (Nat.beq (jNat j1 ["counts", "emitted"]) 2));
+    check "emit: schema names the pipeline"
+      (String.eq (jStr j1 ["schema"]) "scry-findings/1");
+    check "emit: sarif is 2.1.0" (String.eq (jStr s1 ["version"]) "2.1.0");
+    check "emit: sarif rule id is namespaced"
+      (String.eq (jStr (nthJ (jList (nthJ (jList s1 ["runs"]) 0) ["results"]) 0)
+        ["ruleId"]) "scry/c/command-injection");
+
+    -- 2. A rerun is byte-identical (no timestamp, sorted rows).
+    r2 ← run ["findings", "emit", "tests/fixtures/emit",
+      "--json", "build/emit-2.json", "--sarif", "build/emit-2.sarif"];
+    check "determinism: exit 0" (Nat.beq r2.code 0);
+    t1 ← FS.readFile "build/emit-1.json";
+    t2 ← FS.readFile "build/emit-2.json";
+    u1 ← FS.readFile "build/emit-1.sarif";
+    u2 ← FS.readFile "build/emit-2.sarif";
+    check "determinism: JSON is byte-identical" (String.eq t1 t2);
+    check "determinism: SARIF is byte-identical" (String.eq u1 u2);
+
+    -- 3. --json - is a clean pipe: stdout is JSON, human lines are on stderr.
+    r3 ← run ["findings", "emit", "tests/fixtures/emit/one.c", "--json", "-"];
+    check "stdout: exit 0" (Nat.beq r3.code 0);
+    j3 ← parseJson "stdout" r3.out;
+    check "stdout: parses and has one finding"
+      (Nat.beq (List.length (jsonIds j3)) 1);
+    check "stdout: the summary went to stderr"
+      (String.contains r3.err "scry findings emit:");
+
+    -- 4. Bootstrap a baseline from one.c, then gate two.c as new.
+    r4 ← run ["findings", "emit", "tests/fixtures/emit/one.c",
+      "--json", "build/emit-base0.json", "--update-baseline", "build/emit-baseline.json"];
+    check "baseline: update exits 0" (Nat.beq r4.code 0);
+    b ← readJson "build/emit-baseline.json";
+    check "baseline: schema" (String.eq (jStr b ["schema"]) "scry-baseline/1");
+    check "baseline: one id" (Nat.beq (List.length (jList b ["ids"])) 1);
+    let known := match jList b ["ids"] with
+      | .cons x _ => jStr x []
+      | .nil => "";
+    check "baseline: the id is f_-prefixed" (String.startsWith known "f_");
+
+    r5 ← run ["findings", "emit", "tests/fixtures/emit/one.c",
+      "--json", "build/emit-known.json", "--sarif", "build/emit-known.sarif",
+      "--baseline", "build/emit-baseline.json"];
+    check "baseline: only known findings exits 0" (Nat.beq r5.code 0);
+    j5 ← readJson "build/emit-known.json";
+    s5 ← readJson "build/emit-known.sarif";
+    check "baseline: the known finding is suppressed"
+      (Bool.and (Nat.beq (List.length (jsonIds j5)) 0)
+        (Nat.beq (List.length (sarifIds s5)) 0));
+    check "baseline: the suppressed count is explicit"
+      (Nat.beq (jNat j5 ["counts", "baselineSuppressed"]) 1);
+
+    r6 ← run ["findings", "emit", "tests/fixtures/emit/two.c",
+      "--json", "build/emit-new.json", "--sarif", "build/emit-new.sarif",
+      "--baseline", "build/emit-baseline.json"];
+    check "baseline: a new finding exits 1" (Nat.beq r6.code 1);
+    j6 ← readJson "build/emit-new.json";
+    s6 ← readJson "build/emit-new.sarif";
+    let newId := match jsonIds j6 with
+      | .cons x _ => x
+      | .nil => "";
+    check "baseline: the new finding is the only result"
+      (Bool.and (Nat.beq (List.length (jsonIds j6)) 1)
+        (Nat.beq (List.length (sarifIds s6)) 1));
+    check "baseline: the new id differs from the known id"
+      (Bool.not (String.eq newId known));
+    check "baseline: the new finding is named on stderr"
+      (Bool.and (String.contains r6.err "new finding:")
+        (String.contains r6.err newId));
+    check "baseline: SARIF marks it new"
+      (String.eq (jStr (nthJ (jList (nthJ (jList s6 ["runs"]) 0) ["results"]) 0)
+        ["baselineState"]) "new");
+
+    -- 5. Budgets fail on the count and name it; a severity cap is independent.
+    rb1 ← run ["findings", "emit", "tests/fixtures/emit",
+      "--json", "build/emit-budget.json", "--budget", "1"];
+    check "budget: over the total exits 1" (Nat.beq rb1.code 1);
+    check "budget: the message names the count"
+      (Bool.and (String.contains rb1.err "budget exceeded:")
+        (String.contains rb1.err "2 finding(s)"));
+    rb2 ← run ["findings", "emit", "tests/fixtures/emit",
+      "--json", "build/emit-budget2.json", "--budget", "2"];
+    check "budget: at the cap exits 0" (Nat.beq rb2.code 0);
+    rb3 ← run ["findings", "emit", "tests/fixtures/emit",
+      "--json", "build/emit-budget3.json", "--budget", "error=1"];
+    check "budget: severity cap exits 1" (Nat.beq rb3.code 1);
+    check "budget: severity message names the count"
+      (Bool.and (String.contains rb3.err "budget exceeded:")
+        (String.contains rb3.err "2 error finding(s)"));
+    rb4 ← run ["findings", "emit", "tests/fixtures/emit",
+      "--json", "build/emit-budget4.json", "--budget", "warning=0"];
+    check "budget: another severity is within its cap" (Nat.beq rb4.code 0);
+
+    -- 6. --fail-on-finding is the no-baseline gate.
+    rf1 ← run ["findings", "emit", "tests/fixtures/emit",
+      "--json", "build/emit-fail.json"];
+    check "fail-on: no flag exits 0" (Nat.beq rf1.code 0);
+    rf2 ← run ["findings", "emit", "tests/fixtures/emit",
+      "--json", "build/emit-fail2.json", "--fail-on-finding"];
+    check "fail-on: the flag exits 1" (Nat.beq rf2.code 1);
+
+    -- 7. The web bundle and the SARIF share the id derivation.
+    rw ← run ["web", "tests/fixtures/emit/one.c", "--out", "build/emit-web"];
+    check "web: bundle exit 0" (Nat.beq rw.code 0);
+    wf ← readJson "build/emit-web/data/findings.json";
+    let webIds := List.map (fun r => jStr r ["id"]) (jList wf ["findings"]);
+    check "web: one finding" (Nat.beq (List.length webIds) 1);
+    check "web: id is the emit JSON id"
+      (match webIds, jsonIds j3 with
+        | .cons w _, .cons j _ => String.eq w j
+        | _, _ => .false);
+    check "web: id is a SARIF fingerprint id"
+      (match webIds with
+        | .cons w _ => List.any (fun z => String.eq w z) (sarifIds s1)
+        | .nil => .false)
+)
