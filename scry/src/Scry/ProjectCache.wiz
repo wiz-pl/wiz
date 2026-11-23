@@ -8,8 +8,9 @@ import Scry.CstStore
 import Json
 import Scry.Identity
 import Scry.QuireFindings
+import Scry.Lower
 /-!
-# Scry.ProjectCache: the per-translation-unit parse cache
+# Scry.ProjectCache: the per-translation-unit parse and lowering caches
 
 The project driver's expensive step is tree-sitter parsing plus the native-store copy
 (`Scry.Native.parse` → `Scry.CstStore`); `cc -E` and lowering are comparatively cheap.
@@ -19,6 +20,15 @@ the *actual preprocessed text*. That second check is what makes the cache safe w
 header or a macro changes: a stale entry does not match the digest and is a miss, even if
 the outer key did not change. A stale hit therefore cannot silently reuse a tree from
 different code.
+
+The second cache is the **per-TU lowering** (`Stage B` of
+`wiz-notes/incremental-scry.md` §6.2): the `Scry.TU` a CST lowers to, keyed by the
+inputs lowering actually reads — the full CST digest, the lowering/version identity, the
+preprocessing digest, the unit target, and the original file paths and text digests
+(origins and warnings carry original positions, which come from the line map and texts,
+not from the preprocessed text). It is opt-in through the same `Scry.CacheOpts` as the
+parse cache and stores exactly one record per TU, written atomically. See
+"The lowering cache" below.
 
 The cache is a separate directory (`--cache[=DIR]`, default `.scry-project-cache`). Each
 entry is `DIR/<key>.tu`, written through a sibling `.tmp` and renamed. A malformed or
@@ -47,8 +57,38 @@ An entry is reused only when every one of these agrees:
 
 A rule pack is deliberately **not** keyed: it cannot change the cached CST, and findings
 are recomputed from the CST on every run, so a warm cache with a changed pack produces
-the new findings (pinned by `scry/tests/project.wiz`). Lowering, points-to and the rule
-engine are likewise rerun rather than cached.
+the new findings (pinned by `scry/tests/project.wiz`). Points-to and the rule engine are
+likewise rerun rather than cached. Lowering is cached separately (the next section), under
+its own key, because it reads the original texts and the full CST digest rather than the
+parse key's inputs.
+
+## The lowering cache
+
+`Scry.lowerCacheSave`/`Scry.lowerCacheLoad` store one TU per record at
+`DIR/lower-<key>.tu` whenever `Scry.CacheOpts.enabled` is set (the same opt-in as the
+parse cache; there is no second flag). An entry is the unit's `Scry.TU` — every
+function/block/statement/terminator with its span and register types, the warnings in
+order, and the external calls — plus the parse error count, written as one canonical
+JSON record per line. It contains no project-global id: the merge
+(`Scry.projectOfUnitsWith`) assigns file/function/site ids in unit order on every run, so
+a cached TU is safe at any project position.
+
+The key names every input the lowering reads:
+
+| input | why |
+|---|---|
+| the entry format and `Scry.projectLowererVersion` | a writer or lowering change is a clean miss |
+| `Scry.cstFullDigest` | the exact CST the lowering consumed (all columns, including the ones the spill does not write) |
+| `Scry.lowerPreDigest pre` | headers and macros (`cc -E` output) **and the line map**: a same-length `#line` rewrite blanks to the same text but changes every origin |
+| the unit target (`Scry.TU.path`) | two units with identical text at different paths must not share a TU |
+| every original file path and text digest | every `Wil.Span` and warning carries an original file/line/column from the line map and texts, not from the preprocessed text (H5) |
+| `--allow-errors` | explicit, alongside the CST digest that already distinguishes a recovery tree |
+
+On load the header names the key inputs and the body's length and 64-bit digest; a key
+or version mismatch is a `miss`, and a truncated body, a digest mismatch, a malformed
+line or a body that does not re-render identically is `corrupt`. Both are recomputed and
+rewritten, so corruption costs a lowering, never a stale TU. The write is one atomic
+record (a sibling `.tmp` and a rename, through `Scry.cacheWriteAtomic`).
 
 The frontend stamp is a constant, not a hash of the grammar sources: an installed
 toolchain has no source path to hash, and hashing a 30 MB `parser.c` per translation unit
@@ -90,7 +130,10 @@ def Scry.CacheOpts.none : Scry.CacheOpts :=
   Scry.CacheOpts.mk .false ".scry-project-cache" .json
 
 /-- Cache policy and statistics. `reason` is `cold`, `hit`, `miss`, `corrupt` or
-`disabled` (the first event of the last TU, for the human line). -/
+`disabled` (the first event of the last TU, for the human line). The `lower*` counters
+describe the per-TU lowering cache; they are deliberately not printed by
+`Scry.CacheStats.line`/`.json`, whose format is a CLI surface (cache statistics are
+metadata about the incremental run, not an artifact). -/
 structure Scry.CacheStats where
   enabled : Bool
   dir : String
@@ -101,27 +144,53 @@ structure Scry.CacheStats where
   /-- TUs examined (hit + miss). -/
   files : Nat
   reason : String
+  /-- Lowering-cache hits. -/
+  lowerHit : Nat
+  /-- Lowering-cache misses (`cold`, `miss`, `corrupt`). -/
+  lowerMiss : Nat
+  /-- Lowering entries written (on a miss). -/
+  lowerWrite : Nat
+  /-- Lowering entries rejected as corrupt or truncated. -/
+  lowerCorrupt : Nat
 
 def Scry.CacheStats.empty : Scry.CacheStats :=
-  Scry.CacheStats.mk .false "" 0 0 0 0 0 "disabled"
+  Scry.CacheStats.mk .false "" 0 0 0 0 0 "disabled" 0 0 0 0
 
 def Scry.CacheStats.enabledWith (dir : String) : Scry.CacheStats :=
-  Scry.CacheStats.mk .true dir 0 0 0 0 0 "cold"
+  Scry.CacheStats.mk .true dir 0 0 0 0 0 "cold" 0 0 0 0
 
 def Scry.CacheStats.hitOne (s : Scry.CacheStats) : Scry.CacheStats :=
   Scry.CacheStats.mk s.enabled s.dir (Nat.succ s.hit) s.miss s.write s.corrupt
-    (Nat.succ s.files) "hit"
+    (Nat.succ s.files) "hit" s.lowerHit s.lowerMiss s.lowerWrite s.lowerCorrupt
 
 def Scry.CacheStats.missOne (s : Scry.CacheStats) (reason : String) : Scry.CacheStats :=
   let corrupt := match String.eq reason "corrupt" with
     | .true => Nat.succ s.corrupt
     | .false => s.corrupt;
   Scry.CacheStats.mk s.enabled s.dir s.hit (Nat.succ s.miss) s.write corrupt
-    (Nat.succ s.files) reason
+    (Nat.succ s.files) reason s.lowerHit s.lowerMiss s.lowerWrite s.lowerCorrupt
 
 def Scry.CacheStats.writeOne (s : Scry.CacheStats) : Scry.CacheStats :=
   Scry.CacheStats.mk s.enabled s.dir s.hit s.miss (Nat.succ s.write) s.corrupt s.files
-    s.reason
+    s.reason s.lowerHit s.lowerMiss s.lowerWrite s.lowerCorrupt
+
+/-- A lowering-cache hit. -/
+def Scry.CacheStats.lowerHitOne (s : Scry.CacheStats) : Scry.CacheStats :=
+  Scry.CacheStats.mk s.enabled s.dir s.hit s.miss s.write s.corrupt s.files s.reason
+    (Nat.succ s.lowerHit) s.lowerMiss s.lowerWrite s.lowerCorrupt
+
+/-- A lowering-cache miss; `corrupt` increments the corruption counter too. -/
+def Scry.CacheStats.lowerMissOne (s : Scry.CacheStats) (reason : String) : Scry.CacheStats :=
+  let corrupt := match String.eq reason "corrupt" with
+    | .true => Nat.succ s.lowerCorrupt
+    | .false => s.lowerCorrupt;
+  Scry.CacheStats.mk s.enabled s.dir s.hit s.miss s.write s.corrupt s.files s.reason
+    s.lowerHit (Nat.succ s.lowerMiss) s.lowerWrite corrupt
+
+/-- A lowering entry written after a miss. -/
+def Scry.CacheStats.lowerWriteOne (s : Scry.CacheStats) : Scry.CacheStats :=
+  Scry.CacheStats.mk s.enabled s.dir s.hit s.miss s.write s.corrupt s.files s.reason
+    s.lowerHit s.lowerMiss (Nat.succ s.lowerWrite) s.lowerCorrupt
 
 /-- The cache-entry format version. Bump it when `cacheEntryText`/`cacheEntryOf` change;
 an entry written by another version is a clean miss and is rewritten. -/
@@ -193,6 +262,25 @@ def Scry.digestU32 (h : U64) (a : U32Array) : U64 :=
 def Scry.digestU64 (h : U64) (a : U64Array) : U64 :=
   U64Array.foldl (fun acc x => Scry.fnvStep acc x)
     (Scry.fnvStep h (U64.ofNat (U64Array.size a))) a
+
+/-- Mix a list of naturals (with its length) into a running hash. -/
+def Scry.digestNats (h : U64) (xs : List Nat) : U64 :=
+  List.foldl (fun acc n => Scry.fnvStep acc (U64.ofNat n))
+    (Scry.fnvStep h (U64.ofNat (List.length xs))) xs
+
+/-- The lowering cache's preprocessing digest: the preprocessed text **and the line map**
+(`lineStart`/`lineFile`/`lineOrig`), the original paths and texts. `Scry.preDigest` (the
+parse cache's) covers only `pre.text`, but a `#line` rewrite of the same length blanks to
+the same text; the lowering reads `lineOrig` to stamp every origin and warning, so its key
+must cover the map too (H5). -/
+def Scry.lowerPreDigest (pre : Scry.Preprocessed) : String :=
+  let h0 := Scry.digestStr Scry.fnvOffset pre.text;
+  let h1 := List.foldl (fun acc s => Scry.digestStr acc s) h0 pre.paths;
+  let h2 := List.foldl (fun acc s => Scry.digestStr acc s) h1 pre.texts;
+  let h3 := Scry.digestNats h2 pre.lineStart;
+  let h4 := Scry.digestNats h3 pre.lineFile;
+  let h5 := Scry.digestNats h4 pre.lineOrig;
+  Nat.repr (UIntN.toNat h5)
 
 /-- A digest of **every** column of a CST store, including the intern tables and the
 child CSR. `CstStore.render`/`ofText` does not write `nextSib` or the child CSR
@@ -321,12 +409,11 @@ def Scry.cacheLoad (dir key pre : String) : EIO (Except String (Scry.CstStore ×
     | .error _ => EIO.pure (.error "corrupt")
     | .ok text => EIO.pure (Scry.cacheEntryOf key pre text)
 
-/-- Write a cache entry atomically (sibling `.tmp`, then rename over the target). A
+/-- Write `text` to `p` atomically: a sibling `.tmp`, then rename over the target. A
 `.tmp` that is a symbolic link is refused: `FS.writeFile` opens with `O_TRUNC`, so a
-committed `<entry>.tmp -> ~/.bashrc` would otherwise truncate the target. -/
-def Scry.cacheSave (dir key pre errors digest cst : String) : EIO Unit := do
-  Scry.mkdirp dir;
-  let p := Scry.cachePath dir key;
+committed `<entry>.tmp -> ~/.bashrc` would otherwise truncate the target. Both cache
+formats write exactly one record through this function. -/
+def Scry.cacheWriteAtomic (p text : String) : EIO Unit := do
   let tmp := String.append p ".tmp";
   st ← EIO.lift (FS.linkStat tmp);
   match st with
@@ -334,8 +421,14 @@ def Scry.cacheSave (dir key pre errors digest cst : String) : EIO Unit := do
     | .symlink => EIO.fail ("cache: " ++ tmp ++ " is a symbolic link; refusing to write through it")
     | _ => EIO.pure ()
   | .error _ => EIO.pure ();
-  FS.writeFile tmp (Scry.cacheEntryText key pre errors digest cst);
+  FS.writeFile tmp text;
   FS.rename tmp p
+
+/-- Write a cache entry atomically (sibling `.tmp`, then rename over the target). -/
+def Scry.cacheSave (dir key pre errors digest cst : String) : EIO Unit := do
+  Scry.mkdirp dir;
+  Scry.cacheWriteAtomic (Scry.cachePath dir key)
+    (Scry.cacheEntryText key pre errors digest cst)
 
 /-- Overwrite every entry in `dir` with a malformed body (the corruption test). -/
 partial def Scry.corruptCacheEntries (dir : String) : List String → EIO Unit
@@ -343,6 +436,887 @@ partial def Scry.corruptCacheEntries (dir : String) : List String → EIO Unit
   | .cons name rest => do
     FS.writeFile (String.append dir (String.append "/" name)) "not a cache entry\n";
     Scry.corruptCacheEntries dir rest
+
+-- ## The canonical Wil dump (shared with `scry-artifacts`)
+
+/-- A line for the canonical dump. -/
+def Scry.adLine (xs : List String) : String := String.intercalate "\t" xs
+
+/-- Lines joined with a final newline. -/
+def Scry.adLines (ls : List String) : String :=
+  List.foldr (fun l acc => l ++ "\n" ++ acc) "" ls
+
+/-- `f 0, f 1, …, f (n-1)`, by index (structural on the fuel). -/
+partial def Scry.adRangeGo (f : Nat → String) : Nat → Nat → List String
+  | .zero, _ => .nil
+  | .succ k, i => List.cons (f i) (Scry.adRangeGo f k (Nat.succ i))
+
+def Scry.adRange (n : Nat) (f : Nat → String) : List String := Scry.adRangeGo f n 0
+
+/-- A type. -/
+def Scry.adTy : Wil.Ty → String
+  | .int w s => "int" ++ Nat.repr w ++ (match s with | .true => "s" | .false => "u")
+  | .ptr t => "ptr(" ++ Scry.adTy t ++ ")"
+  | .fn n t => "fn(" ++ Nat.repr n ++ "," ++ Scry.adTy t ++ ")"
+  | .record i => "record" ++ Nat.repr i
+  | .dyn => "dyn"
+  | .unknown => "unknown"
+
+/-- A concrete value. -/
+def Scry.adVal : Wil.Val → String
+  | .int w s b => "int" ++ Nat.repr w ++ (match s with | .true => "s" | .false => "u")
+      ++ ":" ++ Nat.repr b
+  | .ptr b o => "ptr:" ++ Nat.repr b ++ ":" ++ Nat.repr o
+  | .nul => "null"
+  | .undef => "undef"
+
+/-- A register: index and declared type. -/
+def Scry.adVar (v : Wil.Var) : String :=
+  Nat.repr v.index ++ ":" ++ Scry.adTy v.ty
+
+/-- An operator. -/
+def Scry.adOp : Wil.Op → String
+  | .add => "add" | .sub => "sub" | .mul => "mul" | .div => "div" | .rem => "rem"
+  | .and => "and" | .or => "or" | .xor => "xor" | .shl => "shl" | .shr => "shr"
+  | .eq => "eq" | .ne => "ne" | .lt => "lt" | .le => "le" | .gt => "gt" | .ge => "ge"
+  | .neg => "neg" | .not => "not"
+
+/-- A condition. -/
+def Scry.adCond : Wil.Cond → String
+  | .const b => "const" ++ (match b with | .true => "1" | .false => "0")
+  | .cmp op a b => "cmp:" ++ Scry.adOp op ++ ":" ++ Scry.adVar a ++ ":" ++ Scry.adVar b
+  | .not c => "not(" ++ Scry.adCond c ++ ")"
+  | .and a b => "and(" ++ Scry.adCond a ++ "," ++ Scry.adCond b ++ ")"
+  | .or a b => "or(" ++ Scry.adCond a ++ "," ++ Scry.adCond b ++ ")"
+
+/-- A right-hand side. -/
+def Scry.adRhs : Wil.Rhs → String
+  | .use v => "use:" ++ Scry.adVar v
+  | .cst v => "cst:" ++ Scry.adVal v
+  | .bin op a b => "bin:" ++ Scry.adOp op ++ ":" ++ Scry.adVar a ++ ":" ++ Scry.adVar b
+  | .un op a => "un:" ++ Scry.adOp op ++ ":" ++ Scry.adVar a
+  | .load p => "load:" ++ Scry.adVar p
+  | .gep p k => "gep:" ++ Scry.adVar p ++ ":" ++ Nat.repr k
+  | .alloc n => "alloc:" ++ Nat.repr n
+  | .havoc t => "havoc:" ++ Scry.adTy t
+  | .slot n => "slot:" ++ Nat.repr n
+  | .globalRef n => "global:" ++ n
+  | .fnptr n => "fnptr:" ++ n
+  | .gepVar p i k => "gepvar:" ++ Scry.adVar p ++ ":" ++ Scry.adVar i ++ ":" ++ Nat.repr k
+
+/-- A callee. -/
+def Scry.adCallee : Wil.Callee → String
+  | .direct n => "direct:" ++ n
+  | .indirect v => "indirect:" ++ Scry.adVar v
+
+/-- An origin: file, byte range, CST node, line, column. -/
+def Scry.adSpan (sp : Wil.Span) : String :=
+  Scry.adLine [Nat.repr sp.file, Nat.repr sp.start, Nat.repr sp.stop, Nat.repr sp.node,
+    Nat.repr sp.line, Nat.repr sp.col]
+
+/-- A statement (one line). -/
+def Scry.adStmt : Wil.Stmt → String
+  | .assign x e o => "assign\t" ++ Scry.adVar x ++ "\t" ++ Scry.adRhs e ++ "\t" ++ Scry.adSpan o
+  | .assume c o => "assume\t" ++ Scry.adCond c ++ "\t" ++ Scry.adSpan o
+  | .store p v o => "store\t" ++ Scry.adVar p ++ "\t" ++ Scry.adVar v ++ "\t" ++ Scry.adSpan o
+  | .free p o => "free\t" ++ Scry.adVar p ++ "\t" ++ Scry.adSpan o
+  | .call r c args o => "call\t"
+      ++ (match r with | .some v => Scry.adVar v | .none => "-")
+      ++ "\t" ++ Scry.adCallee c
+      ++ "\t" ++ String.intercalate "," (List.map Scry.adVar args)
+      ++ "\t" ++ Scry.adSpan o
+  | .nop o => "nop\t" ++ Scry.adSpan o
+
+/-- A terminator (one line). -/
+def Scry.adTerm : Wil.Term → String
+  | .goto b o => "goto\t" ++ Nat.repr b.index ++ "\t" ++ Scry.adSpan o
+  | .br c t f o => "br\t" ++ Scry.adCond c ++ "\t" ++ Nat.repr t.index ++ "\t"
+      ++ Nat.repr f.index ++ "\t" ++ Scry.adSpan o
+  | .ret v o => "ret\t" ++ (match v with | .some x => Scry.adVar x | .none => "-")
+      ++ "\t" ++ Scry.adSpan o
+  | .unreachable o => "unreachable\t" ++ Scry.adSpan o
+
+/-- One block's statements and terminator, each prefixed with its block and statement
+index. -/
+partial def Scry.adStmtsGo (b i : Nat) : List Wil.Stmt → List String
+  | .nil => .nil
+  | .cons s rest => List.cons
+      ("b" ++ Nat.repr b ++ "\ts" ++ Nat.repr i ++ "\t" ++ Scry.adStmt s)
+      (Scry.adStmtsGo b (Nat.succ i) rest)
+
+/-- Every block of a function, in order. -/
+partial def Scry.adBlocksGo (i : Nat) : List Wil.Block → List String
+  | .nil => .nil
+  | .cons blk rest => List.append
+      (Scry.adStmtsGo i 0 blk.stmts)
+      (List.cons ("b" ++ Nat.repr i ++ "\tterm\t" ++ Scry.adTerm blk.term)
+        (Scry.adBlocksGo (Nat.succ i) rest))
+
+/-- One function: name, entry, params, locals, origin, blocks. -/
+def Scry.adFunc (i : Nat) (f : Wil.Func) : List String :=
+  List.append
+    [ "func\t" ++ Nat.repr i ++ "\t" ++ f.name
+    , "entry\t" ++ Nat.repr f.entry.index
+    , "origin\t" ++ Scry.adSpan f.origin
+    , "params\t" ++ String.intercalate "," (List.map Scry.adVar f.params)
+    , "locals\t" ++ String.intercalate "," (List.map Scry.adVar f.locals) ]
+    (Scry.adBlocksGo 0 f.blocks)
+
+/-- Every function of a TU, with its index. -/
+partial def Scry.adFuncsGo (i : Nat) : List Wil.Func → List String
+  | .nil => .nil
+  | .cons f rest => List.append (Scry.adFunc i f) (Scry.adFuncsGo (Nat.succ i) rest)
+
+/-- One warning: function, message, origin. -/
+def Scry.adWarning (w : Scry.Warning) : String :=
+  "warning\t" ++ w.func ++ "\t" ++ w.message ++ "\t" ++ Scry.adSpan w.span
+
+/-- Every warning, in the TU's order (newest first). -/
+def Scry.adWarnings (ws : List Scry.Warning) : List String :=
+  List.map (fun w => Scry.adWarning w) ws
+
+/-- Every external call, in the TU's order. -/
+def Scry.adExternals (xs : List (String × String)) : List String :=
+  List.map (fun p => "external\t" ++ p.1 ++ "\t" ++ p.2) xs
+
+/-- The source files of a TU: index, path, text length, and a 64-bit digest of the
+text (so a line-map/text change is visible even when the CST is identical). -/
+def Scry.adFiles (tu : Scry.TU) : List String :=
+  List.append [ "files\t" ++ Nat.repr (List.length tu.files) ]
+    (List.map (fun p =>
+      let i := p.1;
+      let text := p.2;
+      "file\t" ++ Nat.repr i ++ "\t" ++ Scry.cstEnc (List.getD tu.paths i "")
+        ++ "\t" ++ Nat.repr (String.length text) ++ "\t" ++ Nat.repr (Scry.fnv text))
+      (Scry.zipIdx tu.files 0))
+
+/-- The canonical dump of one lowered translation unit: path, error count, CST digest,
+files, every function/block/statement/terminator with its origin, warnings and external
+calls. This is the `.tu` shape `scry-artifacts` writes and the differential harness
+compares; the lowering cache stores the same content (in a versioned JSON record). -/
+def Scry.tuDump (tu : Scry.TU) (path : String) (errors : Nat)
+    (storeDigest : String) : String :=
+  let files := Scry.adFiles tu;
+  let funcs := Scry.adFuncsGo 0 tu.funcs;
+  let warnings := Scry.adWarnings tu.warnings;
+  let externals := Scry.adExternals tu.externalCalls;
+  Scry.adLines (List.concat
+    [ [ "unit\t" ++ Scry.cstEnc path
+      , "errors\t" ++ Nat.repr errors
+      , "store-digest\t" ++ storeDigest ]
+    , files
+    , [ "funcs\t" ++ Nat.repr (List.length tu.funcs) ]
+    , funcs
+    , [ "warnings\t" ++ Nat.repr (List.length tu.warnings) ]
+    , warnings
+    , [ "externals\t" ++ Nat.repr (List.length tu.externalCalls) ]
+    , externals ])
+
+-- ## The lowering cache
+
+/-- The lowering-entry format. Bump it when the JSON writer/reader below changes; an
+entry from another format is a clean miss and is rewritten. -/
+def Scry.lowerCacheMagic : String := "scry-project-lower 1"
+
+/-- The identity of the lowering that produced a cached `Scry.TU`. It is the manual
+contract (like `Scry.projectCacheFrontend`): bump it in the same commit as any change to
+`Scry.lowerTU`/`Scry.lowerTUWithModels`, `Scry.lowerFuncs`, the state-machine passes, or
+`Scry.defaultModels`. A stale `Scry.TU` is worse than a re-lowering, so this is a
+deliberate version stamp rather than a guess. -/
+def Scry.projectLowererVersion : String := "c-lower-1 default-models"
+
+/-- The lowering-cache entry path: a distinct prefix in the same cache directory as the
+parse entries (whose names are bare decimal keys), so one `--cache-dir` holds both. -/
+def Scry.lowerCachePath (dir key : String) : String :=
+  String.append dir (String.append "/lower-" (String.append key ".tu"))
+
+/-- The per-file key fields: the path and a digest of the original text, in file order.
+Origins and warnings carry original positions, which come from the line map and texts,
+not from the preprocessed text (H5 in `wiz-notes/incremental-scry.md`). -/
+partial def Scry.lowerKeyFiles : List String → List String → List String
+  | .nil, _ => .nil
+  | .cons p ps, texts => match texts with
+    | .nil => List.cons (Scry.cacheKeyField p) (Scry.lowerKeyFiles ps .nil)
+    | .cons t ts =>
+      List.cons (Scry.cacheKeyField p)
+        (List.cons (Scry.cacheKeyField (Nat.repr (String.length t)))
+          (List.cons (Scry.cacheKeyField (Nat.repr (Scry.fnv t)))
+            (Scry.lowerKeyFiles ps ts)))
+
+/-- The lowering key: the full set of inputs the lowering reads — the entry format, the
+lowerer identity, the full CST digest, the preprocessing digest (the preprocessed text
+**and its line map**), the unit's target path, the original file paths and text digests,
+and the recovery mode. It is deliberately **not** the parse cache's outer key: the CST
+key also covers the raw source text and preprocessing flags, which lowering never reads
+directly, while the lowering key needs the per-file text digests and line map the CST key
+does not have. -/
+def Scry.lowerCacheKeyFor (lowerer cst pre target : String) (paths texts : List String)
+    (allowErrors : Bool) : String :=
+  let mode := match allowErrors with | .true => "allow-errors" | .false => "strict";
+  let fields := List.append
+    [Scry.lowerCacheMagic, lowerer, cst, pre, target, mode,
+     Nat.repr (List.length paths), Nat.repr (List.length texts)]
+    (Scry.lowerKeyFiles paths texts);
+  let body := String.intercalate "\u{0}" (List.map Scry.cacheKeyField fields);
+  Nat.repr (Scry.fnv body)
+
+/-- The lowering key under this build's lowerer identity. -/
+def Scry.lowerCacheKey (cst pre target : String) (paths texts : List String)
+    (allowErrors : Bool) : String :=
+  Scry.lowerCacheKeyFor Scry.projectLowererVersion cst pre target paths texts allowErrors
+
+-- ### The versioned JSON record
+
+/-- The first element of a tagged JSON array and its remaining elements. -/
+def Scry.lcTagArgs (j : Json) : Option (String × List Json) := do
+  let xs := Json.asList j;
+  t ← Json.asString (List.getD xs 0 Json.null);
+  .some (t, List.drop 1 xs)
+
+/-- A required string field of a JSON object. -/
+def Scry.lcStrField (j : Json) (k : String) : Option String :=
+  match Json.get j k with
+  | .some v => Json.asString v
+  | .none => .none
+
+/-- A required natural field of a JSON object. -/
+def Scry.lcNatField (j : Json) (k : String) : Option Nat :=
+  match Json.get j k with
+  | .some v => Json.asNat v
+  | .none => .none
+
+/-- A required array field of a JSON object. -/
+def Scry.lcArrField (j : Json) (k : String) : Option (List Json) :=
+  match Json.get j k with
+  | .some v => .some (Json.asList v)
+  | .none => .none
+
+/-- `f` over every element, or `none` if any element does not decode (so a malformed
+element is corruption, not a silently shorter list). -/
+partial def Scry.lcAllOpt {A : Type} (f : Json → Option A) : List Json → Option (List A)
+  | .nil => .some .nil
+  | .cons x xs => do
+    y ← f x;
+    ys ← Scry.lcAllOpt f xs;
+    .some (List.cons y ys)
+
+/-- A JSON array of naturals, decoded strictly. -/
+partial def Scry.lcNatListOf : List Json → Option (List Nat)
+  | .nil => .some .nil
+  | .cons x xs => do
+    n ← Json.asNat x;
+    ns ← Scry.lcNatListOf xs;
+    .some (List.cons n ns)
+
+/-- A `Wil.Ty` as JSON: `["int", w, signed]`, `["ptr", t]`, `["fn", n, t]`,
+`["record", id]`, `"dyn"` or `"unknown"`. -/
+def Scry.lcTyJson : Wil.Ty → Json
+  | .int w s => Json.mkArr [Json.mkStr "int", Json.ofNat w, Json.mkBool s]
+  | .ptr t => Json.mkArr [Json.mkStr "ptr", Scry.lcTyJson t]
+  | .fn n t => Json.mkArr [Json.mkStr "fn", Json.ofNat n, Scry.lcTyJson t]
+  | .record i => Json.mkArr [Json.mkStr "record", Json.ofNat i]
+  | .dyn => Json.mkStr "dyn"
+  | .unknown => Json.mkStr "unknown"
+
+partial def Scry.lcTyOfJson (j : Json) : Option Wil.Ty :=
+  match Json.asString j with
+  | .some s => match s with
+    | "dyn" => .some .dyn
+    | "unknown" => .some .unknown
+    | _ => .none
+  | .none => do
+    pair ← Scry.lcTagArgs j;
+    match pair.1, pair.2 with
+    | "int", .cons w (.cons s .nil) => do
+      wn ← Json.asNat w;
+      sn ← Json.asBool s;
+      .some (.int wn sn)
+    | "ptr", .cons t .nil => do
+      tt ← Scry.lcTyOfJson t;
+      .some (.ptr tt)
+    | "fn", .cons n (.cons t .nil) => do
+      nn ← Json.asNat n;
+      tt ← Scry.lcTyOfJson t;
+      .some (.fn nn tt)
+    | "record", .cons i .nil => do
+      ii ← Json.asNat i;
+      .some (.record ii)
+    | _, _ => .none
+
+/-- A `Wil.Val` as JSON. -/
+def Scry.lcValJson : Wil.Val → Json
+  | .int w s b => Json.mkArr [Json.mkStr "int", Json.ofNat w, Json.mkBool s, Json.ofNat b]
+  | .ptr b o => Json.mkArr [Json.mkStr "ptr", Json.ofNat b, Json.ofNat o]
+  | .nul => Json.mkStr "nul"
+  | .undef => Json.mkStr "undef"
+
+def Scry.lcValOfJson (j : Json) : Option Wil.Val :=
+  match Json.asString j with
+  | .some s => match s with
+    | "nul" => .some .nul
+    | "undef" => .some .undef
+    | _ => .none
+  | .none => do
+    pair ← Scry.lcTagArgs j;
+    match pair.1, pair.2 with
+    | "int", .cons w (.cons s (.cons b .nil)) => do
+      wn ← Json.asNat w;
+      sn ← Json.asBool s;
+      bn ← Json.asNat b;
+      .some (.int wn sn bn)
+    | "ptr", .cons b (.cons o .nil) => do
+      bn ← Json.asNat b;
+      on ← Json.asNat o;
+      .some (.ptr bn on)
+    | _, _ => .none
+
+/-- A `Wil.Var` as `[index, ty]`. -/
+def Scry.lcVarJson (v : Wil.Var) : Json :=
+  Json.mkArr [Json.ofNat v.index, Scry.lcTyJson v.ty]
+
+def Scry.lcVarOfJson (j : Json) : Option Wil.Var := do
+  let xs := Json.asList j;
+  i ← Json.asNat (List.getD xs 0 Json.null);
+  t ← Scry.lcTyOfJson (List.getD xs 1 Json.null);
+  .some (Wil.Var.mk i t)
+
+/-- A `Wil.Span` as `[file, start, stop, node, line, col]`. -/
+def Scry.lcSpanJson (sp : Wil.Span) : Json :=
+  Json.mkArr [Json.ofNat sp.file, Json.ofNat sp.start, Json.ofNat sp.stop,
+    Json.ofNat sp.node, Json.ofNat sp.line, Json.ofNat sp.col]
+
+def Scry.lcSpanOfJson (j : Json) : Option Wil.Span :=
+  match Scry.lcNatListOf (Json.asList j) with
+  | .some (.cons file (.cons start (.cons stop (.cons node (.cons line (.cons col .nil)))))) =>
+    .some (Wil.Span.mk file start stop node line col)
+  | _ => .none
+
+/-- An optional variable as `["none"]` or `["some", var]`. -/
+def Scry.lcOptVarJson : Option Wil.Var → Json
+  | .none => Json.mkArr [Json.mkStr "none"]
+  | .some v => Json.mkArr [Json.mkStr "some", Scry.lcVarJson v]
+
+def Scry.lcOptVarOfJson (j : Json) : Option (Option Wil.Var) := do
+  pair ← Scry.lcTagArgs j;
+  match pair.1, pair.2 with
+  | "none", .nil => .some (.none : Option Wil.Var)
+  | "some", .cons v .nil => do
+    vv ← Scry.lcVarOfJson v;
+    .some (.some vv)
+  | _, _ => .none
+
+/-- A `Wil.Cond`. -/
+def Scry.lcCondJson : Wil.Cond → Json
+  | .const b => Json.mkArr [Json.mkStr "const", Json.mkBool b]
+  | .cmp op a b => Json.mkArr [Json.mkStr "cmp", Json.mkStr (Scry.adOp op),
+      Scry.lcVarJson a, Scry.lcVarJson b]
+  | .not c => Json.mkArr [Json.mkStr "not", Scry.lcCondJson c]
+  | .and a b => Json.mkArr [Json.mkStr "and", Scry.lcCondJson a, Scry.lcCondJson b]
+  | .or a b => Json.mkArr [Json.mkStr "or", Scry.lcCondJson a, Scry.lcCondJson b]
+
+def Scry.lcOpOfName (s : String) : Option Wil.Op :=
+  match s with
+  | "add" => .some .add
+  | "sub" => .some .sub
+  | "mul" => .some .mul
+  | "div" => .some .div
+  | "rem" => .some .rem
+  | "and" => .some .and
+  | "or" => .some .or
+  | "xor" => .some .xor
+  | "shl" => .some .shl
+  | "shr" => .some .shr
+  | "eq" => .some .eq
+  | "ne" => .some .ne
+  | "lt" => .some .lt
+  | "le" => .some .le
+  | "gt" => .some .gt
+  | "ge" => .some .ge
+  | "neg" => .some .neg
+  | "not" => .some .not
+  | _ => .none
+
+partial def Scry.lcCondOfJson (j : Json) : Option Wil.Cond := do
+  pair ← Scry.lcTagArgs j;
+  match pair.1, pair.2 with
+  | "const", .cons b .nil => do
+    bb ← Json.asBool b;
+    .some (.const bb)
+  | "cmp", .cons op (.cons a (.cons b .nil)) => do
+    on ← Json.asString op;
+    oo ← Scry.lcOpOfName on;
+    va ← Scry.lcVarOfJson a;
+    vb ← Scry.lcVarOfJson b;
+    .some (.cmp oo va vb)
+  | "not", .cons c .nil => do
+    cc ← Scry.lcCondOfJson c;
+    .some (.not cc)
+  | "and", .cons a (.cons b .nil) => do
+    ca ← Scry.lcCondOfJson a;
+    cb ← Scry.lcCondOfJson b;
+    .some (.and ca cb)
+  | "or", .cons a (.cons b .nil) => do
+    ca ← Scry.lcCondOfJson a;
+    cb ← Scry.lcCondOfJson b;
+    .some (.or ca cb)
+  | _, _ => .none
+
+/-- A `Wil.Rhs`. -/
+def Scry.lcRhsJson : Wil.Rhs → Json
+  | .use v => Json.mkArr [Json.mkStr "use", Scry.lcVarJson v]
+  | .cst v => Json.mkArr [Json.mkStr "cst", Scry.lcValJson v]
+  | .bin op a b => Json.mkArr [Json.mkStr "bin", Json.mkStr (Scry.adOp op),
+      Scry.lcVarJson a, Scry.lcVarJson b]
+  | .un op a => Json.mkArr [Json.mkStr "un", Json.mkStr (Scry.adOp op), Scry.lcVarJson a]
+  | .load p => Json.mkArr [Json.mkStr "load", Scry.lcVarJson p]
+  | .gep p k => Json.mkArr [Json.mkStr "gep", Scry.lcVarJson p, Json.ofNat k]
+  | .alloc n => Json.mkArr [Json.mkStr "alloc", Json.ofNat n]
+  | .havoc t => Json.mkArr [Json.mkStr "havoc", Scry.lcTyJson t]
+  | .slot n => Json.mkArr [Json.mkStr "slot", Json.ofNat n]
+  | .globalRef n => Json.mkArr [Json.mkStr "globalRef", Json.mkStr n]
+  | .fnptr n => Json.mkArr [Json.mkStr "fnptr", Json.mkStr n]
+  | .gepVar p i k => Json.mkArr [Json.mkStr "gepVar", Scry.lcVarJson p,
+      Scry.lcVarJson i, Json.ofNat k]
+
+def Scry.lcRhsOfJson (j : Json) : Option Wil.Rhs := do
+  pair ← Scry.lcTagArgs j;
+  match pair.1, pair.2 with
+  | "use", .cons v .nil => do
+    vv ← Scry.lcVarOfJson v;
+    .some (.use vv)
+  | "cst", .cons v .nil => do
+    vv ← Scry.lcValOfJson v;
+    .some (.cst vv)
+  | "bin", .cons op (.cons a (.cons b .nil)) => do
+    on ← Json.asString op;
+    oo ← Scry.lcOpOfName on;
+    va ← Scry.lcVarOfJson a;
+    vb ← Scry.lcVarOfJson b;
+    .some (.bin oo va vb)
+  | "un", .cons op (.cons a .nil) => do
+    on ← Json.asString op;
+    oo ← Scry.lcOpOfName on;
+    va ← Scry.lcVarOfJson a;
+    .some (.un oo va)
+  | "load", .cons p .nil => do
+    vp ← Scry.lcVarOfJson p;
+    .some (.load vp)
+  | "gep", .cons p (.cons k .nil) => do
+    vp ← Scry.lcVarOfJson p;
+    kk ← Json.asNat k;
+    .some (.gep vp kk)
+  | "alloc", .cons n .nil => do
+    nn ← Json.asNat n;
+    .some (.alloc nn)
+  | "havoc", .cons t .nil => do
+    tt ← Scry.lcTyOfJson t;
+    .some (.havoc tt)
+  | "slot", .cons n .nil => do
+    nn ← Json.asNat n;
+    .some (.slot nn)
+  | "globalRef", .cons n .nil => do
+    nn ← Json.asString n;
+    .some (.globalRef nn)
+  | "fnptr", .cons n .nil => do
+    nn ← Json.asString n;
+    .some (.fnptr nn)
+  | "gepVar", .cons p (.cons i (.cons k .nil)) => do
+    vp ← Scry.lcVarOfJson p;
+    vi ← Scry.lcVarOfJson i;
+    kk ← Json.asNat k;
+    .some (.gepVar vp vi kk)
+  | _, _ => .none
+
+/-- A `Wil.Callee`. -/
+def Scry.lcCalleeJson : Wil.Callee → Json
+  | .direct n => Json.mkArr [Json.mkStr "direct", Json.mkStr n]
+  | .indirect v => Json.mkArr [Json.mkStr "indirect", Scry.lcVarJson v]
+
+def Scry.lcCalleeOfJson (j : Json) : Option Wil.Callee := do
+  pair ← Scry.lcTagArgs j;
+  match pair.1, pair.2 with
+  | "direct", .cons n .nil => do
+    nn ← Json.asString n;
+    .some (.direct nn)
+  | "indirect", .cons v .nil => do
+    vv ← Scry.lcVarOfJson v;
+    .some (.indirect vv)
+  | _, _ => .none
+
+/-- A `Wil.Stmt`. -/
+def Scry.lcStmtJson : Wil.Stmt → Json
+  | .assign x e o => Json.mkArr [Json.mkStr "assign", Scry.lcVarJson x,
+      Scry.lcRhsJson e, Scry.lcSpanJson o]
+  | .assume c o => Json.mkArr [Json.mkStr "assume", Scry.lcCondJson c, Scry.lcSpanJson o]
+  | .store p v o => Json.mkArr [Json.mkStr "store", Scry.lcVarJson p, Scry.lcVarJson v,
+      Scry.lcSpanJson o]
+  | .free p o => Json.mkArr [Json.mkStr "free", Scry.lcVarJson p, Scry.lcSpanJson o]
+  | .call r c args o => Json.mkArr [Json.mkStr "call", Scry.lcOptVarJson r,
+      Scry.lcCalleeJson c, Json.mkArr (List.map Scry.lcVarJson args), Scry.lcSpanJson o]
+  | .nop o => Json.mkArr [Json.mkStr "nop", Scry.lcSpanJson o]
+
+def Scry.lcStmtOfJson (j : Json) : Option Wil.Stmt := do
+  pair ← Scry.lcTagArgs j;
+  match pair.1, pair.2 with
+  | "assign", .cons x (.cons e (.cons o .nil)) => do
+    vx ← Scry.lcVarOfJson x;
+    ve ← Scry.lcRhsOfJson e;
+    vo ← Scry.lcSpanOfJson o;
+    .some (.assign vx ve vo)
+  | "assume", .cons c (.cons o .nil) => do
+    vc ← Scry.lcCondOfJson c;
+    vo ← Scry.lcSpanOfJson o;
+    .some (.assume vc vo)
+  | "store", .cons p (.cons v (.cons o .nil)) => do
+    vp ← Scry.lcVarOfJson p;
+    vv ← Scry.lcVarOfJson v;
+    vo ← Scry.lcSpanOfJson o;
+    .some (.store vp vv vo)
+  | "free", .cons p (.cons o .nil) => do
+    vp ← Scry.lcVarOfJson p;
+    vo ← Scry.lcSpanOfJson o;
+    .some (.free vp vo)
+  | "call", .cons r (.cons c (.cons args (.cons o .nil))) => do
+    vr ← Scry.lcOptVarOfJson r;
+    vc ← Scry.lcCalleeOfJson c;
+    vs ← Scry.lcAllOpt Scry.lcVarOfJson (Json.asList args);
+    vo ← Scry.lcSpanOfJson o;
+    .some (.call vr vc vs vo)
+  | "nop", .cons o .nil => do
+    vo ← Scry.lcSpanOfJson o;
+    .some (.nop vo)
+  | _, _ => .none
+
+/-- A `Wil.Term`. -/
+def Scry.lcTermJson : Wil.Term → Json
+  | .goto b o => Json.mkArr [Json.mkStr "goto", Json.ofNat b.index, Scry.lcSpanJson o]
+  | .br c t f o => Json.mkArr [Json.mkStr "br", Scry.lcCondJson c, Json.ofNat t.index,
+      Json.ofNat f.index, Scry.lcSpanJson o]
+  | .ret v o => Json.mkArr [Json.mkStr "ret", Scry.lcOptVarJson v, Scry.lcSpanJson o]
+  | .unreachable o => Json.mkArr [Json.mkStr "unreachable", Scry.lcSpanJson o]
+
+def Scry.lcTermOfJson (j : Json) : Option Wil.Term := do
+  pair ← Scry.lcTagArgs j;
+  match pair.1, pair.2 with
+  | "goto", .cons b (.cons o .nil) => do
+    bb ← Json.asNat b;
+    vo ← Scry.lcSpanOfJson o;
+    .some (.goto (Wil.mkBlockId bb) vo)
+  | "br", .cons c (.cons t (.cons f (.cons o .nil))) => do
+    vc ← Scry.lcCondOfJson c;
+    bt ← Json.asNat t;
+    bf ← Json.asNat f;
+    vo ← Scry.lcSpanOfJson o;
+    .some (.br vc (Wil.mkBlockId bt) (Wil.mkBlockId bf) vo)
+  | "ret", .cons v (.cons o .nil) => do
+    vv ← Scry.lcOptVarOfJson v;
+    vo ← Scry.lcSpanOfJson o;
+    .some (.ret vv vo)
+  | "unreachable", .cons o .nil => do
+    vo ← Scry.lcSpanOfJson o;
+    .some (.unreachable vo)
+  | _, _ => .none
+
+/-- A `Wil.Block`. -/
+def Scry.lcBlockJson (b : Wil.Block) : Json :=
+  Json.mkObj
+    [ ("stmts", Json.mkArr (List.map Scry.lcStmtJson b.stmts))
+    , ("term", Scry.lcTermJson b.term) ]
+
+def Scry.lcBlockOfJson (j : Json) : Option Wil.Block := do
+  ss ← Scry.lcArrField j "stmts";
+  stmts ← Scry.lcAllOpt Scry.lcStmtOfJson ss;
+  let topt := Json.get j "term";
+  t ← match topt with
+    | .some x => Scry.lcTermOfJson x
+    | .none => .none;
+  .some (Wil.Block.mk stmts t)
+
+/-- A `Wil.Func`. -/
+def Scry.lcFuncJson (f : Wil.Func) : Json :=
+  Json.mkObj
+    [ ("name", Json.mkStr f.name)
+    , ("entry", Json.ofNat f.entry.index)
+    , ("params", Json.mkArr (List.map Scry.lcVarJson f.params))
+    , ("locals", Json.mkArr (List.map Scry.lcVarJson f.locals))
+    , ("origin", Scry.lcSpanJson f.origin)
+    , ("blocks", Json.mkArr (List.map Scry.lcBlockJson f.blocks)) ]
+
+def Scry.lcFuncOfJson (j : Json) : Option Wil.Func := do
+  name ← Scry.lcStrField j "name";
+  entry ← Scry.lcNatField j "entry";
+  ps ← Scry.lcArrField j "params";
+  params ← Scry.lcAllOpt Scry.lcVarOfJson ps;
+  ls ← Scry.lcArrField j "locals";
+  locals ← Scry.lcAllOpt Scry.lcVarOfJson ls;
+  let oopt := Json.get j "origin";
+  o ← match oopt with
+    | .some x => Scry.lcSpanOfJson x
+    | .none => .none;
+  bs ← Scry.lcArrField j "blocks";
+  blocks ← Scry.lcAllOpt Scry.lcBlockOfJson bs;
+  .some (Wil.Func.mk name params locals (Wil.mkBlockId entry) blocks o)
+
+/-- A `Scry.Warning`. -/
+def Scry.lcWarningJson (w : Scry.Warning) : Json :=
+  Json.mkObj
+    [ ("func", Json.mkStr w.func)
+    , ("message", Json.mkStr w.message)
+    , ("span", Scry.lcSpanJson w.span) ]
+
+def Scry.lcWarningOfJson (j : Json) : Option Scry.Warning := do
+  func ← Scry.lcStrField j "func";
+  message ← Scry.lcStrField j "message";
+  let sopt := Json.get j "span";
+  sp ← match sopt with
+    | .some x => Scry.lcSpanOfJson x
+    | .none => .none;
+  .some (Scry.Warning.mk func message sp)
+
+/-- An external call as `[caller, callee]`. -/
+def Scry.lcExternalJson (p : String × String) : Json :=
+  Json.mkArr [Json.mkStr p.1, Json.mkStr p.2]
+
+def Scry.lcExternalOfJson (j : Json) : Option (String × String) :=
+  match Json.asList j with
+  | .cons a (.cons b .nil) => match Json.asString a, Json.asString b with
+    | .some x, .some y => .some (x, y)
+    | _, _ => .none
+  | _ => .none
+
+/-- The lowering entry's body: one JSON line per function, warning and external call,
+in the TU's canonical order. `Scry.adLines` gives every line (including the last) a
+trailing newline, so the body is self-delimiting. -/
+def Scry.lowerBodyOf (tu : Scry.TU) : String :=
+  Scry.adLines (List.append
+    (List.map (fun f => "func\t" ++ Json.render (Scry.lcFuncJson f)) tu.funcs)
+    (List.append
+      (List.map (fun w => "warning\t" ++ Json.render (Scry.lcWarningJson w)) tu.warnings)
+      (List.map (fun e => "external\t" ++ Json.render (Scry.lcExternalJson e))
+        tu.externalCalls)))
+
+/-- The TU's file texts, padded with `""` to the path count. `Scry.lowerTUWithModels` reads
+`fileText i` for `i < List.length pre.paths` and `getD` returns `""` past the text list;
+the cache must reconstruct exactly that list. -/
+partial def Scry.lowerPadTexts : List String → List String → List String
+  | .nil, _ => .nil
+  | .cons p ps, texts => match texts with
+    | .cons t ts => List.cons t (Scry.lowerPadTexts ps ts)
+    | .nil => List.cons "" (Scry.lowerPadTexts ps .nil)
+
+/-- The three lists a lowering body reconstructs. A structure (not a triple): the
+elaborator does not flatten pattern matches on nested pairs. -/
+structure Scry.LowerBody where
+  funcs : List Wil.Func
+  warnings : List Scry.Warning
+  externals : List (String × String)
+
+/-- Parse the body lines. Every line must be a `func`, `warning` or `external` record and
+decode; anything else is corruption (never a partial TU). -/
+partial def Scry.lcBodyParseGo (funcs : List Wil.Func) (warnings : List Scry.Warning)
+    (externals : List (String × String)) : List String →
+    Except String Scry.LowerBody
+  | .nil => .ok (Scry.LowerBody.mk (List.reverse funcs) (List.reverse warnings)
+      (List.reverse externals))
+  | .cons line rest =>
+    match String.stripPrefix line "func\t" with
+    | .some js => match Json.parse js with
+      | .error _ => .error "corrupt"
+      | .ok j => match Scry.lcFuncOfJson j with
+        | .some f => Scry.lcBodyParseGo (List.cons f funcs) warnings externals rest
+        | .none => .error "corrupt"
+    | .none => match String.stripPrefix line "warning\t" with
+      | .some js => match Json.parse js with
+        | .error _ => .error "corrupt"
+        | .ok j => match Scry.lcWarningOfJson j with
+          | .some w => Scry.lcBodyParseGo funcs (List.cons w warnings) externals rest
+          | .none => .error "corrupt"
+      | .none => match String.stripPrefix line "external\t" with
+        | .some js => match Json.parse js with
+          | .error _ => .error "corrupt"
+          | .ok j => match Scry.lcExternalOfJson j with
+            | .some e => Scry.lcBodyParseGo funcs warnings (List.cons e externals) rest
+            | .none => .error "corrupt"
+        | .none => .error "corrupt"
+
+/-- Check a parsed body against the header counts and the canonical re-rendering. The
+body parser has already rejected malformed lines; here a count mismatch or a body that
+does not re-render identically is corruption. -/
+def Scry.lowerBodyCheck (target : String) (paths texts : List String) (body : String)
+    (fc wc ec : Nat) (bodyParsed : Scry.LowerBody) : Except String Scry.TU :=
+  let countsOk := Bool.and (Nat.beq (List.length bodyParsed.funcs) fc)
+    (Bool.and (Nat.beq (List.length bodyParsed.warnings) wc)
+      (Nat.beq (List.length bodyParsed.externals) ec));
+  match countsOk with
+  | .true =>
+    let tu := Scry.TU.mk target (Scry.lowerPadTexts paths texts) paths
+      bodyParsed.funcs bodyParsed.warnings bodyParsed.externals;
+    match String.eq (Scry.lowerBodyOf tu) body with
+    | .true => .ok tu
+    | .false => .error "corrupt"
+  | .false => .error "corrupt"
+
+/-- The header fields a lowering entry carries into the body check. -/
+structure Scry.LowerHeader where
+  funcs : Nat
+  warnings : Nat
+  externals : Nat
+  body : String
+
+/-- The entry-format check: the magic line. Another lowering format is a clean `miss`;
+anything else is `corrupt`. -/
+def Scry.lcMagicOk (magic : String) : Except String Unit :=
+  match String.eq magic Scry.lowerCacheMagic with
+  | .true => .ok ()
+  | .false => match String.startsWith magic "scry-project-lower " with
+    | .true => .error "miss"
+    | .false => .error "corrupt"
+
+/-- One `prefix value` header field that must equal `value`. A mismatch is a `miss` (the
+entry belongs to another state); a malformed line is `corrupt`. -/
+def Scry.lcFieldEq (line prefix value : String) : Except String Unit :=
+  match String.stripPrefix line prefix with
+  | .some v => match String.eq v value with
+    | .true => .ok ()
+    | .false => .error "miss"
+  | .none => .error "corrupt"
+
+/-- One `prefix n` header field. -/
+def Scry.lcFieldNat (line prefix : String) : Except String Nat :=
+  match String.stripPrefix line prefix with
+  | .some v => match String.parseNat v with
+    | .some n => .ok n
+    | .none => .error "corrupt"
+  | .none => .error "corrupt"
+
+/-- The `target` header field: a JSON string that must equal the unit target. -/
+def Scry.lcTargetField (line target : String) : Except String Unit :=
+  match String.stripPrefix line "target " with
+  | .some v => match Json.parse v with
+    | .ok (.str s) => match String.eq s target with
+      | .true => .ok ()
+      | .false => .error "miss"
+    | _ => .error "corrupt"
+  | .none => .error "corrupt"
+
+/-- The `body <len> <digest>` header field: check the byte length and the 64-bit digest
+of the body text (the lines after the header), and return that text. -/
+def Scry.lcBodyField (line : String) (rest : List String) : Except String String :=
+  match String.stripPrefix line "body " with
+  | .some v => match String.splitOn v " " with
+    | .cons a (.cons b .nil) =>
+      let body := String.intercalate "\n" rest;
+      match String.parseNat a with
+      | .none => .error "corrupt"
+      | .some blen => match String.parseNat b with
+        | .none => .error "corrupt"
+        | .some bdig =>
+          match Nat.beq blen (String.length body) with
+          | .false => .error "corrupt"
+          | .true => match Nat.beq bdig (Scry.fnv body) with
+            | .true => .ok body
+            | .false => .error "corrupt"
+    | _ => .error "corrupt"
+  | .none => .error "corrupt"
+
+/-- Validate a lowering entry's header: the format and lowerer stamps, every key input,
+the error count, the three body counts, and the body's length/digest. No state is read
+from the body yet; `Scry.lowerCacheOf` parses and re-renders it next. -/
+def Scry.lowerHeaderOf (magic lowerLine keyLine cstLine preLine targetLine errLine
+    funcsLine warnLine extLine bodyLine : String) (key cst pre target : String)
+    (errors : Nat) (rest : List String) : Except String Scry.LowerHeader :=
+  match Scry.lcMagicOk magic with
+  | .error e => .error e
+  | .ok _ =>
+    match Scry.lcFieldEq lowerLine "lowerer " Scry.projectLowererVersion with
+    | .error e => .error e
+    | .ok _ =>
+      match Scry.lcFieldEq keyLine "key " key with
+      | .error e => .error e
+      | .ok _ =>
+        match Scry.lcFieldEq cstLine "cst " cst with
+        | .error e => .error e
+        | .ok _ =>
+          match Scry.lcFieldEq preLine "pre " pre with
+          | .error e => .error e
+          | .ok _ =>
+            match Scry.lcTargetField targetLine target with
+            | .error e => .error e
+            | .ok _ =>
+              match Scry.lcFieldEq errLine "errors " (Nat.repr errors) with
+              | .error e => .error e
+              | .ok _ =>
+                match Scry.lcFieldNat funcsLine "funcs " with
+                | .error e => .error e
+                | .ok fc =>
+                  match Scry.lcFieldNat warnLine "warnings " with
+                  | .error e => .error e
+                  | .ok wc =>
+                    match Scry.lcFieldNat extLine "externals " with
+                    | .error e => .error e
+                    | .ok ec =>
+                      match Scry.lcBodyField bodyLine rest with
+                      | .error e => .error e
+                      | .ok body => .ok (Scry.LowerHeader.mk fc wc ec body)
+
+/-- Parse a lowering entry. Header fields that name other inputs are a `miss` (the entry
+belongs to a different state); a malformed line, a truncated body or a body digest that
+does not match is `corrupt`. Both are recomputed and rewritten, so neither can be a stale
+hit. The body is re-rendered and compared after parsing: a decoder that drops or reorders
+a field is corruption, not a silently different TU. -/
+def Scry.lowerCacheOf (key cst pre target : String) (errors : Nat)
+    (paths texts : List String) (text : String) : Except String Scry.TU :=
+  match String.splitOn text "\n" with
+  | .cons magic (.cons lowerLine (.cons keyLine (.cons cstLine (.cons preLine
+      (.cons targetLine (.cons errLine (.cons funcsLine (.cons warnLine
+      (.cons extLine (.cons bodyLine rest)))))))))) =>
+    match Scry.lowerHeaderOf magic lowerLine keyLine cstLine preLine targetLine errLine
+        funcsLine warnLine extLine bodyLine key cst pre target errors rest with
+    | .error e => .error e
+    | .ok h =>
+      match Scry.lcBodyParseGo .nil .nil .nil
+          (List.filter (fun l => Bool.not (String.isEmpty l)) rest) with
+      | .error e => .error e
+      | .ok parsed => Scry.lowerBodyCheck target paths texts h.body h.funcs h.warnings
+          h.externals parsed
+  | _ => .error "corrupt"
+
+/-- Read and validate one lowering entry. An absent entry is `cold`, an unreadable one
+`corrupt`, and another state's entry `miss`; all three recompute. -/
+def Scry.lowerCacheLoad (dir key cst pre target : String) (errors : Nat)
+    (paths texts : List String) : EIO (Except String Scry.TU) := do
+  let p := Scry.lowerCachePath dir key;
+  there ← EIO.lift (FS.exists p);
+  match there with
+  | .false => EIO.pure (.error "cold")
+  | .true => do
+    textRes ← EIO.lift (FS.readFile p);
+    match textRes with
+    | .error _ => EIO.pure (.error "corrupt")
+    | .ok text => EIO.pure (Scry.lowerCacheOf key cst pre target errors paths texts text)
+
+/-- The entry text: a fixed header naming every key input and the body's length/digest,
+then the body (one canonical JSON record per line). `Scry.lowerCacheOf` requires all of
+it to agree before returning a TU. -/
+def Scry.lowerEntryText (key cst pre target : String) (errors : Nat) (tu : Scry.TU) : String :=
+  let body := Scry.lowerBodyOf tu;
+  Scry.lowerCacheMagic ++ "\nlowerer " ++ Scry.projectLowererVersion
+    ++ "\nkey " ++ key ++ "\ncst " ++ cst ++ "\npre " ++ pre
+    ++ "\ntarget " ++ Json.render (Json.mkStr target)
+    ++ "\nerrors " ++ Nat.repr errors
+    ++ "\nfuncs " ++ Nat.repr (List.length tu.funcs)
+    ++ "\nwarnings " ++ Nat.repr (List.length tu.warnings)
+    ++ "\nexternals " ++ Nat.repr (List.length tu.externalCalls)
+    ++ "\nbody " ++ Nat.repr (String.length body) ++ " " ++ Nat.repr (Scry.fnv body)
+    ++ "\n" ++ body
+
+/-- Write one lowering entry atomically (a sibling `.tmp` and a rename, through the same
+`Scry.cacheWriteAtomic` the parse cache uses). -/
+def Scry.lowerCacheSave (dir key cst pre target : String) (errors : Nat)
+    (tu : Scry.TU) : EIO Unit := do
+  Scry.mkdirp dir;
+  Scry.cacheWriteAtomic (Scry.lowerCachePath dir key)
+    (Scry.lowerEntryText key cst pre target errors tu)
 
 /-- The human cache line (`cache: hit=… miss=… …`). -/
 def Scry.CacheStats.line (s : Scry.CacheStats) : String :=
