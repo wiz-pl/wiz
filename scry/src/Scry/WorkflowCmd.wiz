@@ -385,7 +385,7 @@ partial def Scry.scanArgsGo (o : Scry.ScanOpts) : List String → Except String 
       | .false => Scry.scanArgsGo { o with files := List.append o.files [a] } rest
 
 partial def Scry.wfPackTextGo : List String → EIO (String × String)
-  | .nil => EIO.pure ("lib/Scry/rules/default.scry", "")
+  | .nil => EIO.pure ("scry/rules/default.scry", "")
   | .cons p rest => do
     t ← Scry.wfReadTextOpt p;
     match t with

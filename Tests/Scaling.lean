@@ -595,7 +595,9 @@ def exampleEnv : IO (Toolchain × List System.FilePath) := do
   match ← Grail.readConfig tc (← Tests.Grail.binId tc) "lib" "." with
   | .ok (pkg, machine) =>
     let tc ← Tests.Grail.withSettings tc pkg machine
-    pure (tc, ← Module.roots (Grail.libRootsOf "." pkg.targets))
+    -- `tc.searchPath` carries the manifest's `root` settings (for a package that left
+    -- `lib/`, like `scry/src`); an example imports those modules too.
+    pure (tc, ← Module.roots (Grail.libRootsOf "." pkg.targets ++ tc.searchPath))
   | .error e => throw (IO.userError s!"cannot read grail.wiz: {e}")
 
 /-- Elaborate an example the way `wiz check`/`wiz run` does: the toolchain's library as

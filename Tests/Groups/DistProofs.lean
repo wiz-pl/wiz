@@ -17,6 +17,40 @@ def distProofsGroup : Group where
   name := "dist-proofs"
   exercise := "Distributed P0 (2PC safety)"
   cases := [
+    { name := "P1: refinement, fairness, leader safety/liveness and the bridge are axiom-free", run := fun _ =>
+        okLibs ("import Dist.Refine\n" ++
+          "import Dist.Fairness\n" ++
+          "import Dist.Leader\n" ++
+          "import Dist.Bridge\n" ++
+          "#print axioms Refines.safety\n" ++
+          "#print axioms Refines.safetyInv\n" ++
+          "#print axioms Refines.comp\n" ++
+          "#print axioms Refines.liveness_fails\n" ++
+          "#print axioms LTS.fairRank\n" ++
+          "#print axioms Leader.safety\n" ++
+          "#print axioms Leader.safety_unique\n" ++
+          "#print axioms Elect2.live\n" ++
+          "#print axioms Elect2.idleNoLeader\n" ++
+          "#print axioms Elect2.idleNotFair\n" ++
+          "#print axioms Bridge.SpecModel.safety\n")
+          [
+            "'Refines.safety' does not depend on any axioms",
+            "'Refines.safetyInv' does not depend on any axioms",
+            "'Refines.comp' does not depend on any axioms",
+            "'Refines.liveness_fails' does not depend on any axioms",
+            "'LTS.fairRank' does not depend on any axioms",
+            "'Leader.safety' does not depend on any axioms",
+            "'Leader.safety_unique' does not depend on any axioms",
+            "'Elect2.live' does not depend on any axioms",
+            "'Elect2.idleNoLeader' does not depend on any axioms",
+            "'Elect2.idleNotFair' does not depend on any axioms",
+            "'Bridge.SpecModel.safety' does not depend on any axioms"
+          ] },
+    { name := "P1: the fair advance chooses a leader", run := fun _ =>
+        okLibs ("import Dist.Leader\n" ++
+          "#eval Elect2.leaderB (Elect2.advance Elect2.init)\n" ++
+          "#eval Elect2.leaderB Elect2.init\n")
+          [".true", ".false"] },
     { name := "the library checks, and the safety and checker theorems are axiom-free", run := fun _ =>
         okLibs ("import Dist.TwoPhaseFinite\n" ++
           "#print axioms TwoPC.safety\n" ++

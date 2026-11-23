@@ -1,15 +1,20 @@
 # An eBPF target — P0 (typed core, checker, C emitter skeleton)
 
-**Status, 2026-11-22:** P0 implementation in progress. The typed core, checker and C
-emitter skeleton are implemented, and their pure test group is green. The post-`clang`
-object checks and the kernel verifier remain; they need a clang and/or privileged slot.
-The design is `wiz-notes/ebpf-target.md`; this file records what the P0 cut contains and
-what the remaining verifier run has to establish.
+**Status, 2026-11-22:** P0 implementation nearly complete. The types, checker, C
+emitter, and the elaborator → `STm` adapter are implemented; `lake build wiz tests` and
+the pure test group are green. `--target bpf` now consumes a real `.wiz` source (through
+the adapter) as well as the `bpf-core/1` fixture. The post-`clang` object checks and the
+kernel verifier remain; they need a clang and/or privileged slot. The design is
+`wiz-notes/ebpf-target.md`; this file records what the P0 cut contains and what the
+remaining verifier run has to establish.
 
-`wiz build FLOW.toml -o flow.c --target bpf` writes `flow.c` and `bpf_rt.h`. It does not
-call `clang` (see "needs a queue slot"). `--target bpf` is a normal entry in the selector
-list; the CLI branch in `Main.lean` is the one per-backend branch the note allows, because
-the input is not the untyped IR.
+`wiz build FLOW.wiz -o flow.c --target bpf` writes `flow.c` and `bpf_rt.h`; a sibling
+`FLOW.toml` (or `bpf.toml`) supplies the section, licence, version and maps. A manifest
+with `source = "FLOW.wiz"` also works, and a manifest with `core = "FLOW.bpfcore"` (or
+no `source`) keeps the fixture path. The CLI does not call `clang` (see "needs a queue
+slot"). `--target bpf` is a normal entry in the selector list; the CLI branch in
+`Main.lean` is the one per-backend branch the note allows, because the input is not the
+untyped IR.
 
 ## The boundary
 
@@ -20,11 +25,13 @@ The target is **verifier-shaped by construction**, not "Wiz on eBPF":
 | `Wiz/Compiler/Bpf/Core.lean` | `BpfCore`: the typed, flat, first-order IR of §4.1-§4.2. Every term carries a `Ty`; a `Span`; no pointer, closure, array, `String`, `Nat` or heap object. |
 | `Wiz/Compiler/Bpf/Check.lean` | the gate: type/storage/POD/map/call-graph/frame/instruction checks and the stable `bpf:` messages of §4.4. Pure, so it belongs in `wiz check`. |
 | `Wiz/Compiler/Bpf/Lower.lean` | the typed-surface → `BpfCore` erasure. Widths are literals; `Nat` is compile-time only; the §2.6 edge cases are rejected here. |
-| `Wiz/Compiler/Bpf/Sexp.lean` | `bpf-core/1`, the serialised typed core the P0 CLI consumes. A fixture format, not yet the public §9.4 schema. |
+| `Wiz/Compiler/Bpf/Adapter.lean` | the elaborator → `STm` bridge: `Term R` (de Bruijn, generated recursors) is classified by type and name; unsupported shapes are `bpf:` diagnostics, never dropped. |
+| `Wiz/Compiler/Bpf/Sexp.lean` | `bpf-core/1`, the serialised typed core. Kept as the fixture path for tests; the CLI's source path is the adapter. |
 | `Wiz/Compiler/Bpf/C.lean` | the flat-C emitter: `SEC`, BTF map declarations, `static __always_inline` functions, `#line`, checked packet accessors, copy-out map lookups, `Map.add` as lookup + `XADD`. |
-| `Wiz/Compiler/Bpf.lean` | the manifest reader (`bpf.toml`, §5.1) and `buildCmd`. |
-| `Tests/fixtures/bpf/` | the IPv4 allow-list fixture (`allow.toml` + `allow.bpfcore`) and the source-level reject/accept corpus. |
-| `Tests/Groups/Bpf.lean` | pure rejection/value tests. **Green, 22/22.** |
+| `Wiz/Compiler/Bpf.lean` | the manifest reader (`bpf.toml`, §5.1) and `buildCmd`; it chooses the adapter or the fixture reader. |
+| `lib/Bpf.wiz` | the surface vocabulary (`XdpContext`, `TcContext`, `Packet`, `Map`, `BpfM`, the actions and the named operations). The bodies are inert; the adapter emits the kernel helper. |
+| `Tests/fixtures/bpf/` | the `bpf-core/1` allow-list fixture, the `.wiz` end-to-end allow-list, and the source-level reject/accept corpus. |
+| `Tests/Groups/Bpf.lean` | pure rejection/value tests and the `.wiz` end-to-end case. **Green, 26/26** (the `clang -target bpf` sub-check skips without a bpf clang). |
 
 Implemented in P0:
 
@@ -60,9 +67,8 @@ Rejected with an explicit `bpf:` message (the negative corpus):
 
 Not in P0 (do not mistake the skeleton for them):
 
-* the **elaborator → `STm` adapter**. This is the load-bearing missing piece: the IR is
-  untyped, and the restriction pass needs the elaborated term's types and spans. The
-  surface `STm` and the erasure are written; the adapter is a roadblock, not a guess.
+* the generic `ind`/`rec` eliminators: the adapter unfolds the generated
+  `Bool.casesOn`/`Option.casesOn`/`T.casesOn`, and rejects anything else;
 * `clang -target bpf`, the ELF reader/relocator, the ubpf harness, the `BPF_HOSTED` map
   implementation (the header has the shape, not the tables);
 * loops (`Bpf.repeat`), enums with a default arm, TC actions beyond the enum arity,
@@ -72,17 +78,21 @@ Not in P0 (do not mistake the skeleton for them):
 ## What the first build must establish
 
 1. **Done (2026-11-22).** `lake build wiz tests` compiles all of `Wiz/Compiler/Bpf/*`,
-   `Wiz/Compiler/Bpf.lean`, `Main.lean` and `Tests/Groups/Bpf.lean` (590 jobs).
-2. **Done (2026-11-22).** `lake test -- '=bpf'` passes 22/22. Every case is pure and
-   unprivileged; the fixture case is the whole path manifest → reader → checker → C text.
-3. `wiz build Tests/fixtures/bpf/allow.toml -o /tmp/allow.c --target bpf` exits 0 and
-   writes `/tmp/allow.c` + `/tmp/allow.h` (`bpf_rt.h` beside it). **Pending**: the same
-   pipeline is exercised in-process by the fixture case; the CLI path has not run yet.
+   `Wiz/Compiler/Bpf.lean`, `Main.lean`, the new `Wiz/Compiler/Bpf/Adapter.lean`, and
+   `Tests/Groups/Bpf.lean` (606 jobs).
+2. **Done (2026-11-22).** `lake test -- '=bpf'` passes 26/26. Every case is pure and
+   unprivileged; the fixture case is manifest → reader → checker → C text, and the new
+   source case is elaborator → adapter → restriction pass → checker → C text.
+3. **Done (2026-11-22).** `wiz build Tests/fixtures/bpf/allow-list.wiz -o /tmp/allow.c
+   --target bpf` exits 0 and writes `/tmp/allow.c` + `bpf_rt.h` (the sibling
+   `allow-list.toml` supplies the maps). The `bpf-core/1` fixture path remains for tests.
 4. `clang -target bpfel -mcpu=v2 -O2 -g -ffreestanding -fno-builtin
    -fno-stack-protector -fno-asynchronous-unwind-tables -nostdlibinc -Wall -Werror
-   -c /tmp/allow.c -o /tmp/allow.o` succeeds. The expected object shape: `.text`, `.maps`,
-   `.BTF`/`.BTF.ext`, only the two map helpers (plus `ktime`/`prandom` if used) as
-   relocations, no undefined symbol, no `memcpy`/`memset`, no `__stack_chk_fail`.
+   -c /tmp/allow.c -o /tmp/allow.o` succeeds. **The `=bpf` case runs this when the node's
+   clang advertises `bpf`; on a node without it the case prints a skip.** The expected
+   object shape: `.text`, `.maps`, `.BTF`/`.BTF.ext`, only the map helpers used (plus
+   `ktime`/`prandom` if used) as relocations, no undefined symbol, no
+   `memcpy`/`memset`, no `__stack_chk_fail`.
 5. `llvm-objdump -S /tmp/allow.o` interleaves `allow.wiz` lines (the `#line` check) and
    every packet access is preceded by the two range checks in the same block.
 6. `bpftool btf dump file /tmp/allow.o` shows the key/value types and the map sizes.
@@ -119,25 +129,19 @@ with the clang/loader work.
 
 ## Roadblocks that need a queue slot
 
-1. **The elaborator adapter** (`Term R` with types and spans → `STm`). Without it the
-   CLI cannot take a `.wiz` file, and the source-level `.wiz` reject fixtures in
-   `Tests/fixtures/bpf/reject/` can only be checked by inspection. This is the largest
-   P0 item after the emitter.
-2. **The build and the test group.** Nothing here has been elaborated by Lean; the
-   unrun marker in `Tests/Groups/Bpf.lean` is deliberate.
-3. **`clang -target bpf` and the post-`clang` checks.** The emitter is a text printer;
+1. **`clang -target bpf` and the post-`clang` checks.** The emitter is a text printer;
    the stack/symbol/relocation/instruction checks need the object, so they cannot be
-   written against the C text alone.
-4. **The hosted (`BPF_HOSTED`) oracle and the ubpf harness.** The header has the
+   written against the C text alone. The e2e test compiles the generated C when the
+   node's `clang` advertises the `bpf` target, and reports a skip otherwise.
+2. **The hosted (`BPF_HOSTED`) oracle and the ubpf harness.** The header has the
    interface shape; the map tables, packet buffer and helper callbacks are P0's next
    code, not written here.
-5. **The privileged verifier runner.** The long pole (§8.5): a self-hosted VM or
+3. **The privileged verifier runner.** The long pole (§8.5): a self-hosted VM or
    `virtme-ng` with a pinned kernel; GitHub-hosted runners must be a **probe** with the
    `skip-allowlist.json` reason, not a hard requirement.
-6. **`lib/Bpf.wiz` and the ledger.** The surface library (`BpfM`, `Packet`, `Map`,
-   `Bpf.repeat`) and its one-row-per-helper trust-ledger change are not in this branch:
-   they need the elaborator and a review of `.github/trust-baseline.tsv`, which this lane
-   did not touch.
+4. **The `Map.add` / per-CPU value and the BTF macro forms.** The C is emitted; their
+   object-level acceptance is part of the clang/verifier slot, not a source-language
+   question.
 
 ## Known unverified assumptions
 

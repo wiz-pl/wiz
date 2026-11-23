@@ -1,6 +1,11 @@
 // The browser half of lib/Web/Loom.wiz: apply the patch list `Loom.patchesJson`
 // produces, and turn DOM events into (event, handler-index) calls back into Wiz.
 //
+// This file is the DOM seam only. The shared model (host / Loom runtime / SSR shell /
+// designer-builder), the data paths, the single validation table and the adopt contract
+// are canonical in `docs/notes/loom-wire-protocol.md`; in particular `mount` here is the
+// **replace** path, chosen by `adopt.js` when an island's SSR hash does not verify.
+//
 // The paths are child indices from the container: "" is the container, "0" its first
 // child, "0.2" the third child of that. Text nodes count as children, as in the DOM.
 // The pages this is used on are produced by the same renderer (SSR), so the index path

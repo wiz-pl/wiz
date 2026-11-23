@@ -22,7 +22,7 @@ import {
 import { hoverContents, hoverLines } from "./framework/hover.mjs";
 import { encodeFrame, acceptKey, FrameReader, OPCODE } from "./ws_frames.mjs";
 import { document as minidoc } from "./framework/minidom.mjs";
-import { startInfoview } from "./playground-lsp.js";
+import { startInfoview, createIndexer } from "./playground-lsp.js";
 import { rules } from "./framework/editor-model.mjs";
 import { index as indexOracle } from "./framework/index-oracle.mjs";
 import { selfhostEndpoint } from "./selfhost-lsp-shim.js";
@@ -129,6 +129,34 @@ check("token: ?lsp= wins over the fallback", endpointFromSearch("?lsp=off&token=
 check("token: none, the URL unchanged", withToken("ws://h:1", ""), "ws://h:1");
 check("token: escaped", withToken("ws://h:1/", "a b&c"), "ws://h:1/?token=a+b%26c");
 check("token: withoutToken keeps the rest", withoutToken("ws://h:1/?a=1&token=t"), "ws://h:1/?a=1");
+
+// ## 1b. The runtime adapter: a definition answer is the runtime's question
+
+{
+  const asked = [];
+  const ask = (name, ...args) => {
+    asked.push([name, ...args]);
+    if (name === "wiz_loom_hover_target") {
+      return args[0] === "null" ? "null" : JSON.stringify({
+        uri: "file:///lib/Prelude.wiz",
+        range: { start: { line: 6, character: 0 }, end: { line: 6, character: 9 } },
+        label: "Prelude.wiz:7:1",
+      });
+    }
+    return "{}";
+  };
+  const index = createIndexer(ask);
+  const answer = { uri: "file:///lib/Prelude.wiz", range: { start: { line: 6, character: 0 } } };
+  check("adapter: a definition is the runtime's query", JSON.stringify(index.target(answer)), JSON.stringify({
+    uri: "file:///lib/Prelude.wiz",
+    range: { start: { line: 6, character: 0 }, end: { line: 6, character: 9 } },
+    label: "Prelude.wiz:7:1",
+  }));
+  check("adapter: the query carries the server's answer",
+    asked[0][0] === "wiz_loom_hover_target" && asked[0][1] === JSON.stringify(answer), true);
+  check("adapter: no answer is the JSON null", index.target(null), null);
+  check("adapter: null is sent as null", asked[1][0] === "wiz_loom_hover_target" && asked[1][1] === "null", true);
+}
 
 // ## 2. The RFC 6455 frames (the mock server and the test client share them)
 

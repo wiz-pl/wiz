@@ -29,7 +29,7 @@ comments name the interesting ones.
 
 The rule pack is `Scry.demoPackText` / `Scry.demoRules`: command injection (including
 the `exec` family and the `sink … args` variadic selector), format strings, `gets` and
-`strcpy`. `lib/Scry/rules/default.scry` is the same pack as a real spec file;
+`strcpy`. `src/Scry/rules/default.scry` is the same pack as a real spec file;
 `Scry.demoPackText` mirrors it so the tests exercise the parser without file IO.
 -/
 

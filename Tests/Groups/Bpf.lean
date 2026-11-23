@@ -2,7 +2,6 @@ import Tests.Elab
 
 open Wiz
 open Wiz.Compiler.Bpf
-
 -- Closed terms are normally evaluated at program start-up; that would execute
 -- unimplemented `sorry`s before any test runs.
 set_option compiler.extract_closed false
@@ -60,6 +59,36 @@ def passProgram (maps : Array SMapDecl := #[]) : SProgram :=
 def lowerTyCase (ty : STy) (fragment : String) : Case :=
   { name := s!"`{fragment}` is rejected", run := fun _ =>
       expectReject (lowerTy {} ty) fragment }
+
+/-- The library modules a bpf source may import, plus the target's surface library. -/
+def bpfLoader : IO (Name → Option String) := do
+  let base ← Tests.Elab.preludeLoader
+  let bpf ← IO.FS.readFile "lib/Bpf.wiz"
+  pure fun m => if m == "Bpf" then some bpf else base m
+
+/-- Elaborate a bpf source without writing a file. -/
+def elabSource (src : String) : IO (CommandState ZeroOneMany) := do
+  let loader ← bpfLoader
+  let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+  let errs := s.messages.filter (·.severity == .error)
+  unless errs.isEmpty do
+    throw (IO.userError s!"the source did not elaborate:\n{
+      "\n".intercalate (errs.toList.map (·.render src))}")
+  pure s
+
+def specOf (m : Manifest) : SourceSpec :=
+  { entry := m.program.entry
+    sectionName := m.program.sectionName
+    kind := m.program.kind
+    license := m.program.license
+    version := m.program.version
+    maps := surfaceMaps m.maps }
+
+/-- Compile a source string with the given spec, returning the C or the `bpf:` error. -/
+def compileSrc (src : String) (spec : SourceSpec) : IO (Except String String) := do
+  let state ← elabSource src
+  let source : Source ZeroOneMany := { state, path := "<test>.wiz", text := src }
+  pure (compileSource source spec)
 
 def group : Group where
   name := "bpf"
@@ -180,7 +209,66 @@ def group : Group where
           checkEq 2 m.maps.size
           match m.maps.find? fun x => x.name == "hits" with
           | some m => checkEq 256 m.maxEntries
-          | none => throw (IO.userError "the `hits` map did not parse") }
+          | none => throw (IO.userError "the `hits` map did not parse") },
+
+    -- the elaborator adapter: a real `.wiz` source, not a `bpf-core/1` fixture
+    { name := "a `.wiz` XDP source builds C and `bpf_rt.h`", run := fun _ => do
+        let src ← IO.FS.readFile "Tests/fixtures/bpf/allow-list.wiz"
+        let toml ← IO.FS.readFile "Tests/fixtures/bpf/allow-list.toml"
+        match parseManifest toml with
+        | .error e => throw (IO.userError e)
+        | .ok m => do
+          let state ← elabSource src
+          let source : Source ZeroOneMany :=
+            { state, path := "Tests/fixtures/bpf/allow-list.wiz", text := src }
+          match compileSource source (specOf m) with
+          | .error e => throw (IO.userError s!"the `.wiz` case was rejected: {e}")
+          | .ok c => do
+            check ((c.splitOn "SEC(\"xdp\")").length > 1) "no SEC(\"xdp\") entry"
+            check ((c.splitOn "bpf_map_lookup_elem").length > 1) "no map lookup"
+            check ((c.splitOn "pkt_load16be").length > 1) "no checked 16-bit load"
+            check ((c.splitOn "pkt_load32be").length > 1) "no checked 32-bit load"
+            check ((c.splitOn "__sync_fetch_and_add").length > 1) "no atomic Map.add"
+            check ((c.splitOn "#line").length > 1) "no `#line` for the verifier log"
+            check ((c.splitOn "static __always_inline").length > 1) "a call was not inlined"
+            -- write the pair and, if the node has a bpf clang, compile it
+            let dir ← IO.FS.createTempDir
+            let cPath := dir / "allow-list.c"
+            IO.FS.writeFile cPath c
+            IO.FS.writeFile (dir / "bpf_rt.h") header
+            let probe ← IO.Process.output { cmd := "sh", args := #["-c",
+              "command -v clang >/dev/null 2>&1 && clang -print-targets 2>/dev/null | grep -q bpf"] }
+            if probe.exitCode != 0 then
+              IO.println "bpf: SKIP `clang -target bpf` is not available on this node"
+            else do
+              let obj := dir / "allow-list.o"
+              let out ← IO.Process.output { cmd := "clang", args := #[
+                "-target", "bpfel", "-mcpu=v2", "-O2", "-g", "-ffreestanding",
+                "-fno-builtin", "-fno-stack-protector", "-fno-asynchronous-unwind-tables",
+                "-nostdlibinc", "-Wall", "-Werror", "-c", cPath.toString, "-o", obj.toString] }
+              if out.exitCode != 0 then
+                throw (IO.userError s!"clang -target bpf failed:\n{out.stderr}") },
+
+    -- the adapter's stable rejections, from source rather than a hand-written `STm`
+    { name := "a runtime `Nat` offset is rejected", run := fun _ => do
+        let src := "import Bpf\n\n\
+def bad (p : Packet) (n : Nat) : Option (UIntN 16) := Packet.load16be p n\n"
+        expectReject (← compileSrc src
+          { entry := "bad", sectionName := "xdp", kind := .xdp, license := "GPL",
+            version := 1, maps := #[] }) "`Nat` is not representable" },
+
+    { name := "a `BitVec 12` parameter is rejected", run := fun _ => do
+        let src := "import Bpf\n\ninductive BitVec (n : Nat) where\n  | mk\n\ndef bad (x : BitVec 12) : BitVec 12 := x\n"
+        expectReject (← compileSrc src
+          { entry := "bad", sectionName := "xdp", kind := .xdp, license := "GPL",
+            version := 1, maps := #[] }) "BitVec 12" },
+
+    { name := "a `partial` definition is rejected", run := fun _ => do
+        let src := "import Bpf\n\n\
+partial def spin (ctx : XdpContext) : XdpAction := spin ctx\n"
+        expectReject (← compileSrc src
+          { entry := "spin", sectionName := "xdp", kind := .xdp, license := "GPL",
+            version := 1, maps := #[] }) "has a witness" }
   ]
 
 builtin_initialize registerGroup group

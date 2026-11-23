@@ -1,6 +1,7 @@
 import IO
 import Json
 import Web.EditorModel
+import Web.Hover
 import Web.Loom
 import Web.Playground
 import Web.Selfhost
@@ -253,6 +254,10 @@ def loomLspHover (text index position : String) : String :=
 def loomLspDefinition (text index position uri : String) : String :=
   Selfhost.definitionJson text index position uri
 
+/-- A `textDocument/definition` result as `{uri, range, label}`, or `null` (the runtime's
+rule for the answer; `web/hover.js` only applies it). -/
+def loomHoverTarget (result : String) : String := Hover.targetJson result
+
 export "wiz_loom_init" loomInit
 export "wiz_loom_html" loomHtml
 export "wiz_loom_step" loomStep
@@ -280,6 +285,7 @@ export "wiz_loom_editor_item_title" loomEditorItemTitle
 export "wiz_loom_editor_ask_key" loomEditorAskKey
 export "wiz_loom_editor_span" loomEditorSpan
 export "wiz_loom_editor_range_text" loomEditorRangeText
+export "wiz_loom_hover_target" loomHoverTarget
 export "wiz_loom_index_build" loomIndexBuild
 export "wiz_loom_index_size" loomIndexSize
 export "wiz_loom_index_term" loomIndexTerm

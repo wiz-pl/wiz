@@ -3,13 +3,14 @@
 
 Two entry points:
 
-* `compileManifest` — the CLI path. P0 consumes a **manifest** (`bpf.toml`, §5.1) and the
-  typed core it names (`bpf-core/1`, `Wiz/Compiler/Bpf/Sexp.lean`), checks the result and
-  prints the flat C. The Wiz-source restriction pass is `Wiz/Compiler/Bpf/Lower.lean`;
-  its adapter from the elaborator's `Term R` is the one piece P0 cannot write without a
-  build, because the IR is untyped (§1.2) and the elaborated term's types and spans are
-  what the diagnostics need.
-* `buildCmd` — `wiz build bpf.toml -o flow.c --target bpf`.
+* `compileSourceFile` / `Wiz/Compiler/Bpf/Adapter.lean` — the CLI path for a `.wiz`
+  source: the elaborated `Term R` is adapted to the typed surface, the restriction pass
+  (`Bpf.Lower`) and checker run, and the flat C is printed. `compileManifest` remains the
+  fixture path: a manifest naming a `bpf-core/1` file (or with no `source`) is read by
+  `Bpf.Sexp`, so the tests keep a serialised-core case.
+* `buildCmd` — `wiz build flow.wiz -o flow.c --target bpf` (a sibling `flow.toml`/`bpf.toml`
+  supplies the section, licence, version and maps; a manifest with `source = "flow.wiz"`
+  works too).
 
 Deliberately absent (recorded as needing a queue slot, not guessed):
 
@@ -21,6 +22,8 @@ Deliberately absent (recorded as needing a queue slot, not guessed):
 import Wiz.Compiler.Bpf.Sexp
 import Wiz.Compiler.Bpf.C
 import Wiz.Compiler.Bpf.Lower
+import Wiz.Compiler.Bpf.Adapter
+import Wiz.Rig.Instances
 
 namespace Wiz.Compiler.Bpf
 
@@ -35,6 +38,9 @@ structure ProgramSpec where
   version : Nat
   /-- the `bpf-core/1` file, relative to the manifest; default `<entry>.bpfcore` -/
   core : Option String := none
+  /-- the `.wiz` source, relative to the manifest. A source build goes through the
+  elaborator adapter; a `core` build stays as the P0 fixture path. -/
+  wizSource : Option String := none
 
 structure Manifest where
   program : ProgramSpec
@@ -129,7 +135,8 @@ is outside the packet subset)"
       .error s!"bpf.toml: the section `{sectionName}` is {k.describe}, but `type` is \
 {kind.describe}"
     else pure ()
-  pure { name, entry, sectionName, kind, license, version, core := findEntry s "core" }
+  pure (ProgramSpec.mk name entry sectionName kind license version
+    (findEntry s "core") (findEntry s "source"))
 
 def parseMapSect (s : Sect) : Except String MapDecl := do
   let name ← sectionSuffix "map." s
@@ -164,8 +171,33 @@ def parseManifest (input : String) : Except String Manifest := do
 def coreFileName (p : ProgramSpec) : String :=
   p.core.getD (p.entry ++ ".bpfcore")
 
-/-- Read the manifest and its typed core, lower nothing (the core *is* the lowered term),
-check it, and return the C text. -/
+/-- The manifest's scalar map types as the surface's types. -/
+def tyToSTy : Ty → STy
+  | .unit => .unit
+  | .bool => .bool
+  | .u8 => .uint 8
+  | .u16 => .uint 16
+  | .u32 => .uint 32
+  | .u64 => .uint 64
+  | .i8 => .int 8
+  | .i16 => .int 16
+  | .i32 => .int 32
+  | .i64 => .int 64
+  | .enum n => .enum n
+  | .struct fs => .struct (fs.map tyToSTy)
+  | .option t => .option (tyToSTy t)
+  | .packet => .packet
+  | .ctx k => .ctx k
+  | .map k v kind => .map (tyToSTy k) (tyToSTy v) kind
+
+/-- The map declarations the manifest adds to the surface program. -/
+def surfaceMaps (maps : Array MapDecl) : Array SMapDecl :=
+  maps.map fun m =>
+    { name := m.name, kind := m.kind, key := tyToSTy m.key, value := tyToSTy m.value
+      maxEntries := m.maxEntries }
+
+/-- Read a `bpf-core/1` fixture manifest and emit its C. This is the fixture path; the
+CLI's source path is `compileSourceFile` below. -/
 def compileManifest (manifestPath : System.FilePath) : IO (Except String String) := do
   let text ← IO.FS.readFile manifestPath
   match parseManifest text with
@@ -175,10 +207,8 @@ def compileManifest (manifestPath : System.FilePath) : IO (Except String String)
     let corePath := dir / coreFileName m.program
     let present ← corePath.pathExists
     if !present then
-      pure (.error s!"bpf: `{manifestPath}` needs the typed core `{corePath}` (a \
-`bpf-core/1` file). P0 cannot read Wiz source: the compiler IR is untyped, so the \
-restriction pass needs the elaborated types and is not wired yet (see \
-Wiz/Compiler/Bpf/Lower.lean).")
+      pure (.error s!"bpf: `{manifestPath}` needs a typed core `{corePath}` (a \
+`bpf-core/1` file) or a `source = \"file.wiz\"` key.")
     else
       let coreText ← IO.FS.readFile corePath
       match Sexp.parseCore coreText with
@@ -195,31 +225,112 @@ Wiz/Compiler/Bpf/Lower.lean).")
             ret := core.ret }
         pure (emitProgram prog)
 
-def buildCmd (path out : String) (lib noMain : Bool) (split : Nat) : IO UInt32 := do
+/-- Elaborate a `.wiz` file and return its state and text. The CLI supplies this (the
+frontend needs the toolchain's module roots, headers and cache); the adapter and the
+manifest parser stay pure. -/
+abbrev Elaborator := String → IO (Except String (CommandState ZeroOneMany × String))
+
+/-- Lower an elaborated `.wiz` source with the manifest's metadata and maps. -/
+def compileSourceFile (elaborate : Elaborator) (sourcePath : System.FilePath)
+    (m : Manifest) : IO (Except String String) := do
+  match ← elaborate sourcePath.toString with
+  | .error e => pure (.error e)
+  | .ok (state, text) =>
+    let src : Source ZeroOneMany := { state, path := sourcePath.toString, text }
+    pure (compileSource src
+      { entry := m.program.entry
+        sectionName := m.program.sectionName
+        kind := m.program.kind
+        license := m.program.license
+        version := m.program.version
+        maps := surfaceMaps m.maps })
+
+/-- A source file with no manifest: the file's stem is the entry, an XDP program with a
+GPL licence and no maps. A manifest is needed for a TC program or a map. -/
+def defaultManifest (sourcePath : System.FilePath) : Manifest :=
+  let name := sourcePath.fileStem.getD "flow"
+  { program :=
+      { name, entry := name, sectionName := "xdp", kind := .xdp, license := "GPL", version := 1 }
+    maps := #[] }
+
+/-- The manifest beside a `.wiz` file: `<stem>.toml`, or `bpf.toml`. -/
+def companionManifest (sourcePath : System.FilePath) : IO (Option System.FilePath) := do
+  let dir := sourcePath.parent.getD "."
+  let stem := sourcePath.withExtension "toml"
+  if ← stem.pathExists then pure (some stem)
+  else
+    let bpf := dir / "bpf.toml"
+    if ← bpf.pathExists then pure (some bpf) else pure none
+
+/-- A source path from the manifest, relative to the manifest's directory. -/
+def manifestSource? (m : Manifest) (manifestPath : System.FilePath) : Option System.FilePath :=
+  m.program.wizSource.map fun s =>
+    if System.FilePath.isAbsolute (System.FilePath.mk s) then System.FilePath.mk s
+    else manifestPath.parent.getD "." / s
+
+def buildCmd (elaborate : Elaborator) (path out : String) (lib noMain : Bool) (split : Nat) :
+    IO UInt32 := do
   if lib || noMain || split != 0 then do
     IO.eprintln "wiz build --target bpf: the backend builds one freestanding object; \
 `--lib`, `--no-main` and `--split` do not apply"
     pure 2
-  else if !path.endsWith ".toml" then do
-    IO.eprintln "wiz build --target bpf: P0 consumes a manifest (`bpf.toml`) and a \
-`bpf-core/1` file. A `.wiz` source needs the restriction pass, which needs the elaborated \
-types; it is not wired yet (see Wiz/Compiler/Bpf/Lower.lean)."
-    pure 2
   else
-    match ← compileManifest (System.FilePath.mk path) with
-    | .error e => IO.eprintln e; pure 1
-    | .ok c =>
-      let outPath : String :=
-        if out.endsWith ".c" then out
-        else ((System.FilePath.mk out).withExtension "c").toString
-      let outFile := System.FilePath.mk outPath
-      let dir := outFile.parent.getD "."
-      let hdr := dir / "bpf_rt.h"
-      IO.FS.writeFile outFile c
-      IO.FS.writeFile hdr header
-      IO.println s!"bpf: wrote {outPath} and {hdr}"
-      IO.eprintln "bpf: the C is verifier-shaped; `clang -target bpf` and the post-clang \
+    let p := System.FilePath.mk path
+    let ext := p.extension
+    if ext != some "wiz" && ext != some "toml" then do
+      IO.eprintln "wiz build --target bpf: takes a `.wiz` source (with an optional \
+sibling `bpf.toml`) or a manifest (`bpf.toml`) naming a `source` or a `bpf-core/1` file"
+      pure 2
+    else
+      let (manifestPath?, sourceArg?) ←
+        if ext == some "wiz" then do
+          pure (← companionManifest p, some p)
+        else pure (some p, none)
+      let manifest ←
+        match manifestPath? with
+        | none => pure (.ok (defaultManifest p))
+        | some mp => do
+          let text ← IO.FS.readFile mp
+          pure (parseManifest text)
+      match manifest with
+      | .error e => do IO.eprintln e; pure 1
+      | .ok m =>
+        let manifestDir := match manifestPath? with
+          | some mp => mp.parent.getD "."
+          | none => p.parent.getD "."
+        let source? :=
+          match sourceArg? with
+          | some s => some s
+          | none => manifestSource? m (manifestPath?.getD p)
+        let corePath := manifestDir / coreFileName m.program
+        let result ←
+          match source? with
+          | some src => compileSourceFile elaborate src m
+          | none =>
+            if ← corePath.pathExists then
+              match manifestPath? with
+              | some mp => compileManifest mp
+              | none => pure (.error "bpf: internal: a core build has no manifest")
+            else
+              -- a manifest with neither `source` nor a core: try `<stem>.wiz`
+              let guess := manifestDir / (m.program.entry ++ ".wiz")
+              if ← guess.pathExists then compileSourceFile elaborate guess m
+              else pure (.error s!"bpf: `{path}` has no `source = \"file.wiz\"` and no \
+`{corePath}`. Add `source = \"file.wiz\"` to the manifest, or pass the `.wiz` directly.")
+        match result with
+        | .error e => do IO.eprintln e; pure 1
+        | .ok c =>
+          let outPath : String :=
+            if out.endsWith ".c" then out
+            else ((System.FilePath.mk out).withExtension "c").toString
+          let outFile := System.FilePath.mk outPath
+          let dir := outFile.parent.getD "."
+          let hdr := dir / "bpf_rt.h"
+          IO.FS.writeFile outFile c
+          IO.FS.writeFile hdr header
+          IO.println s!"bpf: wrote {outPath} and {hdr}"
+          IO.eprintln "bpf: the C is verifier-shaped; `clang -target bpf` and the post-clang \
 checks (stack, undefined symbols, relocations, instruction budget) are the next P0 step."
-      pure 0
+          pure 0
 
 end Wiz.Compiler.Bpf

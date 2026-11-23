@@ -7,6 +7,10 @@ def package : Package := Package.new "wiz"
   |> Package.lib "std" "lib"
   -- Feral's runtime stand-ins (FeralCore), which examples/resources.wiz imports
   |> Package.lib "feral-core" "drafts/feral/lib"
+  -- Scry is a package (`scry/src`), not part of `lib/` (separate-repos.md P0.1);
+  -- examples/scry-*.wiz still import Scry.* during co-development. This is a module
+  -- root, not a check target: `grail build std` and the `std` lib target stay `lib/`.
+  |> Package.set "root" "scry/src"
   |> Package.tests "examples" "examples"
   |> Package.exe "io" "examples/io.wiz"
   |> Package.exe "std-demo" "examples/std.wiz"

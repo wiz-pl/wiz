@@ -7,6 +7,7 @@
 import Sys
 import Text
 import Scry.Native
+import Scry.NativeLink
 
 -- Corpus parse invariant: every `.c` under `corpus/` parses with tree-sitter-c and
 -- every `.cs` parses with tree-sitter-c-sharp, with **0 ERROR/MISSING nodes**.

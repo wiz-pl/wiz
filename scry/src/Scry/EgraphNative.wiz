@@ -3,11 +3,11 @@ import Scry.Egraph
 # Scry.EgraphNative: compatibility import for the one e-graph engine
 
 This module used to be the native-table backend of the S12 e-graph, a second
-implementation that declared the same names as `lib/Scry/Egraph.wiz` (74 of the
+implementation that declared the same names as `src/Scry/Egraph.wiz` (74 of the
 reference module's 80 declarations, plus the analyses, explanations, limits and `Option`
 costs the reference lacked). The two could not be imported into one program.
 
-They are now one engine. `lib/Scry/Egraph.wiz` keeps the reference surface (`EGraph`,
+They are now one engine. `src/Scry/Egraph.wiz` keeps the reference surface (`EGraph`,
 `ENode`, `ETerm`, `Pat`, `Rewrite`, `costs : U64Array` with `EGraph.inf`, and
 `applyAt`/`applyMatches` without a rule index) on the native representation: `etable` is
 a `U64Map` from an e-node hash to a bucket, so `add` and `rebuild` do one bucket lookup

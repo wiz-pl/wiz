@@ -3,6 +3,7 @@ import Wiz.Module
 import Wiz.LegacyNames
 import Wiz.Rig.Instances
 import Wiz.Parser.DocComment
+import Wiz.Lint
 
 /-!
 # The frontend
@@ -245,7 +246,10 @@ the frontend — `Wiz.Format` and `Wiz.LSP` each held a 29–33 MB specialisatio
 cost is instance arguments in the frontend loop; the measurement is in
 `docs/building.md`, "The Lean build". -/
 @[nospecialize] partial def runFrontend (input : String) (s : CommandState R := {}) : CommandState R :=
-  (go input s input.toList.toArray 0 s).checkUnclosedNamespaces
+  let out := (go input s input.toList.toArray 0 s).checkUnclosedNamespaces
+  -- (lint) module-scope rules and per-site suppressions run once, after the target
+  -- is elaborated; the pass never changes a declaration
+  if out.lintEnabled then Lint.finish out input.toList.toArray else out
 where
   @[nospecialize] go (input : String) (base : CommandState R) (chars : Array Char) (pos : Nat) (s : CommandState R) : CommandState R :=
     -- a new text (a file, a REPL entry, a `:load`) has its own header: the state's
@@ -351,9 +355,14 @@ where
     let s' := ((elabCommand cmd).run { s with pristine := false }).2
     let added := s'.globals.order.extract before s'.globals.order.size
     -- (a command macro's located output may have placed them already: keep that)
-    { s' with declSites := added.foldl (fun m n => if m.contains n then m else m.insert n (cmd.info, s.module)) s'.declSites,
-              -- (import header) this is a command that is not an import: the header is over
-              headerDone := true,
-              declDocs := if added.isEmpty then s'.declDocs else declDocsOf chars cmd added s'.declDocs }
+    let out :=
+      { s' with declSites := added.foldl (fun m n => if m.contains n then m else m.insert n (cmd.info, s.module)) s'.declSites,
+                -- (import header) this is a command that is not an import: the header is over
+                headerDone := true,
+                declDocs := if added.isEmpty then s'.declDocs else declDocsOf chars cmd added s'.declDocs }
+    -- (lint) post-elaboration findings are ordinary messages; no declaration changes
+    if out.lintEnabled && out.module == "" then
+      { out with messages := out.messages ++ (Lint.runCommand out cmd chars added).map Lint.Finding.toMsg }
+    else out
 
 end Wiz

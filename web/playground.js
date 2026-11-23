@@ -138,6 +138,7 @@ function editorRules(handle, versionOf = null) {
       JSON.parse(ask("wiz_loom_editor_accept", text, JSON.stringify(item), String(offset))),
     trigger: (text, offset, c) => ask("wiz_loom_editor_trigger", text, c, String(offset)) === "1",
     position: index.position,
+    target: index.target,
   };
 }
 

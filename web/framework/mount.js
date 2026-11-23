@@ -1,5 +1,11 @@
 // The page's whole half of a Loom app: one function.
 //
+// The shared model — what the host, the Loom runtime, the SSR shell and the
+// designer/builder each own, which data crosses which boundary, where it is validated,
+// and the adopt contract — is canonical in `docs/notes/loom-wire-protocol.md`. This
+// comment is only the mount API and the host capabilities; do not restate the model
+// here.
+//
 // A page finds its element and calls
 //
 //   mount(el, { module, transport })
@@ -33,11 +39,12 @@
 //
 // **What is not here on purpose.** The textarea's value, selection and caret are the
 // browser's text-input implementation: an IME, undo and accessibility are not something
-// a Wiz program can own. So a runtime *models* the text and the host applies edits
-// (`host.edit`), rather than the runtime replacing the control. The same goes for the
-// element's identity and event delivery: those are the DOM's, and this file's.
+// a Wiz program can own. The runtime *models* the text and the host applies edits
+// (`host.edit`) rather than replacing the control; the ownership table and the reason
+// are in the canonical note, not repeated here.
 "use strict";
 import { start } from "./driver.js";
+import { islandInfo, islandProps, writeError } from "./adopt.js";
 
 const big = (x) => (typeof x === "bigint" ? x : BigInt(x));   // wasm64: pointers are i64
 
@@ -230,17 +237,36 @@ function browserHost(el, env) {
 // receives the effects the runtime asked for (its `wiz_loom_requests` export, a JSON
 // list); the page does them and acknowledges with
 // `call("wiz_loom_effect", "ack", kind, "")`.
+//
+// An island (`data-wiz-island`, `data-wiz-ssr`, optionally `data-wiz-props`) is adopted
+// when the hash matches and replaced when it does not; see `adopt.js` and the canonical
+// note. A module/ABI failure on an island leaves the static tree and writes one plain
+// text reason into `data-wiz-error`; elsewhere it still throws, as before.
 export async function mount(target, { module, transport, env = globalThis, print, printErr,
-  events, parse, onStep, onRequest } = {}) {
+  events, parse, onStep, onRequest, warn } = {}) {
   const doc = (target && target.ownerDocument) || env.document;
   const el = resolveTarget(target, doc);
   if (!el) throw new TypeError("mount: no element to mount on");
-  const wasm = await instantiate(module, { transport, print, printErr });
+  const island = islandInfo(el);
+  const props = islandProps(island, warn || ((m) => console.warn(m)));
+  const runtimeTransport = props === null || !island.island
+    ? transport
+    : (transport && typeof transport === "object" && !Array.isArray(transport)
+      ? { ...transport, props }
+      : { transport, props });
+  let wasm;
+  try {
+    wasm = await instantiate(module, { transport: runtimeTransport, print, printErr });
+  } catch (e) {
+    if (island.island) writeError(el, doc, "mount: " + (e && e.message ? e.message : String(e)));
+    throw e;
+  }
   const host = browserHost(el, env);
   // Publish the boundary before the first render: a runtime that asks for a capability
   // from `wiz_loom_init` must find it there.
   globalThis.wizHost = host;             // the capability boundary (see the header)
-  globalThis.wizTransport = transport;   // the runtime's outside world (engine, socket)
+  globalThis.wizTransport = runtimeTransport;   // the runtime's outside world (engine, socket)
+  globalThis.wizProps = props;           // the island's `data-wiz-props`, through the transport
 
   let app = null;
   let servicing = false;
@@ -266,13 +292,19 @@ export async function mount(target, { module, transport, env = globalThis, print
     }
   };
 
-  app = start(wasm, el, {
-    events, parse,
-    onStep: (state, event, index, payload) => {
-      service();
-      if (typeof onStep === "function") onStep(state, event, index, payload);
-    },
-  });
+  try {
+    app = start(wasm, el, {
+      events, parse,
+      warn,
+      onStep: (state, event, index, payload) => {
+        service();
+        if (typeof onStep === "function") onStep(state, event, index, payload);
+      },
+    });
+  } catch (e) {
+    if (island.island) writeError(el, doc, "mount: " + (e && e.message ? e.message : String(e)));
+    throw e;
+  }
 
   // The runtime's own entry points (`wiz_loom_effect`, …): strings are allocated here
   // and freed after, numbers are wasm64 pointers, and the returned state is the next one.

@@ -141,6 +141,21 @@ structure CommandState (R : Type) where
   infos : Array (Info R) := #[]
   /-- record the expected type of every checked term (the language server turns it on) -/
   termInfo : Bool := false
+  /-- (lint) run `Wiz.Lint` after each command of the target. Off by default: `wiz lint`
+  turns it on; `wiz check`, `wiz build` and the language server do not. -/
+  lintEnabled : Bool := false
+  /-- (lint) the file being linted, for public-root decisions and reports -/
+  lintPath : String := ""
+  /-- (lint) the roots whose declarations are public (`lib/`, a package's library
+  roots); a path under one is linted by `W301` -/
+  lintPublicRoots : List String := ["lib"]
+  /-- (lint) only these rule ids (empty: the registry's defaults) -/
+  lintRules : List String := []
+  /-- (lint) the target's direct imports, with the `import` command's range -/
+  lintImports : Array (Name × SourceInfo) := #[]
+  /-- (lint) direct imports that contribute an effect (instance, syntax, notation,
+  builtin, attribute, export, FFI/link code), so `W302` never reports them -/
+  lintEffectful : Std.HashSet Name := {}
   declSites : Std.HashMap Name (SourceInfo × String) := {}
   /-- (11s) what each declaration is and its doc comment (`/-- … -/`), for `wiz doc` and
   hovers: filled by the frontend (`runFrontend.step`), replayed by the cache -/

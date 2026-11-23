@@ -353,14 +353,18 @@ def qtyPoly (ctx : Ctx R) (q : Val R) : TCM (QPoly R) :=
 pop the binder's own usage off the head of the vector and check it is compatible
 with `q` (using `QPoly.le`), returning the rest. Throw `quantityMismatch` otherwise.
 
-The vector is sparse, so it may already have stopped before this binder: an empty
-vector means the binder is used `0` times, which every quantity allows. -/
+The vector is sparse, so it may already have stopped before this binder. The missing
+entry is `0`, and it must still be checked: a linear binder (`q = 1`) used zero times is
+a quantity error (`0 ≤ 1` is false), while an erased (`q = 0`) or unrestricted binder
+allows it. -/
 def popUsage (x : Name) (q : QPoly R) : Usage R → TCM (Usage R)
   --<sol
   | used :: rest =>
     if QPoly.le used q then pure rest
     else throw (.quantityMismatch x (toString q) (toString used))
-  | [] => pure []
+  | [] =>
+    if QPoly.le (QPoly.const 0) q then pure []
+    else throw (.quantityMismatch x (toString q) "0")
   --|ex
   --| | u => sorry
   --sol>

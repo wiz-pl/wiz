@@ -19,7 +19,8 @@ variables they are all constants, so you can read `QPoly R` as "a quantity".
 
 Leaving a binder pops the head and compares it against the binder's declared
 quantity -- see `popUsage` in `Wiz.Core.Check`. A vector that has already stopped is
-all zeros, so popping it yields the empty vector (the binder is unused).
+all zeros; popping it checks the missing zero against the declared quantity (so a
+linear binder used zero times is still an error) and yields the empty vector.
 
 -/
 
@@ -65,17 +66,26 @@ def scale (q : QPoly R) (u : Usage R) : Usage R := trim (u.map (q * ·))
 instance : Add (Usage R) := ⟨add⟩
 instance : HSMul (QPoly R) (Usage R) (Usage R) := ⟨scale⟩
 
-private def joinAux : Usage R → Usage R → Option (Usage R)
-  | [], v => some v
-  | u, [] => some u
-  | a :: u, b :: v =>
-    match QPoly.join? a b, joinAux u v with
-    | some j, some rest => some (j :: rest)
-    | _, _ => none
-
 /-- The pointwise least upper bound of two usages, for the branches of a case:
-`none` when some variable's two usages have no join. As with `add`, a vector that stops
-earlier is extended by zeros. -/
+`none` when some variable's two usages have no join. The missing entries of a sparse
+vector are `0`, so a join against a stopped vector is a join against explicit zeros (as
+the old same-length vectors had): `0 ⊔ 1 = ω` in `{0, 1, ω}`, which is what makes a case
+whose branches disagree on a linear variable a quantity error. -/
+private def joinAux : Usage R → Usage R → Option (Usage R)
+  | [], [] => some []
+  | [], b :: v => do
+    let j ← QPoly.join? [] b
+    let rest ← joinAux [] v
+    pure (j :: rest)
+  | a :: u, [] => do
+    let j ← QPoly.join? a []
+    let rest ← joinAux u []
+    pure (j :: rest)
+  | a :: u, b :: v => do
+    let j ← QPoly.join? a b
+    let rest ← joinAux u v
+    pure (j :: rest)
+
 def join? (u v : Usage R) : Option (Usage R) :=
   match joinAux u v with
   | some j => some (trim j)

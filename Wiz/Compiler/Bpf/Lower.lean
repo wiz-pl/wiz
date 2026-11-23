@@ -106,6 +106,8 @@ inductive STm where
   | intOp (w : Nat) (op : IOp) (a b : STm)
   | bitvecOp (n : Nat) (op : UOp) (a b : STm)
   | shift (w : Nat) (left : Bool) (a : STm) (k : Nat)
+  /-- a signed-word shift; the bits are the unsigned shift's, the carried type is `IntN` -/
+  | intShift (w : Nat) (left : Bool) (a : STm) (k : Nat)
   | resize (srcW dstW : Nat) (a : STm)
   | eq (a b : STm)
   | lt (signed : Bool) (a b : STm)
@@ -117,6 +119,8 @@ inductive STm where
   | mkSome (t : STm)
   | mkNone (ty : STy)
   | switchOption (s : STm) (onNone : STm) (x : Nat) (onSome : STm)
+  /-- an exhaustive switch on a nullary enum's tag -/
+  | switchTag (s : STm) (alts : Array STm)
   | pktLoad (w : Nat) (be : Bool) (p off : STm)
   | ctxPacket (c : STm)
   | ctxIfindex (c : STm)
@@ -369,6 +373,13 @@ partial def lowerTm (maps : Array MapDecl) (sigs : Array (String × Sig))
     unless a.ty == ty do reject span s!"the operand of a `UIntN {w}` shift is `{a.ty.describe}`"
     let amount : Tm := .mk span (.lit ty k)
     pure (mk (.bin ty (if left then .shl else .shr) a amount))
+  | .intShift w left a k =>
+    let ty ← lowerSigned span w
+    if k >= w then reject span (shiftMessage w k)
+    let a ← lowerTm maps sigs ctx span a
+    unless a.ty == ty do reject span s!"the operand of an `IntN {w}` shift is `{a.ty.describe}`"
+    let amount : Tm := .mk span (.lit ty k)
+    pure (mk (.bin ty (if left then .shl else .shr) a amount))
   | .resize srcW dstW a =>
     let fty ← lowerUnsigned span srcW
     let tty ← lowerUnsigned span dstW
@@ -469,6 +480,21 @@ partial def lowerTm (maps : Array MapDecl) (sigs : Array (String × Sig))
       unless onNone.ty == onSome.ty do
         reject span s!"the arms of a `match` are `{onNone.ty.describe}` and `{onSome.ty.describe}`"
       pure (mk (.switchOption onNone.ty s onNone x onSome))
+  | .switchTag s alts =>
+    let s ← lowerTm maps sigs ctx span s
+    let n ← match s.ty.enumArity with
+      | some n => pure n
+      | none => reject span s!"a tag switch needs a nullary enum, not `{s.ty.describe}`"
+    if alts.size != n then
+      reject span s!"the switch is not exhaustive: {alts.size} arms for {n} constructors"
+    let alts ← alts.toList.mapM (lowerTm maps sigs ctx span)
+    match alts with
+    | [] => reject span "a tag switch needs at least one arm"
+    | a :: rest =>
+      for b in rest do
+        unless a.ty == b.ty do
+          reject span s!"the arms of a `match` are `{a.ty.describe}` and `{b.ty.describe}`"
+      pure (mk (.switchTag a.ty s alts.toArray))
   | .pktLoad w be p off =>
     let ty ← match Ty.unsignedOf? w with
       | some u => pure (.option u)
