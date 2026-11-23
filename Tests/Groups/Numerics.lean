@@ -30,7 +30,8 @@ caches (those are the `sat`/`smt` groups in `Tests/Smt.lean`):
 
 R3 (the SMT range side condition) and R5 (proofs, not verdicts, in the cache) live in
 `Tests/Smt.lean` next to the tactics they exercise. R7 (a certificate-producing
-`omega`) is a plan only: `docs/numerics-trust.md` §7.
+`omega`) is an S0–S1 prototype (`omega_cert`, `lib/Omega.wiz`); the switch to `omega`
+and the BFS deletion are S6. `docs/numerics-trust.md` §7.
 -/
 
 /-- The text between the first `before` and the next `after` (`none` if either is

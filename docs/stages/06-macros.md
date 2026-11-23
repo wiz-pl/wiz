@@ -381,6 +381,19 @@ expression".
   `succ a ≤ b`, `=` closes by antisymmetry. Multiplication, division, modulo and powers
   are refused (`omega: non-linear`); the node budget is 10,000. `Int` order is not the
   same code (its `Le` is a sign predicate), so it remains P1.
+* **`omega_cert` (R7, slice S1).** A certificate-producing linear `Nat` tactic:
+  the untrusted search emits a typed `Omega.RCert` (hypotheses, the real-shadow step
+  `Nat.omegaFM`, cancellation, a constant contradiction), and `Omega.checkR` replays it
+  into a proof term assigned once, so the kernel checks every step; there is no solver
+  axiom. The additive rules run first, then the goal is closed by refuting its negation
+  with Fourier–Motzkin elimination over the `Nat` atoms (including the implicit
+  `0 ≤ x` bounds). The fragment is difference logic (unit coefficients): a system with
+  coefficients > 1 whose real shadow is feasible is refused as
+  `omega: incomplete: integrality gap …`, never as "no proof"; an exhausted search
+  budget is `omega: incomplete: budget exhausted (N)`. Every coefficient comparison in
+  a certificate is a `NatExpr.prove` ring identity the kernel re-checks. Non-linear,
+  division/modulo/power and subtraction cases are refused at the tactic's position.
+  The existing `omega` BFS is untouched until slice S6.
 * **`by_cases`.** Landed from `tactics-gap` as `Tac.byCases` (tag 42), built with
   `Bool.casesOn`; nothing is trusted.
 

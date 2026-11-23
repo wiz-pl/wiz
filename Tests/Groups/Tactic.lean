@@ -503,6 +503,41 @@ def tacticGroup : Group where
     { name := "omega_cert refuses a non-linear hypothesis", run := fun _ =>
         failsLibs "import Omega\ndef bad (a b : Nat) (h : Nat.mul a b = 3) : Nat.Le a 3 := by\n  omega_cert"
           "omega: non-linear" },
+    -- S1 (`wiz-notes/omega-certificate.md` §7): the real shadow (FM) and refutation.
+    { name := "omega_cert S1: a difference-logic goal by real-shadow refutation", run := fun _ =>
+        okLibs ("import Omega\n" ++
+          "def omegaLtTrans (a b c : Nat) (h₁ : Nat.Le a b) (h₂ : Nat.Lt b c) :\n" ++
+          "    Nat.Lt a c := by\n  omega_cert\n" ++
+          "#print axioms omegaLtTrans")
+          ["'omegaLtTrans' does not depend on any axioms"] },
+    { name := "omega_cert S1: the real shadow proves 2*a ≤ 2*b ⊢ a ≤ b", run := fun _ =>
+        okLibs ("import Omega\n" ++
+          -- coefficient 2 in the fragment's repeated-occurrence form: `a + a` is
+          -- `2*a`; a `Nat.mul` in the input is refused as non-linear (S0 behaviour)
+          "def omegaTwo (a b : Nat) (h : Nat.Le (Nat.add a a) (Nat.add b b)) : Nat.Le a b := by\n" ++
+          "  omega_cert\n" ++
+          "#print axioms omegaTwo")
+          ["'omegaTwo' does not depend on any axioms"] },
+    { name := "omega_cert S1 refuses a false goal", run := fun _ =>
+        failsLibs ("import Omega\n" ++
+          "def bad (a b : Nat) (h : Nat.Lt a b) : Nat.Lt b a := by\n  omega_cert")
+          "omega: no proof" },
+    { name := "omega_cert S1 reports an integrality gap, not no proof", run := fun _ =>
+        failsLibs ("import Omega\n" ++
+          "def gap (a : Nat) (h₁ : Nat.Le (Nat.add a a) 1) (h₂ : Nat.Le 1 (Nat.add a a)) : Nat.Le 2 a := by\n" ++
+          "  omega_cert")
+          "3:3: error: omega: incomplete: integrality gap" },
+    { name := "omega_cert refuses subtraction at the tactic's position", run := fun _ =>
+        failsLibs ("import Omega\n" ++
+          "def subBad (a b : Nat) : Nat.Le (Nat.sub a b) a := by\n  omega_cert")
+          "3:3: error: omega: outside the linear Nat fragment" },
+    { name := "omega_cert S1 reports budget exhaustion as incomplete", run := fun _ => do
+        let lowers := (List.range 25).map (fun i => s!"    (l{i} : Nat.Le {i} x)\n")
+        let uppers := (List.range 24).map (fun i => s!"    (u{i} : Nat.Le x {200 + i})\n")
+        let last := "    (u24 : Nat.Le x 224) : Nat.Le x 0 := by\n  omega_cert"
+        let src := "import Omega\ndef omegaBudget (x : Nat)\n" ++ String.join lowers ++
+          String.join uppers ++ last
+        failsLibs src "omega: incomplete: budget exhausted (512)" },
     { name := "two subgoals: the second survives the first exact", run := fun _ =>
         okLib ("import Prelude\nstructure Pairish where\n  a : Nat\n  b : Nat\n" ++
           "def p : Pairish := by\n  constructor\n  exact 1\n  exact 2\n" ++

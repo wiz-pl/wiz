@@ -16,6 +16,16 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 
 ## [Unreleased]
 
+* omega: `omega_cert`'s S1 slice is the real-shadow (Fourier–Motzkin) engine with a
+  refutation discipline. The untrusted search emits a typed certificate (`Omega.RCert`)
+  that `Omega.checkR` replays into a proof term assigned once; the kernel checks every
+  `Nat.omegaFM`, cancellation and ring step, so a wrong coefficient fails typechecking.
+  The procedure decides the difference-logic fragment (unit coefficients, with the
+  implicit `0 ≤ x` bounds), and refuses an integrality gap or an exhausted search budget
+  as a positioned `omega: incomplete: …` never as "no proof"; subtraction is now refused
+  explicitly (S4). The existing `omega` BFS is unchanged until S6. Tests: six new
+  `=tactics` cases, `#print axioms` empty on the positive proofs.
+
 * ci: a pull request's `build` job starts from a `.lake` a **cold** derivation saved
   (`flake.nix`'s `withLakeCache`, keyed by `flake.lock`, `lean-toolchain`, the
   architecture and the `lean`/`runtime` subset hashes), so Lake recompiles only the

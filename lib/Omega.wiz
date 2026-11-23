@@ -1,4 +1,5 @@
 import Ring
+import Text
 /-!
 # Omega certificates (prototype)
 
@@ -6,18 +7,27 @@ A proof-producing linear-arithmetic tactic for `Nat`: the search builds an expli
 certificate (a derivation tree), and a checker replays it into a proof term that the
 kernel infers when the tactic assigns it. Nothing here is a solver axiom.
 
-This first slice (`omega_cert`) covers the *additive* fragment:
+The engine has two layers:
 
-* atoms `a ≤ b`, `a < b` and `a = b`, with `+` and numerals;
-* hypotheses used directly, by transitivity, by adding two inequalities
-  (`Nat.add_le_add`), by cancelling a common summand
+* the *additive* rules: hypotheses used directly, by transitivity, by adding two
+  inequalities (`Nat.add_le_add`), by cancelling a common summand
   (`Nat.le_of_add_le_add_right`), and from an equality whose side is a sum
-  (`Nat.le_of_eq_add'`/`Nat.le_of_eq_add`);
-* equality goals by antisymmetry.
+  (`Nat.le_of_eq_add'`/`Nat.le_of_eq_add`), with equality goals by antisymmetry;
+* the *real shadow* (S1): the goal is negated with `Nat.le_or_lt`, and Fourier–Motzkin
+  elimination (`Nat.omegaFM`, plus the `Omega.cancel*` cancellations) derives a constant
+  contradiction, which `Nat.not_add_succ_le`/`False.elim` turns into the goal. The
+  search also adds the implicit `0 ≤ x` bounds (`Nat.zero_le`), so it is complete for
+  difference logic (unit coefficients).
 
-Products, division, modulo, powers and subtraction are outside the fragment and are
-refused with a positioned message. The search is untrusted: a wrong certificate makes
-the checker or the kernel fail, never a false goal pass.
+The refutation search emits a typed certificate (`Omega.RCert`) that `Omega.checkR`
+replays; every coefficient comparison is a `NatExpr.prove` ring identity the kernel
+re-checks, so a wrong coefficient cannot produce a proof. A real shadow that is feasible
+with coefficients > 1 is a named `omega: incomplete: integrality gap` (S3 is the Cooper
+split), and an exhausted search budget is `omega: incomplete: budget exhausted (N)` —
+never "no proof" or a guess. Products, division, modulo, powers and subtraction are
+outside the input fragment (coefficients are repeated occurrences, `a + a`) and are
+refused with a positioned message. The existing `omega`
+(`lib/Prelude.wiz`) is untouched until S6.
 
 The design and the next slices are in `wiz-notes/omega-certificate.md`.
 -/
@@ -83,8 +93,6 @@ inductive Omega.Cert where
   | leAddRight (a k : Expr)
   /-- `a ≤ k + a` -/
   | leAddLeft (a k : Expr)
-  /-- `a ≤ succ a` -/
-  | leSucc (a : Expr)
   /-- `a ≤ b` and `b ≤ c` give `a ≤ c` -/
   | trans (a b c : Expr) (p q : Omega.Cert)
   /-- `a ≤ b` and `c ≤ d` give `a + c ≤ b + d` -/
@@ -136,8 +144,6 @@ partial def Omega.check (g : Nat) (hyps : List (String × Expr)) (c : Omega.Cert
   | .leAddLeft a k =>
     TacticM.pure (.le a (Expr.ap2 (.const "Nat.add") k a),
       Expr.ap2 (.const "Nat.le_add_left") a k)
-  | .leSucc a =>
-    TacticM.pure (.le a (Omega.succ a), .app (.const "Nat.le_succ") a)
   | .trans a b c p q => do
     dp ← Omega.check g hyps p;
     dq ← Omega.check g hyps q;
@@ -219,6 +225,58 @@ def Nat.omegaFM (A B C D a b x : Nat)
       ((b * B + a * D) + b * a * x) e₂ hL;
   Nat.le_of_add_le_add_right (b * a * x) (b * A + a * C) (b * B + a * D) hR
 
+/-- `Nat.omegaFM` with the arithmetic written as `Nat.add`/`Nat.mul`. The raw theorem's
+`+`/`*` notation leaves an instance argument that the kernel cannot solve from the
+certificate's explicit forms (the `Omega.cancelR` lesson from S0); this wrapper is the
+same bridge. -/
+def Omega.fm (A B C D a b x : Nat)
+    (h₁ : Nat.Le (Nat.add A (Nat.mul a x)) B)
+    (h₂ : Nat.Le C (Nat.add D (Nat.mul b x))) :
+    Nat.Le (Nat.add (Nat.mul b A) (Nat.mul a C))
+      (Nat.add (Nat.mul b B) (Nat.mul a D)) :=
+  Nat.omegaFM A B C D a b x h₁ h₂
+
+/-- Cancel a common `k*x` from both sides (the unit-coefficient FM result), with the
+arithmetic as written by `nat_ring!`. -/
+def Omega.cancelSamePlus (A B k x : Nat)
+    (h : Nat.Le (A + k * x) (B + k * x)) : Nat.Le A B :=
+  Nat.le_of_add_le_add_right (k * x) A B h
+
+/-- The `Nat.add` form of `cancelSame` the certificate checker uses. -/
+def Omega.cancelSame (A B k x : Nat)
+    (h : Nat.Le (Nat.add A (Nat.mul k x)) (Nat.add B (Nat.mul k x))) : Nat.Le A B :=
+  Omega.cancelSamePlus A B k x h
+
+/-- Cancel the common `k*x` when the left side has `d` extra copies:
+`A + (k+d)*x ≤ B + k*x` gives `A + d*x ≤ B`. -/
+def Omega.cancelMoreLPlus (A B d k x : Nat)
+    (h : Nat.Le (A + (k + d) * x) (B + k * x)) : Nat.Le (A + d * x) B :=
+  let e : A + (k + d) * x = (A + d * x) + k * x :=
+    nat_ring! A + (k + d) * x = (A + d * x) + k * x;
+  Nat.le_of_add_le_add_right (k * x) (A + d * x) B
+    (Omega.leL (A + (k + d) * x) ((A + d * x) + k * x) (B + k * x) e h)
+
+/-- The `Nat.add` form of `cancelMoreL`. -/
+def Omega.cancelMoreL (A B d k x : Nat)
+    (h : Nat.Le (Nat.add A (Nat.mul (Nat.add k d) x)) (Nat.add B (Nat.mul k x))) :
+    Nat.Le (Nat.add A (Nat.mul d x)) B :=
+  Omega.cancelMoreLPlus A B d k x h
+
+/-- Cancel the common `k*x` when the right side has `d` extra copies:
+`A + k*x ≤ B + (k+d)*x` gives `A ≤ B + d*x`. -/
+def Omega.cancelMoreRPlus (A B d k x : Nat)
+    (h : Nat.Le (A + k * x) (B + (k + d) * x)) : Nat.Le A (B + d * x) :=
+  let e : B + (k + d) * x = (B + d * x) + k * x :=
+    nat_ring! B + (k + d) * x = (B + d * x) + k * x;
+  Nat.le_of_add_le_add_right (k * x) A (B + d * x)
+    (Omega.leR (A + k * x) (B + (k + d) * x) ((B + d * x) + k * x) e h)
+
+/-- The `Nat.add` form of `cancelMoreR`. -/
+def Omega.cancelMoreR (A B d k x : Nat)
+    (h : Nat.Le (Nat.add A (Nat.mul k x)) (Nat.add B (Nat.mul (Nat.add k d) x))) :
+    Nat.Le A (Nat.add B (Nat.mul d x)) :=
+  Omega.cancelMoreRPlus A B d k x h
+
 -- ## The search (untrusted)
 
 /-- The sum edges of one term. -/
@@ -267,12 +325,13 @@ def Omega.hypEdges (g : Nat) (i : Nat) (node : Expr) : List (String × Expr) →
               | .false => .nil;
             TacticM.pure (List.append (List.append fwd bwd) rest)
 
-/-- All successor edges of `node`, in deterministic order: successor, sums, hypotheses. -/
+/-- The edges out of `node`: sums and hypotheses. The unconditional successor edge of the
+S0 prototype is gone: it made a failed search walk an infinite chain, and the real shadow
+(S1) is the rule that replaces it. -/
 def Omega.allEdges (g : Nat) (hyps : List (String × Expr)) (terms : List Expr) (node : Expr) :
     TacticM (List (Expr × Omega.Cert)) := do
   hs ← Omega.hypEdges g 0 node hyps;
-  let succEdge : List (Expr × Omega.Cert) := .cons (Omega.succ node, .leSucc node) .nil;
-  TacticM.pure (List.append succEdge (List.append (Omega.addEdges node terms) hs))
+  TacticM.pure (List.append (Omega.addEdges node terms) hs)
 
 /-- A path of the DFS: its start, its current node, the nodes already on the path, and
 the certificate for `start ≤ current`. -/
@@ -412,53 +471,1019 @@ def Omega.hypTypes : List (String × Expr) → List Expr
   | .nil => .nil
   | .cons h hs => .cons h.2 (Omega.hypTypes hs)
 
+-- ## S1: linear forms, the real shadow, and the refutation discipline
+--
+-- The search below is untrusted: it proposes a refutation certificate (`Omega.RCert`),
+-- and `Omega.checkR` replays it into proof terms that the kernel checks. Coefficient
+-- arithmetic appears only in *closed numerals* in the proof (via `Nat.omegaFM` and the
+-- cancellation lemmas), and every transport between an input expression and a linear
+-- form is a `NatExpr.prove` term the kernel re-checkes. A wrong coefficient cannot
+-- produce a proof: the ring certificate fails to typecheck.
+
+/-- A linear form over the fixed atom list: one coefficient per atom, and a constant. -/
+structure Omega.Lin where
+  coeffs : List Nat
+  const : Nat
+
+/-- Vector equality (`Expr.beq`-style, for coefficients). -/
+def Omega.vecEq : List Nat → List Nat → Bool
+  | .nil, .nil => .true
+  | .cons x xs, .cons y ys => Bool.and (Nat.beq x y) (Omega.vecEq xs ys)
+  | _, _ => .false
+
+/-- The `i`th coefficient (0 past the end). -/
+def Omega.vecGet : List Nat → Nat → Nat
+  | .nil, _ => 0
+  | .cons x _, .zero => x
+  | .cons _ xs, .succ n => Omega.vecGet xs n
+
+/-- Set the `i`th coefficient. -/
+def Omega.vecSet : List Nat → Nat → Nat → List Nat
+  | .nil, _, _ => .nil
+  | .cons x xs, .zero, v => .cons v xs
+  | .cons x xs, .succ n, v => .cons x (Omega.vecSet xs n v)
+
+/-- Pointwise addition. -/
+def Omega.vecAdd : List Nat → List Nat → List Nat
+  | .nil, ys => ys
+  | xs, .nil => xs
+  | .cons x xs, .cons y ys => .cons (Nat.add x y) (Omega.vecAdd xs ys)
+
+/-- Multiply every coefficient by `k`. -/
+def Omega.vecSmul (k : Nat) : List Nat → List Nat
+  | .nil => .nil
+  | .cons x xs => .cons (Nat.mul k x) (Omega.vecSmul k xs)
+
+/-- `n` zero coefficients. -/
+def Omega.vecZeros : Nat → List Nat
+  | .zero => .nil
+  | .succ n => .cons 0 (Omega.vecZeros n)
+
+/-- Are all coefficients zero? -/
+def Omega.vecAllZero : List Nat → Bool
+  | .nil => .true
+  | .cons x xs => Bool.and (Nat.beq x 0) (Omega.vecAllZero xs)
+
+/-- The largest coefficient in a vector. -/
+def Omega.vecMax : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => Nat.max x (Omega.vecMax xs)
+
+/-- The zero form with `n` atoms. -/
+def Omega.linZero (n : Nat) : Omega.Lin :=
+  Omega.Lin.mk (Omega.vecZeros n) 0
+
+/-- Form addition. -/
+def Omega.linAdd (a b : Omega.Lin) : Omega.Lin :=
+  Omega.Lin.mk (Omega.vecAdd a.coeffs b.coeffs) (Nat.add a.const b.const)
+
+/-- Form scaling. -/
+def Omega.linSmul (k : Nat) (a : Omega.Lin) : Omega.Lin :=
+  Omega.Lin.mk (Omega.vecSmul k a.coeffs) (Nat.mul k a.const)
+
+/-- The coefficient of atom `i`. -/
+def Omega.linGet (a : Omega.Lin) (i : Nat) : Nat := Omega.vecGet a.coeffs i
+
+/-- Set the coefficient of atom `i`. -/
+def Omega.linSet (a : Omega.Lin) (i : Nat) (v : Nat) : Omega.Lin :=
+  Omega.Lin.mk (Omega.vecSet a.coeffs i v) a.const
+
+/-- Form equality. -/
+def Omega.linEq (a b : Omega.Lin) : Bool :=
+  Bool.and (Omega.vecEq a.coeffs b.coeffs) (Nat.beq a.const b.const)
+
+/-- A form with a pivot coefficient removed. -/
+def Omega.linDrop (a : Omega.Lin) (i : Nat) : Omega.Lin := Omega.linSet a i 0
+
+/-- A numeral `Expr`, if `e` is one (`Nat.succ` chains and `OfNat` included). -/
+partial def Omega.numeral (e : Expr) : Option Nat :=
+  match e with
+  | .lit n => .some n
+  | _ => match Expr.constApp e with
+    | .some (n, args) =>
+      if Expr.nameEq n "OfNat.ofNat" then
+        match args with
+        | .cons _ (.cons m (.cons _ .nil)) => Omega.numeral m
+        | _ => .none
+      else if Expr.nameEq n "Nat.succ" then
+        match args with
+        | .cons a .nil => match Omega.numeral a with
+          | .some k => .some (Nat.succ k)
+          | .none => .none
+        | _ => .none
+      else if Expr.nameEq n "Nat.zero" then
+        match args with
+        | .nil => .some 0
+        | _ => .none
+      else .none
+    | .none => .none
+
+/-- The operands of a multiplication (after its type/instance arguments). -/
+def Omega.mulPair (e : Expr) : Option (Expr × Expr) :=
+  match Expr.constApp e with
+  | .some (n, args) =>
+    let k := if Expr.nameEq n "Nat.mul" then 0
+      else if Expr.nameEq n "Mul.mul" then 2
+      else if Expr.nameEq n "HMul.hMul" then 4
+      else 99;
+    match List.dropN k args with
+    | .cons a (.cons b .nil) => .some (a, b)
+    | _ => .none
+  | .none => .none
+
+/-- The argument of `Nat.succ`. -/
+def Omega.succOf (e : Expr) : Option Expr :=
+  match Expr.constApp e with
+  | .some (n, args) =>
+    if Expr.nameEq n "Nat.succ" then
+      match args with
+      | .cons a .nil => .some a
+      | _ => .none
+    else .none
+  | .none => .none
+
+/-- The index of `e` in the atom list. -/
+def Omega.atomIndexGo : List Expr → Expr → Nat → Option Nat
+  | .nil, _, _ => .none
+  | .cons x xs, e, i => match Expr.beq x e with
+    | .true => .some i
+    | .false => Omega.atomIndexGo xs e (Nat.succ i)
+
+/-- The index of `e` in the atom list, if it is there. -/
+def Omega.atomIndex (atoms : List Expr) (e : Expr) : Option Nat :=
+  Omega.atomIndexGo atoms e 0
+
+/-- Append `e` to the atoms unless it is already there. -/
+def Omega.addAtom (acc : List Expr) (e : Expr) : List Expr :=
+  match Omega.atomIndex acc e with
+  | .some _ => acc
+  | .none => List.append acc (.cons e .nil)
+
+/-- Reflect a side as a `NatExpr` over the fixed atom list. `none` if an operation is
+outside the fragment (a product of two non-numerals is the only one that reaches here;
+the tactic refuses it earlier). -/
+partial def Omega.reifyAt (atoms : List Expr) (e : Expr) : Option NatExpr :=
+  match Omega.numeral e with
+  | .some n => .some (.lit n)
+  | .none => match Expr.addPair e with
+    | .some (a, b) => match Omega.reifyAt atoms a, Omega.reifyAt atoms b with
+      | .some ra, .some rb => .some (.add ra rb)
+      | _, _ => .none
+    | .none => match Omega.mulPair e with
+      | .some (a, b) => match Omega.numeral a with
+        | .some n => match Omega.reifyAt atoms b with
+          | .some rb => .some (.mul (.lit n) rb)
+          | .none => .none
+        | .none => match Omega.numeral b with
+          | .some n => match Omega.reifyAt atoms a with
+            | .some ra => .some (.mul ra (.lit n))
+            | .none => .none
+          | .none => .none
+      | .none => match Omega.succOf e with
+        | .some a => match Omega.reifyAt atoms a with
+          | .some ra => .some (.add (.lit 1) ra)
+          | .none => .none
+        | .none => match Omega.atomIndex atoms e with
+          | .some i => .some (.atom i)
+          | .none => .none
+
+/-- The atoms of a side, in pre-order, without duplicates. -/
+partial def Omega.collectAtoms (acc : List Expr) (e : Expr) : List Expr :=
+  match Omega.numeral e with
+  | .some _ => acc
+  | .none => match Expr.addPair e with
+    | .some (a, b) => Omega.collectAtoms (Omega.collectAtoms acc a) b
+    | .none => match Omega.mulPair e with
+      | .some (a, b) => match Omega.numeral a with
+        | .some _ => Omega.collectAtoms acc b
+        | .none => match Omega.numeral b with
+          | .some _ => Omega.collectAtoms acc a
+          | .none => Omega.addAtom acc e
+      | .none => match Omega.succOf e with
+        | .some a => Omega.collectAtoms acc a
+        | .none => Omega.addAtom acc e
+
+/-- The linear form of a `NatExpr` over `n` atoms; `none` for a product of two
+non-numerals. -/
+def Omega.linOfNat (n : Nat) : NatExpr → Option Omega.Lin
+  | .atom i => .some (Omega.Lin.mk (Omega.vecSet (Omega.vecZeros n) i 1) 0)
+  | .lit k => .some (Omega.Lin.mk (Omega.vecZeros n) k)
+  | .add a b => match Omega.linOfNat n a, Omega.linOfNat n b with
+    | .some x, .some y => .some (Omega.linAdd x y)
+    | _, _ => .none
+  | .mul a b => match a with
+    | .lit k => match Omega.linOfNat n b with
+      | .some y => .some (Omega.linSmul k y)
+      | .none => .none
+    | _ => match b with
+      | .lit k => match Omega.linOfNat n a with
+        | .some x => .some (Omega.linSmul k x)
+        | .none => .none
+      | _ => .none
+
+/-- The linear form of a side over the fixed atom list. -/
+def Omega.linOf (atoms : List Expr) (e : Expr) : Option Omega.Lin :=
+  match Omega.reifyAt atoms e with
+  | .some ne => Omega.linOfNat (List.length atoms) ne
+  | .none => .none
+
+/-- `c*x` as a term. The `c = 1` case keeps `Nat.mul` too: `Nat.mul 1 x` reduces to
+`x + 0`, and the `Nat.omegaFM` premise is stated with `a * x`, so the canonical form must
+have the same head for the kernel's conversion to match it. -/
+def Omega.coefTerm (c : Nat) (x : Expr) : Expr :=
+  Expr.ap2 (.const "Nat.mul") (.lit c) x
+
+/-- Fold the coefficients into a sum, leaving out the pivot atom. -/
+partial def Omega.formFold (atoms : List Expr) (pivot : Option Nat) : Nat → Expr → List Nat → Expr
+  | i, acc, .nil => acc
+  | i, acc, .cons c cs => match atoms with
+    | .nil => acc
+    | .cons x xs =>
+      let skip := match pivot with
+        | .some p => Nat.beq i p
+        | .none => Bool.false;
+      let c' := match skip with
+        | .true => 0
+        | .false => c;
+      let acc' := match Nat.beq c' 0 with
+        | .true => acc
+        | .false => Expr.ap2 (.const "Nat.add") acc (Omega.coefTerm c' x);
+      Omega.formFold xs pivot (Nat.succ i) acc' cs
+
+/-- The canonical expression of a form. With `pivot = some i` the pivot atom is the last
+summand, in the shape `Nat.omegaFM` consumes: `A + a*x`. -/
+def Omega.formExpr (atoms : List Expr) (pivot : Option Nat) (L : Omega.Lin) : Expr :=
+  let base := Omega.formFold atoms pivot 0 (.lit L.const) L.coeffs;
+  match pivot with
+  | .none => base
+  | .some p => match Omega.nth atoms p with
+    | .none => base
+    | .some x =>
+      let c := Omega.vecGet L.coeffs p;
+      match Nat.beq c 0 with
+      | .true => base
+      | .false => Expr.ap2 (.const "Nat.add") base (Omega.coefTerm c x)
+
+/-- A `NatExpr` value as a term. -/
+def Omega.natExprExpr : NatExpr → Expr
+  | .atom i => .app (.const "NatExpr.atom") (.lit i)
+  | .lit n => .app (.const "NatExpr.lit") (.lit n)
+  | .add a b => Expr.mkApp (.const "NatExpr.add")
+      (.cons (Omega.natExprExpr a) (.cons (Omega.natExprExpr b) .nil))
+  | .mul a b => Expr.mkApp (.const "NatExpr.mul")
+      (.cons (Omega.natExprExpr a) (.cons (Omega.natExprExpr b) .nil))
+
+/-- The atom environment `ρ` as a term (`List Nat`). -/
+def Omega.rhoExpr : List Expr → Expr
+  | .nil => .app (.const "List.nil") (.const "Nat")
+  | .cons x xs => Expr.mkApp (.const "List.cons")
+      (.cons (.const "Nat") (.cons x (.cons (Omega.rhoExpr xs) .nil)))
+
+/-- The Boolean certificate `NatExpr.prove` checks by computing (`Ring.trivial`'s peer;
+`Ring` has no proof object and `RingTactic` is not imported here). -/
+def Omega.trivial : Bool.true = Bool.true := rfl
+
+/-- `e = formExpr atoms pivot L`, by the ring normaliser's soundness theorem. The type of
+the term is `NatExpr.eval ρ (reify e) = NatExpr.eval ρ (reify formExpr)`; the kernel's
+conversion sees the two sides as `e` and `formExpr` because `NatExpr.eval` computes on the
+reflected syntax. A wrong coefficient makes the normal forms disagree and `Omega.trivial`
+fails to typecheck. -/
+def Omega.canonEq (g : Nat) (rho : Expr) (atoms : List Expr) (e : Expr)
+    (pivot : Option Nat) (L : Omega.Lin) : TacticM Expr :=
+  match Omega.reifyAt atoms e with
+  | .none => TacticM.fail "omega: internal: cannot reify a linear side"
+  | .some a => match Omega.reifyAt atoms (Omega.formExpr atoms pivot L) with
+    | .none => TacticM.fail "omega: internal: cannot reify a linear form"
+    | .some b =>
+      TacticM.pure (Expr.mkApp (.const "NatExpr.prove")
+        (.cons rho (.cons (Omega.natExprExpr a)
+          (.cons (Omega.natExprExpr b) (.cons (.const "Omega.trivial") .nil)))))
+
+/-- `Omega.leL` as a term. -/
+def Omega.transportLe (a b c e h : Expr) : Expr :=
+  Expr.mkApp (.const "Omega.leL") (.cons a (.cons b (.cons c (.cons e (.cons h .nil)))))
+
+/-- `Omega.leR` as a term. -/
+def Omega.transportLeR (a b c e h : Expr) : Expr :=
+  Expr.mkApp (.const "Omega.leR") (.cons a (.cons b (.cons c (.cons e (.cons h .nil)))))
+
+-- ## The refutation certificate
+
+/-- How a hypothesis is read as an inequality. -/
+inductive Omega.RKind where
+  | le
+  | lt
+  | eqFwd
+  | eqBwd
+
+/-- The refutation certificate. A leaf names a hypothesis; the internal nodes are the
+real shadow (`fm`, the theorem `Nat.omegaFM`) and the cancellation of a variable that
+occurs on both sides (`cancel`). The checker recomputes every conclusion: no form or
+coefficient in this tree is trusted. -/
+inductive Omega.RCert where
+  | hyp (i : Nat) (kind : Omega.RKind)
+  /-- the implicit nonnegativity bound `0 ≤ x` (`Nat.zero_le x`) -/
+  | zeroLe (x : Nat)
+  | fm (x : Nat) (p q : Omega.RCert)
+  | cancel (x : Nat) (p : Omega.RCert)
+  | falseOf (p : Omega.RCert)
+
+/-- What a refutation certificate node checked to: an inequality in canonical form, or
+`False`. -/
+inductive Omega.RRes where
+  | le (l : Omega.Lin) (r : Omega.Lin) (proof : Expr)
+  | false (proof : Expr)
+
+/-- Transport a hypothesis `L ≤ R` to the canonical expressions of its forms. -/
+def Omega.checkRLe (g : Nat) (rho : Expr) (atoms : List Expr) (L R h : Expr) :
+    TacticM Omega.RRes := do
+  match Omega.linOf atoms L, Omega.linOf atoms R with
+  | .some fl, .some fr => do
+    pL ← Omega.canonEq g rho atoms L .none fl;
+    pR ← Omega.canonEq g rho atoms R .none fr;
+    let h1 := Omega.transportLe L (Omega.formExpr atoms .none fl) R pL h;
+    let h2 := Omega.transportLeR (Omega.formExpr atoms .none fl) R
+      (Omega.formExpr atoms .none fr) pR h1;
+    TacticM.pure (.le fl fr h2)
+  | _, _ => TacticM.fail "omega: internal: a side is not a linear form"
+
+/-- Is `n` positive? -/
+def Omega.pos (n : Nat) : Bool := Nat.lt 0 n
+
+/-- Is `n` zero? -/
+def Omega.isZero (n : Nat) : Bool := Nat.beq n 0
+
+/-- The smaller of two naturals. -/
+def Omega.natMin (a b : Nat) : Nat := match Nat.le a b with
+  | .true => a
+  | .false => b
+
+/-- The type of the hypothesis at position `i` in the branch-prefixed list. Index 0 is
+the branch type (`h.2`, a constructed `Nat.Lt`); later positions are the goal's context
+variables `0, 1, …`. The kernel's own inferred type is used for those: the reflected
+`h.2` can print identically while carrying a different instance argument (the S0
+cancellation lesson), and `inferType` returns the type the kernel will check. -/
+def Omega.hypTypeAt (g : Nat) (i : Nat) (h : String × Expr) : TacticM Expr :=
+  match i with
+  | .zero => TacticM.pure h.2
+  | .succ j => TacticM.inferType g (.var j)
+
+/-- Replay a refutation certificate. `terms` are the proof terms of the hypotheses (a
+`var` for each goal hypothesis, a placeholder for the negated goal branch). -/
+partial def Omega.checkR (g : Nat) (rho : Expr) (atoms : List Expr)
+    (hyps : List (String × Expr)) (terms : List Expr) (c : Omega.RCert) :
+    TacticM Omega.RRes :=
+  match c with
+  | .hyp i kind => match Omega.nth hyps i, Omega.nth terms i with
+    | .some h, .some hterm => do
+      hty ← Omega.hypTypeAt g i h;
+      match kind with
+      | .le => match Omega.asLe hty with
+        | .some ab => Omega.checkRLe g rho atoms ab.1 ab.2 hterm
+        | .none => TacticM.fail "omega: certificate: hypothesis is not ≤"
+      | .lt => match Omega.asLt hty with
+        | .some ab => Omega.checkRLe g rho atoms (Omega.succ ab.1) ab.2 hterm
+        | .none => match Omega.asLe hty with
+          -- the elaborator may already have unfolded `Nat.Lt a b` to
+          -- `Nat.Le (Nat.succ a) b`; both are the same proposition
+          | .some ab => Omega.checkRLe g rho atoms ab.1 ab.2 hterm
+          | .none => TacticM.fail "omega: certificate: hypothesis is not <"
+      | .eqFwd => do
+        ev ← TacticM.eqView g hty;
+        match ev with
+        | .some q => match q with
+          | (_, u, v) => Omega.checkRLe g rho atoms u v
+              (Expr.mkApp (.const "Nat.le_of_eq") (.cons u (.cons v (.cons hterm .nil))))
+        | .none => TacticM.fail "omega: certificate: hypothesis is not an equality"
+      | .eqBwd => do
+        ev ← TacticM.eqView g hty;
+        match ev with
+        | .some q => match q with
+          | (_, u, v) => Omega.checkRLe g rho atoms v u
+              (Expr.mkApp (.const "Nat.le_of_eq_sym") (.cons u (.cons v (.cons hterm .nil))))
+        | .none => TacticM.fail "omega: certificate: hypothesis is not an equality"
+    | _, _ => TacticM.fail "omega: certificate: hypothesis index out of range"
+  | .zeroLe x => match Omega.nth atoms x with
+    | .none => TacticM.fail "omega: certificate: zero bound out of range"
+    | .some xe => Omega.checkRLe g rho atoms (.lit 0) xe (.app (.const "Nat.zero_le") xe)
+  | .fm x p q => do
+    vp ← Omega.checkR g rho atoms hyps terms p;
+    vq ← Omega.checkR g rho atoms hyps terms q;
+    match vp, vq with
+    | .le fl fr hp, .le ql qr hq => match Omega.nth atoms x with
+      | .none => TacticM.fail "omega: certificate: fm pivot out of range"
+      | .some xe =>
+        let a := Omega.linGet fl x;
+        let ar := Omega.linGet fr x;
+        let b := Omega.linGet qr x;
+        let bl := Omega.linGet ql x;
+        match Bool.and (Omega.pos a) (Bool.and (Omega.isZero ar) (Bool.and (Omega.pos b) (Omega.isZero bl))) with
+        | .false => TacticM.fail "omega: certificate: fm premises do not eliminate the pivot"
+        | .true => do
+          let A := Omega.linDrop fl x;
+          let B := fr;
+          let C := ql;
+          let D := Omega.linDrop qr x;
+          let Ae := Omega.formExpr atoms .none A;
+          let Be := Omega.formExpr atoms .none B;
+          let Ce := Omega.formExpr atoms .none C;
+          let De := Omega.formExpr atoms .none D;
+          eqp ← Omega.canonEq g rho atoms (Omega.formExpr atoms .none fl) (.some x) fl;
+          let hp' := Omega.transportLe (Omega.formExpr atoms .none fl)
+            (Omega.formExpr atoms (.some x) fl) (Omega.formExpr atoms .none fr) eqp hp;
+          eqq ← Omega.canonEq g rho atoms (Omega.formExpr atoms .none qr) (.some x) qr;
+          let hq' := Omega.transportLeR (Omega.formExpr atoms .none ql) (Omega.formExpr atoms .none qr)
+            (Omega.formExpr atoms (.some x) qr) eqq hq;
+          let fmProof := Expr.mkApp (.const "Omega.fm")
+            (.cons Ae (.cons Be (.cons Ce (.cons De (.cons (.lit a) (.cons (.lit b)
+              (.cons xe (.cons hp' (.cons hq' .nil)))))))));
+          let concL := Expr.ap2 (.const "Nat.add") (Expr.ap2 (.const "Nat.mul") (.lit b) Ae)
+            (Expr.ap2 (.const "Nat.mul") (.lit a) Ce);
+          let concR := Expr.ap2 (.const "Nat.add") (Expr.ap2 (.const "Nat.mul") (.lit b) Be)
+            (Expr.ap2 (.const "Nat.mul") (.lit a) De);
+          let resL := Omega.linAdd (Omega.linSmul b A) (Omega.linSmul a C);
+          let resR := Omega.linAdd (Omega.linSmul b B) (Omega.linSmul a D);
+          eL ← Omega.canonEq g rho atoms concL .none resL;
+          eR ← Omega.canonEq g rho atoms concR .none resR;
+          let h1 := Omega.transportLe concL (Omega.formExpr atoms .none resL) concR eL fmProof;
+          let h2 := Omega.transportLeR (Omega.formExpr atoms .none resL) concR
+            (Omega.formExpr atoms .none resR) eR h1;
+          TacticM.pure (.le resL resR h2)
+    | _, _ => TacticM.fail "omega: certificate: fm premise is not an inequality"
+  | .cancel x p => do
+    vp ← Omega.checkR g rho atoms hyps terms p;
+    match vp with
+    | .le fl fr hp => match Omega.nth atoms x with
+      | .none => TacticM.fail "omega: certificate: cancel pivot out of range"
+      | .some xe =>
+        let cL := Omega.linGet fl x;
+        let cR := Omega.linGet fr x;
+        match Bool.and (Omega.pos cL) (Omega.pos cR) with
+        | .false => TacticM.fail "omega: certificate: cancel needs the pivot on both sides"
+        | .true => do
+          eqp ← Omega.canonEq g rho atoms (Omega.formExpr atoms .none fl) (.some x) fl;
+          let hpL := Omega.transportLe (Omega.formExpr atoms .none fl)
+            (Omega.formExpr atoms (.some x) fl) (Omega.formExpr atoms .none fr) eqp hp;
+          eqq ← Omega.canonEq g rho atoms (Omega.formExpr atoms .none fr) (.some x) fr;
+          let hp' := Omega.transportLeR (Omega.formExpr atoms (.some x) fl)
+            (Omega.formExpr atoms .none fr) (Omega.formExpr atoms (.some x) fr) eqq hpL;
+          let k := Omega.natMin cL cR;
+          let dL := Nat.sub cL k;
+          let dR := Nat.sub cR k;
+          let l' := Omega.linSet fl x dL;
+          let r' := Omega.linSet fr x dR;
+          match Omega.isZero dL, Omega.isZero dR with
+          | .true, .true =>
+            let p0 := Expr.mkApp (.const "Omega.cancelSame")
+              (.cons (Omega.formExpr atoms .none l') (.cons (Omega.formExpr atoms .none r')
+                (.cons (.lit k) (.cons xe (.cons hp' .nil)))));
+            TacticM.pure (.le l' r' p0)
+          | .false, .true => do
+            let A := Omega.linDrop l' x;
+            let p0 := Expr.mkApp (.const "Omega.cancelMoreL")
+              (.cons (Omega.formExpr atoms .none A) (.cons (Omega.formExpr atoms .none r')
+                (.cons (.lit dL) (.cons (.lit k) (.cons xe (.cons hp' .nil))))));
+            eL ← Omega.canonEq g rho atoms (Omega.formExpr atoms (.some x) l') .none l';
+            let h := Omega.transportLe (Omega.formExpr atoms (.some x) l')
+              (Omega.formExpr atoms .none l') (Omega.formExpr atoms .none r') eL p0;
+            TacticM.pure (.le l' r' h)
+          | .true, .false => do
+            let B := Omega.linDrop r' x;
+            let p0 := Expr.mkApp (.const "Omega.cancelMoreR")
+              (.cons (Omega.formExpr atoms .none l') (.cons (Omega.formExpr atoms .none B)
+                (.cons (.lit dR) (.cons (.lit k) (.cons xe (.cons hp' .nil))))));
+            eR ← Omega.canonEq g rho atoms (Omega.formExpr atoms (.some x) r') .none r';
+            let h := Omega.transportLeR (Omega.formExpr atoms .none l')
+              (Omega.formExpr atoms (.some x) r') (Omega.formExpr atoms .none r') eR p0;
+            TacticM.pure (.le l' r' h)
+          | .false, .false => TacticM.fail "omega: certificate: cancel made no progress"
+    | .false _ => TacticM.fail "omega: certificate: cancel premise is not an inequality"
+  | .falseOf p => do
+    vp ← Omega.checkR g rho atoms hyps terms p;
+    match vp with
+    | .le fl fr hp => match Bool.and (Omega.vecAllZero fl.coeffs) (Omega.vecAllZero fr.coeffs) with
+      | .false => TacticM.fail "omega: certificate: a contradiction still has atoms"
+      | .true => match Nat.lt fr.const fl.const with
+        | .false => TacticM.fail "omega: certificate: the constant inequality is not false"
+        | .true =>
+          let k := Nat.sub (Nat.sub fl.const fr.const) 1;
+          TacticM.pure (.false (Expr.mkApp (.const "Nat.not_add_succ_le")
+            (.cons (.lit fr.const) (.cons (.lit k) (.cons hp .nil)))))
+    | .false _ => TacticM.fail "omega: certificate: falseOf premise is not an inequality"
+
+-- ## The untrusted refutation search
+
+/-- One derived inequality: its two forms and the certificate that proves it. -/
+structure Omega.Item where
+  l : Omega.Lin
+  r : Omega.Lin
+  cert : Omega.RCert
+
+/-- The implicit `0 ≤ x` items (one per atom), which make the Nat problem an integer
+problem in the note's sense (`Nat.zero_le`). -/
+partial def Omega.zeroItemsGo (n : Nat) (i : Nat) : List Omega.Item :=
+  match Nat.lt i n with
+  | .false => .nil
+  | .true =>
+    let r := Omega.Lin.mk (Omega.vecSet (Omega.vecZeros n) i 1) 0;
+    .cons (Omega.Item.mk (Omega.linZero n) r (.zeroLe i)) (Omega.zeroItemsGo n (Nat.succ i))
+
+/-- The nonnegativity items for `atoms`. -/
+def Omega.zeroItems (atoms : List Expr) : List Omega.Item :=
+  Omega.zeroItemsGo (List.length atoms) 0
+
+/-- A contradiction item: no atoms and the constant on the left exceeds the one on the
+right. -/
+def Omega.isContra (it : Omega.Item) : Bool :=
+  Bool.and (Omega.vecAllZero it.l.coeffs) (Bool.and (Omega.vecAllZero it.r.coeffs)
+    (Nat.lt it.r.const it.l.const))
+
+/-- The first contradiction in the list. -/
+def Omega.findContra : List Omega.Item → Option Omega.Item
+  | .nil => .none
+  | .cons it its => match Omega.isContra it with
+    | .true => .some it
+    | .false => Omega.findContra its
+
+/-- Does the item contain the pivot on the left, on the right, or both? -/
+def Omega.hasLeft (x : Nat) (it : Omega.Item) : Bool := Omega.pos (Omega.linGet it.l x)
+/-- Does the item contain the pivot on the right? -/
+def Omega.hasRight (x : Nat) (it : Omega.Item) : Bool := Omega.pos (Omega.linGet it.r x)
+
+/-- 0 = no pivot, 1 = lower bound, 2 = upper bound, 3 = both sides. -/
+def Omega.itemKind (x : Nat) (it : Omega.Item) : Nat :=
+  match Omega.hasLeft x it, Omega.hasRight x it with
+  | .true, .false => 1
+  | .false, .true => 2
+  | .false, .false => 0
+  | .true, .true => 3
+
+/-- Count the lower and upper bounds on `x`. -/
+def Omega.countBounds (x : Nat) : List Omega.Item → Nat × Nat
+  | .nil => (0, 0)
+  | .cons it its =>
+    let rest := Omega.countBounds x its;
+    match Omega.itemKind x it with
+    | 1 => (Nat.succ rest.1, rest.2)
+    | 2 => (rest.1, Nat.succ rest.2)
+    | _ => rest
+
+/-- Does any item mention `x`? -/
+def Omega.mentions (x : Nat) : List Omega.Item → Bool
+  | .nil => .false
+  | .cons it its => match Omega.itemKind x it with
+    | 0 => Omega.mentions x its
+    | _ => .true
+
+/-- Pick the variable with the fewest lower×upper pairs; a variable that only occurs on
+one side (or only on both sides) comes after every pairable one. -/
+partial def Omega.pickVarGo (n : Nat) (items : List Omega.Item) (i : Nat) (best : Option (Nat × Nat)) :
+    Option Nat :=
+  match Nat.lt i n with
+  | .false => match best with
+    | .none => .none
+    | .some b => .some b.2
+  | .true =>
+    let cs := Omega.countBounds i items;
+    let pairs := Nat.mul cs.1 cs.2;
+    let score := match Nat.lt 0 pairs with
+      | .true => pairs
+      | .false => Nat.mul (Nat.succ n) (Nat.succ n);
+    match Omega.mentions i items with
+    | .false => Omega.pickVarGo n items (Nat.succ i) best
+    | .true => match best with
+      | .none => Omega.pickVarGo n items (Nat.succ i) (.some (score, i))
+      | .some b => match Nat.le score b.1 with
+        | .true => Omega.pickVarGo n items (Nat.succ i) (.some (score, i))
+        | .false => Omega.pickVarGo n items (Nat.succ i) best
+
+/-- The pivot variable, if any item has one. -/
+def Omega.pickVar (n : Nat) (items : List Omega.Item) : Option Nat :=
+  Omega.pickVarGo n items 0 .none
+
+/-- Cancel the common minimum coefficient at `x` from an item with `x` on both sides. -/
+def Omega.cancelItem (x : Nat) (it : Omega.Item) : Omega.Item :=
+  let cL := Omega.linGet it.l x;
+  let cR := Omega.linGet it.r x;
+  let k := Omega.natMin cL cR;
+  Omega.Item.mk (Omega.linSet it.l x (Nat.sub cL k)) (Omega.linSet it.r x (Nat.sub cR k))
+    (.cancel x it.cert)
+
+/-- The real-shadow result of a lower and an upper bound on `x`. -/
+def Omega.fmItem (x : Nat) (lo up : Omega.Item) : Omega.Item :=
+  let a := Omega.linGet lo.l x;
+  let b := Omega.linGet up.r x;
+  let A := Omega.linDrop lo.l x;
+  let B := lo.r;
+  let C := up.l;
+  let D := Omega.linDrop up.r x;
+  Omega.Item.mk (Omega.linAdd (Omega.linSmul b A) (Omega.linSmul a C))
+    (Omega.linAdd (Omega.linSmul b B) (Omega.linSmul a D)) (.fm x lo.cert up.cert)
+
+/-- Is `it` already in the list (form equality)? -/
+def Omega.memItem (it : Omega.Item) : List Omega.Item → Bool
+  | .nil => .false
+  | .cons x xs => Bool.or (Bool.and (Omega.linEq it.l x.l) (Omega.linEq it.r x.r)) (Omega.memItem it xs)
+
+/-- The result of an elimination: the new system and the remaining fuel, or out of
+budget. -/
+inductive Omega.Elim where
+  | ok (items : List Omega.Item) (fuel : Nat)
+  | out
+
+/-- Pair one lower bound with every upper bound. Every attempted pair costs one unit of
+fuel, whether or not its result is new. -/
+partial def Omega.pairOne (x : Nat) (lo : Omega.Item) (acc : List Omega.Item) (fuel : Nat) :
+    List Omega.Item → Omega.Elim
+  | .nil => .ok acc fuel
+  | .cons up ups => match fuel with
+    | .zero => .out
+    | .succ f =>
+      let it := Omega.fmItem x lo up;
+      let acc' := match Omega.memItem it acc with
+        | .true => acc
+        | .false => List.cons it acc;
+      Omega.pairOne x lo acc' f ups
+
+/-- Pair every lower bound with every upper bound. -/
+partial def Omega.pairAll (x : Nat) (lowers : List Omega.Item) (uppers : List Omega.Item)
+    (acc : List Omega.Item) (fuel : Nat) : Omega.Elim :=
+  match lowers with
+  | .nil => .ok acc fuel
+  | .cons lo los => match Omega.pairOne x lo acc fuel uppers with
+    | .out => .out
+    | .ok acc' fuel' => Omega.pairAll x los uppers acc' fuel'
+
+/-- A system split at one pivot. -/
+structure Omega.Split where
+  keep : List Omega.Item
+  lowers : List Omega.Item
+  uppers : List Omega.Item
+
+/-- Split a system into items that no longer mention `x`, lower bounds, and upper bounds.
+Items with `x` on both sides are replaced by their cancelled version first. -/
+def Omega.splitItems (x : Nat) : List Omega.Item → Omega.Split
+  | .nil => Omega.Split.mk List.nil List.nil List.nil
+  | .cons it its =>
+    let rest := Omega.splitItems x its;
+    let it' := match Omega.itemKind x it with
+      | 3 => Omega.cancelItem x it
+      | _ => it;
+    match Omega.itemKind x it' with
+    | 0 => Omega.Split.mk (.cons it' rest.keep) rest.lowers rest.uppers
+    | 1 => Omega.Split.mk rest.keep (.cons it' rest.lowers) rest.uppers
+    | 2 => Omega.Split.mk rest.keep rest.lowers (.cons it' rest.uppers)
+    | _ => rest
+
+/-- Eliminate `x` by the real shadow. -/
+def Omega.eliminate (x : Nat) (items : List Omega.Item) (fuel : Nat) : Omega.Elim :=
+  let parts := Omega.splitItems x items;
+  match Omega.pairAll x parts.lowers parts.uppers List.nil fuel with
+  | .out => .out
+  | .ok derived fuel' => .ok (List.append parts.keep derived) fuel'
+
+/-- The outcome of the untrusted search. -/
+inductive Omega.Search where
+  | proved (c : Omega.RCert)
+  | feasible
+  | budget
+
+/-- Fourier–Motzkin elimination to a contradiction, with a fuel bound. -/
+partial def Omega.run (n : Nat) (items : List Omega.Item) (fuel : Nat) : Omega.Search :=
+  match Omega.findContra items with
+  | .some it => .proved (.falseOf it.cert)
+  | .none => match Omega.pickVar n items with
+    | .none => .feasible
+    | .some x => match fuel with
+      | .zero => .budget
+      | .succ f => match Omega.eliminate x items f with
+        | .out => .budget
+        | .ok items' fuel' => Omega.run n items' fuel'
+
+/-- The largest coefficient in a system (the integrality-gap test: a unit-coefficient
+system is difference logic). -/
+def Omega.maxCoeff : List Omega.Item → Nat
+  | .nil => 0
+  | .cons it its => Nat.max (Omega.vecMax it.l.coeffs) (Nat.max (Omega.vecMax it.r.coeffs) (Omega.maxCoeff its))
+
+/-- The fuel of the FM search. Measured on the S1 cases (see
+`wiz-notes/omega-certificate.md` §8.1b); running out is a named `incomplete`, never a
+claim that the goal has no proof. -/
+def Omega.fmFuel : Nat := 512
+
+/-- The additive path search's fuel (the S0 measurement: 64 expansions; the unconditional
+successor edge that made longer budgets cost seconds is gone). -/
+def Omega.pathFuel : Nat := 64
+
+/-- Is `e` the type `Nat`? -/
+def Omega.isNatTy (e : Expr) : Bool := match Expr.constApp e with
+  | .some (n, args) => Bool.and (Expr.nameEq n "Nat")
+      (match args with | .nil => .true | _ => .false)
+  | .none => .false
+
+/-- Is `e` an order relation at `Nat` (`Nat.Le`, `Nat.Lt`, or the class forms applied to
+`Nat`)? Non-`Nat` orders are outside this fragment. -/
+def Omega.isNatOrder (e : Expr) : Bool := match Expr.constApp e with
+  | .some (n, args) =>
+    if Bool.or (Expr.nameEq n "Nat.Le") (Expr.nameEq n "Nat.Lt") then .true
+    else if Bool.or (Expr.nameEq n "LE.le") (Expr.nameEq n "LT.lt") then
+      match args with
+      | .cons t _ => Omega.isNatTy t
+      | _ => .false
+    else .false
+  | .none => .false
+
+/-- Is `e` an equality at `Nat`? -/
+def Omega.isNatEq (e : Expr) : Bool := match Expr.constApp e with
+  | .some (n, args) =>
+    if Expr.nameEq n "Eq" then
+      match args with
+      | .cons t _ => Omega.isNatTy t
+      | _ => .false
+    else .false
+  | .none => .false
+
+-- ## A linear form for each hypothesis
+
+/-- Read the hypotheses as inequalities over `atoms`. -/
+partial def Omega.initItems (g : Nat) (atoms : List Expr) (i : Nat) :
+    List (String × Expr) → TacticM (List Omega.Item)
+  | .nil => TacticM.pure List.nil
+  | .cons h hs => do
+    rest ← Omega.initItems g atoms (Nat.succ i) hs;
+    hty ← Omega.hypTypeAt g i h;
+    match Omega.asLe hty with
+    | .some ab => match Omega.isNatOrder hty with
+      | .false => TacticM.pure rest
+      | .true => match Omega.linOf atoms ab.1, Omega.linOf atoms ab.2 with
+        | .some l, .some r => TacticM.pure (.cons (Omega.Item.mk l r (.hyp i .le)) rest)
+        | _, _ => TacticM.pure rest
+    | .none => match Omega.asLt hty with
+      | .some ab => match Omega.isNatOrder hty with
+        | .false => TacticM.pure rest
+        | .true => match Omega.linOf atoms (Omega.succ ab.1), Omega.linOf atoms ab.2 with
+          | .some l, .some r => TacticM.pure (.cons (Omega.Item.mk l r (.hyp i .lt)) rest)
+          | _, _ => TacticM.pure rest
+      | .none => do
+        ev ← TacticM.eqView g hty;
+        match ev with
+        | .some q => match q with
+          | (a, u, v) => match Omega.isNatTy a with
+            | .false => TacticM.pure rest
+            | .true => match Omega.linOf atoms u, Omega.linOf atoms v with
+              | .some lu, .some lv =>
+                TacticM.pure (.cons (Omega.Item.mk lu lv (.hyp i .eqFwd))
+                  (.cons (Omega.Item.mk lv lu (.hyp i .eqBwd)) rest))
+              | _, _ => TacticM.pure rest
+        | .none => TacticM.pure rest
+
+/-- The atoms of the hypotheses, in a fixed pre-order. Both the search and the checker
+call this, so indices agree without the certificate carrying an environment. -/
+partial def Omega.atomsOfHyps (g : Nat) (acc : List Expr) (i : Nat) :
+    List (String × Expr) → TacticM (List Expr)
+  | .nil => TacticM.pure acc
+  | .cons h hs => do
+    hty ← Omega.hypTypeAt g i h;
+    match Omega.asLe hty with
+    | .some ab => match Omega.isNatOrder hty with
+      | .true => Omega.atomsOfHyps g (Omega.collectAtoms (Omega.collectAtoms acc ab.1) ab.2) (Nat.succ i) hs
+      | .false => Omega.atomsOfHyps g acc (Nat.succ i) hs
+    | .none => match Omega.asLt hty with
+      | .some ab => match Omega.isNatOrder hty with
+        | .true =>
+          Omega.atomsOfHyps g (Omega.collectAtoms (Omega.collectAtoms acc (Omega.succ ab.1)) ab.2)
+            (Nat.succ i) hs
+        | .false => Omega.atomsOfHyps g acc (Nat.succ i) hs
+      | .none => do
+        ev ← TacticM.eqView g hty;
+        match ev with
+        | .some q => match q with
+          | (a, u, v) => match Omega.isNatTy a with
+            | .true => Omega.atomsOfHyps g (Omega.collectAtoms (Omega.collectAtoms acc u) v) (Nat.succ i) hs
+            | .false => Omega.atomsOfHyps g acc (Nat.succ i) hs
+        | .none => Omega.atomsOfHyps g acc (Nat.succ i) hs
+
+-- ## The negated-goal wrapper
+
+/-- `Nat.Le a b` as a term. -/
+def Omega.mkLe (a b : Expr) : Expr := Expr.ap2 (.const "Nat.Le") a b
+/-- `Nat.Lt a b` as a term. -/
+def Omega.mkLt (a b : Expr) : Expr := Expr.ap2 (.const "Nat.Lt") a b
+
+/-- The name of the placeholder that stands for the negated goal's branch hypothesis
+while the certificate is checked in the outer context. `Omega.abstractBranch` replaces
+it with the lambda's binder and shifts every free variable by one. -/
+def Omega.branchName : String := "Omega.branchHyp"
+
+/-- Shift free variables by `k` under `depth` binders. -/
+partial def Omega.shiftVars (k : Nat) (depth : Nat) (e : Expr) : Expr :=
+  match e with
+  | .var i => match Nat.le depth i with
+    | .true => .var (Nat.add i k)
+    | .false => .var i
+  | .const n => .const n
+  | .sort u => .sort u
+  | .lam x b => .lam x (Omega.shiftVars k (Nat.succ depth) b)
+  | .pi x imp q d b => .pi x imp (Omega.shiftVars k depth q) (Omega.shiftVars k depth d)
+      (Omega.shiftVars k (Nat.succ depth) b)
+  | .app f a => .app (Omega.shiftVars k depth f) (Omega.shiftVars k depth a)
+  | .lit n => .lit n
+  | .opaque id => .opaque id
+
+/-- Replace the branch placeholder by binder `depth` and shift the outer variables by one
+so the checked term becomes the body of `fun h => …`. -/
+partial def Omega.abstractBranch (depth : Nat) (e : Expr) : Expr :=
+  match e with
+  | .const n => match Expr.nameEq n Omega.branchName with
+    | .true => .var depth
+    | .false => .const n
+  | .var i => match Nat.le depth i with
+    | .true => .var (Nat.succ i)
+    | .false => .var i
+  | .sort u => .sort u
+  | .lam x b => .lam x (Omega.abstractBranch (Nat.succ depth) b)
+  | .pi x imp q d b => .pi x imp (Omega.abstractBranch depth q)
+      (Omega.abstractBranch depth d) (Omega.abstractBranch (Nat.succ depth) b)
+  | .app f a => .app (Omega.abstractBranch depth f) (Omega.abstractBranch depth a)
+  | .lit n => .lit n
+  | .opaque id => .opaque id
+
+/-- The proof terms for the hypotheses after the branch placeholder, at index `i`. -/
+def Omega.varTerms : List (String × Expr) → Nat → List Expr
+  | .nil, _ => .nil
+  | .cons _ hs, i => .cons (.var i) (Omega.varTerms hs (Nat.succ i))
+
+/-- What happened when the refutation was attempted. -/
+inductive Omega.Outcome where
+  | proved (e : Expr)
+  | noProof
+  | incomplete (msg : String)
+
+/-- Refute the branch hypothesis `branchTy` from `hyps` (the goal's hypotheses). The
+certificate is checked with a placeholder for the branch, then abstracted into the
+lambda body. -/
+def Omega.refute (g : Nat) (hyps : List (String × Expr)) (branchTy : Expr) : TacticM Omega.Outcome := do
+  let allHyps := List.cons ("h", branchTy) hyps;
+  let terms := List.cons (Expr.const Omega.branchName) (Omega.varTerms hyps 0);
+  atoms ← Omega.atomsOfHyps g List.nil 0 allHyps;
+  let rho := Omega.rhoExpr atoms;
+  items0 ← Omega.initItems g atoms 0 allHyps;
+  let items := List.append items0 (Omega.zeroItems atoms);
+  let big := Omega.maxCoeff items;
+  match Omega.run (List.length atoms) items Omega.fmFuel with
+  | .proved c => do
+    r ← Omega.checkR g rho atoms allHyps terms c;
+    match r with
+    | .false p => TacticM.pure (.proved (Omega.abstractBranch 0 p))
+    | .le _ _ _ => TacticM.fail "omega: internal: a refutation did not end in False"
+  | .feasible => match Nat.lt 1 big with
+    | .true => TacticM.pure (.incomplete
+        "omega: incomplete: integrality gap (the real shadow is feasible; coefficients > 1 need the Cooper split, S3)")
+    | .false => TacticM.pure .noProof
+  | .budget => TacticM.pure (.incomplete
+      (String.append "omega: incomplete: budget exhausted ("
+        (String.append (Nat.repr Omega.fmFuel) ")")))
+
+/-- Build `Nat.le_or_lt a b` and close both branches: the good one is the goal itself,
+the bad one is `False.elim` of the refutation. `eFalse` is already the body of the bad
+lambda (`Omega.abstractBranch`); the motive `P` passed to `False.elim` lives inside that
+lambda too, so it is shifted by the binder. -/
+def Omega.wrapLe (a b : Expr) (eFalse : Expr) : Expr :=
+  let P := Omega.mkLe a b;
+  let Q := Omega.mkLt b a;
+  let h := Expr.ap2 (.const "Nat.le_or_lt") a b;
+  let good := Expr.lam "h" (.var 0);
+  let bad := Expr.lam "h" (Expr.mkApp (.const "False.elim")
+    (.cons (Omega.shiftVars 1 0 P) (.cons eFalse .nil)));
+  Expr.mkApp (.const "Or.elim") (.cons P (.cons Q (.cons P (.cons h (.cons good (.cons bad .nil))))))
+
+/-- Prove `a ≤ b`: the additive certificate first, then the FM refutation of `b < a`. -/
+def Omega.tryLe (g : Nat) (hyps : List (String × Expr)) (terms : List Expr) (a b : Expr) :
+    TacticM Omega.Outcome := do
+  p ← Omega.proveLe g hyps terms Omega.pathFuel a b;
+  match p with
+  | .some c => do
+    d ← Omega.check g hyps c;
+    match d with
+    | (.le _ _, e) => TacticM.pure (.proved e)
+    | _ => TacticM.fail "omega: internal: proveLe returned a non-inequality"
+  | .none => do
+    r ← Omega.refute g hyps (Omega.mkLt b a);
+    match r with
+    | .proved eFalse => TacticM.pure (.proved (Omega.wrapLe a b eFalse))
+    | .noProof => TacticM.pure .noProof
+    | .incomplete m => TacticM.pure (.incomplete m)
+
+/-- Prove `a < b` by proving `succ a ≤ b`. -/
+def Omega.tryLt (g : Nat) (hyps : List (String × Expr)) (terms : List Expr) (a b : Expr) :
+    TacticM Omega.Outcome := do
+  let a' := Omega.succ a;
+  p ← Omega.proveLe g hyps terms Omega.pathFuel a' b;
+  match p with
+  | .some c => do
+    d ← Omega.check g hyps c;
+    match d with
+    | (.le _ _, e) => TacticM.pure (.proved e)
+    | _ => TacticM.fail "omega: internal: proveLe returned a non-inequality"
+  | .none => do
+    r ← Omega.refute g hyps (Omega.mkLt b a');
+    match r with
+    | .proved eFalse => TacticM.pure (.proved (Omega.wrapLe a' b eFalse))
+    | .noProof => TacticM.pure .noProof
+    | .incomplete m => TacticM.pure (.incomplete m)
+
+/-- Prove `a = b` by antisymmetry, each direction through the wrapper. -/
+def Omega.tryEq (g : Nat) (hyps : List (String × Expr)) (terms : List Expr) (a b : Expr) :
+    TacticM Omega.Outcome := do
+  p ← Omega.tryLe g hyps terms a b;
+  match p with
+  | .proved p1 => do
+    q ← Omega.tryLe g hyps terms b a;
+    match q with
+    | .proved q1 => TacticM.pure (.proved (Expr.mkApp (.const "Nat.le_antisymm")
+        (.cons a (.cons b (.cons p1 (.cons q1 .nil))))))
+    | .noProof => TacticM.pure .noProof
+    | .incomplete m => TacticM.pure (.incomplete m)
+  | .noProof => TacticM.pure .noProof
+  | .incomplete m => TacticM.pure (.incomplete m)
+
+/-- Finish a goal with an outcome: assign once (the kernel infers the whole term), or
+report the named reason. -/
+def Omega.finish (g : Nat) (o : Omega.Outcome) : TacticM Unit := match o with
+  | .proved e => TacticM.assign g e
+  | .noProof => TacticM.fail "omega: no proof (linear Nat fragment)"
+  | .incomplete m => TacticM.fail m
+
+/-- Dispatch a linear goal to the `≤`/`<`/`=` path. -/
+def Omega.solve (g : Nat) (hyps : List (String × Expr)) (terms : List Expr) (ty : Expr) :
+    TacticM Unit := do
+  match Omega.asLe ty with
+  | .some ab => match Omega.isNatOrder ty with
+    | .false => TacticM.fail "omega: not a linear Nat goal (expected ≤, < or =)"
+    | .true => do
+      r ← Omega.tryLe g hyps terms ab.1 ab.2;
+      Omega.finish g r
+  | .none => match Omega.asLt ty with
+    | .some ab => match Omega.isNatOrder ty with
+      | .false => TacticM.fail "omega: not a linear Nat goal (expected ≤, < or =)"
+      | .true => do
+        r ← Omega.tryLt g hyps terms ab.1 ab.2;
+        Omega.finish g r
+    | .none => do
+      ev ← TacticM.eqView g ty;
+      match ev with
+      | .none => TacticM.fail "omega: not a linear Nat goal (expected ≤, < or =)"
+      | .some q => match q with
+        | (a, lhs, rhs) => match Omega.isNatTy a with
+          | .false => TacticM.fail "omega: not a linear Nat goal (expected ≤, < or =)"
+          | .true => do
+            r ← Omega.tryEq g hyps terms lhs rhs;
+            Omega.finish g r
+
+/-- The S0 guard's non-linear heads (multiplication, division, modulo, powers). -/
+def Omega.badMulHeads : List String :=
+  .cons "Nat.mul" (.cons "Mul.mul" (.cons "HMul.hMul"
+    (.cons "Nat.div" (.cons "HDiv.hDiv" (.cons "Div.div"
+      (.cons "Nat.mod" (.cons "HMod.hMod" (.cons "Mod.mod"
+        (.cons "Nat.pow" (.cons "HPow.hPow" (.cons "Pow.pow" .nil)))))))))))
+
+/-- The subtraction heads (refused until S4). -/
+def Omega.badSubHeads : List String :=
+  .cons "Nat.sub" (.cons "Nat.subFrom" (.cons "HSub.hSub" (.cons "Sub.sub" .nil)))
+
 -- ## The tactic
 
 syntax (name := omegaCert) "omega_cert" : tactic
-/-- `omega_cert`: linear `Nat` arithmetic by a kernel-checked certificate. The current
-slice covers `≤`, `<`, `=` over `+` and numerals: hypotheses, transitivity, adding two
-inequalities, cancelling a common summand, the equality-add shortcut, and antisymmetry.
-Everything non-linear is refused; no external solver is called. -/
+/-- `omega_cert`: linear `Nat` arithmetic by a kernel-checked certificate. The additive
+rules (hypotheses, transitivity, addition, cancellation, equality-add, antisymmetry) run
+first; if they fail, the goal is closed by refuting its negation with the real shadow
+(`Nat.omegaFM`) and the cancellation rules. The fragment is difference logic (unit
+coefficients); a system with coefficients > 1 whose real shadow is feasible is refused
+as an integrality gap, and an exhausted budget is a named `incomplete`, never "no proof".
+Everything non-linear or outside the fragment is refused at the tactic's position. -/
 def Tactic.omegaCert : Tactic := fun _ => do
   g ← TacticM.mainGoal;
   ty ← TacticM.goalType g;
   hyps ← TacticM.goalHyps g;
   ty' ← TacticM.normalize g ty;
-  let bad : List String := .cons "Nat.mul" (.cons "Nat.div" (.cons "Nat.mod" (.cons "Nat.pow"
-    (.cons "HMul.hMul" (.cons "Mul.mul" (.cons "HDiv.hDiv" (.cons "HMod.hMod" .nil)))))));
-  hb ← TacticM.omegaHypsBad g bad hyps;
-  gb ← TacticM.omegaEqBad g bad ty;
-  match Bool.or (Expr.hasOp bad ty') (Bool.or hb gb) with
+  -- the S0 guard, exactly: `Expr.hasOp` on the goal and its normalized form, plus
+  -- `omegaHypsBad`/`omegaEqBad`, which normalize each relation side. Normalizing a
+  -- side is what exposes a surface `*`/`Nat.mul` whose whole-type head the reflection
+  -- layer spells differently (the S0 non-linear tests rely on this).
+  hbMul ← TacticM.omegaHypsBad g Omega.badMulHeads hyps;
+  gbMul ← TacticM.omegaEqBad g Omega.badMulHeads ty;
+  hbSub ← TacticM.omegaHypsBad g Omega.badSubHeads hyps;
+  gbSub ← TacticM.omegaEqBad g Omega.badSubHeads ty;
+  let mul := Bool.or (Expr.hasOp Omega.badMulHeads ty)
+    (Bool.or (Expr.hasOp Omega.badMulHeads ty') (Bool.or hbMul gbMul));
+  match mul with
   | .true => TacticM.fail "omega: non-linear (multiplication/division is outside the linear Nat fragment)"
-  | .false => do
-    let terms := Omega.collect (.cons ty (Omega.hypTypes hyps));
-    match Omega.asLe ty with
-    | .some ab => do
-      r ← Omega.proveLe g hyps terms 64 ab.1 ab.2;
-      match r with
-      | .none => TacticM.fail "omega: no proof (linear Nat fragment)"
-      | .some c => do
-        d ← Omega.check g hyps c;
-        TacticM.assign g d.2
-    | .none => match Omega.asLt ty with
-      | .some ab => do
-        r ← Omega.proveLe g hyps terms 64 (Omega.succ ab.1) ab.2;
-        match r with
-        | .none => TacticM.fail "omega: no proof (linear Nat fragment)"
-        | .some c => do
-          d ← Omega.check g hyps c;
-          TacticM.assign g d.2
-      | .none => do
-        ev ← TacticM.eqView g ty;
-        match ev with
-        | .none => TacticM.fail "omega: not a linear Nat goal (expected ≤, < or =)"
-        | .some q => match q with
-          | (_, lhs, rhs) => do
-            r ← Omega.proveEq g hyps terms 64 lhs rhs;
-            match r with
-            | .none => TacticM.fail "omega: no proof (linear Nat fragment)"
-            | .some c => do
-              d ← Omega.check g hyps c;
-              TacticM.assign g d.2
+  | .false =>
+    let sub := Bool.or (Expr.hasOp Omega.badSubHeads ty)
+      (Bool.or (Expr.hasOp Omega.badSubHeads ty') (Bool.or hbSub gbSub));
+    match sub with
+    | .true => TacticM.fail "omega: outside the linear Nat fragment (subtraction is S4)"
+    | .false => Omega.solve g hyps (Omega.collect (.cons ty (Omega.hypTypes hyps))) ty
+
 
 attribute [tactic tactic.omegaCert] Tactic.omegaCert

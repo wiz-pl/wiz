@@ -187,11 +187,12 @@ allows by default), and the `numerics` group scans every build path — `Build.l
 `-freciprocal-math`, `-fassociative-math`, `-fno-signed-zeros` and
 `-ffp-contract=fast`. Adding any of them fails the case.
 
-## R7 — a certificate-producing `omega` (deferred plan)
+## R7 — a certificate-producing `omega` (S0–S1 prototype)
 
-R7 needs `Wiz/Elab/Tactic.lean`, held by another lane, so only the plan is recorded
-here, in the note's terms: **grow `omega` into a certificate-producing Cooper/Omega
-procedure over the linear fragment, with no external solver.** Wiz's current `omega`
+R7's S0 finding corrected the file attribution: the procedure lives in `lib/Omega.wiz`,
+not `Wiz/Elab/Tactic.lean`, and needs no host-side change. R7 is, in the note's terms:
+**grow `omega` into a certificate-producing Cooper/Omega procedure over the linear
+fragment, with no external solver.** Wiz's current `omega`
 (`lib/Prelude.wiz`, a sound 10,000-node BFS over order lemmas) already sits on the
 right side of the line — it builds a proof term and `#print axioms` shows no solver
 axiom — but its search is not a decision procedure. The replacement should keep the
@@ -204,3 +205,12 @@ is the kernel and the library lemmas the certificate cites. That is strictly str
 than calling an SMT solver (which would add `smt✝`) or enlarging the BFS: an oracle with
 a bigger search buys completeness at the price of a new axiom, while a certificate buys
 it with no new trust.
+
+**S1 status.** The slice landed as `omega_cert` in `lib/Omega.wiz`: the untrusted search
+emits a typed `Omega.RCert` replayed by `Omega.checkR` into a proof term assigned once,
+with the real shadow (`Nat.omegaFM`), cancellation, the `Nat.zero_le` bounds and the
+`Nat.le_or_lt`/`False.elim` refutation wrapper. It is complete for unit-coefficient
+difference logic modulo the named budget; an integrality gap or an exhausted budget is a
+positioned `omega: incomplete: …`, never
+"no proof", and no solver axiom is added. `omega` itself (the BFS) is unchanged until
+S6. The design and the S1 status table are in `wiz-notes/omega-certificate.md`.
