@@ -335,3 +335,84 @@ def Scry.execModelFn : Wil.Func :=
         (Wil.ret .none) ]
 
 def Scry.execModelProgram : Wil.Program := Wil.program [Scry.execModelFn]
+
+-- ## Rule-scoped taint
+
+/-- Two rules where the first declares a sanitiser and the second the source and sink.
+The sanitiser belongs to `rule-a`, so it must not clear `rule-b`'s finding. -/
+def Scry.scopePackText : String :=
+  "rule rule-a\n" ++
+  "  kind taint\n" ++
+  "  severity warning\n" ++
+  "  message Rule A\n" ++
+  "  sanitise clean result\n" ++
+  "  sink sink_a arg 0\n" ++
+  "end\n" ++
+  "rule rule-b\n" ++
+  "  kind taint\n" ++
+  "  severity error\n" ++
+  "  message Rule B\n" ++
+  "  source getenv result\n" ++
+  "  sink sink_b arg 0\n" ++
+  "end\n"
+
+/-- The same pack, with the sanitiser opted into every rule by `shared`: now it does
+clear `rule-b`'s finding. -/
+def Scry.scopeSharedPackText : String :=
+  "rule rule-a\n" ++
+  "  kind taint\n" ++
+  "  severity warning\n" ++
+  "  message Rule A\n" ++
+  "  sanitise clean result shared\n" ++
+  "  sink sink_a arg 0\n" ++
+  "end\n" ++
+  "rule rule-b\n" ++
+  "  kind taint\n" ++
+  "  severity error\n" ++
+  "  message Rule B\n" ++
+  "  source getenv result\n" ++
+  "  sink sink_b arg 0\n" ++
+  "end\n"
+
+/-- Two rules with different sources and different sinks: `rule-a`'s source must not
+feed `rule-b`'s sink. -/
+def Scry.sourceScopePackText : String :=
+  "rule rule-a\n" ++
+  "  kind taint\n" ++
+  "  severity warning\n" ++
+  "  message Rule A\n" ++
+  "  source source_a result\n" ++
+  "  sink sink_a arg 0\n" ++
+  "end\n" ++
+  "rule rule-b\n" ++
+  "  kind taint\n" ++
+  "  severity error\n" ++
+  "  message Rule B\n" ++
+  "  sink sink_b arg 0\n" ++
+  "end\n"
+
+/-- `scope() { r = getenv(); s = clean(r); sink_b(s) }`.
+Points: 0 source, 1 sanitiser, 2 sink, 3 return. -/
+def Scry.scopeFn : Wil.Func :=
+  let r := Scry.rtv 0;
+  let s := Scry.rtv 1;
+  Wil.func "scope" [] [r, s]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.call (.some s) "clean" [r]
+        , Wil.call .none "sink_b" [s] ]
+        (Wil.ret .none) ]
+
+def Scry.scopeProgram : Wil.Program := Wil.program [Scry.scopeFn]
+
+/-- `sourceScope() { r = source_a(); sink_b(r) }`.
+Points: 0 source, 1 sink, 2 return. -/
+def Scry.sourceScopeFn : Wil.Func :=
+  let r := Scry.rtv 0;
+  Wil.func "sourceScope" [] [r]
+    [ Wil.block
+        [ Wil.call (.some r) "source_a" []
+        , Wil.call .none "sink_b" [r] ]
+        (Wil.ret .none) ]
+
+def Scry.sourceScopeProgram : Wil.Program := Wil.program [Scry.sourceScopeFn]

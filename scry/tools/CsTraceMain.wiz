@@ -32,6 +32,12 @@ def Scry.traceLoc (m : Scry.OriginMap) (fn : String) (p : Nat) : String :=
 def Scry.tracePairs (m : Scry.OriginMap) (fn : String) (ps : List (Nat × Nat)) : List String :=
   List.map (fun p => Scry.traceLoc m fn p.1 ++ "  var " ++ Nat.repr p.2) ps
 
+/-- A source/sanitiser fact with its rule index. -/
+def Scry.tracePairs3 (m : Scry.OriginMap) (fn : String) (ps : List (Nat × Nat × Nat)) :
+    List String :=
+  List.map (fun p => Scry.traceLoc m fn p.1 ++ "  var " ++ Nat.repr p.2.1
+    ++ "  rule " ++ Nat.repr p.2.2) ps
+
 def Scry.traceSinks (m : Scry.OriginMap) (fn : String) (ss : List Scry.RuleSinkFact) :
     List String :=
   List.map (fun s => Scry.traceLoc m fn s.node ++ "  arg " ++ Nat.repr s.arg
@@ -45,7 +51,7 @@ def Scry.traceOne (m : Scry.OriginMap) (r : Scry.FuncResult) : EIO Unit := do
   Scry.traceSay ("== " ++ r.fn.name);
   Scry.traceSay "lowered:";
   Scry.traceSay (Scry.Cs.funcText r.fn);
-  let srcs := Scry.tracePairs m r.fn.name r.plan.sources;
+  let srcs := Scry.tracePairs3 m r.fn.name r.plan.sources;
   Scry.traceSay ("sources " ++ Nat.repr (List.length srcs));
   Scry.traceSay (String.intercalate "\n" srcs);
   let prs : List (Nat × Nat) := List.map (fun row =>

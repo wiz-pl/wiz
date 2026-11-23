@@ -37,6 +37,11 @@ end
   `sink NAME arg K`. `result` is the default when the argument selector is omitted.
   `sink NAME args` checks every argument, for a variadic callee such as `execl`. A
   finding still names the concrete argument index that carried the taint.
+* A `source`/`sanitise` line may end in `shared`: the fact then applies to every taint
+  rule in the pack, not only the enclosing one. Taint is **rule-scoped** by default, so
+  a sanitiser declared for rule A does not launder a value for rule B, and a source
+  declared for rule A does not feed rule B's sinks. `shared` is the explicit opt-in for
+  a pack-level fact (a sanitiser that is genuinely safe for every rule).
 * `call NAME` (§`kind forbidden` only) names a forbidden callee.
 * Blank lines and lines starting with `#` are comments; unknown keywords are ignored.
 
@@ -182,10 +187,10 @@ structure Scry.TaintRule where
   id : String
   severity : Scry.Severity
   message : String
-  /-- `(callee pattern, part written by the call)`. -/
-  sources : List (String × Scry.ArgRef)
-  /-- `(callee pattern, part cleaned by the call)`. -/
-  sanitisers : List (String × Scry.ArgRef)
+  /-- `(callee pattern, part written by the call, shared across every rule)`. -/
+  sources : List (String × Scry.ArgRef × Bool)
+  /-- `(callee pattern, part cleaned by the call, shared across every rule)`. -/
+  sanitisers : List (String × Scry.ArgRef × Bool)
   sinks : List Scry.RuleSink
 
 structure Scry.ForbiddenRule where
@@ -312,8 +317,8 @@ structure Scry.PartialRule where
   kind : String
   severity : Scry.Severity
   message : String
-  sources : List (String × Scry.ArgRef)
-  sanitisers : List (String × Scry.ArgRef)
+  sources : List (String × Scry.ArgRef × Bool)
+  sanitisers : List (String × Scry.ArgRef × Bool)
   sinks : List Scry.RuleSink
   calls : List String
   check : String
@@ -377,8 +382,10 @@ def Scry.PartialRule.addLine (words : List String) (r : Scry.PartialRule) : Scry
       match rest with
       | .cons name sel =>
         let ref := Scry.parseArgRef sel;
-        if String.eq kw "source" then { r with sources := List.cons (name, ref) r.sources }
-        else { r with sanitisers := List.cons (name, ref) r.sanitisers }
+        let shared := List.any (fun w => String.eq w "shared") sel;
+        if String.eq kw "source" then
+          { r with sources := List.cons (name, ref, shared) r.sources }
+        else { r with sanitisers := List.cons (name, ref, shared) r.sanitisers }
       | .nil => r
     else if String.eq kw "sink" then
       match rest with
@@ -433,13 +440,14 @@ def Scry.parseRulePack (text : String) : Scry.RulePack :=
 
 -- ## Rendering (for round-trip tests and diagnostics)
 
-def Scry.renderSourceLine (kw name : String) (ref : Scry.ArgRef) : String :=
-  match ref with
-  | .result =>
-    String.append (String.append (String.append "  " kw) (String.append " " name)) " result"
-  | .arg k =>
-    String.append (String.append (String.append (String.append "  " kw) (String.append " " name))
-      " arg ") (Nat.repr k)
+def Scry.renderSourceLine (kw name : String) (ref : Scry.ArgRef) (shared : Bool) : String :=
+  let line := match ref with
+    | .result =>
+      String.append (String.append (String.append "  " kw) (String.append " " name)) " result"
+    | .arg k =>
+      String.append (String.append (String.append (String.append "  " kw) (String.append " " name))
+        " arg ") (Nat.repr k);
+  if shared then String.append line " shared" else line
 
 def Scry.RuleSink.render (s : Scry.RuleSink) : String :=
   match s.arg with
@@ -452,8 +460,10 @@ def Scry.PackRule.render (r : Scry.PackRule) : String :=
     let head := String.append (String.append (String.append (String.append
       (String.append (String.append "rule " t.id) "\n  kind taint\n  severity ")
       (Scry.Severity.show t.severity)) "\n  message ") t.message) "\n";
-    let sources := String.join (List.map (fun p => Scry.renderSourceLine "source" p.1 p.2) t.sources);
-    let sans := String.join (List.map (fun p => Scry.renderSourceLine "sanitise" p.1 p.2) t.sanitisers);
+    let sources := String.join (List.map (fun p =>
+      Scry.renderSourceLine "source" p.1 p.2.1 p.2.2) t.sources);
+    let sans := String.join (List.map (fun p =>
+      Scry.renderSourceLine "sanitise" p.1 p.2.1 p.2.2) t.sanitisers);
     let sinks := String.join (List.map Scry.RuleSink.render t.sinks);
     String.append (String.append (String.append head (String.append sources sans)) "\n")
       (String.append sinks "\nend")

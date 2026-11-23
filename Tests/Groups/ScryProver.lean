@@ -9,8 +9,8 @@ honest slice of "prove, don't just report":
 
 * **a universal claim, proved.** `no Console.ReadLine result reaches Process.Start` in
   the sanitised C# twin `cwe78-process-safe.cs`. The proof is an invariant over
-  `(point, register)` facts; `Scry.check` verifies it from the EDB without running the
-  analysis and without calling `Scry.prove`.
+  `(point, register, rule)` facts; `Scry.check` verifies it from the EDB without running
+  the analysis and without calling `Scry.prove`.
 * **the same claim refuted on the unsafe twin.** The prover's closure reaches the sink,
   and the checker's alert obligation refutes it with a provenance path.
 * **memory is covered.** A store/load pair is proved when the load is sanitised and
@@ -90,17 +90,17 @@ def group : Group where
     { name := "the tiny examples: safe proves, unsafe is refuted with a path, wrong invariants are refused",
       run := fun _ => evalTexts
         ("#eval String.eq (Scry.Verdict.show Scry.proverSafeVerdict) \"proved\"\n" ++
-         "#eval String.eq Scry.proverSafeInvariant \"{(0,0)}\"\n" ++
+         "#eval String.eq Scry.proverSafeInvariant \"{(0,0,0)}\"\n" ++
          "#eval String.contains (Scry.Verdict.show Scry.proverUnsafeVerdict) \"alert rule fires at sink 2 argument 0\"\n" ++
-         "#eval String.contains (Scry.Verdict.show Scry.proverUnsafeVerdict) \"path src(0,0) -> flow(0,1,0) -> flow(1,2,1) -> sink(2,0,1)\"\n" ++
-         "#eval String.contains (Scry.Verdict.show Scry.proverEmptyVerdict) \"rule 0 derives tainted (0,0)\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverUnsafeVerdict) \"path src(0,0,0) -> flow(0,1,0) -> flow(1,2,1) -> sink(2,0,1)\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverEmptyVerdict) \"rule 0 derives tainted (0,0,0)\"\n" ++
          "#eval String.contains (Scry.Verdict.show Scry.proverEmptyVerdict) \"refused\"\n" ++
          "#eval Scry.Verdict.isOk Scry.proverSafeVerdict\n" ++
          "#eval Scry.Verdict.isOk Scry.proverUnsafeVerdict\n" ++
          "#eval Scry.Verdict.isOk Scry.proverEmptyVerdict\n" ++
          "#eval Scry.Verdict.isOk Scry.proverCrossVerdict\n" ++
-         "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.noFlow \"hand\" [(0,0)] []))\n" ++
-         "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.noFlow \"hand-wrong\" [(1,1)] []))\n" ++
+         "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.noFlow \"hand\" [(0,0,0)] []))\n" ++
+         "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.noFlow \"hand-wrong\" [(1,1,0)] []))\n" ++
          "#eval String.contains (Scry.Verdict.show Scry.proverUnsafeCoverVerdict) \"refuted\"\n")
         [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".false", ".false", ".false", ".true", ".false", ".true"] },
     { name := "the script proves the safe twin; the unsafe twin is refuted at the alert obligation",
@@ -128,8 +128,10 @@ def group : Group where
           (s!"def pack : Scry.RulePack := Scry.parseRulePack {wizStr pack}\n" ++
            fixtureBody "safe" "cwe78-process-safe" src spill ++
            "def full : Scry.Verdict := Scry.prove Scry.ruleTaintProgram safeEdb\n" ++
+           "def rowTriple (r : List U64) : Nat × Nat × Nat :=\n" ++
+           "  (Scry.claimRowNat r 0, Scry.claimRowNat r 1, Scry.claimRowNat r 2)\n" ++
            "def noSeeds (c : Scry.Claim) : Scry.Claim :=\n" ++
-           "  { c with invariant := List.filter (fun p => Bool.not (List.any (fun r => Scry.pairEq p (Scry.rowPair r))\n" ++
+           "  { c with invariant := List.filter (fun p => Bool.not (List.any (fun r => Scry.tripleEq p (rowTriple r))\n" ++
            "      (Scry.rtRows safeEdb Scry.rtSrc))) c.invariant }\n" ++
            "#eval match full with\n" ++
            "  | .proved c => Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram safeEdb (noSeeds c))\n" ++
@@ -164,14 +166,14 @@ def group : Group where
          "#eval String.contains (Scry.Verdict.show Scry.proverMemoryUnsafeVerdict) \"load(7,2,0)\"\n" ++
          "#eval String.contains (Scry.Verdict.show Scry.proverMemoryUnsafeVerdict) \"sink(4,0,0)\"\n" ++
          "#eval Scry.Verdict.isOk Scry.proverMemorySafeVerdict\n" ++
-         "#eval String.eq Scry.proverMemorySafeInvariant \"{(0,0)}\"\n" ++
-         "#eval String.eq Scry.proverMemorySafeLocations \"{7}\"\n" ++
+         "#eval String.eq Scry.proverMemorySafeInvariant \"{(0,0,0)}\"\n" ++
+         "#eval String.eq Scry.proverMemorySafeLocations \"{(7,0)}\"\n" ++
          "def noM : Scry.Verdict := Scry.check Scry.ruleTaintProgram Scry.proverMemorySafe\n" ++
-         "  (Scry.Claim.noFlow \"no-m\" [(0,0)] [])\n" ++
-         "#eval String.contains (Scry.Verdict.show noM) \"mtainted 7\"\n" ++
+         "  (Scry.Claim.noFlow \"no-m\" [(0,0,0)] [])\n" ++
+         "#eval String.contains (Scry.Verdict.show noM) \"mtainted (7,0)\"\n" ++
          "def noLoad : Scry.Verdict := Scry.check Scry.ruleTaintProgram Scry.proverMemoryUnsafe\n" ++
-         "  (Scry.Claim.noFlow \"no-load\" [(0,0)] [7])\n" ++
-         "#eval String.contains (Scry.Verdict.show noLoad) \"tainted (2,0)\"\n" ++
+         "  (Scry.Claim.noFlow \"no-load\" [(0,0,0)] [(7,0)])\n" ++
+         "#eval String.contains (Scry.Verdict.show noLoad) \"tainted (2,0,0)\"\n" ++
          "#eval Scry.Verdict.isOk noLoad\n")
         [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".false"] },
     { name := "vacuity: a claim with no source or no sink is vacuous, not proved",
@@ -180,7 +182,7 @@ def group : Group where
          "#eval String.contains (Scry.Verdict.show Scry.proverVacuousVerdict) \"source set is empty\"\n" ++
          "#eval Scry.Verdict.isOk Scry.proverVacuousVerdict\n" ++
          "def srcOnly : Scry.State Nat :=\n" ++
-         "  Scry.State.addTuple Scry.State.empty Scry.rtSrc [U64.ofNat 0, U64.ofNat 0]\n" ++
+         "  Scry.State.addTuple Scry.State.empty Scry.rtSrc [U64.ofNat 0, U64.ofNat 0, U64.ofNat 0]\n" ++
          "def noSink : Scry.Verdict := Scry.prove Scry.ruleTaintProgram srcOnly\n" ++
          "#eval String.contains (Scry.Verdict.show noSink) \"sink set is empty\"\n" ++
          "#eval Scry.Verdict.isOk noSink\n")
@@ -192,7 +194,7 @@ def group : Group where
          "#eval Scry.Verdict.isOk Scry.proverConstantOrBoundVerdict\n" ++
          "#eval String.contains (Scry.Verdict.show Scry.proverConstantOrBoundVerdict) \"constant or parameter-bound\"\n" ++
          "#eval String.contains (Scry.Verdict.show Scry.proverConstantOrBoundUnsafeVerdict) \"refuted\"\n" ++
-         "#eval String.contains (Scry.Verdict.show Scry.proverConstantOrBoundUnsafeVerdict) \"src(0,0)\"\n")
+         "#eval String.contains (Scry.Verdict.show Scry.proverConstantOrBoundUnsafeVerdict) \"src(0,0,0)\"\n")
         [".true", ".true", ".true", ".true", ".true", ".true"] },
     { name := "the verdict is tagged: a bad script is script-failed, not none",
       run := fun _ => evalTexts

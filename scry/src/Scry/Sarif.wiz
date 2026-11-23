@@ -115,11 +115,11 @@ def Scry.sinkListJson (r : Scry.TaintRule) : Json :=
 
 def Scry.sourceListJson (r : Scry.TaintRule) : Json :=
   Json.mkArr (List.map (fun p => Json.mkObj
-    [("name", Json.mkStr p.1), ("part", Json.mkStr (Scry.ArgRef.show p.2))]) r.sources)
+    [("name", Json.mkStr p.1), ("part", Json.mkStr (Scry.ArgRef.show p.2.1))]) r.sources)
 
 def Scry.sanListJson (r : Scry.TaintRule) : Json :=
   Json.mkArr (List.map (fun p => Json.mkObj
-    [("name", Json.mkStr p.1), ("part", Json.mkStr (Scry.ArgRef.show p.2))]) r.sanitisers)
+    [("name", Json.mkStr p.1), ("part", Json.mkStr (Scry.ArgRef.show p.2.1))]) r.sanitisers)
 
 def Scry.callListJson (r : Scry.ForbiddenRule) : Json :=
   Json.mkArr (List.map (fun c => Json.mkStr c) r.calls)

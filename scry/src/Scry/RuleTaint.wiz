@@ -25,32 +25,46 @@ carries the register:
 | # | relation | arity | kind |
 |---|---|---|---|
 | 0 | `flow (def, use, var)` | 3 | EDB, def-use edges |
-| 1 | `src (point, var)` | 2 | EDB |
+| 1 | `src (point, var, rule)` | 3 | EDB |
 | 2 | `sink (point, arg, var)` | 3 | EDB |
-| 3 | `san (point, var)` | 2 | EDB |
-| 4 | `tainted (point, var)` | 2 | IDB |
-| 5 | `alert (sink, arg)` | 2 | IDB |
-| 6 | `param (entry, var)` | 2 | EDB: a tainted parameter seed |
-| 7 | `retsrc (call, var)` | 2 | EDB: a call result tainted by a callee's return |
+| 3 | `san (point, var, rule)` | 3 | EDB |
+| 4 | `tainted (point, var, rule)` | 3 | IDB |
+| 5 | `alert (sink, arg, rule)` | 3 | IDB |
+| 6 | `param (entry, var, rule)` | 3 | EDB: a tainted parameter seed |
+| 7 | `retsrc (call, var, rule)` | 3 | EDB: a call result tainted by a callee's return |
 | 8 | `badcall (point)` | 1 | EDB: a forbidden call |
 | 9 | `badalert (point)` | 1 | IDB |
 | 10 | `gen (point, var)` | 2 | EDB: the ordinary definition at a point |
 | 11 | `mstore (loc, point, var)` | 3 | EDB: a store of `var` at `point` into `loc` |
 | 12 | `mload (loc, point, var)` | 3 | EDB: a load from `loc` at `point` into `var` |
-| 13 | `mtainted (loc)` | 1 | IDB: the location holds attacker-controlled data |
+| 13 | `mtainted (loc, rule)` | 2 | IDB: the location holds attacker-controlled data |
+
+The third column of `src`/`san`/`tainted` is the **rule index** (the position of the
+enclosing rule in `RulePack.taintRules`, after `withModels`). Taint is rule-scoped: a
+source only feeds its own rule's sinks, and a sanitiser only kills its own rule's flow. A
+pack opts into a cross-rule fact with a trailing `shared` on the `source`/`sanitise`
+line; those facts are emitted once per rule. Memory carries the rule too
+(`mtainted (loc, rule)`), so a store through one rule's tainted value does not launder
+another rule's load.
 
 Rules:
 
 ```
-tainted n v   :- src n v.
-tainted n v   :- param n v.
-tainted n v   :- retsrc n v.
-tainted n w   :- tainted d v, flow d n v, gen n w, !san n w.
-alert n a     :- tainted d v, flow d n v, sink n a v.
+tainted n v r :- src n v r.
+tainted n v r :- param n v r.
+tainted n v r :- retsrc n v r.
+tainted n w r :- tainted d v r, flow d n v, gen n w, !san n w r.
+alert n a r   :- tainted d v r, flow d n v, sink n a v.
 badalert n    :- badcall n.
-mtainted l    :- tainted d v, flow d s v, mstore l s v.
-tainted n w   :- mtainted l, mload l n w, !san n w.
+mtainted l r  :- tainted d v r, flow d s v, mstore l s v.
+tainted n w r :- mtainted l r, mload l n w, !san n w r.
 ```
+
+`alert` carries the rule of the tainted definition; `Scry.resultTaintFindings` keeps an
+alert only when a `RuleSinkFact` at the same `(node, arg)` has that rule. Interprocedural
+seeds (`param`/`retsrc`) and memory seeds are summarised without a rule today, so they
+are expanded to every rule at the EDB boundary: a value passed to a callee is tainted for
+every rule there, which is a conservative approximation of the same scope.
 
 The memory rules make a `store` propagate taint into the **locations it may alias**
 (`Scry.PointsTo`, field-sensitive), and a later `load` from an overlapping location
@@ -76,7 +90,9 @@ used by the entry statement is added in `Scry.prepareFunc`.
 
 `Scry.Models` supplies effects the rule pack does not have to repeat: a model source or
 sanitiser is added after the pack's own facts and deduplicated, and a model sink is
-added only for a `(point, argument)` the pack does not already claim. The sink class
+added only for a `(point, argument)` the pack does not already claim. A model
+source/sanitiser is a property of the callee, so it is **shared** across every rule; a
+model sink belongs to the rule its sink class names. The sink class
 selects the rule id (command/format/length/size); `Scry.RulePack.withModels` makes sure
 the descriptor exists. A model `copy`/`copyArgs` is a memory store: `sprintf(dst, fmt, t)`
 writes `t` into the destination's location closure, and a later load sees it. An
@@ -127,7 +143,8 @@ def Scry.useCopyRead : Nat := 3
 -- ## The plan for one function
 
 /-- A sink occurrence with the rule that owns it: `node` is the call point, `arg` the
-checked argument, `var` the register passed there. -/
+checked argument, `var` the register passed there, and `ruleIdx` the rule's numeric
+index (the same value the `tainted`/`src`/`san` columns carry). -/
 structure Scry.RuleSinkFact where
   node : Nat
   arg : Nat
@@ -136,6 +153,7 @@ structure Scry.RuleSinkFact where
   rule : String
   severity : Scry.Severity
   message : String
+  ruleIdx : Nat
 
 /-- A forbidden call occurrence. -/
 structure Scry.BadCall where
@@ -219,12 +237,18 @@ def Scry.dedupSeeds (ms : List Scry.MemSeed) : List Scry.MemSeed :=
 structure Scry.FuncPlan where
   info : Scry.FnInfo
   entry : Nat
+  /-- The number of taint rules the plan was built for (rule indices are `0 .. count-1`).
+  Interprocedural and memory seeds are rule-agnostic, so they are expanded over this
+  range at the EDB boundary. -/
+  ruleCount : Nat
   /-- `(position, register index)` for every parameter. -/
   params : List (Nat × Nat)
   /-- `(terminator point, returned register)` for every `ret x`. -/
   rets : List (Nat × Nat)
-  sources : List (Nat × Nat)
-  sans : List (Nat × Nat)
+  /-- `(point, register, rule index)` source facts. -/
+  sources : List (Nat × Nat × Nat)
+  /-- `(point, register, rule index)` sanitiser facts. -/
+  sans : List (Nat × Nat × Nat)
   sinks : List Scry.RuleSinkFact
   badCalls : List Scry.BadCall
   /-- Stores through a pointer, with the locations they may write. -/
@@ -255,65 +279,85 @@ def Scry.retPoints (g : Scry.Fn) : List (Nat × Nat) :=
       | .ret (.some v) _ => [(n, v.index)]
       | _ => .nil) (Scry.range g.count)
 
-/-- Match one taint rule's sources and sanitisers against a call, collecting the
-`(point, register)` facts and the extra definitions a written argument needs. -/
-def Scry.matchRuleParts (n : Nat) (name : String) (args : List Wil.Var) (r : Scry.TaintRule) :
-    List (Nat × Nat) × List (Nat × Nat) :=
-  let sources := Scry.rulePackConcat (fun p =>
-    if Scry.nameMatches p.1 name then
-      match p.2 with
-      | .result => .nil
-      | .arg k => match Wil.listNth args k with
-        | .none => .nil
-        | .some v => [(n, v.index)]
-    else .nil) r.sources;
-  let sans := Scry.rulePackConcat (fun p =>
-    if Scry.nameMatches p.1 name then
-      match p.2 with
-      | .result => .nil
-      | .arg k => match Wil.listNth args k with
-        | .none => .nil
-        | .some v => [(n, v.index)]
-    else .nil) r.sanitisers;
-  (sources, sans)
+/-- Rules paired with the numeric index their facts carry. The index is the rule's
+position in `RulePack.taintRules` (after `withModels`); it is stable within one pack and
+is the join key between a taint fact and the sink that owns it. -/
+def Scry.indexedRulesGo : Nat → List Scry.TaintRule → List (Nat × Scry.TaintRule)
+  | _, .nil => .nil
+  | i, .cons r rs => List.cons (i, r) (Scry.indexedRulesGo (Nat.succ i) rs)
 
-/-- Source facts of a call, including its result when a rule names the result. -/
-def Scry.ruleSourcesAt (n : Nat) (callResult : Option Nat) (name : String)
-    (args : List Wil.Var) (rules : List Scry.TaintRule) : List (Nat × Nat) :=
-  Scry.rulePackConcat (fun r =>
-    let direct := Scry.rulePackConcat (fun p =>
-      if Scry.nameMatches p.1 name then
-        match p.2 with
-        | .result => match callResult with
-          | .some rv => [(n, rv)]
-          | .none => .nil
-        | .arg _ => .nil
-      else .nil) r.sources;
-    let dropped := Scry.matchRuleParts n name args r;
-    List.append direct dropped.1) rules
+def Scry.indexedRules (rs : List Scry.TaintRule) : List (Nat × Scry.TaintRule) :=
+  Scry.indexedRulesGo 0 rs
 
-/-- Sanitiser facts of a call, including its result. -/
-def Scry.ruleSansAt (n : Nat) (callResult : Option Nat) (name : String)
-    (args : List Wil.Var) (rules : List Scry.TaintRule) : List (Nat × Nat) :=
-  Scry.rulePackConcat (fun r =>
-    let direct := Scry.rulePackConcat (fun p =>
-      if Scry.nameMatches p.1 name then
-        match p.2 with
-        | .result => match callResult with
-          | .some rv => [(n, rv)]
-          | .none => .nil
-        | .arg _ => .nil
-      else .nil) r.sanitisers;
-    let dropped := Scry.matchRuleParts n name args r;
-    List.append direct dropped.2) rules
+/-- The numeric index of a rule id in this pack (0 when the id is unknown, which only
+happens for a malformed pack). -/
+def Scry.taintRuleIndexOf (rules : List Scry.TaintRule) (id : String) : Nat :=
+  match List.find (fun rp => String.eq rp.2.id id) (Scry.indexedRules rules) with
+  | .some rp => rp.1
+  | .none => 0
+
+/-- The registers a `result`/`arg K` selector names at this call. -/
+def Scry.refVars (sel : Scry.ArgRef) (callResult : Option Nat) (args : List Wil.Var) :
+    List Nat :=
+  match sel with
+  | .result => match callResult with
+    | .some rv => List.cons rv List.nil
+    | .none => .nil
+  | .arg k => match Wil.listNth args k with
+    | .some v => List.cons v.index List.nil
+    | .none => .nil
+
+/-- The rule indices a fact belongs to: every rule for a `shared` fact, otherwise only
+the rule that declared it. -/
+def Scry.scopeIds (shared : Bool) (ri count : Nat) : List Nat :=
+  if shared then Scry.range count else List.cons ri List.nil
+
+/-- `(point, register, rule)` facts for the given registers, one row per rule index. -/
+def Scry.ruleFacts (n : Nat) (vars : List Nat) (ids : List Nat) :
+    List (Nat × Nat × Nat) :=
+  Scry.rulePackConcat (fun v => List.map (fun r => (n, v, r)) ids) vars
 
 /-- The extra definitions a rule pack adds at a call: every argument a source writes or
-a sanitiser cleans in place. The result is already an ordinary definition. -/
+a sanitiser cleans in place. Rule scope does not matter here: an extra definition is a
+def-use node, and it is deduplicated once collected. The result is already an ordinary
+definition. -/
 def Scry.ruleExtraDefsAt (n : Nat) (name : String) (args : List Wil.Var)
     (rules : List Scry.TaintRule) : List (Nat × Nat) :=
+  let argDefs := fun (entries : List (String × Scry.ArgRef × Bool)) =>
+    Scry.rulePackConcat (fun e =>
+      if Scry.nameMatches e.1 name then
+        match e.2.1 with
+        | .result => .nil
+        | .arg k => match Wil.listNth args k with
+          | .none => .nil
+          | .some v => [(n, v.index)]
+      else .nil) entries;
   Scry.rulePackConcat (fun r =>
-    let parts := Scry.matchRuleParts n name args r;
-    List.append parts.1 parts.2) rules
+    List.append (argDefs r.sources) (argDefs r.sanitisers)) rules
+
+/-- Source facts of a call, including its result when a rule names the result. A
+non-`shared` entry is scoped to its own rule; a `shared` entry is emitted for every rule
+in the pack. -/
+def Scry.ruleSourcesAt (n : Nat) (callResult : Option Nat) (name : String)
+    (args : List Wil.Var) (rules : List Scry.TaintRule) : List (Nat × Nat × Nat) :=
+  let count := List.length rules;
+  Scry.rulePackConcat (fun rp =>
+    Scry.rulePackConcat (fun e =>
+      if Scry.nameMatches e.1 name then
+        Scry.ruleFacts n (Scry.refVars e.2.1 callResult args)
+          (Scry.scopeIds e.2.2 rp.1 count)
+      else .nil) rp.2.sources) (Scry.indexedRules rules)
+
+/-- Sanitiser facts of a call, including its result. Scoped exactly like sources. -/
+def Scry.ruleSansAt (n : Nat) (callResult : Option Nat) (name : String)
+    (args : List Wil.Var) (rules : List Scry.TaintRule) : List (Nat × Nat × Nat) :=
+  let count := List.length rules;
+  Scry.rulePackConcat (fun rp =>
+    Scry.rulePackConcat (fun e =>
+      if Scry.nameMatches e.1 name then
+        Scry.ruleFacts n (Scry.refVars e.2.1 callResult args)
+          (Scry.scopeIds e.2.2 rp.1 count)
+      else .nil) rp.2.sanitisers) (Scry.indexedRules rules)
 
 /-- `(argument position, register)` for every argument. -/
 def Scry.indexedArgVars : List Wil.Var → Nat → List (Nat × Nat)
@@ -333,13 +377,13 @@ def Scry.sinkArgPositions (sel : Scry.SinkArg) (args : List Wil.Var) :
 
 def Scry.ruleSinksAt (n : Nat) (name : String) (args : List Wil.Var)
     (rules : List Scry.TaintRule) : List Scry.RuleSinkFact :=
-  Scry.rulePackConcat (fun r =>
+  Scry.rulePackConcat (fun rp =>
     Scry.rulePackConcat (fun s =>
       if Scry.nameMatches s.name name then
         List.map (fun p =>
-          Scry.RuleSinkFact.mk n p.1 p.2 name r.id r.severity r.message)
+          Scry.RuleSinkFact.mk n p.1 p.2 name rp.2.id rp.2.severity rp.2.message rp.1)
           (Scry.sinkArgPositions s.arg args)
-      else .nil) r.sinks) rules
+      else .nil) rp.2.sinks) (Scry.indexedRules rules)
 
 def Scry.ruleBadCallsAt (n : Nat) (name : String) (rules : List Scry.ForbiddenRule) :
     List Scry.BadCall :=
@@ -355,8 +399,8 @@ structure Scry.CallScan where
   result : Option Nat
   args : List Wil.Var
   defs : List (Nat × Nat)
-  sources : List (Nat × Nat)
-  sans : List (Nat × Nat)
+  sources : List (Nat × Nat × Nat)
+  sans : List (Nat × Nat × Nat)
   sinks : List Scry.RuleSinkFact
   bads : List Scry.BadCall
 
@@ -445,6 +489,17 @@ def Scry.dedupPairs (xs : List (Nat × Nat)) : List (Nat × Nat) :=
     | .true => acc
     | .false => List.append acc [p]) .nil xs
 
+/-- Deduplicate `(point, register, rule)` facts. A pack fact and a model fact for the
+same triple are one fact. -/
+def Scry.tripleKey (p : Nat × Nat × Nat) : String :=
+  Nat.repr p.1 ++ ":" ++ Nat.repr p.2.1 ++ ":" ++ Nat.repr p.2.2
+
+def Scry.dedupTriples (xs : List (Nat × Nat × Nat)) : List (Nat × Nat × Nat) :=
+  List.foldl (fun acc p =>
+    match List.any (fun q => String.eq (Scry.tripleKey q) (Scry.tripleKey p)) acc with
+    | .true => acc
+    | .false => List.append acc [p]) .nil xs
+
 /-- Deduplicate sink facts by `(node, argument)`, keeping the first. A pack sink wins
 over a model fallback for the same call argument, so one alert cannot become two
 findings with different rule ids. -/
@@ -481,6 +536,23 @@ def Scry.modelSansAt (models : Scry.ModelPack) (n : Nat) (callResult : Option Na
       | .some v => [(n, v.index)]
       | .none => .nil) (Scry.ModelPack.sansOfAt models name (List.length args))
 
+/-- Model source facts for every rule: a model source is a property of the external
+callee, not of one pack rule, so it falls in the `shared` class. -/
+def Scry.modelSourceFactsAt (models : Scry.ModelPack) (n : Nat) (callResult : Option Nat)
+    (name : String) (args : List Wil.Var) (ruleCount : Nat) : List (Nat × Nat × Nat) :=
+  Scry.ruleFacts n
+    (List.map (fun p => p.2) (Scry.modelSourcesAt models n callResult name args))
+    (Scry.range ruleCount)
+
+/-- Model sanitiser facts for every rule: like a model source, a model sanitiser is a
+table effect shared by the pack. A pack still has to name the function before the table
+is trusted (`RulePack.trustsSanitiser`). -/
+def Scry.modelSanFactsAt (models : Scry.ModelPack) (n : Nat) (callResult : Option Nat)
+    (name : String) (args : List Wil.Var) (ruleCount : Nat) : List (Nat × Nat × Nat) :=
+  Scry.ruleFacts n
+    (List.map (fun p => p.2) (Scry.modelSansAt models n callResult name args))
+    (Scry.range ruleCount)
+
 /-- Extra definitions a model call writes: a source argument and an in-place
 sanitiser argument are definitions at the call point, exactly like the rule pack's
 `source read arg 1`. A result source is an ordinary definition and is not included. -/
@@ -495,7 +567,8 @@ def Scry.modelExtraDefsAt (models : Scry.ModelPack) (pack : Scry.RulePack) (n : 
 (`command-injection`, `format-string`, `buffer-overflow`, `integer-overflow`); the pack's
 metadata is used when it declares that rule, otherwise the model's defaults are used. -/
 def Scry.modelSinkFactsAt (models : Scry.ModelPack) (n : Nat) (name : String)
-    (args : List Wil.Var) (pack : Scry.RulePack) : List Scry.RuleSinkFact :=
+    (args : List Wil.Var) (pack : Scry.RulePack) (rules : List Scry.TaintRule) :
+    List Scry.RuleSinkFact :=
   Scry.modelFlat (fun ac =>
     let arg := ac.1;
     let cls := ac.2;
@@ -515,7 +588,8 @@ def Scry.modelSinkFactsAt (models : Scry.ModelPack) (n : Nat) (name : String)
         let msg := match pack.taintRuleById id with
           | .some r => r.message
           | .none => Scry.SinkClass.message cls;
-        List.cons (Scry.RuleSinkFact.mk n arg v.index name id sev msg) .nil)
+        List.cons (Scry.RuleSinkFact.mk n arg v.index name id sev msg
+          (Scry.taintRuleIndexOf rules id)) .nil)
     (Scry.ModelPack.sinksOfAt models name (List.length args))
 
 /-- One access's freed-location diagnostic: a free that reaches the access and may free
@@ -609,6 +683,7 @@ def Scry.prepareFuncWithModels (models : Scry.ModelPack) (fn : Wil.Func)
   let pack := Scry.RulePack.withModels pack0;
   let g := Scry.flatten fn;
   let taintRules := Scry.RulePack.taintRules pack;
+  let ruleCount := List.length taintRules;
   let forbidden := Scry.RulePack.forbiddenRules pack;
   let paramDefs := List.map (fun p => (Scry.entryNode g, p.2)) (Scry.paramMap 0 fn.params);
   /-- `source argv result`: `main`'s second parameter (the C `argv` array) is
@@ -632,14 +707,14 @@ def Scry.prepareFuncWithModels (models : Scry.ModelPack) (fn : Wil.Func)
           List.cons (Scry.CallScan.mk n name rv args
             (Scry.dedupPairs (List.append (Scry.ruleExtraDefsAt n name args taintRules)
               (Scry.modelExtraDefsAt models pack n name args)))
-            (Scry.dedupPairs (List.append (Scry.ruleSourcesAt n rv name args taintRules)
-              (Scry.modelSourcesAt models n rv name args)))
-            (Scry.dedupPairs (List.append (Scry.ruleSansAt n rv name args taintRules)
+            (Scry.dedupTriples (List.append (Scry.ruleSourcesAt n rv name args taintRules)
+              (Scry.modelSourceFactsAt models n rv name args ruleCount)))
+            (Scry.dedupTriples (List.append (Scry.ruleSansAt n rv name args taintRules)
               (match pack.trustsSanitiser name with
-                | .true => Scry.modelSansAt models n rv name args
-                | .false => (.nil : List (Nat × Nat)))))
+                | .true => Scry.modelSanFactsAt models n rv name args ruleCount
+                | .false => (.nil : List (Nat × Nat × Nat)))))
             (Scry.dedupSinks (List.append (Scry.ruleSinksAt n name args taintRules)
-              (Scry.modelSinkFactsAt models n name args pack)))
+              (Scry.modelSinkFactsAt models n name args pack taintRules)))
             (Scry.ruleBadCallsAt n name forbidden)) .nil
         | .indirect _ => .nil
       | _ => .nil) (Scry.range g.count);
@@ -654,14 +729,18 @@ def Scry.prepareFuncWithModels (models : Scry.ModelPack) (fn : Wil.Func)
     (List.filter (fun p => Scry.memNat p.2 entryUsed) paramDefs);
   let allDeps := List.append selfDeps baseInfo.deps;
   let info : Scry.FnInfo := { baseInfo with deps := allDeps, depIdx := Scry.depIdxOf allDeps };
-  let entryFacts := Scry.entrySourceFacts (Scry.entryNode g)
-    (Scry.paramMap 0 fn.params) entrySources;
+  /-- An exported-entry parameter is attacker-controlled for every rule in the pack, so
+  its `src` fact is shared (one row per rule index). -/
+  let entryFacts := Scry.ruleFacts (Scry.entryNode g)
+    (List.map (fun p => p.2) (Scry.entrySourceFacts (Scry.entryNode g)
+      (Scry.paramMap 0 fn.params) entrySources))
+    (Scry.range ruleCount);
   let sources := List.append entryFacts (Scry.rulePackConcat (fun p => p.sources) scan);
   let sans := Scry.rulePackConcat (fun p => p.sans) scan;
   let sinks := Scry.rulePackConcat (fun p => p.sinks) scan;
   let bads := Scry.rulePackConcat (fun p => p.bads) scan;
   let mem := Scry.memScan models pt fn g;
-  Scry.FuncPlan.mk info (Scry.entryNode g) (Scry.paramMap 0 fn.params)
+  Scry.FuncPlan.mk info (Scry.entryNode g) ruleCount (Scry.paramMap 0 fn.params)
     (Scry.retPoints g) sources sans sinks bads
     mem.stores mem.loads mem.warnings .nil
 
@@ -681,31 +760,39 @@ def Scry.rtOps : Scry.LatOps Nat :=
   Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq
 
 def Scry.rtRuleSrc : Scry.Rule Nat :=
-  Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 0, Scry.Term.var 1])
-    [Scry.Atom.pos 1 [Scry.Term.var 0, Scry.Term.var 1]]
+  Scry.Rule.mk (Scry.Head.tuple 4
+      [Scry.Term.var 0, Scry.Term.var 1, Scry.Term.var 2])
+    [Scry.Atom.pos 1 [Scry.Term.var 0, Scry.Term.var 1, Scry.Term.var 2]]
 
 def Scry.rtRuleParam : Scry.Rule Nat :=
-  Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 0, Scry.Term.var 1])
-    [Scry.Atom.pos 6 [Scry.Term.var 0, Scry.Term.var 1]]
+  Scry.Rule.mk (Scry.Head.tuple 4
+      [Scry.Term.var 0, Scry.Term.var 1, Scry.Term.var 2])
+    [Scry.Atom.pos 6 [Scry.Term.var 0, Scry.Term.var 1, Scry.Term.var 2]]
 
 def Scry.rtRuleRetSrc : Scry.Rule Nat :=
-  Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 0, Scry.Term.var 1])
-    [Scry.Atom.pos 7 [Scry.Term.var 0, Scry.Term.var 1]]
+  Scry.Rule.mk (Scry.Head.tuple 4
+      [Scry.Term.var 0, Scry.Term.var 1, Scry.Term.var 2])
+    [Scry.Atom.pos 7 [Scry.Term.var 0, Scry.Term.var 1, Scry.Term.var 2]]
 
 /-- Taint transfer: a tainted definition reaching a use at `n` taints every ordinary
-definition `w` at `n` (an assignment's target, or a call's result). An argument source
-or an in-place sanitiser is an *extra* definition, not an ordinary one: a source seeds it
-and a sanitiser kills it, so it is not derived from its inputs here. -/
+definition `w` at `n` (an assignment's target, or a call's result), **under the same
+rule** `r`. An argument source or an in-place sanitiser is an *extra* definition, not an
+ordinary one: a source seeds it and a sanitiser kills it, so it is not derived from its
+inputs here. -/
 def Scry.rtRuleProp : Scry.Rule Nat :=
-  Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 2, Scry.Term.var 3])
-    [ Scry.Atom.pos 4 [Scry.Term.var 0, Scry.Term.var 1]
+  Scry.Rule.mk (Scry.Head.tuple 4
+      [Scry.Term.var 2, Scry.Term.var 3, Scry.Term.var 4])
+    [ Scry.Atom.pos 4 [Scry.Term.var 0, Scry.Term.var 1, Scry.Term.var 4]
     , Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 2, Scry.Term.var 1]
     , Scry.Atom.pos 10 [Scry.Term.var 2, Scry.Term.var 3]
-    , Scry.Atom.neg 3 [Scry.Term.var 2, Scry.Term.var 3] ]
+    , Scry.Atom.neg 3 [Scry.Term.var 2, Scry.Term.var 3, Scry.Term.var 4] ]
 
+/-- The alert carries the rule of the tainted definition, so the finding layer can join
+it to the sink fact that owns the same rule. -/
 def Scry.rtRuleAlert : Scry.Rule Nat :=
-  Scry.Rule.mk (Scry.Head.tuple 5 [Scry.Term.var 1, Scry.Term.var 2])
-    [ Scry.Atom.pos 4 [Scry.Term.var 0, Scry.Term.var 3]
+  Scry.Rule.mk (Scry.Head.tuple 5
+      [Scry.Term.var 1, Scry.Term.var 2, Scry.Term.var 4])
+    [ Scry.Atom.pos 4 [Scry.Term.var 0, Scry.Term.var 3, Scry.Term.var 4]
     , Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 1, Scry.Term.var 3]
     , Scry.Atom.pos 2 [Scry.Term.var 1, Scry.Term.var 2, Scry.Term.var 3] ]
 
@@ -713,27 +800,29 @@ def Scry.rtRuleBad : Scry.Rule Nat :=
   Scry.Rule.mk (Scry.Head.tuple 9 [Scry.Term.var 0])
     [Scry.Atom.pos 8 [Scry.Term.var 0]]
 
-/-- A store of a tainted value into a location taints the location: the value used at the
-store point is tainted (`tainted d v, flow d s v`) and the store writes `s`. -/
+/-- A store of a tainted value into a location taints the location **for the same rule**:
+the value used at the store point is tainted (`tainted d v r, flow d s v`) and the store
+writes `s`. -/
 def Scry.rtRuleMemStore : Scry.Rule Nat :=
-  Scry.Rule.mk (Scry.Head.tuple 13 [Scry.Term.var 0])
-    [ Scry.Atom.pos 4 [Scry.Term.var 1, Scry.Term.var 2]
+  Scry.Rule.mk (Scry.Head.tuple 13 [Scry.Term.var 0, Scry.Term.var 4])
+    [ Scry.Atom.pos 4 [Scry.Term.var 1, Scry.Term.var 2, Scry.Term.var 4]
     , Scry.Atom.pos 0 [Scry.Term.var 1, Scry.Term.var 3, Scry.Term.var 2]
     , Scry.Atom.pos 11 [Scry.Term.var 0, Scry.Term.var 3, Scry.Term.var 2] ]
 
-/-- A load from a tainted location taints its result register (unless a sanitiser cleans
-the result at that point). -/
+/-- A load from a location tainted for rule `r` taints its result register for the same
+rule (unless a sanitiser cleans the result at that point for `r`). -/
 def Scry.rtRuleMemLoad : Scry.Rule Nat :=
-  Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 0, Scry.Term.var 1])
-    [ Scry.Atom.pos 13 [Scry.Term.var 2]
+  Scry.Rule.mk (Scry.Head.tuple 4
+      [Scry.Term.var 0, Scry.Term.var 1, Scry.Term.var 3])
+    [ Scry.Atom.pos 13 [Scry.Term.var 2, Scry.Term.var 3]
     , Scry.Atom.pos 12 [Scry.Term.var 2, Scry.Term.var 0, Scry.Term.var 1]
-    , Scry.Atom.neg 3 [Scry.Term.var 0, Scry.Term.var 1] ]
+    , Scry.Atom.neg 3 [Scry.Term.var 0, Scry.Term.var 1, Scry.Term.var 3] ]
 
 /-- The program without the memory relations: a function whose plan has no store, no
 load and no seeded location cannot use them, and the smaller program keeps the summary
 fixpoint cheap for memory-free code. -/
 def Scry.ruleTaintProgramPlain : Scry.Program Nat :=
-  Scry.Program.mk Scry.rtOps [3, 2, 3, 2, 2, 2, 2, 2, 1, 1, 2] [] []
+  Scry.Program.mk Scry.rtOps [3, 3, 3, 3, 3, 3, 3, 3, 1, 1, 2] [] []
     [ Scry.rtRuleSrc
     , Scry.rtRuleParam
     , Scry.rtRuleRetSrc
@@ -744,7 +833,7 @@ def Scry.ruleTaintProgramPlain : Scry.Program Nat :=
 /-- Arity 3 `flow`, then the rule-pack relations; see the module header. This is the
 full program (with `mstore`/`mload`/`mtainted`). -/
 def Scry.ruleTaintProgram : Scry.Program Nat :=
-  Scry.Program.mk Scry.rtOps [3, 2, 3, 2, 2, 2, 2, 2, 1, 1, 2, 3, 3, 1] [] []
+  Scry.Program.mk Scry.rtOps [3, 3, 3, 3, 3, 3, 3, 3, 1, 1, 2, 3, 3, 2] [] []
     [ Scry.rtRuleSrc
     , Scry.rtRuleParam
     , Scry.rtRuleRetSrc
@@ -772,8 +861,17 @@ def Scry.rtAddTuples (rel : Nat) (rows : List (List Nat)) (st : Scry.State Nat) 
 def Scry.rtPairs (xs : List (Nat × Nat)) : List (List Nat) :=
   List.map (fun p => [p.1, p.2]) xs
 
+/-- `(point, register, rule)` source/sanitiser rows. -/
+def Scry.rtScopedPairs (xs : List (Nat × Nat × Nat)) : List (List Nat) :=
+  List.map (fun p => [p.1, p.2.1, p.2.2]) xs
+
 def Scry.rtTriples (xs : List Scry.DataDep) : List (List Nat) :=
   List.map (fun d => [d.from, d.to, d.var]) xs
+
+/-- A rule-agnostic `(point, register)` seed (a parameter or a callee return), expanded
+to one row per rule index. -/
+def Scry.scopedSeedRows (p : Nat × Nat) (ruleCount : Nat) : List (List Nat) :=
+  List.map (fun r => [p.1, p.2, r]) (Scry.range ruleCount)
 
 /-- `(loc, point, var)` rows for a list of memory accesses. -/
 def Scry.memRows (ops : List Scry.MemOp) : List (List Nat) :=
@@ -787,24 +885,31 @@ def Scry.planInput (plan : Scry.FuncPlan) (paramTaint : List Nat)
   let st0 := Scry.State.empty;
   let st1 := Scry.rtAddTuples Scry.rtFlow (Scry.rtTriples plan.info.deps) st0;
   let st1b := Scry.rtAddTuples Scry.rtGen (Scry.rtPairs (Scry.defsOf plan.info.g)) st1;
-  let st2 := Scry.rtAddTuples Scry.rtSrc (Scry.rtPairs plan.sources) st1b;
+  let st2 := Scry.rtAddTuples Scry.rtSrc (Scry.rtScopedPairs plan.sources) st1b;
   let sinkRows := List.map (fun s => [s.node, s.arg, s.var])
     plan.sinks;
   let st3 := Scry.rtAddTuples Scry.rtSink sinkRows st2;
-  let st4 := Scry.rtAddTuples Scry.rtSan (Scry.rtPairs plan.sans) st3;
+  let st4 := Scry.rtAddTuples Scry.rtSan (Scry.rtScopedPairs plan.sans) st3;
+  -- A parameter a caller passes taint into is not attributed to one rule by the summary,
+  -- so it is seeded for every rule (a conservative approximation).
   let paramRows := Scry.rulePackConcat (fun i =>
     match Scry.paramVarAt plan.params i with
-    | .some v => [(List.cons plan.entry (List.cons v .nil))]
+    | .some v => Scry.scopedSeedRows (plan.entry, v) plan.ruleCount
     | .none => .nil) paramTaint;
   let st5 := Scry.rtAddTuples Scry.rtParam paramRows st4;
-  let st6 := Scry.rtAddTuples Scry.rtRetSrc (Scry.rtPairs retSeeds) st5;
+  let retRows := Scry.rulePackConcat (fun p =>
+    Scry.scopedSeedRows p plan.ruleCount) retSeeds;
+  let st6 := Scry.rtAddTuples Scry.rtRetSrc retRows st5;
   let badRows := List.map (fun b => [b.node]) plan.badCalls;
   let st7 := Scry.rtAddTuples Scry.rtBadCall badRows st6;
   let st8 := Scry.rtAddTuples Scry.rtMStore (Scry.memRows plan.mstores) st7;
   let st9 := Scry.rtAddTuples Scry.rtMLoad (Scry.memRows plan.mloads) st8;
   -- tainted locations from other functions' summaries (and this function's previous
-  -- rounds): an `mtainted` EDB fact per distinct location
-  let seedRows := List.map (fun m => (.cons m.loc .nil : List Nat)) (Scry.dedupSeeds plan.seeds);
+  -- rounds): an `mtainted` EDB fact per distinct location, for every rule (see the
+  -- parameter-seed note above).
+  let seedRows := Scry.rulePackConcat (fun m =>
+    List.map (fun r => [m.loc, r]) (Scry.range plan.ruleCount))
+    (Scry.dedupSeeds plan.seeds);
   Scry.rtAddTuples Scry.rtMTainted seedRows st9
 
 -- ## Reading a result
@@ -817,11 +922,25 @@ def Scry.rtRowNat (row : List U64) (i : Nat) : Nat :=
 
 def Scry.rtNats (row : List U64) : List Nat := List.map (fun x => UIntN.toNat x) row
 
+/-- Tainted rows with their rule: `(point, register, rule)`. -/
+def Scry.taintRows3 (st : Scry.State Nat) : List (Nat × Nat × Nat) :=
+  List.map (fun row =>
+    (Scry.rtRowNat row 0, Scry.rtRowNat row 1, Scry.rtRowNat row 2))
+    (Scry.rtRows st Scry.rtTainted)
+
+/-- The rule-agnostic projection used by the interprocedural summaries: a definition is
+tainted if any rule taints it. -/
 def Scry.taintRows (st : Scry.State Nat) : List (Nat × Nat) :=
-  List.map (fun row => (Scry.rtRowNat row 0, Scry.rtRowNat row 1)) (Scry.rtRows st Scry.rtTainted)
+  List.map (fun t => (t.1, t.2.1)) (Scry.taintRows3 st)
+
+/-- Alert rows with their rule: `(sink, argument, rule)`. -/
+def Scry.alertRows3 (st : Scry.State Nat) : List (Nat × Nat × Nat) :=
+  List.map (fun row =>
+    (Scry.rtRowNat row 0, Scry.rtRowNat row 1, Scry.rtRowNat row 2))
+    (Scry.rtRows st Scry.rtAlert)
 
 def Scry.alertRows (st : Scry.State Nat) : List (Nat × Nat) :=
-  List.map (fun row => (Scry.rtRowNat row 0, Scry.rtRowNat row 1)) (Scry.rtRows st Scry.rtAlert)
+  List.map (fun t => (t.1, t.2.1)) (Scry.alertRows3 st)
 
 def Scry.badAlertRows (st : Scry.State Nat) : List Nat :=
   List.map (fun row => Scry.rtRowNat row 0) (Scry.rtRows st Scry.rtBadAlert)
@@ -914,9 +1033,9 @@ partial def Scry.rtChainKinds {L : Type} (st : Scry.State L) (seeds : List Scry.
         | .none => [(Scry.mkK here Scry.PathKind.assumed)]
 
 /-- The seed kind of a tainted fact, read from the rule that introduced it. -/
-def Scry.rtSeedKind (st : Scry.State Nat) (n v : Nat) : Scry.PathKind :=
+def Scry.rtSeedKind (st : Scry.State Nat) (n v rule : Nat) : Scry.PathKind :=
   match Scry.State.whyTuple st (Scry.rtOps) Scry.rtTainted
-      [U64.ofNat n, U64.ofNat v] with
+      [U64.ofNat n, U64.ofNat v, U64.ofNat rule] with
   | .none => .assumed
   | .some step =>
     match Scry.rtPremiseOfRel st step Scry.rtSrc with
@@ -930,12 +1049,21 @@ def Scry.rtSeedKind (st : Scry.State Nat) (n v : Nat) : Scry.PathKind :=
 def Scry.chainNodeToPath (d : String) (n : Scry.ChainNode) : Scry.PathNode :=
   Scry.PathNode.mk (Scry.chainFunc d n) n.point n.var n.kind
 
-/-- The path from the taint seed to the definition `(n, v)` in this function, using the
-engine's provenance (through memory when the definition is a load, and across functions
-through a memory seed). The last node is `(n, v)`; an untainted query gives `[]`. -/
-def Scry.chainToDef (func : String) (seeds : List Scry.MemSeed) (st : Scry.State Nat)
-    (n v : Nat) : List Scry.PathNode :=
-  match Scry.State.whyTuple st Scry.rtOps Scry.rtTainted [U64.ofNat n, U64.ofNat v] with
+/-- The rule index of a tainted definition, if any rule taints it. -/
+def Scry.taintRuleAt (st : Scry.State Nat) (n v : Nat) : Option Nat :=
+  match List.find (fun t => Bool.and (Nat.beq t.1 n) (Nat.beq t.2.1 v))
+      (Scry.taintRows3 st) with
+  | .some t => .some t.2.2
+  | .none => .none
+
+/-- The path from the taint seed to the definition `(n, v)` **for rule `rule`** in this
+function, using the engine's provenance (through memory when the definition is a load,
+and across functions through a memory seed). The last node is `(n, v)`; an untainted
+query gives `[]`. -/
+def Scry.chainToDefRule (func : String) (seeds : List Scry.MemSeed) (st : Scry.State Nat)
+    (n v rule : Nat) : List Scry.PathNode :=
+  match Scry.State.whyTuple st Scry.rtOps Scry.rtTainted
+      [U64.ofNat n, U64.ofNat v, U64.ofNat rule] with
   | .none => .nil
   | .some step =>
     match Scry.rtChainKinds st seeds step.id with
@@ -943,12 +1071,23 @@ def Scry.chainToDef (func : String) (seeds : List Scry.MemSeed) (st : Scry.State
     | .cons x rest =>
       let first := match x.func with
         | .some _ => Scry.chainNodeToPath func x
-        | .none => Scry.PathNode.mk func x.point x.var (Scry.rtSeedKind st x.point x.var);
+        | .none => Scry.PathNode.mk func x.point x.var
+            (Scry.rtSeedKind st x.point x.var rule);
       List.cons first (List.map (Scry.chainNodeToPath func) rest)
 
-/-- The tainted definition reaching a sink argument, from the alert's provenance. -/
-def Scry.alertDef (st : Scry.State Nat) (sink arg : Nat) : Option (Nat × Nat) :=
-  match Scry.State.whyTuple st Scry.rtOps Scry.rtAlert [U64.ofNat sink, U64.ofNat arg] with
+/-- The rule-agnostic spelling: take the first rule that taints `(n, v)`. Used by the
+interprocedural path walk, where a summary has no rule attribution yet. -/
+def Scry.chainToDef (func : String) (seeds : List Scry.MemSeed) (st : Scry.State Nat)
+    (n v : Nat) : List Scry.PathNode :=
+  match Scry.taintRuleAt st n v with
+  | .some rule => Scry.chainToDefRule func seeds st n v rule
+  | .none => .nil
+
+/-- The tainted definition reaching a sink argument **for `rule`**, from the alert's
+provenance. -/
+def Scry.alertDef (st : Scry.State Nat) (sink arg rule : Nat) : Option (Nat × Nat) :=
+  match Scry.State.whyTuple st Scry.rtOps Scry.rtAlert
+      [U64.ofNat sink, U64.ofNat arg, U64.ofNat rule] with
   | .none => .none
   | .some step =>
     match Scry.rtPremiseOfRel st step Scry.rtTainted with
@@ -1005,7 +1144,12 @@ def Scry.resultMemSeeds (r : Scry.FuncResult) : List Scry.MemSeed :=
   let st := match r.state with
     | .none => Scry.State.empty
     | .some s => s;
-  let locs := List.map (fun row => Scry.rtRowNat row 0) (Scry.rtRows st Scry.rtMTainted);
+  /-- `mtainted` now has a rule column; a location is one seed no matter how many rules
+  tainted it. -/
+  let locs := List.foldl (fun acc row =>
+    let l := Scry.rtRowNat row 0;
+    if List.any (Nat.beq l) acc then acc else List.append acc [l])
+    (.nil : List Nat) (Scry.rtRows st Scry.rtMTainted);
   Scry.ptFilterMap (fun l =>
     match List.find (fun m => List.any (Nat.beq l) m.locs) r.plan.mstores with
     | .some m => .some (Scry.MemSeed.mk l r.fn.name m.node m.var)
@@ -1016,10 +1160,22 @@ def Scry.resultTaint (r : Scry.FuncResult) : List (Nat × Nat) :=
   | .none => .nil
   | .some st => Scry.taintRows st
 
+/-- Taint rows with their rule (`point, register, rule`), for rule-scoped findings. -/
+def Scry.resultTaint3 (r : Scry.FuncResult) : List (Nat × Nat × Nat) :=
+  match r.state with
+  | .none => .nil
+  | .some st => Scry.taintRows3 st
+
 def Scry.resultAlerts (r : Scry.FuncResult) : List (Nat × Nat) :=
   match r.state with
   | .none => .nil
   | .some st => Scry.alertRows st
+
+/-- Alert rows with their rule (`sink, argument, rule`). -/
+def Scry.resultAlertFacts (r : Scry.FuncResult) : List (Nat × Nat × Nat) :=
+  match r.state with
+  | .none => .nil
+  | .some st => Scry.alertRows3 st
 
 def Scry.resultBadAlerts (r : Scry.FuncResult) : List Nat :=
   match r.state with
@@ -1047,18 +1203,25 @@ def Scry.argTaintedIdx (r : Scry.FuncResult) (idx : U64Map (List Nat)) (node var
 
 -- ## Findings
 
+/-- One finding per `(alert, sink fact)` whose **rule ids agree**. An alert's rule is the
+rule of the tainted definition that reached the sink; a sink fact belongs to the rule
+that declared it. A value tainted for rule A at a sink owned only by rule B is not a
+finding, which is what makes the taint rule-scoped. -/
 def Scry.resultTaintFindings (r : Scry.FuncResult) : List Scry.RuleFinding :=
   let st := match r.state with
     | .none => Scry.State.empty
     | .some s => s;
-  let alerts := Scry.resultAlerts r;
-  Scry.rulePackConcat (fun p =>
-    let sink := p.1;
-    let arg := p.2;
-    let facts := List.filter (fun f => Bool.and (Nat.beq f.node sink) (Nat.beq f.arg arg))
-      r.plan.sinks;
-    let path := match Scry.alertDef st sink arg with
-      | .some d => List.append (Scry.chainToDef r.fn.name r.plan.seeds st d.1 d.2)
+  let alerts := Scry.resultAlertFacts r;
+  Scry.rulePackConcat (fun a =>
+    let sink := a.1;
+    let arg := a.2.1;
+    let rule := a.2.2;
+    let facts := List.filter (fun f =>
+      Bool.and (Nat.beq f.node sink)
+        (Bool.and (Nat.beq f.arg arg) (Nat.beq f.ruleIdx rule))) r.plan.sinks;
+    let path := match Scry.alertDef st sink arg rule with
+      | .some d => List.append
+          (Scry.chainToDefRule r.fn.name r.plan.seeds st d.1 d.2 rule)
           [(Scry.PathNode.mk r.fn.name sink d.2 Scry.PathKind.sink)]
       | .none => [(Scry.PathNode.mk r.fn.name sink 0 Scry.PathKind.sink)];
     List.map (fun f => Scry.RuleFinding.mk f.rule f.severity f.message Scry.FindingKind.taint

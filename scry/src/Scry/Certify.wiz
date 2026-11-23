@@ -55,6 +55,15 @@ def Scry.assumptionsOf (f : Scry.RuleFinding) : List String :=
         (String.append " point " (Nat.repr p.point))) acc
     | _ => acc) .nil f.path
 
+/-- The numeric rule index of a finding's sink fact in its function's plan. Taint
+findings are built from the sink fact that owns the alert's rule, so the match is
+unique; the fallback only covers a hand-built finding. -/
+def Scry.findingRuleIdx (fr : Scry.FuncResult) (f : Scry.RuleFinding) : Nat :=
+  match List.find (fun s => Bool.and (Nat.beq s.node f.sink)
+      (Bool.and (Nat.beq s.arg f.arg) (String.eq s.rule f.rule))) fr.plan.sinks with
+  | .some s => s.ruleIdx
+  | .none => 0
+
 /-- Certify one finding, if its function has an evaluated state and its alert fact has
 provenance. -/
 def Scry.certifyFinding (pr : Scry.ProgramResult) (f : Scry.RuleFinding) :
@@ -69,7 +78,8 @@ def Scry.certifyFinding (pr : Scry.ProgramResult) (f : Scry.RuleFinding) :
       | .none => .none
       | .some st =>
         let row := match f.kind with
-          | .taint => [U64.ofNat f.sink, U64.ofNat f.arg]
+          | .taint => [U64.ofNat f.sink, U64.ofNat f.arg,
+              U64.ofNat (Scry.findingRuleIdx fr f)]
           | .forbidden => [U64.ofNat f.sink]
           | .memory => (.nil : List U64);
         let rel := match f.kind with

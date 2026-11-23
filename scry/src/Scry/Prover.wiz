@@ -14,8 +14,8 @@ rather than report the findings a fixpoint happened to produce.
 The design is `wiz-notes/scry-prover.md`. This module is the smallest honest slice:
 
 * the **proposition** is a *no-flow claim* about one function's fact graph: no `sink`
-  use is reachable from the taint seeds, given an **invariant** over `(point, register)`
-  pairs and memory locations;
+  use is reachable from the taint seeds, given an **invariant** over
+  `(point, register, rule)` triples and `(location, rule)` pairs;
 * the **proof object** is the invariant (`Scry.Claim`);
 * `Scry.check` validates the claim against the function's EDB **without running the
   analysis and without calling the prover**; it rejects a claim that omits a seed,
@@ -41,12 +41,13 @@ fixpoint, and it does not trust `Scry.prove`.
 
 ## Memory
 
-The invariant is a **pair of sets**: `tainted` rows `(point, register)` and `mtainted`
-locations. The checker discharges the two memory rules as well:
+The invariant is a **pair of sets**: `tainted` rows `(point, register, rule)` and
+`mtainted` locations `(location, rule)`. The checker discharges the two memory rules as
+well:
 
 ```
-mtainted l   :- tainted d v, flow d s v, mstore l s v.
-tainted n w  :- mtainted l, mload l n w, !san n w.
+mtainted l r  :- tainted d v r, flow d s v, mstore l s v.
+tainted n w r :- mtainted l r, mload l n w, !san n w r.
 ```
 
 The `mtainted` relation of the EDB already holds the location seeds imported from
@@ -101,8 +102,10 @@ the guard points the certificate selects. `func` is a label only; the EDB identi
 function. -/
 structure Scry.Claim where
   func : String
-  invariant : List (Nat × Nat)
-  locations : List Nat
+  /-- Tainted rows `(point, register, rule)`. -/
+  invariant : List (Nat × Nat × Nat)
+  /-- Tainted locations `(location, rule)`. -/
+  locations : List (Nat × Nat)
   sources : List Nat
   property : Scry.Property
   /-- The cut: the guard points a `cut` claim relies on. Unused by the other
@@ -110,13 +113,14 @@ structure Scry.Claim where
   guards : List Nat
 
 /-- A no-flow claim over every source. -/
-def Scry.Claim.noFlow (func : String) (I : List (Nat × Nat)) (M : List Nat) : Scry.Claim :=
+def Scry.Claim.noFlow (func : String) (I : List (Nat × Nat × Nat))
+    (M : List (Nat × Nat)) : Scry.Claim :=
   Scry.Claim.mk func I M Scry.allSources .noFlow []
 
 /-- "Every sink argument is a constant or a parameter bind": no flow from the untrusted
 sources (`src`, `retsrc`); `param` flows are allowed. -/
-def Scry.Claim.constantOrBound (func : String) (I : List (Nat × Nat)) (M : List Nat) :
-    Scry.Claim :=
+def Scry.Claim.constantOrBound (func : String) (I : List (Nat × Nat × Nat))
+    (M : List (Nat × Nat)) : Scry.Claim :=
   Scry.Claim.mk func I M Scry.untrustedSources .constantOrBound []
 
 /-- A cut claim: every write use is preceded by a guard at one of `guards` that bounds
@@ -161,10 +165,11 @@ def Scry.Verdict.show : Scry.Verdict → String
 
 -- ## Invariants
 
-/-- The certificate's state: the tainted rows and the derived tainted locations. -/
+/-- The certificate's state: the tainted rows `(point, register, rule)` and the derived
+tainted locations `(location, rule)`. -/
 structure Scry.Inv where
-  tainted : List (Nat × Nat)
-  locations : List Nat
+  tainted : List (Nat × Nat × Nat)
+  locations : List (Nat × Nat)
 
 def Scry.Inv.empty : Scry.Inv := Scry.Inv.mk .nil .nil
 
@@ -175,22 +180,28 @@ def Scry.claimOfInv (spec : Scry.Claim) (inv : Scry.Inv) : Scry.Claim :=
   Scry.Claim.mk spec.func inv.tainted inv.locations spec.sources spec.property
     spec.guards
 
+/-- Row equality for a tainted `(point, register, rule)` triple. -/
+def Scry.tripleEq (a b : Nat × Nat × Nat) : Bool :=
+  Bool.and (Nat.beq a.1 b.1)
+    (Bool.and (Nat.beq a.2.1 b.2.1) (Nat.beq a.2.2 b.2.2))
+
 def Scry.pairEq (a b : Nat × Nat) : Bool :=
   if Nat.beq a.1 b.1 then Nat.beq a.2 b.2 else .false
 
 /-- Is `p` one of `I`'s rows? -/
-def Scry.invMem (p : Nat × Nat) (I : List (Nat × Nat)) : Bool :=
-  List.any (fun q => Scry.pairEq p q) I
+def Scry.invMem (p : Nat × Nat × Nat) (I : List (Nat × Nat × Nat)) : Bool :=
+  List.any (fun q => Scry.tripleEq p q) I
 
 /-- Add a row to an invariant unless it is already there. -/
-def Scry.invAdd (p : Nat × Nat) (I : List (Nat × Nat)) : List (Nat × Nat) :=
+def Scry.invAdd (p : Nat × Nat × Nat) (I : List (Nat × Nat × Nat)) :
+    List (Nat × Nat × Nat) :=
   if Scry.invMem p I then I else List.cons p I
 
-/-- Is `l` a tainted location of the invariant? -/
-def Scry.invLocMem (l : Nat) (M : List Nat) : Bool :=
-  List.any (Nat.beq l) M
+/-- Is `l` a tainted location `(location, rule)` of the invariant? -/
+def Scry.invLocMem (l : Nat × Nat) (M : List (Nat × Nat)) : Bool :=
+  List.any (fun q => Scry.pairEq l q) M
 
-def Scry.invLocAdd (l : Nat) (M : List Nat) : List Nat :=
+def Scry.invLocAdd (l : Nat × Nat) (M : List (Nat × Nat)) : List (Nat × Nat) :=
   if Scry.invLocMem l M then M else List.cons l M
 
 /-- Insert a row, keeping the relation (the flag is not needed here). -/
@@ -201,12 +212,12 @@ def Scry.tupleInsert (t : Scry.TupleRel) (row : List U64) : Scry.TupleRel :=
 /-- The invariant as a `tainted`/`mtainted` relation: relation 4 is replaced by `I`,
 and relation 13 is the EDB's location seeds **union** the invariant's derived locations. -/
 def Scry.invDb (db : Scry.Db Nat) (inv : Scry.Inv) : Scry.Db Nat :=
-  let tRows := List.foldr (fun (p : Nat × Nat) (acc : Scry.TupleRel) =>
-      Scry.tupleInsert acc [U64.ofNat p.1, U64.ofNat p.2])
+  let tRows := List.foldr (fun (p : Nat × Nat × Nat) (acc : Scry.TupleRel) =>
+      Scry.tupleInsert acc [U64.ofNat p.1, U64.ofNat p.2.1, U64.ofNat p.2.2])
     Scry.TupleRel.empty inv.tainted;
   let dbT := Scry.Db.setTupleAt db Scry.rtTainted tRows;
-  let lRows := List.foldr (fun (l : Nat) (acc : Scry.TupleRel) =>
-      Scry.tupleInsert acc [U64.ofNat l])
+  let lRows := List.foldr (fun (l : Nat × Nat) (acc : Scry.TupleRel) =>
+      Scry.tupleInsert acc [U64.ofNat l.1, U64.ofNat l.2])
     (Scry.Db.tupleAt dbT Scry.rtMTainted) inv.locations;
   Scry.Db.setTupleAt dbT Scry.rtMTainted lRows
 
@@ -242,38 +253,41 @@ def Scry.rowPair (row : List U64) : Nat × Nat :=
 def Scry.showPair (p : Nat × Nat) : String :=
   "(" ++ Nat.repr p.1 ++ "," ++ Nat.repr p.2 ++ ")"
 
-def Scry.showInv (I : List (Nat × Nat)) : String :=
-  String.append "{" (String.append
-    (String.intercalate " " (List.map Scry.showPair I)) "}")
+def Scry.showTriple (p : Nat × Nat × Nat) : String :=
+  "(" ++ Nat.repr p.1 ++ "," ++ Nat.repr p.2.1 ++ "," ++ Nat.repr p.2.2 ++ ")"
 
-def Scry.showLocs (M : List Nat) : String :=
+def Scry.showInv (I : List (Nat × Nat × Nat)) : String :=
   String.append "{" (String.append
-    (String.intercalate " " (List.map Nat.repr M)) "}")
+    (String.intercalate " " (List.map Scry.showTriple I)) "}")
+
+def Scry.showLocs (M : List (Nat × Nat)) : String :=
+  String.append "{" (String.append
+    (String.intercalate " " (List.map Scry.showPair M)) "}")
 
 -- ## Checking
 
 /-- One taint-head rule's closure: every instance whose tainted premises are `I` has its
 head in `I`. Returns the first offending instance. -/
-def Scry.firstBadInstance (args : List Scry.Term) (I : List (Nat × Nat)) (ri : Nat) :
+def Scry.firstBadInstance (args : List Scry.Term) (I : List (Nat × Nat × Nat)) (ri : Nat) :
     List (Scry.Env Nat × List Nat) → Option String
   | .nil => .none
   | .cons m rest =>
     let row := List.map (Scry.Term.eval m.1.vals) args;
-    let p := Scry.rowPair row;
+    let p := (Scry.claimRowNat row 0, Scry.claimRowNat row 1, Scry.claimRowNat row 2);
     if Scry.invMem p I then Scry.firstBadInstance args I ri rest
-    else .some ("rule " ++ Nat.repr ri ++ " derives tainted " ++ Scry.showPair p ++
+    else .some ("rule " ++ Nat.repr ri ++ " derives tainted " ++ Scry.showTriple p ++
       ", which is not in the invariant")
 
 /-- One location-head rule's closure: every instance whose tainted premises are `I` has
-its location in `M`. Returns the first offending instance. -/
-def Scry.firstBadLocInstance (args : List Scry.Term) (M : List Nat) (ri : Nat) :
+its `(location, rule)` in `M`. Returns the first offending instance. -/
+def Scry.firstBadLocInstance (args : List Scry.Term) (M : List (Nat × Nat)) (ri : Nat) :
     List (Scry.Env Nat × List Nat) → Option String
   | .nil => .none
   | .cons m rest =>
     let row := List.map (Scry.Term.eval m.1.vals) args;
-    let l := Scry.claimRowNat row 0;
+    let l := (Scry.claimRowNat row 0, Scry.claimRowNat row 1);
     if Scry.invLocMem l M then Scry.firstBadLocInstance args M ri rest
-    else .some ("rule " ++ Nat.repr ri ++ " derives mtainted " ++ Nat.repr l ++
+    else .some ("rule " ++ Nat.repr ri ++ " derives mtainted " ++ Scry.showPair l ++
       ", which is not in the invariant's locations")
 
 def Scry.checkRuleClosed (p : Scry.Program Nat) (stI : Scry.State Nat)
@@ -351,92 +365,108 @@ def Scry.termNat (env : List (Nat × U64)) (n : Nat) : Nat :=
 def Scry.matchHeadPair (m : Scry.Env Nat × List Nat) (args : List Scry.Term) : Nat × Nat :=
   Scry.rowPair (List.map (Scry.Term.eval m.1.vals) args)
 
-/-- The tainted premise of an alert (or other) rule's match. -/
-def Scry.taintedAtomPair (body : List Scry.Atom) (env : Scry.Env Nat) : Option (Nat × Nat) :=
+/-- The first three columns of a match's head row, for a tainted triple. -/
+def Scry.matchHeadTriple (m : Scry.Env Nat × List Nat) (args : List Scry.Term) :
+    Nat × Nat × Nat :=
+  let row := List.map (Scry.Term.eval m.1.vals) args;
+  (Scry.claimRowNat row 0, Scry.claimRowNat row 1, Scry.claimRowNat row 2)
+
+/-- The tainted premise of an alert (or other) rule's match, as `(point, register, rule)`. -/
+def Scry.taintedAtomTriple (body : List Scry.Atom) (env : Scry.Env Nat) :
+    Option (Nat × Nat × Nat) :=
   match body with
   | .nil => .none
   | .cons a rest => match a with
     | .pos rel args =>
       if Nat.beq rel Scry.rtTainted then
-        .some (Scry.rowPair (List.map (Scry.Term.eval env.vals) args))
-      else Scry.taintedAtomPair rest env
-    | _ => Scry.taintedAtomPair rest env
+        let row := List.map (Scry.Term.eval env.vals) args;
+        .some (Scry.claimRowNat row 0, Scry.claimRowNat row 1, Scry.claimRowNat row 2)
+      else Scry.taintedAtomTriple rest env
+    | _ => Scry.taintedAtomTriple rest env
 
-/-- A seed fact at `(n,v)`, with its relation name. -/
-def Scry.seedStep (st : Scry.State Nat) (n v : Nat) : Option String :=
-  let row := [U64.ofNat n, U64.ofNat v];
-  if Scry.Db.memTuple st.db Scry.rtSrc row then .some ("src" ++ Scry.showPair (n, v))
-  else if Scry.Db.memTuple st.db Scry.rtParam row then .some ("param" ++ Scry.showPair (n, v))
+/-- A seed fact at `(n, v)` for rule `r`, with its relation name. -/
+def Scry.seedStep (st : Scry.State Nat) (n v r : Nat) : Option String :=
+  let row := [U64.ofNat n, U64.ofNat v, U64.ofNat r];
+  let p : Nat × Nat × Nat := (n, v, r);
+  if Scry.Db.memTuple st.db Scry.rtSrc row then .some ("src" ++ Scry.showTriple p)
+  else if Scry.Db.memTuple st.db Scry.rtParam row then
+    .some ("param" ++ Scry.showTriple p)
   else if Scry.Db.memTuple st.db Scry.rtRetSrc row then
-    .some ("retsrc" ++ Scry.showPair (n, v))
+    .some ("retsrc" ++ Scry.showTriple p)
   else .none
 
-/-- The load-rule instance deriving `(n,v)`, as `(location, point, register)`. -/
-def Scry.findLoad (p : Scry.Program Nat) (st : Scry.State Nat) (n v : Nat) :
+/-- The load-rule instance deriving `(n,v)` for rule `r`, as `(location, point, register)`.
+-/
+def Scry.findLoad (p : Scry.Program Nat) (st : Scry.State Nat) (n v r : Nat) :
     Option (Nat × Nat × Nat) :=
-  match List.find (fun m => Scry.pairEq
-      (Scry.matchHeadPair m [Scry.Term.var 0, Scry.Term.var 1]) (n, v))
+  match List.find (fun m => Scry.tripleEq
+      (Scry.matchHeadTriple m [Scry.Term.var 0, Scry.Term.var 1, Scry.Term.var 3])
+      (n, v, r))
       (Scry.evalAtoms p.ops st Scry.rtRuleMemLoad.body Scry.Env.empty) with
   | .none => .none
   | .some m => .some (Scry.termNat m.1.vals 2, n, v)
 
-/-- The transfer-rule instance deriving `(n,v)`, as the tainted source `(d,u)`. -/
-def Scry.findTransfer (p : Scry.Program Nat) (st : Scry.State Nat) (n v : Nat) :
+/-- The transfer-rule instance deriving `(n,v)` for rule `r`, as the tainted source
+`(d,u)`. -/
+def Scry.findTransfer (p : Scry.Program Nat) (st : Scry.State Nat) (n v r : Nat) :
     Option (Nat × Nat) :=
-  match List.find (fun m => Scry.pairEq
-      (Scry.matchHeadPair m [Scry.Term.var 2, Scry.Term.var 3]) (n, v))
+  match List.find (fun m => Scry.tripleEq
+      (Scry.matchHeadTriple m [Scry.Term.var 2, Scry.Term.var 3, Scry.Term.var 4])
+      (n, v, r))
       (Scry.evalAtoms p.ops st Scry.rtRuleProp.body Scry.Env.empty) with
   | .none => .none
   | .some m => .some (Scry.termNat m.1.vals 0, Scry.termNat m.1.vals 1)
 
-/-- The store-rule instance deriving location `l`, as `(d, storedPoint, storedVar)`. -/
-def Scry.findStore (p : Scry.Program Nat) (st : Scry.State Nat) (l : Nat) :
+/-- The store-rule instance deriving `(l, r)`, as `(d, storedPoint, storedVar)`. -/
+def Scry.findStore (p : Scry.Program Nat) (st : Scry.State Nat) (l r : Nat) :
     Option (Nat × Nat × Nat) :=
-  match List.find (fun m => Nat.beq (Scry.termNat m.1.vals 0) l)
+  match List.find (fun m => Bool.and (Nat.beq (Scry.termNat m.1.vals 0) l)
+      (Nat.beq (Scry.termNat m.1.vals 4) r))
       (Scry.evalAtoms p.ops st Scry.rtRuleMemStore.body Scry.Env.empty) with
   | .none => .none
   | .some m => .some (Scry.termNat m.1.vals 1, Scry.termNat m.1.vals 2,
       Scry.termNat m.1.vals 3)
 
-def Scry.explainKey (mode a b : Nat) : String :=
-  Nat.repr mode ++ ":" ++ Nat.repr a ++ ":" ++ Nat.repr b
+def Scry.explainKey (mode a b r : Nat) : String :=
+  Nat.repr mode ++ ":" ++ Nat.repr a ++ ":" ++ Nat.repr b ++ ":" ++ Nat.repr r
 
-/-- A provenance path for a tainted fact (`mode` 0) or a tainted location (`mode` 1)
-from the EDB and the invariant. `seen` breaks cycles, `fuel` bounds the walk. This is
-*explanation*, not part of the proof: the checker has already accepted or refuted the
-claim; the path names the store/load chain that produced a counterexample. -/
+/-- A provenance path for a tainted fact (`mode` 0: `a` point, `b` register, `r` rule) or
+a tainted location (`mode` 1: `a` location, `r` rule) from the EDB and the invariant.
+`seen` breaks cycles, `fuel` bounds the walk. This is *explanation*, not part of the
+proof: the checker has already accepted or refuted the claim; the path names the
+store/load chain that produced a counterexample. -/
 partial def Scry.explainTaint (p : Scry.Program Nat) (st : Scry.State Nat) (fuel : Nat)
-    (seen : List String) (mode : Nat) (a b : Nat) : List String :=
+    (seen : List String) (mode : Nat) (a b r : Nat) : List String :=
   if Nat.beq fuel 0 then [ "(too deep)" ]
   else
-    let key := Scry.explainKey mode a b;
+    let key := Scry.explainKey mode a b r;
     if List.any (String.eq key) seen then [ "(cycle " ++ key ++ ")" ]
     else
       let seen' := List.cons key seen;
       let fuel' := Nat.sub fuel 1;
       if Nat.beq mode 0 then
-        match Scry.seedStep st a b with
+        match Scry.seedStep st a b r with
         | .some s => [ s ]
         | .none =>
-          match Scry.findLoad p st a b with
-          | .some r =>
-            List.append (Scry.explainTaint p st fuel' seen' 1 r.1 0)
-              [ "load(" ++ Nat.repr r.1 ++ "," ++ Nat.repr r.2.1 ++ "," ++
-                 Nat.repr r.2.2 ++ ")" ]
+          match Scry.findLoad p st a b r with
+          | .some ld =>
+            List.append (Scry.explainTaint p st fuel' seen' 1 ld.1 0 r)
+              [ "load(" ++ Nat.repr ld.1 ++ "," ++ Nat.repr ld.2.1 ++ "," ++
+                 Nat.repr ld.2.2 ++ ")" ]
           | .none =>
-            match Scry.findTransfer p st a b with
+            match Scry.findTransfer p st a b r with
             | .some d =>
-              List.append (Scry.explainTaint p st fuel' seen' 0 d.1 d.2)
+              List.append (Scry.explainTaint p st fuel' seen' 0 d.1 d.2 r)
                 [ "flow(" ++ Nat.repr d.1 ++ "," ++ Nat.repr a ++ "," ++
                    Nat.repr d.2 ++ ")" ]
-            | .none => [ "tainted" ++ Scry.showPair (a, b) ]
+            | .none => [ "tainted" ++ Scry.showTriple (a, b, r) ]
       else
-        match Scry.findStore p st a with
+        match Scry.findStore p st a r with
         | .some s =>
-          List.append (Scry.explainTaint p st fuel' seen' 0 s.1 s.2.1)
+          List.append (Scry.explainTaint p st fuel' seen' 0 s.1 s.2.1 r)
             [ "store(" ++ Nat.repr a ++ "," ++ Nat.repr s.2.2 ++ "," ++
                Nat.repr s.2.1 ++ ")" ]
-        | .none => [ "mtainted(" ++ Nat.repr a ++ ")" ]
+        | .none => [ "mtainted(" ++ Scry.showPair (a, r) ++ ")" ]
 
 /-- The first alert instance in a match list, as a counterexample message. The message
 names the whole provenance path, including store/load edges, because "the alert rule
@@ -445,10 +475,11 @@ def Scry.alertWitness (p : Scry.Program Nat) (st : Scry.State Nat)
     (args : List Scry.Term) (body : List Scry.Atom) (m : Scry.Env Nat × List Nat) :
     String :=
   let row := List.map (Scry.Term.eval m.1.vals) args;
-  let t := Scry.taintedAtomPair body m.1;
+  let t := Scry.taintedAtomTriple body m.1;
   let d := match t with | .some q => q.1 | .none => 0;
-  let v := match t with | .some q => q.2 | .none => 0;
-  let pre := Scry.explainTaint p st 64 .nil 0 d v;
+  let v := match t with | .some q => q.2.1 | .none => 0;
+  let r := match t with | .some q => q.2.2 | .none => 0;
+  let pre := Scry.explainTaint p st 64 .nil 0 d v r;
   let path := List.append pre
     [ "flow(" ++ Nat.repr d ++ "," ++ Nat.repr (Scry.claimRowNat row 0) ++ "," ++
        Nat.repr v ++ ")",
@@ -749,25 +780,30 @@ inductive Scry.Search where
   | found (inv : Scry.Inv)
   | stop (verdict : Scry.Verdict)
 
-/-- Rows of an EDB relation as invariant rows. -/
-def Scry.rowsOf (st : Scry.State Nat) (rel : Nat) : List (Nat × Nat) :=
-  List.map Scry.rowPair (Scry.rtRows st rel)
+/-- Rows of a seed EDB relation (`src`/`param`/`retsrc`) as tainted triples. -/
+def Scry.rowsOf (st : Scry.State Nat) (rel : Nat) : List (Nat × Nat × Nat) :=
+  List.map (fun row =>
+    (Scry.claimRowNat row 0, Scry.claimRowNat row 1, Scry.claimRowNat row 2))
+    (Scry.rtRows st rel)
 
-/-- Add every head of rule `r` (tainted rows or tainted locations) derivable in one
-round whose tainted/mtainted premises are in `inv`. -/
+/-- Add every head of rule `r` (tainted triples or tainted `(location, rule)` pairs)
+derivable in one round whose tainted/mtainted premises are in `inv`. -/
 def Scry.closeOne (p : Scry.Program Nat) (st : Scry.State Nat)
     (inv : Scry.Inv) (r : Scry.Rule Nat) : Scry.Inv :=
   let stI := Scry.invState st inv;
   match r.head with
   | .tuple rel args =>
     if Nat.beq rel Scry.rtTainted then
-      let t := List.foldl (fun (acc : List (Nat × Nat)) (m : Scry.Env Nat × List Nat) =>
-        Scry.invAdd (Scry.rowPair (List.map (Scry.Term.eval m.1.vals) args)) acc)
+      let t := List.foldl (fun (acc : List (Nat × Nat × Nat)) (m : Scry.Env Nat × List Nat) =>
+        let row := List.map (Scry.Term.eval m.1.vals) args;
+        Scry.invAdd (Scry.claimRowNat row 0, Scry.claimRowNat row 1,
+          Scry.claimRowNat row 2) acc)
         inv.tainted (Scry.evalAtoms p.ops stI r.body Scry.Env.empty);
       Scry.Inv.mk t inv.locations
     else if Nat.beq rel Scry.rtMTainted then
-      let m := List.foldl (fun (acc : List Nat) (m : Scry.Env Nat × List Nat) =>
-        Scry.invLocAdd (Scry.claimRowNat (List.map (Scry.Term.eval m.1.vals) args) 0) acc)
+      let m := List.foldl (fun (acc : List (Nat × Nat)) (m : Scry.Env Nat × List Nat) =>
+        let row := List.map (Scry.Term.eval m.1.vals) args;
+        Scry.invLocAdd (Scry.claimRowNat row 0, Scry.claimRowNat row 1) acc)
         inv.locations (Scry.evalAtoms p.ops stI r.body Scry.Env.empty);
       Scry.Inv.mk inv.tainted m
     else inv

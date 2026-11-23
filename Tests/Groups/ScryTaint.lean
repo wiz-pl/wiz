@@ -313,6 +313,30 @@ def group : Group where
         ("#eval List.length (Scry.programFindings (Scry.analyze Scry.argSourceProgram Scry.demoRules))\n" ++
          "#eval Nat.add (Nat.mul (List.length (Scry.programFindings (Scry.analyze Scry.argSanProgram Scry.demoRules))) 10) (List.length (Scry.programFindings (Scry.analyze Scry.argSanProgram Scry.demoRulesNoSan)))\n" ++
          "#eval Nat.add (Nat.mul (List.length (Scry.programFindings (Scry.analyze Scry.fprintfProgram Scry.demoRules))) 10) (List.length (Scry.programFindings (Scry.analyze (Wil.program [Scry.safeFormatFn]) Scry.demoRules)))") [1, 1, 10] },
+    { name := "rule scope: a sanitiser declared for one rule does not clear another rule's finding",
+      run := fun _ => evalRuleNats (rulePrelude ++
+        "def scopePack : Scry.RulePack := Scry.parseRulePack Scry.scopePackText\n" ++
+        "def scopeFs : List Scry.RuleFinding :=\n" ++
+        "  Scry.programFindings (Scry.analyze Scry.scopeProgram scopePack)\n" ++
+        "#eval List.length scopeFs\n" ++
+        "#eval match scopeFs with\n" ++
+        "  | .cons f _ => if String.eq f.rule \"rule-b\" then 1 else 0\n" ++
+        "  | .nil => 0") [1, 1] },
+    { name := "rule scope: a `shared` sanitiser does clear every rule's finding",
+      run := fun _ => evalRuleNats (rulePrelude ++
+        "def sharedPack : Scry.RulePack := Scry.parseRulePack Scry.scopeSharedPackText\n" ++
+        "def sharedSans : List (String × Scry.ArgRef × Bool) :=\n" ++
+        "  match Scry.RulePack.taintRuleById sharedPack \"rule-a\" with\n" ++
+        "  | .some r => r.sanitisers\n" ++
+        "  | .none => []\n" ++
+        "#eval List.length (List.filter (fun e => e.2.2) sharedSans)\n" ++
+        "#eval List.length (Scry.programFindings (Scry.analyze Scry.scopeProgram sharedPack))")
+        [1, 0] },
+    { name := "rule scope: a source declared for one rule does not feed another rule's sink",
+      run := fun _ => evalRuleNats (rulePrelude ++
+        "def sourcePack : Scry.RulePack := Scry.parseRulePack Scry.sourceScopePackText\n" ++
+        "#eval List.length\n" ++
+        "  (Scry.programFindings (Scry.analyze Scry.sourceScopeProgram sourcePack))") [0] },
     { name := "safe fixtures: no false positives across the sanitiser and format cases",
       run := fun _ => evalRuleNats
         "#eval List.foldr (fun p acc => Nat.add (List.length (Scry.programFindings (Scry.analyze p Scry.demoRules))) acc) 0 Scry.safePrograms" [0] },
