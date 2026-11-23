@@ -1,8 +1,10 @@
 # The self-hosted toolchain chain: a prototype (docs/bootstrap-chain.md).
 #
-# NOT ACTIVE. Nothing in CI builds these packages, and no commit pins a toolchain yet:
-# the chain starts once the root is declared (docs/bootstrap-chain.md, "The start
-# condition"). Until then they exist to be built locally and measured.
+# NOT PINNED. `.github/workflows/bootstrap-chain.yml` builds these packages (the release
+# after each successful CI run of a master push, the step check nightly) and publishes
+# them to Cachix, but no commit pins a toolchain yet: the chain starts once the root is
+# declared (docs/bootstrap-chain.md, "The start condition"), and nothing here is a merge
+# gate. They can also be built locally and measured.
 #
 # Terms (all in docs/bootstrap-chain.md):
 #   self.wiz   the toolchain's source as one program, the input of every stage
