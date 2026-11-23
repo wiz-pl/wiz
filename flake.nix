@@ -888,7 +888,7 @@ EOF
             # All non-glibc libraries, after every object that uses them. appending
             # them (rather than only trusting -L order) is what makes the result static
             # even if a later -L path or the driver's own specs name a .so first.
-            exec ${pkgs.stdenv.cc}/bin/cc -no-pie \
+            exec ${pkgs.stdenv.cc}/bin/cc -no-pie -static-libstdc++ -static-libgcc \
               -L${release-static-libs}/lib "''${args[@]}" \
               -Wl,-Bstatic -lgmp -luv -lssl -lcrypto -lstdc++ -lgcc -lgcc_eh -latomic \
               -Wl,-Bdynamic -lm -ldl -pthread
