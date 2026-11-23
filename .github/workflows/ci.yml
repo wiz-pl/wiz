@@ -1174,10 +1174,18 @@ jobs:
             wiz=$(nix path-info .#wiz)
             tests=$(nix path-info .#tests)
           fi
-          if [ -n "$shc" ] && [ -n "$shk" ]; then
-            # a miss is not fatal here: the shard falls back to the driver's /tmp build,
-            # and the shard step warns about it
-            nix build --no-link "$shc" "$shk" || echo "::warning title=selfhost::the self-hosted store paths are not substitutable; the driver will build them"
+          if [ -n "$shc" ] && [ -n "$shk" ] && nix build --no-link "$shc" "$shk"; then
+            echo "selfhost_compiler=$shc" >> "$GITHUB_OUTPUT"
+            echo "selfhost_checker=$shk" >> "$GITHUB_OUTPUT"
+          else
+            # left empty on purpose: the tests step reads these outputs, so an empty value
+            # is what makes the driver build the programs in its /tmp cache. Warning only
+            # (the suite still runs), but the message has to be true - it used to say the
+            # driver would build them while the tests step still had the un-realised paths
+            # from `needs.lean.outputs` and the new pathExists guard then threw.
+            echo "::warning title=selfhost::the self-hosted store paths are not substitutable; this shard will build them in /tmp"
+            echo "selfhost_compiler=" >> "$GITHUB_OUTPUT"
+            echo "selfhost_checker=" >> "$GITHUB_OUTPUT"
           fi
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
@@ -1251,8 +1259,11 @@ jobs:
           ALLOW_MISSING_DEPS: "${{ matrix.shard['allow-missing-deps'] }}"
           # the self-hosted programs from the `lean` job (perf H2); empty means the
           # driver builds them in its `/tmp` cache as before
-          SELFHOST_COMPILER: ${{ needs.lean.outputs.selfhost-compiler }}
-          SELFHOST_CHECKER: ${{ needs.lean.outputs.selfhost-checker }}
+          # the realised paths from this job's nix step (empty when realisation failed, in
+          # which case the driver builds in /tmp); not `needs.lean.outputs`, which are
+          # strings that may name paths this runner never substituted
+          SELFHOST_COMPILER: ${{ steps.nix.outputs.selfhost_compiler }}
+          SELFHOST_CHECKER: ${{ steps.nix.outputs.selfhost_checker }}
         run: |
           mapfile -t sel <<< "$SELECT"
           mkdir -p logs ~/.cache/wiz
