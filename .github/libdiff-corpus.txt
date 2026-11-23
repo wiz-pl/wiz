@@ -70,6 +70,7 @@ lib/Lint.wiz
 lib/Logic.wiz
 lib/MVar.wiz
 lib/Nat.wiz
+lib/Omega.wiz
 lib/Optic.wiz
 lib/OpticDerive.wiz
 lib/Plot.wiz

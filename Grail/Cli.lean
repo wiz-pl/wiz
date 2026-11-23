@@ -305,6 +305,16 @@ def cliMain (args : List String) : IO UInt32 := do
     match ← Registry.loadIndex cache spec true "" opts.allowRewind true opts.allowedSigners pinned with
     | .error e => IO.eprintln e; return 1
     | .ok src =>
+      -- (P0) `--locked` audits the committed lock against the signed state: the lock is
+      -- not signed itself, so a hand-edited `pkg` line (archive/tree swapped, bytes from
+      -- --vendor) passes every local check; this is the only place both are available.
+      if opts.locked then
+        match src.snapshot with
+        | none => IO.eprintln "the index signature was not verified"; return 1
+        | some snap =>
+          match ← Registry.checkLockSnapshot dir snap with
+          | .error e => IO.eprintln e; return 1
+          | .ok () => pure ()
       match src.signature with
       | none => IO.eprintln "the index is not signed"; return 1
       | some s =>

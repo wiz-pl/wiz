@@ -530,7 +530,23 @@ def cliDiffGroup : Group where
         checkEq 1 sW.code
         checkEq "" sW.out
         cliCheck sW.err "unsupported target wasm: the self-hosted backend emits C and LLVM (C5)" "the driver's rejection"
-        cliDiffKnown "flags: `--llvm` selects the host's LLVM path and is C5's first slice here; `--wasm` is still refused (exit 1), as `--target wasm` (C5)" },
+        -- (the names the host learned later: a known name is not a capability. `js` is a
+        -- C5 gap; `bpf`/`ebpf` are the probe backend and get the targets-ext §4 sentence)
+        for t in ["js"] do
+          let spec : CliDiffSpec := { files := files, args := #["check", "good.wiz", "--target", t] }
+          let (h, s) ← cliDiffBoth host exe spec
+          checkEq 0 h.code
+          checkEq 1 s.code
+          checkEq "" s.out
+          cliCheck s.err s!"unsupported target {t}: the self-hosted backend emits C and LLVM (C5)" "the driver's rejection"
+        for t in ["bpf", "ebpf"] do
+          let spec : CliDiffSpec := { files := files, args := #["check", "good.wiz", "--target", t] }
+          let (h, s) ← cliDiffBoth host exe spec
+          checkEq 0 h.code
+          checkEq 1 s.code
+          checkEq "" s.out
+          cliCheck s.err "unsupported-target: the backend 'ebpf' reads bpf-core/1" "the driver's probe refusal"
+        cliDiffKnown "flags: `--llvm` selects the host's LLVM path and is C5's first slice here; `--wasm` is still refused (exit 1), as `--target wasm` (C5); `js` is a known name with no self-hosted backend (C5); `bpf`/`ebpf` are the host's probe backend, refused with the targets-ext §4 sentence" },
     { name := "build --split N: the host splits the C into N units, the driver refuses it (C5)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let tc ← cliDiffHostToolchain

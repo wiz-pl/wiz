@@ -223,7 +223,7 @@ its 3664 s on n jobs without changing what any file is compared against. `--ratc
 compares the run's verdicts with a checked-in `file<TAB>verdict` baseline and exits 1 on
 a regression (a file that was `ok` and no longer is, or a new file with a gap); the
 group's sweep cases use `Tests/libdiff-baseline.tsv`. -/
-def main (args : List String) : IO UInt32 := do
+def mainImpl (args : List String) : IO UInt32 := do
   -- a `panic!` fails the case that hits it (each case runs in its own process), as it
   -- fails `wiz check`; `--panic-probe continue` turns it off again
   Wiz.exitOnPanic
@@ -386,3 +386,11 @@ def main (args : List String) : IO UInt32 := do
     if missingDeps > 0 then
       IO.println s!"{missingDeps} case(s) skipped for a missing dependency (--allow-missing-deps / WIZ_ALLOW_MISSING_DEPS=1)"
     pure (if failed == 0 then 0 else 1)
+
+/-- The driver: `WIZ_STATS=1` makes each case's process report the core counters (and the
+driver itself prints its own, which are empty unless it is also `--run-case`). -/
+def main (args : List String) : IO UInt32 := do
+  Wiz.Stats.fromEnv
+  let rc ← mainImpl args
+  Wiz.Stats.report
+  return rc

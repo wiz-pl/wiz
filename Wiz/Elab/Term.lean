@@ -1923,8 +1923,17 @@ partial def inferData? (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Option (Term
     return some (.ind l (q I) (q D) v P' m' (q i) x' prop, vApp g (vApp g vP i) (← evalIn ctx x'))
   | "out", #[x] =>
     let (x', xty) ← infer ctx x
-    let .nu l I D i _ _ ← force xty | throwAt ctx.info s!"out expects a coinductive value, got {← showVal ctx xty}"
-    return some (.out x', vInterp g l I D (nuFamily l I D) i)
+    let .nu l I D i s _ ← force xty | throwAt ctx.info s!"out expects a coinductive value, got {← showVal ctx xty}"
+    -- (HDL 34c.1) `out`'s payload has the recursive fields at the **predecessor** size,
+    -- as in the kernel's `inferCore` rule (`Wiz/Core/Check.lean`) and `Mark`/`Erase`:
+    -- `out x : Desc.interp D (ν^{s'}) i` for `x : ν^{↑s} D i`, `s' = sizePred? s`
+    -- (`∞ = ↑∞` for observation purposes). Typing the payload at `ν^∞` instead made
+    -- `let p := out a` — one observation per cycle, shared — carry a size the kernel's
+    -- sized `cocon` check rejects ("expected … ν (Signal.desc d A) … inferred … ν^j …").
+    -- Only `↑s` and `∞` can be observed, as in the kernel.
+    let some s' := sizePred? s
+      | throwAt ctx.info s!"only a value of size ↑s or ∞ can be observed, not {← showVal ctx s}"
+    return some (.out x', vInterp g l I D (nuFamilyAt l I D s') i)
   | _, _ => return none
 
 /-- Check `(a, b, c)` against a (right-nested) Σ. -/

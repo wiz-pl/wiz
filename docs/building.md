@@ -429,7 +429,9 @@ offline). An index may publish a signed `index/snapshot.sexpr` (+ `.sig`);
 `grail update --require-signature --allowed-signers FILE` verifies it offline and pins
 its key, sequence and digest in the lock, and `grail index verify` checks one without a
 network. `--locked` reads no index, so it checks the signature entry's shape; use
-`grail index verify --locked` to re-verify the signature itself. SHA-256 and the lock
+`grail index verify --locked` to re-verify the signature itself and to check every `pkg`
+entry of the lock against the signed snapshot (the lock is not signed, so a hand-edited
+archive or tree hash is refused there, not by `fetch --locked`). SHA-256 and the lock
 still give integrity, the index's git history and review give names, and building a
 package still runs its author's code.
 

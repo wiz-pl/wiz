@@ -173,12 +173,10 @@ pseudo-random non-NaN bit patterns plus the boundaries, parses each string back 
 `docs/semantics-matrix.md` were regenerated with the same strings (the generator's
 `ryu_show` derives them from Python's shortest `repr`).
 
-**Scope.** The self-hosted runtime has its own `wiz_f64_show` (`selfhost/rt.c`,
-`%.17g`); it is not this lane's file (the selfhost lanes own `selfhost/*`), so its
-`Float64.toString` still prints `%.17g` and the `=selfhost` FFI test keeps its `0.25`
-expectation. Until that copy is ported, host-run and selfhost-run programs print
-different (both deterministic) float text; the host contract above is what `lib/IO.wiz`
-documents.
+**Scope.** The self-hosted runtime has its own `wiz_f64_show` (`selfhost/rt.c`) and
+carries the same Ryu block, so host-run and selfhost-run programs print the same
+deterministic text (the `=selfhost` FFI test pins `2.5E-1`/`-2E0`); the host contract
+above is what `lib/IO.wiz` documents.
 
 Fast-math: the C backend invocations in `Wiz/Compiler/Build.lean` pass
 `-ffp-contract=off` (FMA contraction is the one fast-math-like transformation that C

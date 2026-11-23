@@ -379,7 +379,7 @@ def ffiProgram1 : String :=
   "  IO.println (Float64.toString (Float64.sub (Float64.ofNat 1) (Float64.ofNat 3)))\n"
 
 def ffiExpected1 : String :=
-  "16\nSuccess\ndigit\nnot\nfrom C\n42\n1000000000000\nwraps\nzero\n0.25\n-2\n"
+  "16\nSuccess\ndigit\nnot\nfrom C\n42\n1000000000000\nwraps\nzero\n2.5E-1\n-2E0\n"
 
 /-- (21l) A foreign pointer type with a finalizer: `fclose` runs when the last reference
 to the `FILE` goes (so the file is complete when it is read back). -/
@@ -887,7 +887,7 @@ def structFiles : List (String × String) :=
       "uint64_t outer_sum(wiz_s_Outer o) { return o.p.a + o.n + strlen(o.p.name); }\n" ++
       "wiz_s_Outer make_outer(uint64_t n) { wiz_s_Outer o; o.p.a = n; o.p.b = 0.5; o.p.ok = 1; o.p.name = \"made in C\"; o.n = 2 * n; return o; }\n")]
 
-def structExpected : String := "3\n2\n42\n6\ntrue\nwiz!\n54\nmade in C\n15\n"
+def structExpected : String := "3\n2\n42\n6E0\ntrue\nwiz!\n54\nmade in C\n15\n"
 
 /-- (22i, `--unbox-structs`) A one-field and a two-field `c_struct` by value: the last
 field is not in a pair, so `wiz_sin`/`wiz_sout` must read and build the unboxed layout. A
@@ -938,7 +938,7 @@ def structDeepProgram (header : String) : String :=
   "  IO.println (Nat.toString (deepSum d));\n  r ← deepMake 5;\n" ++
   "  IO.println (Nat.toString (r.s.a.x + r.s.b.x + r.n));\n  IO.println (Float64.toString r.s.b.y)\n"
 
-def structDeepExpected : String := "5\n6\n22\n21\n1.5\n"
+def structDeepExpected : String := "5\n6E0\n22\n21\n1.5E0\n"
 
 /-- (C8) A byte array (`unsigned char data[4]`) as a `c_struct` field, passed and
 returned by value through an extern (not through `glue`): cut/zero-padded going in,
@@ -3188,13 +3188,20 @@ def selfHostGroup : Group where
     { name := "the selfhost checker: the parser's mutual block stays under 512 MB", run := fun _ => do
         -- the selfhost sources are wrapped in the explicit-global `namespace __root__`;
         -- this snippet concatenates two of them and cuts the second, so drop the wrapper
-        -- (both lines) rather than inherit an unclosed block.
+        -- (both lines) rather than inherit an unclosed block. The closing line is a bare
+        -- `end` in the current files: drop it from a whole file (Lex) only — Parse's head
+        -- ends inside a `mutual`, whose `end` must stay.
+        let dropFinalEnd := fun (s : String) =>
+          let ls := (s.splitOn "\n").reverse.dropWhile (fun l => l == "")
+          match ls with
+          | "end" :: rest => "\n".intercalate rest.reverse
+          | _ => s
         let strip := fun (s : String) => "\n".intercalate ((s.splitOn "\n").filter fun l =>
           !l.startsWith "import" && l != "namespace __root__" && l != "end __root__")
         let lex ← IO.FS.readFile "selfhost/Lex.wiz"
         let parse ← IO.FS.readFile "selfhost/Parse.wiz"
         let parseHead := (parse.splitOn "\ndef sexpr").headD parse
-        let src := "import Prelude\n" ++ strip lex ++ "\n" ++ strip parseHead
+        let src := "import Prelude\n" ++ dropFinalEnd (strip lex) ++ "\n" ++ strip parseHead
         let some out ← selfhostOutputPeak src 512
           | pure ()
         for l in out.splitOn "\n" do

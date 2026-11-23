@@ -32,7 +32,8 @@ variable {R : Type} [QRig R] [DecidableEq R] [QuantitySyntax R]
 /-- The type of a neutral's head: a local's type from `tys`, a global's declared type
 with its level parameters instantiated, or (stage 4c) the type of a stuck
 observational construct. -/
-def headType (g : Globals R) (tys : Array (VTy R)) : Head R → Option (VTy R)
+def headType (g : Globals R) (tys : Array (VTy R)) (h : Head R) : Option (VTy R) :=
+  Stats.countedOptVal Stats.cells.headType <| match h with
   | .local x => tys[x]?
   | .global n us => (g.find? n).map fun d => eval g [] (d.type.instLevels d.levelParams us)
   | .mvar _ => none
@@ -285,9 +286,10 @@ def componentSorts? (g : Globals R) (tys : Array (VTy R)) (A : VTy R) (B : Closu
 
 /-- Is this type a proposition? Then all its inhabitants are equal. -/
 def isProp (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) : Bool :=
-  match typeSort? g tys ty with
-  | some l => l.equiv 0
-  | none => false
+  Stats.isPropOutcome Stats.cells.isProp Stats.cells.isPropTrue <|
+    match typeSort? g tys ty with
+    | some l => l.equiv 0
+    | none => false
 
 /-- (P2) Is the neutral `h · sp[0..k)` a proof of `False`? Either it starts at a proof
 head and has passed through no `absurd` (then it is a proof, and it is being given to an
@@ -317,6 +319,7 @@ mutual
 `true`. Then **regularity**: a stuck `cast A B e t` with an empty spine and
 `convTy A B` is replaced by `t` (on either side) before comparing. -/
 partial def conv (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) (a b : Val R) : Bool :=
+  Stats.convOutcome Stats.cells.convOk Stats.cells.convFail <|
   -- (P2, `lazyProofs`) proof irrelevance first, so that a glued proof is never unfolded
   if g.lazyProofs && isProp g tys ty then true else
   -- a `Nat` operation with a zero argument that makes the other one irrelevant
@@ -417,6 +420,7 @@ partial def conv (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) (a b : Val R
 **Exercise 4.6b** (stage 4b): `sigma`/`sigma` like `pi`; `unit`/`unit` and
 `empty`/`empty` by `Level.equiv`. -/
 partial def convTy (g : Globals R) (tys : Array (VTy R)) (a b : VTy R) : Bool :=
+  Stats.convOutcome Stats.cells.convTyOk Stats.cells.convTyFail <|
   if let some r := convGlued g tys a b then r || convTy g tys (whnf a) (whnf b) else
   let a := whnf a
   let b := whnf b

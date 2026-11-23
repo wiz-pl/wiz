@@ -837,6 +837,44 @@ def checkLocked (lock : Lock) (pkg : Package) (indexCommit : String := "")
         if !Requirement.satisfies req v then
           throw s!"grail.lock has {q.name} {q.version}, but {p.name} asks for {d.req}: run `grail update`"
 
+/-- (P0) The lock's registry entries must be the ones a **signed** snapshot names: for
+every `pkg` line the snapshot lists the same `name@version` with the same archive
+SHA-256, and (when the snapshot records one) the same tree hash and size.
+
+The lock itself is not signed, so this comparison is what makes the signature useful for
+a committed lock: `grail fetch --locked` reads no index, so a hand-edited `pkg` line (a
+swapped archive and tree hash, with bytes supplied by `--vendor`) has the shape every
+local check promises and is accepted by `checkLocked` and `fetch`. `grail index verify
+--locked` is where the signed snapshot and the lock are both available, so the check
+lives there. A version the snapshot does not list is refused too: a lock that claims a
+release the index never signed is not the release the index vouched for. -/
+def checkLockEntries (lock : Lock) (snap : Snapshot) : Except String Unit := do
+  for p in lock.pkgs do
+    let who := s!"{p.name} {p.version}"
+    match snap.find? p.name p.version with
+    | none => throw s!"grail.lock has {who}, which the signed index snapshot does not list"
+    | some e =>
+      if p.sha256 != e.sha256 then
+        throw s!"grail.lock has {who} sha256 {p.sha256}, the signed index snapshot has {e.sha256}"
+      if !e.tree.isEmpty && p.tree != e.tree then
+        let got := if p.tree.isEmpty then "(none)" else p.tree
+        throw s!"grail.lock has {who} tree {got}, the signed index snapshot has {e.tree}"
+      if e.size > 0 then
+        if let some n := p.size then
+          if n != e.size then
+            throw s!"grail.lock has {who} size {n}, the signed index snapshot has {e.size}"
+
+/-- (P0) Read `dir/grail.lock` and check its registry entries against `snap`. The caller
+has already verified `snap` (its key, sequence and digest are the lock's pins). -/
+def checkLockSnapshot (dir : System.FilePath) (snap : Snapshot) :
+    IO (Except String Unit) := do
+  let lock := lockFile dir
+  if !(← lock.pathExists) then
+    return .error s!"no {lock}: --locked audits a committed lock against the signed index"
+  match Lock.parse (← IO.FS.readFile lock) with
+  | .error e => pure (.error e)
+  | .ok l => pure (checkLockEntries l snap)
+
 /-- The signature a project's `grail.lock` pins, if it has one. (A missing or malformed
 lock has none; the caller decides whether that is an error.) -/
 def lockSignature (dir : System.FilePath) : IO (Option Signature) := do

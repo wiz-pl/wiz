@@ -198,7 +198,9 @@ that records no verified index snapshot. The first update against an index needs
 trust root: `grail update --require-signature --allowed-signers FILE` verifies the
 index's signed snapshot and pins its key, sequence and digest in the lock. `--locked`
 reads no index, so it checks that entry's shape; add `grail index verify --locked` to
-re-verify the signature offline. Update a dependency with `grail update`, never by
+re-verify the signature offline and to check the lock's registry entries against the
+signed snapshot (a hand-edited archive or tree hash is refused there, because the lock
+itself is not signed). Update a dependency with `grail update`, never by
 editing the lock.
 
 A publisher writes the index the same way:

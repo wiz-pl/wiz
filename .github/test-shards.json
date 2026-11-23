@@ -167,6 +167,7 @@
       "data",
       "desceq",
       "elab",
+      "elab-ext",
       "eval",
       "format",
       "=fmt",
@@ -202,7 +203,8 @@
       "=scaling",
       "=prop",
       "=audit",
-      "=desc-sweep"
+      "=desc-sweep",
+      "=perf-core"
     ]
   },
   {

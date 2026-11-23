@@ -1,0 +1,14 @@
+stc-bridge corpus: 75 cases, 75 agreed, 0 failed
+  class  cases  agreed translated  rejected  why
+  core   39     39     39          0         -
+  qty    5      5      0           5         piq 1, sigmaq 1, letq 1, darg 1, scaseq 1
+  level  7      7      0           7         sortParam 1, const/levels 1, sortLv/open 1, sortLv/range 1, univ 1, ulift 1, sorted/pi 1
+  desc   9      9      0           9         mu 1, con 1, desc 1, dret 1, darg 1, drec 1, dhrec 1, delim 1, ind 1
+  size   7      7      0           7         size 1, szInf 1, szSuc 1, sizeLt 1, mus 1, sfix 1, scase 1
+  nu     5      5      0           5         nu 1, out 1, cocon 1, scofix 1, coit 1
+  sort   3      3      0           3         pi/component-sort 1, sigma/component-sort 1, ulift/k 1
+stc-bridge: translated 39, outside-qty 5, outside-level 7, outside-desc 9, outside-size 7, outside-nu 5, outside-sort 3
+stc-bridge signature (MTm.globalDefs): 12 declarations, 5 translated, 7 outside
+  translated idU, twice, A, a, caseF
+  level      idP, constP, polyK, dLv
+  desc       Nat, zero, one

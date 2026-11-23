@@ -42,6 +42,8 @@ inductive STy where
   | option (t : STy)
   | packet
   | ctx (kind : ProgKind)
+  | userStr (cap : Nat)
+  | userPtr
   | map (k v : STy) (kind : MapKind)
   /-- markers for the rejected Wiz types -/
   | nat | string | bytes
@@ -62,6 +64,8 @@ partial def STy.describe : STy → String
   | .option t => s!"Option ({t.describe})"
   | .packet => "Packet"
   | .ctx k => s!"{k.describe}Context"
+  | .userStr cap => s!"UserStr {cap}"
+  | .userPtr => "UserPtr"
   | .map k v kind => s!"Map ({k.describe}) ({v.describe}) ({kind.describe})"
   | .nat => "Nat"
   | .string => "String"
@@ -121,6 +125,15 @@ inductive STm where
   | ctxPacket (c : STm)
   | ctxIfindex (c : STm)
   | ctxRxQueue (c : STm)
+  | ctxPid (c : STm)
+  | ctxTgid (c : STm)
+  | ctxNow (c : STm)
+  | ctxArg (i : Nat) (c : STm)
+  | ctxArgWord (i : Nat) (c : STm)
+  | readUserStr (cap : Nat) (c : STm) (ptr : STm)
+  | argvSlot (cap : Nat) (c : STm) (argv : STm) (slot : Nat)
+  | probeEmit (events : String) (kind : EventKind) (slot : Nat)
+      (c pid tgid ppid ts data : STm)
   | mapLookup (m : String) (k : STm)
   | mapUpdate (m : String) (k v : STm)
   | mapDelete (m : String) (k : STm)
@@ -165,6 +178,7 @@ structure SProgram where
   maps : Array SMapDecl
   decls : Array SDecl
   ret : STy
+  transport : Transport := .perfEventArray
   span : Span := {}
 
 /-! ## Widths and types -/
@@ -228,10 +242,16 @@ nullary enum instead"
     match ty.byteSize with
     | none => reject span s!"`{ty.describe}` has no C layout"
     | some n =>
-      if n > 64 then reject span s!"`{ty.describe}` is {n} bytes; a value is at most 64"
+      -- `Option (UserStr N)` is the one payload allowed past the 64-byte struct limit:
+      -- its cap is a literal chosen by the probe policy, and the frame budget checks it.
+      let limit := match i with | .userStr _ => 256 | _ => 64
+      if n > limit then reject span s!"`{ty.describe}` is {n} bytes; a value is at most {limit}"
       else pure ty
   | .packet => pure .packet
   | .ctx k => pure (.ctx k)
+  | .userStr cap =>
+    if cap == 0 || decide (cap > 256) then reject span (userStrMessage cap) else pure (.userStr cap)
+  | .userPtr => pure .userPtr
   | .map k v kind => do
     let k ← lowerTy span k
     let v ← lowerTy span v
@@ -501,6 +521,86 @@ partial def lowerTm (maps : Array MapDecl) (sigs : Array (String × Sig))
     match c.ty with
     | .ctx _ => pure (mk (.ctxRxQueue c))
     | other => reject span s!"a context projection needs a context, not `{other.describe}`"
+  | .ctxPid c =>
+    let c ← lowerTm maps sigs ctx span c
+    match c.ty with
+    | .ctx k =>
+      if k.isTracing then pure (mk (.ctxPid c))
+      else reject span (traceCtxMessage "TraceCtx.pid" c.ty)
+    | _ => reject span (traceCtxMessage "TraceCtx.pid" c.ty)
+  | .ctxTgid c =>
+    let c ← lowerTm maps sigs ctx span c
+    match c.ty with
+    | .ctx k =>
+      if k.isTracing then pure (mk (.ctxTgid c))
+      else reject span (traceCtxMessage "TraceCtx.tgid" c.ty)
+    | _ => reject span (traceCtxMessage "TraceCtx.tgid" c.ty)
+  | .ctxNow c =>
+    let c ← lowerTm maps sigs ctx span c
+    match c.ty with
+    | .ctx k =>
+      if k.isTracing then pure (mk (.ctxNow c))
+      else reject span (traceCtxMessage "TraceCtx.now" c.ty)
+    | _ => reject span (traceCtxMessage "TraceCtx.now" c.ty)
+  | .ctxArg i c =>
+    if i >= traceArgCount then reject span (traceArgMessage i)
+    let c ← lowerTm maps sigs ctx span c
+    match c.ty with
+    | .ctx k =>
+      if k.isTracing then pure (mk (.ctxArg i c))
+      else reject span (traceCtxMessage "TraceCtx.arg" c.ty)
+    | _ => reject span (traceCtxMessage "TraceCtx.arg" c.ty)
+  | .ctxArgWord i c =>
+    if i >= traceArgCount then reject span (traceArgMessage i)
+    let c ← lowerTm maps sigs ctx span c
+    match c.ty with
+    | .ctx k =>
+      if k.isTracing then pure (mk (.ctxArgWord i c))
+      else reject span (traceCtxMessage "TraceCtx.argWord" c.ty)
+    | _ => reject span (traceCtxMessage "TraceCtx.argWord" c.ty)
+  | .readUserStr cap c ptr =>
+    let capTy ← lowerTy span (.userStr cap)
+    let c ← lowerTm maps sigs ctx span c
+    match c.ty with
+    | .ctx k =>
+      if k.isTracing then pure () else reject span (traceCtxMessage "TraceCtx.readUserStr" c.ty)
+    | _ => reject span (traceCtxMessage "TraceCtx.readUserStr" c.ty)
+    let ptr ← lowerTm maps sigs ctx span ptr
+    unless ptr.ty == .userPtr do
+      reject span s!"`TraceCtx.readUserStr`'s pointer is a `UserPtr` token, not \
+`{ptr.ty.describe}`"
+    pure (mk (.readUserStr (.option capTy) c ptr))
+  | .argvSlot cap c argv slot =>
+    let capTy ← lowerTy span (.userStr cap)
+    if slot >= argvSlotMax then reject span (argvSlotMessage slot)
+    let c ← lowerTm maps sigs ctx span c
+    match c.ty with
+    | .ctx k =>
+      if k.isTracing then pure () else reject span (traceCtxMessage "TraceCtx.argvSlot" c.ty)
+    | _ => reject span (traceCtxMessage "TraceCtx.argvSlot" c.ty)
+    let argv ← lowerTm maps sigs ctx span argv
+    unless argv.ty == .userPtr do
+      reject span s!"`TraceCtx.argvSlot`'s argv is a `UserPtr` token, not `{argv.ty.describe}`"
+    pure (mk (.argvSlot (.option capTy) c argv slot))
+  | .probeEmit events kind slot c pid tgid ppid ts data =>
+    let c ← lowerTm maps sigs ctx span c
+    match c.ty with
+    | .ctx k =>
+      if k.isTracing then pure () else reject span (traceCtxMessage "Probe.emit" c.ty)
+    | _ => reject span (traceCtxMessage "Probe.emit" c.ty)
+    let pid ← lowerTm maps sigs ctx span pid
+    let tgid ← lowerTm maps sigs ctx span tgid
+    let ppid ← lowerTm maps sigs ctx span ppid
+    let ts ← lowerTm maps sigs ctx span ts
+    let data ← lowerTm maps sigs ctx span data
+    unless pid.ty == .u32 do reject span s!"`Probe.emit`'s pid is `UIntN 32`, not `{pid.ty.describe}`"
+    unless tgid.ty == .u32 do reject span s!"`Probe.emit`'s tgid is `UIntN 32`, not `{tgid.ty.describe}`"
+    unless ppid.ty == .u32 do reject span s!"`Probe.emit`'s ppid is `UIntN 32`, not `{ppid.ty.describe}`"
+    unless ts.ty == .u64 do reject span s!"`Probe.emit`'s timestamp is `UIntN 64`, not `{ts.ty.describe}`"
+    match data.ty with
+    | .userStr _ => pure ()
+    | other => reject span s!"`Probe.emit`'s payload is a `UserStr`, not `{other.describe}`"
+    pure (mk (.probeEmit .bool events kind slot c pid tgid ppid ts data))
   | .mapLookup m k =>
     let d ← findMap maps span m
     let k ← lowerTm maps sigs ctx span k
@@ -592,7 +692,9 @@ def lowerProgram (p : SProgram) : Except String Program := do
       version := p.version
       maps := maps.toArray
       decls := decls.toArray
-      ret }
+      ret
+      transport := p.transport
+      span := p.span }
   checkProgram prog
   pure prog
 
