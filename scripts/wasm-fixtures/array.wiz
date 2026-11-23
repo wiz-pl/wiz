@@ -1,0 +1,5 @@
+import Std
+
+def main : Nat :=
+  let arr : Array Nat := Array.push (Array.push Array.empty 1) 40
+  Array.getD arr 1 0 * 100 + Array.getD (Array.set arr 0 2) 0 0

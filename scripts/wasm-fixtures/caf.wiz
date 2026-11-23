@@ -1,0 +1,5 @@
+import Prelude
+
+def c : Nat := 7 * 2
+
+def main : Nat := c + c

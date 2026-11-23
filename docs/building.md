@@ -863,9 +863,64 @@ wrote it; the tar content and the tree root do not.
 Generated C is already reproducible (same C for the same program across paths, caches,
 environments and even architectures); binaries are reproducible with the same compiler
 but differ across C compilers and architectures, so a cross-build's *binary* digest is
-not comparable. The binary release tarball (`scripts/release-tarball.sh`, what tower
-installs) is not yet deterministic: it copies build outputs and adds files in checkout
-order, so its digest can differ between builds of one commit.
+not comparable. A hand-run `scripts/release-tarball.sh` on a developer machine copies
+build outputs and adds files in checkout order, so its digest can differ between builds
+of one commit. The Nix output `.#release-bin` is the reproducible form: a fixed source
+fileset, `SOURCE_DATE_EPOCH` from the commit, sorted archive entries and a `doCheck` that
+rebuilds the archive in a second environment and compares it byte for byte.
+
+## Nix artifacts for CI and releases
+
+The flake has one output per artifact the CI and release jobs assemble. Each is
+input-addressed by exactly the sources it reads — `passthru.subset` names the boundary —
+so a docs change does not invalidate a Wasm module, and a change to one web module does
+not invalidate the others:
+
+| output | what it is | keyed on |
+|---|---|---|
+| `.#wasm-fixtures` | the `wasm-fixtures` programs under `scripts/` compiled with `wiz build --target wasm`, the host `web/wasm-host.mjs`, and each module's expected stdout; the check runs every module under Node | the `wasm-fixtures` directory under `scripts/`, `web/wasm-host.mjs` |
+| `.#wiz-web`, `.#wiz-playground`, `.#wiz-playground-ui`, `.#wiz-source-ui` | the Emscripten page modules, each with its own page files (unchanged) | each script's own fileset |
+| `.#web-bundle` | the three page-module outputs merged into one directory (the site's `web/out`) | `wiz-web` + `wiz-playground` + `wiz-playground-ui` |
+| `.#docs-site` | `wiz doc --lib` plus the landing page, guide, benchmark page, playground and licences; `/source/` is absent | `docs/`, `bench/`, the site scripts under `web/`, `wiz`, `reference`, `web-bundle` |
+| `.#pages` | the exact `doc-site` tree the `deploy-docs` job uploads: `docs-site` plus the `scry` source reader under `/source/` | `docs-site`, `scry/`, `web/source-*` and `web/framework/`, `wiz-source-ui`, `tree-sitter-c-sharp` |
+| `.#release-bin` | the binary release tarball (`wiz-<arch>-linux.tar.gz` and `.sha256`): portable `wiz`/`grail`/`tower`, `lib/`, `editors/`, licences and the infoview module (`wiz-web`) | `lib/`, `editors/`, the `release-licenses` directory under `scripts/`, the licence files, `web/wasm-host.mjs`, `release-unwrapped`, `release-tower`, `wiz-web` |
+| `.#release-tarball` / `.#source-tarball` | the deterministic source tarball, manifest and SBOM (unchanged) | the source tree |
+
+```sh
+nix build .#wasm-fixtures .#web-bundle .#docs-site .#pages .#release-bin
+```
+
+The release archive's metadata is the flake's commit time (`RELEASE_SOURCE_DATE_EPOCH`,
+with `SOURCE_DATE_EPOCH` set to the same value for the tools); an ambient epoch cannot
+change it, so two builds of one commit are byte-identical. The docs site and pages carry
+the commit in their source links, not a build time.
+
+`.#release-bin` is the one leaf that may depend on all of the others. Its `buildPhase`
+is deliberately unlike a Nix package: the release has to leave the store, so that one
+step points each ELF interpreter at `/lib64/ld-linux-x86-64.so.2` (or the aarch64 path),
+removes the build RUNPATH, strips debug data and scrubs the remaining store-path strings
+(`scripts/scrub-store-paths.py`). The binaries are linked before that step with every
+non-glibc library static — GMP, libuv, OpenSSL, libstdc++ and libgcc — so the archive
+needs only glibc; `scripts/test-release-portability.sh` checks the NEEDED lists, the
+interpreter, the absence of `/nix/store`, and runs `wiz`, `grail` and `tower` under
+`env -i` with only a glibc output. **Do not copy the leaf scrub into an intermediate
+derivation**: a normal store path must keep its references, and only the tarball is
+allowed to break that rule.
+
+The linkage audit behind that: after the leaf step `readelf -d` names only
+`libc.so.6`, `libm.so.6`, `libdl.so.2`, `libpthread.so.0`, `librt.so.1` and the loader.
+GMP, libuv and OpenSSL are static archives in the link; libstdc++ and libgcc are the
+release compiler's explicit `-Wl,-Bstatic` tail (the wrapper removes the driver's
+dynamic `-lstdc++`/`-lgcc_s` and appends the archives after every object). Boehm GC,
+zlib and ncurses are not linked by `wiz`, `grail` or `tower` at all: the GC is only in
+`gc-ldflags`, which a self-hosted program passes to its generated C, and neither zlib
+nor ncurses is an input. The bundled C toolchain (`scripts/bundle-cc.sh`, which this
+tarball deliberately omits) links GMP and the GC statically for user programs.
+
+The Nix release tarball has no `share/wiz/cc`: `wiz build` falls back to the host `cc`
+and GMP, exactly as a checkout does. The release workflow still uses
+`scripts/bundle-cc.sh` when it wants the bundled compiler. The source tarball and the
+source SBOM are unchanged.
 
 ## Release SBOM and provenance
 
@@ -1613,8 +1668,10 @@ other four cover C#, the prover, the e-graph and the corpus parse invariant.
 ### Documentation site
 
 A push to `master` publishes the site from the `docs` job to GitHub Pages, at
-<https://wiz-pl.github.io/wiz/>. The tree has five parts, and every link in it is
-relative, so the project-site prefix (or a custom domain root) works either way:
+<https://wiz-pl.github.io/wiz/>. The same tree is the flake output `.#pages` (and
+`.#docs-site` without `/source/`; see "Nix artifacts for CI and releases"). The tree has
+five parts, and every link in it is relative, so the project-site prefix (or a custom
+domain root) works either way:
 
 | URL | what it is | built from |
 |---|---|---|
