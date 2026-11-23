@@ -446,6 +446,11 @@ jobs:
       # the store paths of this commit's build (the shards substitute them from Cachix)
       wiz: ${{ steps.nix.outputs.wiz }}
       tests: ${{ steps.nix.outputs.tests }}
+      # the two self-hosted programs (perf H2): built once here and passed to the shards
+      # as `--selfhost-compiler/--selfhost-checker`, instead of every case's `/tmp` cache
+      # rebuilding them from source on a fresh runner
+      selfhost-compiler: ${{ steps.selfhost.outputs.compiler }}
+      selfhost-checker: ${{ steps.selfhost.outputs.checker }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
@@ -562,6 +567,34 @@ jobs:
           echo "wiz: $wiz"; echo "tests: $tests"
           du -sh "$wiz" "$tests"
           nix path-info -S "$wiz" "$tests" | sed 's/^/closure: /'
+      - name: The self-hosted programs (nix build .#selfhost-compiler .#selfhost-checker)
+        # Perf H2: the suite used to build these in a `/tmp` cache keyed on the test
+        # binary's mtime, ~20 times per run (9,257 s, 9.8%). They are derivations now, so
+        # this job builds each once and the shards take the store paths through
+        # `--selfhost-compiler/--selfhost-checker`.
+        #
+        # A pull request takes `lib.selfhostWith` with this job's *seeded* `wiz`/`tests`
+        # store paths (the pure packages do not exist there, so `.#selfhost-compiler`
+        # would cold-build the pure compiler); a master push takes the pure attributes,
+        # whose outputs the trusted cache then serves to everyone.
+        id: selfhost
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}
+          TESTS: ${{ steps.nix.outputs.tests }}
+          SEEDED: ${{ github.event_name != 'push' }}
+        run: |
+          if [ "$SEEDED" = true ]; then
+            sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+            expr="let f = builtins.getFlake \"$PWD\"; in f.lib.\"$sys\".selfhostWith { wiz = builtins.storePath \"$WIZ\"; tests = builtins.storePath \"$TESTS\"; }"
+            comp=$(nix build --impure --no-link --print-out-paths --expr "($expr).compiler")
+            check=$(nix build --impure --no-link --print-out-paths --expr "($expr).checker")
+          else
+            comp=$(nix build .#selfhost-compiler --no-link --print-out-paths)
+            check=$(nix build .#selfhost-checker --no-link --print-out-paths)
+          fi
+          echo "compiler=$comp" >> "$GITHUB_OUTPUT"
+          echo "checker=$check" >> "$GITHUB_OUTPUT"
+          du -sh "$comp" "$check"
       - name: Save the lean subset cache (a pull request, or an integration push)
         # Untrusted and subset-keyed: this is the only writer of this key, and only a
         # successful build reaches it (a failed lean build stops the job before this
@@ -598,7 +631,8 @@ jobs:
           fi
           # .#reference is built by the docs job, not here (#460), so it is not pushed.
           nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_AUTH_TOKEN" cachix push "$CACHIX_NAME" \
-            ${{ steps.nix.outputs.wiz }} ${{ steps.nix.outputs.tests }}
+            ${{ steps.nix.outputs.wiz }} ${{ steps.nix.outputs.tests }} \
+            ${{ steps.selfhost.outputs.compiler }} ${{ steps.selfhost.outputs.checker }}
       - name: Publish the store paths to the PR cache
         # A pull request writes only its own untrusted cache, with its own token. If the
         # repository variable or secret is absent (or this is a fork), nothing is
@@ -613,7 +647,8 @@ jobs:
             exit 0
           fi
           nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_PR_AUTH_TOKEN" cachix push "$CACHIX_PR_NAME" \
-            ${{ steps.nix.outputs.wiz }} ${{ steps.nix.outputs.tests }}
+            ${{ steps.nix.outputs.wiz }} ${{ steps.nix.outputs.tests }} \
+            ${{ steps.selfhost.outputs.compiler }} ${{ steps.selfhost.outputs.checker }}
       - name: Every test case is in exactly one shard
         run: |
           python3 scripts/ci.py check-shards --self-test
@@ -1196,6 +1231,10 @@ jobs:
           SELECT: ${{ matrix.shard.select }}
           JOBS: ${{ matrix.shard.jobs }}
           ALLOW_MISSING_DEPS: "${{ matrix.shard['allow-missing-deps'] }}"
+          # the self-hosted programs from the `lean` job (perf H2); empty means the
+          # driver builds them in its `/tmp` cache as before
+          SELFHOST_COMPILER: ${{ needs.lean.outputs.selfhost-compiler }}
+          SELFHOST_CHECKER: ${{ needs.lean.outputs.selfhost-checker }}
         run: |
           mapfile -t sel <<< "$SELECT"
           mkdir -p logs ~/.cache/wiz
@@ -1229,9 +1268,19 @@ jobs:
           # place a cache miss (or a layer that was substituted from Cachix) can be
           # told apart from a source change, so it names the store path it read.
           echo "tests -- --cache ~/.cache/wiz --cache-ro ${ro[1]} ${jobs_s:+$jobs_s }${allow[*]-}${allow:+ }${sel[*]}"
+          # The self-hosted programs are store paths from the `lean` job (perf H2): built
+          # once there, substituted here, instead of each case's `/tmp` cache rebuilding
+          # them from source on a fresh runner. Empty when `lean` produced none (a shard
+          # can run without it), in which case the driver builds as before.
+          shflags=()
+          if [ -n "$SELFHOST_COMPILER" ] && [ -n "$SELFHOST_CHECKER" ]; then
+            shflags=(--selfhost-compiler "$SELFHOST_COMPILER/bin/compiler" \
+                     --selfhost-checker "$SELFHOST_CHECKER/bin/checker")
+          fi
           # the Nix-built driver, exactly as `lake test -- …` would run it; every case's
           # time as JSON lines (scripts/ci.py summary and baseline read them)
           "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${ro[@]}" "${allow[@]}" "${jobs[@]}" \
+            "${shflags[@]}" \
             --timings "logs/${{ matrix.shard.name }}.jsonl" \
             --shard "${{ matrix.shard.name }}" "${sel[@]}" 2>&1 | tee "logs/${{ matrix.shard.name }}.log"
       - name: Save the Wiz build caches (PR-scoped on a pull request)

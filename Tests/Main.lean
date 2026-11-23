@@ -296,6 +296,19 @@ def mainImpl (args : List String) : IO UInt32 := do
     match (← findGroup group) >>= fun g => ix.toNat? >>= (g.cases[·]?) with
     | some c => c.runHere
     | none => do IO.eprintln s!"no such case: {group} #{ix}"; pure 2
+  -- The composed self-hosted program as source, for the Nix derivations that build
+  -- `.#selfhost-compiler`/`.#selfhost-checker` (`Wiz/Selfhost.lean` holds the
+  -- composition; a derivation cannot call Lean, so the driver prints it).
+  | ["--selfhost-source", name] =>
+    let (files, render) ← match name with
+      | "compiler" => pure (Wiz.Selfhost.compilerFiles, Wiz.Selfhost.compilerSource)
+      | "checker" => pure (Wiz.Selfhost.checkerFiles, Wiz.Selfhost.checkerSource)
+      | _ => do
+        IO.eprintln s!"--selfhost-source: 'compiler' or 'checker', not '{name}'"
+        return 2
+    let srcs ← files.mapM IO.FS.readFile
+    IO.print (render srcs)
+    pure 0
   | "--run" :: rest => runOne rest
   -- (D1) check a file with the given regularity mode, in a child process that the test
   -- can time out: `Elab.checkDiverges`

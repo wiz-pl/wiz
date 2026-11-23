@@ -1348,6 +1348,54 @@ EOF
           # future `.#source-bundle` can depend on it. The one thing the dev shell does
           # that this must repeat is write `grail.local.wiz` (the GMP flags), because that
           # file is generated and not committed.
+          # The two self-hosted programs, as derivations. The tests build them in a
+          # `/tmp` cache keyed on their source plus the *mtime of the test binary*, so
+          # every fresh runner rebuilds them and concurrent cases can build twice (perf
+          # review H2: ~9,257 s of a suite run, 9.8%). A derivation is the same program
+          # with a content key, substitutable, and the test flags
+          # (`--selfhost-compiler/--selfhost-checker`) take the store path.
+          #
+          # The composition lives in `Wiz/Selfhost.lean` (which files, in which order),
+          # so the driver prints it: `tests --selfhost-source compiler|checker`.
+          # `selfhostProgramWith { wizPkg, testsPkg }` is the same derivation built with
+          # those packages (the shape `towerFor` uses): CI passes the `lean` job's
+          # seeded store paths on a pull request, where the pure `wiz`/`tests` do not
+          # exist. `selfhostProgram` is the pure default.
+          selfhostProgramWith = { wizPkg, testsPkg }: name: from: pkgs.stdenv.mkDerivation {
+            pname = "wiz-selfhost-${name}";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [ ./selfhost ./lib ];
+            };
+            nativeBuildInputs = [ wizPkg testsPkg ];
+            buildInputs = [ pkgs.gmp pkgs.boehmgc ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR
+              ${testsPkg}/bin/tests --selfhost-source ${name} > ${from}.wiz
+              ${wizPkg}/bin/wiz --cc cc \
+                --cflags "-I${lib.getDev pkgs.gmp}/include -I${lib.getDev pkgs.boehmgc}/include" \
+                --ldflags "-L${pkgs.gmp}/lib -L${pkgs.boehmgc}/lib -Wl,-rpath,${pkgs.gmp}/lib -Wl,-rpath,${pkgs.boehmgc}/lib" \
+                --gmp "-lgmp" \
+                build ${from}.wiz -o ${name}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 ${name} $out/bin/${name}
+              runHook postInstall
+            '';
+            passthru.subset = "selfhost/ + lib/ (the composed program and its prelude)";
+            meta = {
+              description = "The self-hosted ${name} of the Wiz frontend (Wiz.Selfhost, as a store path)";
+              platforms = systems;
+            };
+          };
+          selfhostProgram = name: from:
+            selfhostProgramWith { wizPkg = wiz; testsPkg = tests; } name from;
+          selfhost-compiler = selfhostProgram "compiler" "selfhost-compiler";
+          selfhost-checker = selfhostProgram "checker" "selfhost-checker";
           scry = pkgs.stdenv.mkDerivation {
             pname = "scry";
             inherit (unwrapped) version;
@@ -1396,6 +1444,7 @@ EOF
           inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native scry
                    wiz-web wiz-playground wiz-playground-ui wiz-landing-ui wiz-source-ui release-tarball
                    wasm-fixtures web-bundle docs-lib docs-site pages release-bin
+                   selfhost-compiler selfhost-checker
                    release-unwrapped release-tower;
           # a function, not a package: `tower` is `towerFor wiz`, and `lib.towerWith`
           # is CI's seeded build. `packages` removes it (see below).
@@ -1428,6 +1477,15 @@ EOF
       lib = forAll (pkgs: {
         withLakeCache = lakeCache: packagesWith pkgs lakeCache;
         empty-lake = emptyLake pkgs;
+        # `lib.selfhostWith { wiz, tests }` is `.#selfhost-compiler`/`.#selfhost-checker`
+        # built with those packages. CI passes the lean job's seeded store paths through
+        # `builtins.storePath`, so a pull request does not cold-build the pure compiler.
+        selfhostWith = { wiz, tests }: {
+          compiler = (packagesWith pkgs null).selfhostProgramWith
+            { wizPkg = wiz; testsPkg = tests; } "compiler" "selfhost-compiler";
+          checker = (packagesWith pkgs null).selfhostProgramWith
+            { wizPkg = wiz; testsPkg = tests; } "checker" "selfhost-checker";
+        };
         # `lib.towerWith wizPkg` is `.#tower` built with that `wiz` package. CI passes
         # the lean job's store path through `builtins.storePath`, so the seeded compiler
         # is a build input and `wiz-unwrapped` is never instantiated.
