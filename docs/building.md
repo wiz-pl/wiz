@@ -1208,11 +1208,15 @@ setup action keeps the elan cache for those
   `"split-cases": true` gives up that first rule for a shard whose cases are siblings
   over disjoint inputs (the four parts of `selfhost-libdiff`, one file range each), where
   spreading them over the jobs is worth a build per part; `part_cost` charges each part
-  that build. The baseline holds only the split shards' cases, one per line
-  (`selfhost`, `library`, `scaling`, `selfhost-libdiff`; the last is split into four cases
-  over `lib/` and `scry/` by file index). `scripts/ci.py plan` shows the parts and their
-  estimates. The heavy groups have shards of their own (`hdl`, `semantics`), so adding a
-  slow case there does not unbalance `library`.
+  that build. The baseline holds every shard's cases, one per line; the split shards'
+  entries (`selfhost`, `library`, `selfhost-libdiff`) are the ones `partition` balances,
+  and an unsplit shard's entries (`scaling` after its merge, `hdl`, `semantics`) price
+  `plan`, `matrix` and the shard budget. `selfhost-libdiff` is split into four cases
+  over `lib/` and `scry/` by file index. `scripts/ci.py plan` shows the parts and their
+  estimates, then the longest predicted job wall, the 75-minute shard budget and the
+  margins to it and to the 90-minute job timeout; it exits 1 when a part is over the
+  budget (`docs/ci-runner.md`, "The shard budget"). The heavy groups have shards of their
+  own (`hdl`, `semantics`), so adding a slow case there does not unbalance `library`.
   To refresh the baseline from a CI run:
   `gh run download RUN -n test-timings && scripts/ci.py baseline timings.jsonl > .github/test-timings.json`.
 * **`"parts"`.** A shard with `"parts": N` splits one case's *work*, not a set of cases:
@@ -1241,8 +1245,10 @@ setup action keeps the elan cache for those
   ```
 
   A case's time is its median over the runs, and each part's prediction is scaled by
-  its shard's measured wall time over its case sum (`"jobs"` overlaps cases: `library`
-  runs at about 0.86 of its case sum). The split counts grow a part at a time, to the
+  its shard's measured wall time over its case sum (`"jobs"` overlaps cases: on the
+  2026-11-23 five-run refresh `library` ran at 0.60 of its case sum and `scaling` at
+  0.47). `--write` puts that ratio in the shard's `"wall-ratio"`, the static model
+  `plan` and `matrix` use. The split counts grow a part at a time, to the
   shard with the longest part, until the job budget (`--jobs`, default the current
   number of test jobs) is used or another part would not shorten the longest one; a
   long job that cannot be split does not stop it. It exits with an error if the parts
@@ -1261,35 +1267,43 @@ setup action keeps the elan cache for those
   CPU count, and the sweep's cost is per file, so the lever is fewer files per job — the
   split.) A shard of one long case (`grail-selfhost`, `hdl-verified`) and the shards that
   build a shared program (`selfhost`) keep 1. A case's `seconds` stays its own
-  process's time, so shard balance is unaffected.
+  process's time, so shard balance is unaffected. A shard with `"jobs"` also carries a
+  `"wall-ratio"`: the measured fraction of its case sum its job wall takes (`library`
+  0.60, `scaling` 0.47). `plan` and `matrix` multiply by it, and the shard budget is
+  checked on the result; without it a parallel shard's serial case sum would look over
+  the budget while its wall is well under it.
 * **Shard order.** `scripts/ci.py matrix` lists the shards longest first, by the same
-  estimated case times the split uses (a shard that selects no case goes last, by name).
+  predicted job wall the split uses: the estimated case times times the shard's
+  `"wall-ratio"` (a shard that selects no case goes last, by name).
   GitHub starts a matrix in the listed order and its 20-concurrent-job cap
   leaves the tail waiting: in run 44333554608 `test (prop)` started 16 minutes after the
-  wave did, so the long shards must be at the front. Only the split shards' cases are in
-  the baseline, so a non-split shard is estimated from the cases it selects (a new case
-  counts its group's median, 1 s when the group is unknown); the shards that are one
-  long case without an entry (`grail-selfhost`, `semantics`, `hdl-verified`) therefore
-  estimate low and sort late, and giving them entries in `.github/test-timings.json`
-  would refine the order.
+  wave did, so the long shards must be at the front. Every shard's cases are in the
+  baseline, so a non-split shard (`scaling`, `hdl`, `semantics`) is priced from its own
+  entries; a case with no entry (a new one) counts its group's median, 1 s when the
+  group is unknown. A shard with no entries at all still estimates low and sorts late,
+  so give a new long case an entry by refreshing the baseline.
 * **Shard balance.** CI's wall time is its longest job, so the invariant is that **no
   test shard's job wall is over 1.5× the median shard's job wall**. Every split shard's
   cases have an entry in `.github/test-timings.json`, and no shared program is built by
   two parts of one split shard (a `"split-cases": true` shard excepted: its parts each
-  build it by design, and the estimates charge for it). It is tracked in two places:
+  build it by design, and the estimates charge for it). It is tracked in three places:
   * `scripts/ci.py check-shards` (the `lean` job) warns when a split shard has cases
-    that are not in the baseline.
+    that are not in the baseline, and fails when a job's predicted wall is over the
+    75-minute shard budget (`docs/ci-runner.md`, "The shard budget").
+  * `scripts/ci.py plan` (also in the `lean` job) prints the longest predicted job and
+    its margins to the budget and the 90-minute timeout, and fails on the same budget.
   * `scripts/ci.py balance` (the `CI result` job) takes the run's job list from the API
     and compares each `tests --` step's wall, so a shard that runs cases in parallel
     (`"jobs": N`) is judged on its wall, not on its summed case seconds (which it also
     reports; the two differ by the shard's `--jobs` factor). It adds a "Shard balance"
     table to the run summary and an annotation for each violation.
 
-  Both warn on pull requests; a push to `master` is strict. A new case has no time until
-  a CI run has measured it, so a master run with a split-shard case missing from the
-  baseline is red until the baseline is refreshed (below). That is deliberate: as a
-  warning, the baseline went stale for three current runs while every shard stayed over
-  the limit.
+  `check-shards` and `plan` fail the `lean` job on any run, before the matrix starts;
+  `balance` warns on pull requests, and a push to `master` is strict. A new case has
+  no time until a CI run has measured it, so a master run with a split-shard case
+  missing from the baseline is red until the baseline is refreshed (below). That is
+  deliberate: as a warning, the baseline went stale for three current runs while every
+  shard stayed over the limit.
 
   On a master push whose tests all passed and whose balance drifted, the `CI result`
   job uploads the regenerated baseline as the `test-timings-baseline` artifact (also when
