@@ -92,6 +92,12 @@ try {
   client.openDocument(uriOf(source), sourceData.source, { languageId: "wiz" });
   await client.connect();
   ok(client.isOpen, "the real wiz lsp accepts the connection");
+  // H2: the host advertises LSP's default encoding explicitly, so a client never has to
+  // guess it from the text. Before H2 (`agent/lsp-host-h1-h3`) the capability was absent
+  // and the server counted code points, whatever the client asked for.
+  ok(client.capabilities && client.capabilities.positionEncoding === "utf-16",
+    "the host advertises positionEncoding utf-16",
+    JSON.stringify(client.capabilities || null).slice(0, 200));
 
   const pos = positionOf(text, useAt);
   const hover = await client.hover(uriOf(source), pos);
