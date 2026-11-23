@@ -728,9 +728,9 @@ EOF
           docsSiteSource = fs.toSource {
             root = ./.;
             fileset = fs.unions ([
-              ./docs ./bench/stdlib-baseline.json ./bench/stdlib-bench.json
-              ./scry/bench/baseline.json
+              ./docs ./bench ./examples ./tools ./editors ./drafts ./scry
               ./README.md ./ROADMAP.md ./CHANGELOG.md ./LICENSE
+              ./COPYING.RUNTIME
             ] ++ map (f: ./. + "/${f}") siteAssetFiles);
           };
           docs-site = pkgs.stdenv.mkDerivation {
@@ -766,7 +766,7 @@ EOF
               fi
               runHook postCheck
             '';
-            passthru.subset = "docs/ + bench/stdlib-{baseline,bench}.json + scry/bench/baseline.json + README/ROADMAP/CHANGELOG/LICENSE + the site scripts in siteAssetFiles + wiz + reference + web-bundle";
+            passthru.subset = "docs/ + bench/ + examples/ + tools/ + editors/ + drafts/ + scry/ (for the prose links) + README/ROADMAP/CHANGELOG/LICENSE/COPYING.RUNTIME + the site scripts in siteAssetFiles + wiz + reference + web-bundle";
             meta = {
               description = "The documentation site: wiz doc --lib and the landing, guide, benchmark and playground pages";
               platforms = systems;
