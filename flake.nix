@@ -1399,6 +1399,11 @@ EOF
             installPhase = ''
               runHook preInstall
               install -Dm755 ${name} $out/bin/${name}
+              # The identity the harness checks for an override (`<exe>.selfhost-id` ==
+              # `tests --selfhost-identity <name>`): a property of the artifact, so a
+              # store path from CI is accepted and a stale /tmp binary is refused.
+              ${testsPkg}/bin/tests --selfhost-identity ${name} > $out/bin/${name}.selfhost-id
+              chmod 444 $out/bin/${name}.selfhost-id
               runHook postInstall
             '';
             passthru.subset = "selfhost/ + lib/ (the composed program and its prelude)";
