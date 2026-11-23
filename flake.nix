@@ -883,7 +883,7 @@ EOF
             for a in "$@"; do
               case "$a" in
                 -c|-E|-S|-M|-MM) compile=yes ;;
-                -lgmp|-luv|-lssl|-lcrypto|-lstdc++|-lgcc|-lgcc_s|-latomic) continue ;;
+                -lgmp|-luv|-lssl|-lcrypto|-lstdc++|-lc++|-lc++abi|-lgcc|-lgcc_s|-latomic) continue ;;
               esac
               args+=("$a")
             done
@@ -919,7 +919,14 @@ EOF
             buildPhase = ''
               runHook preBuild
               export HOME=$TMPDIR LAKE_CACHE_DIR=$TMPDIR/lake-cache \
-                LEAN_CC=${releaseCC}
+                LEAN_CC=${releaseCC} CC=${releaseCC} CXX=${releaseCC}
+              # Lake's executable link can pick the ambient cc/gcc/g++ even when
+              # LEAN_CC is set; put the release wrapper under every driver name first.
+              mkdir -p cc-bin
+              for t in cc gcc g++ c++ clang clang++; do
+                ln -sf ${releaseCC} cc-bin/$t
+              done
+              export PATH=$PWD/cc-bin:$PATH
               lake build wiz grail
               runHook postBuild
             '';
