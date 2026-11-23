@@ -2685,13 +2685,20 @@ def lspGoalBlockGo (off : Nat) (best : Option LspGoal) : List LspEntry → Optio
       | .false => lspGoalBlockGo off best rest
       | .true => match best with
         | .none => lspGoalBlockGo off (.some (LspGoal.mk s t gs)) rest
-        | .some b => match Nat.le (lspGoalSize b) (Nat.sub t s) with
+        -- the narrower block wins; on equal spans the one met later in this
+        -- newest-first walk (the older entry) wins: see the comment below
+        | .some b => match Nat.le (Nat.sub t s) (lspGoalSize b) with
           | .true => lspGoalBlockGo off (.some (LspGoal.mk s t gs)) rest
           | .false => lspGoalBlockGo off best rest
     | .term _ _ _ => lspGoalBlockGo off best rest
     | .decl _ _ _ _ _ => lspGoalBlockGo off best rest
 
--- the innermost `by` block containing `off`
+-- the innermost `by` block containing `off` (`Query.goalsAt`'s `innermost … endIn`).
+-- Equal spans: the host records a block after its steps (`Term.lean:4633`, post-order,
+-- so an enclosing block is recorded after the blocks inside it) and keeps the last
+-- recorded; here a block is recorded before its steps (`Frontend.wiz:5149`, pre-order)
+-- and the list is newest first, so keeping the last one met in the walk keeps the
+-- earliest recorded, i.e. the same (outer) block as the host.
 def lspGoalBlockAt (es : List LspEntry) (off : Nat) : Option LspGoal :=
   lspGoalBlockGo off .none es
 

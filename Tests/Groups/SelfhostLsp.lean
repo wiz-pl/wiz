@@ -312,6 +312,77 @@ def selfhostLspGroup : Group where
         -- inside the `by` body the expected type is the body's (`n : Nat ⊢ Nat`)
         checkEq "n : Nat\n⊢ Nat" (lspStr (← lspAt got 7) ["result", "goal"])
         checkEq 1 (lspNat (← lspAt got 7) ["result", "range", "start", "line"]) },
+    { name := "lsp: nested by blocks: plainGoal answers the innermost block, as the host", run := fun _ =>
+        withSelfhostCli fun exe => do
+        -- G: a `by` inside a step of a `by`. S: two sibling inner blocks. Positions are
+        -- (line, character), 0-based; the comments name what the caret is on.
+        let g := "import Prelude\ndef k : Nat → Nat := by\n  exact (by intro x; exact x)\n"
+        let gq : List (Nat × Nat) :=
+          [ (2, 9)   -- the inner `by`: the inner block's own state
+          , (2, 11)  -- inside the inner block, before its first step
+          , (2, 12)  -- at `intro`: the state before it
+          , (2, 20)  -- between `intro x;` and `exact x`: after `intro x`
+          , (2, 28)  -- the end of `exact x` (end included): no goals
+          , (2, 29)  -- one past the inner block (the outer step's end): no goals
+          , (1, 21) ] -- the outer `by`
+        let s := "import Prelude\ndef p : Nat → Nat := by\n  intro x\n  exact (Nat.add (by exact x) (by exact 1))\n"
+        let sq : List (Nat × Nat) :=
+          [ (3, 18)   -- the first inner `by`
+          , (3, 31)   -- the second inner `by`
+          , (3, 28) ] -- the end of the first inner `exact x`
+        let prelude ← IO.FS.readFile "lib/Prelude.wiz"
+        -- Run one document through the self-hosted server and the in-process host,
+        -- compare every `wiz/plainGoal` answer field by field (a failure names the
+        -- caret), and return the self-hosted answers.
+        let compare (name doc : String) (qs : List (Nat × Nat)) : IO (List Lean.Json) := do
+          let uri := s!"file:///tmp/selfhost-nested-{name}.wiz"
+          let pos (l c : Nat) : Lean.Json :=
+            Lean.Json.mkObj [("line", Lean.Json.num l), ("character", Lean.Json.num c)]
+          let params (l c : Nat) : Lean.Json := Lean.Json.mkObj [
+            ("textDocument", Lean.Json.mkObj [("uri", uri)]), ("position", pos l c)]
+          let msgs :=
+            [ lspReq 1 "initialize",
+              lspNote "textDocument/didOpen" (Lean.Json.mkObj [("textDocument", lspTextDoc uri doc 1)]) ] ++
+            (qs.toArray.mapIdx fun i (l, c) => lspReq (10 + i) "wiz/plainGoal" (params l c)).toList ++
+            [ lspNote "exit" (Lean.Json.mkObj []) ]
+          let dir ← IO.FS.createTempDir
+          let (code, out, err) ← selfhostLspSession exe dir #[] msgs
+          checkEq 0 code
+          checkEq "" err
+          let got ← lspMessages out
+          checkEq (2 + qs.length) got.length
+          let srv : LSP.Server :=
+            { libs := ({} : Std.HashMap String (String × String)).insert "Prelude" ("lib/Prelude.wiz", prelude),
+              trusted := ["Prelude"] }
+          let (srv, _) ← LSP.handle srv (lspReq 100 "initialize")
+          let (srv, _) ← LSP.handle srv (lspNote "textDocument/didOpen"
+            (Lean.Json.mkObj [("textDocument", lspTextDoc uri doc 1)]))
+          let mut srv := srv
+          let mut selfs : List Lean.Json := []
+          let mut qi := 0
+          for (l, c) in qs do
+            let (srv', hostOut) ← LSP.handle srv (lspReq (200 + qi) "wiz/plainGoal" (params l c))
+            srv := srv'
+            let host := match hostOut.find? (fun m => (jpath m ["id"] |>.bind (·.getNat?.toOption)) == some (200 + qi)) with
+              | some m => (jpath m ["result"]).getD .null
+              | none => .null
+            let self := (jpath (← lspAt got (2 + qi)) ["result"]).getD .null
+            checkEq (s!"{name} {l}:{c}", lspStrs host ["goals"]) (s!"{name} {l}:{c}", lspStrs self ["goals"])
+            checkEq (s!"{name} {l}:{c}", lspStr host ["rendered"]) (s!"{name} {l}:{c}", lspStr self ["rendered"])
+            selfs := selfs ++ [self]
+            qi := qi + 1
+          pure selfs
+        let gs ← compare "g" g gq
+        let ss ← compare "s" s sq
+        -- the concrete answers (so a host change shows here too); the first four are
+        -- the innermost-`by` ones the self-hosted walk used to answer from the enclosing
+        -- step
+        checkEq ["⊢ Nat → Nat"] (lspStrs gs[0]! ["goals"])          -- g 2:9  (the inner `by`)
+        checkEq ["⊢ Nat → Nat"] (lspStrs gs[1]! ["goals"])          -- g 2:11
+        checkEq ["x : Nat\n⊢ Nat"] (lspStrs gs[3]! ["goals"])       -- g 2:20 (after `intro x`)
+        checkEq ["x : Nat\n⊢ Nat"] (lspStrs ss[1]! ["goals"])       -- s 3:31 (the second inner `by`)
+        checkEq "no goals" (lspStr gs[4]! ["rendered"])             -- g 2:28 (the inner step's end)
+        checkEq ["⊢ Nat → Nat"] (lspStrs gs[6]! ["goals"]) },       -- g 1:21 (the outer `by`)
     { name := "lsp: hover, definition and completion answer in the host's shapes", run := fun _ =>
         withSelfhostCli fun exe => do
         let doc := "import Prelude\ndef one : Nat := 1\ndef label : String := \"x\"\ndef two : Nat := one\ndef three : Nat := lab\n"
