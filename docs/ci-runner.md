@@ -64,13 +64,14 @@ an input the table does not classify still runs every job. The `lean` job runs f
 `code` change rather than the `lean` subset alone: the shard matrix is a job output, and
 a non-empty `shards` list cannot be expanded without it.
 
-`packages (tower)` builds tower with the lean job's **seeded** `wiz`, not the pure
-`wiz` derivation: it substitutes the store path from Cachix, then builds
-`lib.<system>.towerWith (builtins.storePath <wiz>)`. The guard reads the derivation graph
-and requires that store path among `tower-unwrapped`'s inputs and no `wiz-unwrapped`
-derivation, so a cache miss fails the job instead of cold-building the compiler (the PR
-timeout this replaced). The pure `.#tower` is unchanged; only this job's output is
-seeded. The build is warm on a
+`packages (hdl)`, `packages (scry)` and `packages (tower)` build with the lean job's
+**seeded** `wiz`, not the pure `wiz` derivation: each substitutes the store path from
+Cachix, then builds `lib.<system>.{hdl,scry,tower}With (builtins.storePath <wiz>)`.
+`scripts/check-seeded-wiz.py` reads the derivation graph and requires that store path
+among the package inputs and no `wiz`/`wiz-unwrapped` derivation (for tower, through the
+`tower-unwrapped` input), so a cache miss fails the job instead of cold-building the
+compiler (the PR timeout this replaced). The pure `.#hdl`, `.#scry` and `.#tower` are
+unchanged; only these jobs' outputs are seeded. The build is warm on a
 `wizlib` or package (`hdl`/`scry`/`tower`) change (the sources and the seed are
 unchanged, so Cachix substitutes or Lake recompiles nothing).
 

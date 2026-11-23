@@ -576,7 +576,11 @@ EOF
           # a stamp that records the check (the build log has the full output); the
           # yosys/Icarus/formal cases stay in the `hdl` test shard, because they need
           # tools the package itself does not.
-          hdl = pkgs.stdenv.mkDerivation {
+          #
+          # `hdlFor wizPkg` is the same package built with a particular `wiz`; the
+          # public `.#hdl` is `hdlFor wiz`, and `lib.hdlWith <store path>` is CI's
+          # seeded build (the seeded path is a store input, never a `wiz-unwrapped`).
+          hdlFor = wizPkg: pkgs.stdenv.mkDerivation {
             pname = "hdl";
             inherit (unwrapped) version;
             src = fs.toSource {
@@ -589,10 +593,10 @@ EOF
                 (fs.maybeMissing ./hdl/grail.local.wiz)
               ]);
             };
-            nativeBuildInputs = [ wiz ];
+            nativeBuildInputs = [ wizPkg ];
             buildPhase = ''
               runHook preBuild
-              export HOME=$TMPDIR GRAIL=${wiz}/bin/grail
+              export HOME=$TMPDIR GRAIL=${wizPkg}/bin/grail
               if ! sh hdl/scripts/check-standalone.sh > hdl-check.log 2>&1; then
                 cat hdl-check.log
                 exit 1
@@ -607,7 +611,7 @@ EOF
                 echo "package: hdl ${unwrapped.version}"
                 echo "check: hdl/scripts/check-standalone.sh (grail build; grail test: 32 goldens)"
                 printf 'grail: '
-                ${wiz}/bin/grail --version 2>&1 | head -n 1
+                ${wizPkg}/bin/grail --version 2>&1 | head -n 1
                 echo "subset: hdl/"
               } > $out/stamp
               runHook postInstall
@@ -618,6 +622,7 @@ EOF
               platforms = systems;
             };
           };
+          hdl = hdlFor wiz;
 
           # The machine toolchain the dev shell writes as `grail.local.wiz`, generated
           # from the flake's `toolchain` record (never a hand-copied file), so a GMP,
@@ -639,7 +644,9 @@ EOF
           # toolchain flags are the generated `grail.local.wiz` above. `$out/bin/scry`
           # is the CLI; `$out/stamp` records what built it. `scry-native` is in the
           # inputs so the same native parse library is built/substituted beside it.
-          scry = pkgs.stdenv.mkDerivation {
+          # `scryFor wizPkg` is the same package built with a particular `wiz`; the
+          # public `.#scry` is `scryFor wiz`, and `lib.scryWith` is CI's seeded build.
+          scryFor = wizPkg: pkgs.stdenv.mkDerivation {
             pname = "scry";
             inherit (unwrapped) version;
             src = fs.toSource {
@@ -650,7 +657,7 @@ EOF
                 (fs.maybeMissing ./scry/native/tree-sitter-c-sharp)
               ]);
             };
-            nativeBuildInputs = [ wiz scry-native tree-sitter-c-sharp ];
+            nativeBuildInputs = [ wizPkg scry-native tree-sitter-c-sharp ];
             buildPhase = ''
               runHook preBuild
               export HOME=$TMPDIR
@@ -660,7 +667,7 @@ EOF
               ln -s ${tree-sitter-c-sharp} scry/native/tree-sitter-c-sharp
               # this machine's toolchain, the same fields the dev shell writes
               cp ${grailLocal} scry/grail.local.wiz
-              ( cd scry && ${wiz}/bin/grail build scry )
+              ( cd scry && ${wizPkg}/bin/grail build scry )
               runHook postBuild
             '';
             installPhase = ''
@@ -671,7 +678,7 @@ EOF
                 echo "package: scry ${unwrapped.version}"
                 echo "build: (cd scry && grail build scry)"
                 printf 'grail: '
-                ${wiz}/bin/grail --version 2>&1 | head -n 1
+                ${wizPkg}/bin/grail --version 2>&1 | head -n 1
                 echo "grammar: ${tree-sitter-c-sharp}"
                 echo "subset: scry/"
               } > $out/stamp
@@ -693,6 +700,7 @@ EOF
               platforms = systems;
             };
           };
+          scry = scryFor wiz;
 
           # tower, the toolchain manager (stage 26): the Wiz implementation in `tower/`,
           # built by grail (stage 26e/26h). It needs no Lean at build time; the binary
@@ -1386,9 +1394,10 @@ EOF
                    wiz-web wiz-playground wiz-playground-ui wiz-source-ui release-tarball
                    wasm-fixtures web-bundle docs-site pages release-bin
                    release-unwrapped release-tower;
-          # a function, not a package: `tower` is `towerFor wiz`, and `lib.towerWith`
-          # is CI's seeded build. `packages` removes it (see below).
-          inherit towerFor;
+          # functions, not packages: the public packages are `hdlFor wiz`,
+          # `scryFor wiz` and `towerFor wiz`; the `lib.*With` outputs are CI's seeded
+          # builds. `packages` removes them (see below).
+          inherit hdlFor scryFor towerFor;
           # The trusted Lake seed as a package: `withLakeCache empty-lake`'s `lake`
           # output (the compiled `.lake` directory without the linked binaries). A master
           # push builds this and publishes the store path to the trusted Cachix; a pull
@@ -1405,8 +1414,8 @@ EOF
         };
     in {
       # (packages without the function set, which is not a derivation)
-      packages = forAll (pkgs: builtins.removeAttrs (packagesFor pkgs) [ "bootstrapChain" "towerFor" ]);
-      legacyPackages = forAll (pkgs: { inherit (packagesFor pkgs) bootstrapChain towerFor; });
+      packages = forAll (pkgs: builtins.removeAttrs (packagesFor pkgs) [ "bootstrapChain" "hdlFor" "scryFor" "towerFor" ]);
+      legacyPackages = forAll (pkgs: { inherit (packagesFor pkgs) bootstrapChain hdlFor scryFor towerFor; });
 
       # The function set (a flake output cannot be a function, so `packages` cannot hold
       # `withLakeCache`). CI's producer and consumer both call it through
@@ -1417,12 +1426,14 @@ EOF
       lib = forAll (pkgs: {
         withLakeCache = lakeCache: packagesWith pkgs lakeCache;
         empty-lake = emptyLake pkgs;
-        # `lib.towerWith wizPkg` is `.#tower` built with that `wiz` package. CI passes
-        # the lean job's store path through `builtins.storePath`, so the seeded compiler
-        # is a build input and `wiz-unwrapped` is never instantiated:
+        # `lib.{hdl,scry,tower}With wizPkg` are the packages built with that `wiz`.
+        # CI passes the lean job's store path through `builtins.storePath`, so the
+        # seeded compiler is a build input and `wiz-unwrapped` is never instantiated:
         #   nix build --impure --expr \
         #     'let f = builtins.getFlake "/path/to/checkout"; in
         #      f.lib."x86_64-linux".towerWith (builtins.storePath "/nix/store/…-wiz-0.1.0")'
+        hdlWith = wizPkg: (packagesWith pkgs null).hdlFor wizPkg;
+        scryWith = wizPkg: (packagesWith pkgs null).scryFor wizPkg;
         towerWith = wizPkg: (packagesWith pkgs null).towerFor wizPkg;
       });
 

@@ -897,10 +897,11 @@ CI job, so a change to one does not rerun or rekey the others. Only `.#release-b
 the leaf that patches ELF interpreters, strips, or scrubs store paths; the three packages
 are normal store paths.
 
-`.#tower` is the pure package (`towerFor wiz`). The flake also exposes
-`lib.<system>.towerWith wizPkg`, the same tower built with that `wiz`. The
-`packages (tower)` job passes the lean job's **seeded** compiler as a store path, so the
-seeded `wiz` is an input source and `wiz-unwrapped` is never instantiated:
+`.#hdl`, `.#scry` and `.#tower` are the pure packages (`hdlFor wiz`, `scryFor wiz`,
+`towerFor wiz`). The flake also exposes `lib.<system>.{hdl,scry,tower}With wizPkg`, the
+same package built with that `wiz`. Each per-package job passes the lean job's
+**seeded** compiler as a store path, so the seeded `wiz` is an input source and
+`wiz-unwrapped` is never instantiated:
 
 ```sh
 nix build --impure --expr '
@@ -908,10 +909,11 @@ nix build --impure --expr '
   in f.lib."x86_64-linux".towerWith (builtins.storePath "/nix/store/…-wiz-0.1.0")'
 ```
 
-The job fails before building when the seeded `wiz` is not substitutable, and its guard
-reads the derivation graph to require the seeded path among the `tower-unwrapped` inputs
-and no `wiz-unwrapped` derivation. `.#tower` itself is unchanged and still builds with the
-pure `wiz`.
+The job substitutes the seeded `wiz` with `nix build --option max-jobs 0` (no local
+build) and fails when it is not substitutable. `scripts/check-seeded-wiz.py` then reads
+the derivation graph and requires the seeded path among the package inputs and no
+`wiz`/`wiz-unwrapped` derivation (for tower, through the `tower-unwrapped` input). The
+pure packages themselves are unchanged and still build with the pure `wiz`.
 
 The release archive's metadata is the flake's commit time (`RELEASE_SOURCE_DATE_EPOCH`,
 with `SOURCE_DATE_EPOCH` set to the same value for the tools); an ambient epoch cannot

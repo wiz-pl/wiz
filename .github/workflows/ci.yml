@@ -685,11 +685,15 @@ jobs:
   # The Hdl derivation itself runs `check-standalone.sh` (build + its 32 goldens); the
   # scry derivation runs `grail build scry`. Hdl and tower own no Actions cache; the
   # scry job keeps the checkout's `.grail` mirror under the `scry` subset's key.
+  # Each job's first step substitutes the lean job's seeded `wiz` with no local build;
+  # the package is then built with `builtins.storePath` so `wiz-unwrapped` is never
+  # instantiated (the PR timeout this replaced).
   #
-  # `packages (tower)` is seeded: it substitutes the lean job's `wiz` store path and
-  # builds `lib.<system>.towerWith (builtins.storePath <wiz>)`, then asserts on the
-  # derivation graph that the seeded path is an input source of tower-unwrapped and that
-  # no `wiz-unwrapped` derivation is in it. A cache miss fails instead of cold-building.
+  # Every package job is seeded: it substitutes the lean job's `wiz` store path and
+  # builds `lib.<system>.{hdl,scry,tower}With (builtins.storePath <wiz>)`, then
+  # `scripts/check-seeded-wiz.py` asserts on the derivation graph that the seeded path
+  # is an input source and that no wiz derivation is an input. A cache miss fails
+  # instead of cold-building `wiz-unwrapped`.
 
   packages_hdl:
     name: packages (hdl)
@@ -700,8 +704,8 @@ jobs:
       needs.changes.outputs.subset_hdl == 'true' &&
       needs.lean.result == 'success'
     runs-on: ubuntu-latest
-    # 60 min: the Hdl standalone build and its 32 goldens, plus a cold pure `wiz` when
-    # the trusted cache does not hold it; a substitution is seconds.
+    # 60 min: the Hdl standalone build and its 32 goldens; the seeded wiz is a
+    # substitution, and the rest is a few minutes at most.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -712,13 +716,39 @@ jobs:
           cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
           cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
-      - name: "nix build (the Hdl package: standalone build and its goldens)"
-        # `.#hdl` copies `hdl/` alone, then runs `check-standalone.sh` with the packaged
-        # `grail`; the yosys/Icarus/formal assertions stay in the `hdl` test shard.
-        # `$out/stamp` records the check.
-        id: nix
+      - name: wiz (the lean job's seeded compiler, substituted from Cachix)
+        # Substitution only (`--option max-jobs 0`): a cache miss fails here instead of
+        # letting the Hdl derivation pull in `wiz-unwrapped`, the cold compile.
+        id: wiz
         run: |
-          out=$(nix build .#hdl --no-link --print-out-paths -L)
+          wiz='${{ needs.lean.outputs.wiz }}'
+          if [ -z "$wiz" ]; then
+            echo "::error title=hdl::the lean job produced no wiz store path"
+            exit 1
+          fi
+          if ! nix build --no-link "$wiz" --option max-jobs 0; then
+            echo "::error title=hdl::the seeded wiz $wiz is not substitutable from the PR or trusted cache; refusing a cold wiz-unwrapped build"
+            exit 1
+          fi
+          echo "wiz: substituted $wiz"
+          echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
+          du -sh "$wiz"
+      - name: "nix build (the Hdl package, with the lean job's seeded wiz)"
+        # `lib.hdlWith (builtins.storePath <seeded wiz>)` makes the seeded compiler an
+        # input source, so Nix substitutes it and never starts `wiz-unwrapped`. The guard
+        # asserts that on the derivation graph before the build.
+        id: nix
+        env:
+          WIZ: ${{ steps.wiz.outputs.wiz }}
+        run: |
+          set -eu
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          expr="let f = builtins.getFlake \"$PWD\"; in f.lib.\"$sys\".hdlWith (builtins.storePath \"$WIZ\")"
+          drv=$(nix eval --impure --raw --expr "($expr).drvPath")
+          nix derivation show "$drv" > "$RUNNER_TEMP/hdl.json"
+          python3 scripts/check-seeded-wiz.py --self-test
+          python3 scripts/check-seeded-wiz.py "$RUNNER_TEMP/hdl.json" "$WIZ"
+          out=$(nix build --impure --no-link --print-out-paths --expr "$expr")
           echo "out=$out" >> "$GITHUB_OUTPUT"
           cat "$out/stamp"
           du -sh "$out"
@@ -755,8 +785,7 @@ jobs:
       needs.lean.result == 'success'
     runs-on: ubuntu-latest
     # 90 min: `grail build scry` (~12 min measured in scry.yml) on a cold Nix cache,
-    # plus a cold pure `wiz` (the lean job's seeded build is a different derivation and
-    # does not substitute here); a substitution is seconds.
+    # plus a cold `scry-native`; the seeded wiz is a substitution.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -767,6 +796,23 @@ jobs:
           cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
           cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
+      - name: wiz (the lean job's seeded compiler, substituted from Cachix)
+        # Substitution only (`--option max-jobs 0`): a cache miss fails here instead of
+        # letting the Scry derivation pull in `wiz-unwrapped`, the cold compile.
+        id: wiz
+        run: |
+          wiz='${{ needs.lean.outputs.wiz }}'
+          if [ -z "$wiz" ]; then
+            echo "::error title=scry::the lean job produced no wiz store path"
+            exit 1
+          fi
+          if ! nix build --no-link "$wiz" --option max-jobs 0; then
+            echo "::error title=scry::the seeded wiz $wiz is not substitutable from the PR or trusted cache; refusing a cold wiz-unwrapped build"
+            exit 1
+          fi
+          echo "wiz: substituted $wiz"
+          echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
+          du -sh "$wiz"
       - name: Subset cache key (the scry subset)
         # `subset-v1-scry-<os>-<arch>-<toolchain sha12>-<compiler-key>-<scry sha12>`:
         # the scry subset's sha is the identity (a `hdl` or `tower` change does not
@@ -785,13 +831,23 @@ jobs:
           path: scry/.grail
           key: ${{ steps.subset-key.outputs.key }}
           restore-keys: ${{ steps.subset-key.outputs.prefix }}
-      - name: "nix build (the Scry package: the CLI and its native parser)"
-        # `.#scry` builds in the sandbox: `grail build scry` with the packaged
-        # toolchain, the C# grammar from the store (not a checkout out-link) and a
-        # generated `grail.local.wiz`. `$out/bin/scry` is the CLI, `$out/stamp` the record.
+      - name: "nix build (the Scry package, with the lean job's seeded wiz)"
+        # `lib.scryWith (builtins.storePath <seeded wiz>)` builds in the sandbox:
+        # `grail build scry` with the seeded toolchain, the C# grammar from the store
+        # (not a checkout out-link) and a generated `grail.local.wiz`. The guard asserts
+        # the seeded path is an input source and no wiz derivation is an input.
         id: nix
+        env:
+          WIZ: ${{ steps.wiz.outputs.wiz }}
         run: |
-          out=$(nix build .#scry --no-link --print-out-paths -L)
+          set -eu
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          expr="let f = builtins.getFlake \"$PWD\"; in f.lib.\"$sys\".scryWith (builtins.storePath \"$WIZ\")"
+          drv=$(nix eval --impure --raw --expr "($expr).drvPath")
+          nix derivation show "$drv" > "$RUNNER_TEMP/scry.json"
+          python3 scripts/check-seeded-wiz.py --self-test
+          python3 scripts/check-seeded-wiz.py "$RUNNER_TEMP/scry.json" "$WIZ"
+          out=$(nix build --impure --no-link --print-out-paths --expr "$expr")
           echo "out=$out" >> "$GITHUB_OUTPUT"
           cat "$out/stamp"
           # the checkout's mirror of the same tree: the other workflows and the smoke
@@ -849,9 +905,8 @@ jobs:
       needs.changes.outputs.subset_tower == 'true' &&
       needs.lean.result == 'success'
     runs-on: ubuntu-latest
-    # 60 min: tower's Nix build (grail + the C compiler), the two publication smokes,
-    # and a cold pure `wiz` when the trusted cache does not hold it; a substitution is
-    # seconds.
+    # 60 min: tower's Nix build (grail + the C compiler) and the two publication
+    # smokes; the seeded wiz is a substitution.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -901,40 +956,8 @@ jobs:
           expr="let f = builtins.getFlake \"$PWD\"; in f.lib.\"$sys\".towerWith (builtins.storePath \"$WIZ\")"
           drv=$(nix eval --impure --raw --expr "($expr).drvPath")
           nix derivation show "$drv" > "$RUNNER_TEMP/tower.json"
-          python3 - "$WIZ" "$RUNNER_TEMP/tower.json" <<'PY'
-          import json, subprocess, sys
-          wiz, path = sys.argv[1], sys.argv[2]
-          doc = json.load(open(path))
-          wrapper = next(iter(doc.get("derivations", doc).values()))
-
-          def drvs(v):
-              return v.get("inputs", {}).get("drvs", v.get("inputDrvs", {}))
-
-          def srcs(v):
-              return [
-                  s if s.startswith("/") else f"/nix/store/{s}"
-                  for s in v.get("inputs", {}).get("srcs", v.get("inputSrcs", []))
-              ]
-
-          # Nix 2.34's `inputs.drvs` keys are bare store-path basenames; older formats
-          # use the full path. Normalise before asking for the derivation.
-          unwrapped = [
-              p if p.startswith("/") else f"/nix/store/{p}"
-              for p in drvs(wrapper) if "-tower-unwrapped-" in p
-          ]
-          if len(unwrapped) != 1:
-              sys.exit(f"tower guard: expected one tower-unwrapped input, got {unwrapped}")
-          parsed = json.loads(subprocess.check_output(["nix", "derivation", "show", unwrapped[0]], text=True))
-          u = next(iter(parsed.get("derivations", parsed).values()))
-          if wiz not in srcs(u):
-              sys.exit(f"tower guard: the seeded wiz {wiz} is not an input source of {unwrapped[0]}")
-          wiz_drvs = [p for p in drvs(u) if "-wiz-" in p and p.endswith(".drv")]
-          if wiz_drvs:
-              sys.exit(f"tower guard: {unwrapped[0]} still depends on a wiz derivation: {wiz_drvs}")
-          if wiz not in u.get("env", {}).get("nativeBuildInputs", ""):
-              sys.exit(f"tower guard: the seeded wiz {wiz} is not in tower-unwrapped's nativeBuildInputs")
-          print(f"tower guard: {wiz} is an input source; no wiz-unwrapped derivation")
-          PY
+          python3 scripts/check-seeded-wiz.py --self-test
+          python3 scripts/check-seeded-wiz.py "$RUNNER_TEMP/tower.json" "$WIZ" --through tower-unwrapped
           out=$(nix build --impure --no-link --print-out-paths --expr "$expr")
           echo "out=$out" >> "$GITHUB_OUTPUT"
           "$out/bin/tower" --help > /dev/null
