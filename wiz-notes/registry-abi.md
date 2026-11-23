@@ -931,13 +931,16 @@ were re-read at those lines, not copied from `extensibility.md` (whose tree was
   duplicates in `lib/Prelude.wiz` are inside doc comments; `attribute [tactic
   tactic.exact]` appears at `:1009` only as code, `:969` is a documentation example).
 
-**Executed.** The build and test results will be filled here from the heavy job. The
-commands are `heavy --rsync --timeout 3600 -- lake build wiz tests` (job 5131, batch,
-queued at the time this file was written behind the batch queue) and
-`heavy --sshfs -- timeout 600 lake test -- '=ext'` (the test runs after the build, one
-heavy job at a time). What I did **not** run: the full suite, `=backend`, `=js`, `=bpf`,
-`=wasm`, `=selfhost`, `=selfhost-cli-diff`, `=wiz-lint`, `grail test`, any measurement.
-No Lean build was run on the controller; everything goes through `heavy`.
+**Executed.** `heavy --rsync --timeout 3600 -- lake build wiz tests` (job 5131,
+node `win3`) exited 0: 630 jobs, including `Wiz.Ext.Basic`, `Tests.Groups.Ext`, `Main`,
+`wiz:exe` and `tests:exe`. The warnings in that log are pre-existing (`Tests/Elab.lean`
+unused `textLib`, `Tests/Scaling`'s `String.mk`, `Tests/Groups/Hdl`'s `String.Slice`
+deprecations); none is from `Wiz/Ext/Basic.lean` or `Tests/Groups/Ext.lean`. The `=ext`
+test run is `heavy --sshfs -- timeout 600 lake test -- '=ext'`; its result is recorded
+below when it returns (one heavy job at a time). What I did **not** run: the full suite,
+`=backend`, `=js`, `=bpf`, `=wasm`, `=selfhost`, `=selfhost-cli-diff`, `=wiz-lint`,
+`grail test`, any measurement. No Lean build was run on the controller; everything goes
+through `heavy`.
 
 **Not implemented (the prototype stops here).**
 
