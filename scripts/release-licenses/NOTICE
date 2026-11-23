@@ -22,10 +22,10 @@ Linked into the binaries wiz and grail (built with Lean 4):
 * libc++ and libc++abi (LLVM), statically in the GitHub/elan build: Apache License
   2.0 with LLVM Exceptions. LICENSES/lean4-third-party (the licences of what Lean's
   binary releases bundle).
-* libstdc++, libgcc and libgcc_eh (GCC 16.2.0), statically in the Nix build and, in
-  the Nix train11 tarball, as lib/libstdc++.so.6 and lib/libgcc_s.so.1: GNU GPL v3
-  or later with the GCC Runtime Library Exception 3.1. LICENSES/gcc-RLE-LICENSE.
-  Corresponding source: SOURCE-OFFER.
+* libstdc++, libgcc and libgcc_eh (GCC 16.2.0): GNU GPL v3 or later with the GCC
+  Runtime Library Exception 3.1. The Nix build links them; the train11 Nix tarball
+  ships lib/libstdc++.so.6 and lib/libgcc_s.so.1. LICENSES/gcc-RLE-LICENSE (the
+  exception) and LICENSE (GPL v3). Corresponding source: SOURCE-OFFER.
 * GNU MP (GMP) 6.3.0, statically: GNU LGPL v3 or later, or GNU GPL v2 or later.
   LICENSES/lean4-third-party (the LGPL v3) and LICENSE (the GPL v3, which the LGPL
   v3 adds to). Its source: https://gmplib.org/. Because wiz, grail and tower are

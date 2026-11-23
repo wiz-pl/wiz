@@ -1,12 +1,12 @@
 Source offer for the bundled GCC runtime
 ========================================
 
-The Nix release artifact ships GCC 16.2.0's runtime under the GNU GPL v3
-with the GCC Runtime Library Exception 3.1:
+The Nix release artifact links and, on train11, ships GCC 16.2.0's runtime
+under the GNU GPL v3 with the GCC Runtime Library Exception 3.1:
 
   lib/libstdc++.so.6   shared, train11 layout
   lib/libgcc_s.so.1    shared, train11 layout
-  wiz, grail           static libstdc++/libgcc in the Nix build
+  wiz, grail           linked against these runtimes (lib/ on train11)
 
 The GitHub release.yml path links Lean's static libc++ instead; see NOTICE
 and LICENSES/lean4-third-party.
@@ -14,11 +14,22 @@ and LICENSES/lean4-third-party.
 Corresponding Source
 --------------------
 
-  GCC 16.2.0: https://ftp.gnu.org/gnu/gcc/gcc-16.2.0/gcc-16.2.0.tar.xz
+The exact source is the nixpkgs gcc-16.2.0 derivation at the revision in
+flake.lock, including nixpkgs' patches:
 
-The exact nixpkgs revision is recorded in flake.lock. The Wiz packaging
-scripts (scripts/release-tarball.sh, scripts/scrub-store-paths.py) and the
-Wiz source are at https://github.com/wiz-pl/wiz.
+  nix build --no-link --print-out-paths \
+    github:NixOS/nixpkgs/$(nix flake metadata --json |
+      jq -r '.locks.nodes.nixpkgs.locked.rev')#gcc.src
+
+Upstream tarball: https://ftp.gnu.org/gnu/gcc/gcc-16.2.0/gcc-16.2.0.tar.xz
+
+The Wiz packaging scripts (scripts/release-tarball.sh,
+scripts/scrub-store-paths.py) and the Wiz source are at
+https://github.com/wiz-pl/wiz.
+
+Written offer: for three years from the release date, the Wiz maintainers
+will provide the Corresponding Source, including patches, on request at
+https://github.com/wiz-pl/wiz/issues.
 
 This file is the written offer for the runtime source. It ships as
 share/wiz/SOURCE-OFFER next to the licence texts.
