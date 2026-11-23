@@ -1410,13 +1410,13 @@ EOF
               cat > grail.local.wiz <<EOF
 import Grail
 def settings : Settings := Settings.empty
-  |> Settings.set "cflags" "-I/include"
-  |> Settings.set "ldflags" "-L/lib -Wl,-rpath,/lib"
+  |> Settings.set "cflags" "-I${lib.getDev pkgs.gmp}/include"
+  |> Settings.set "ldflags" "-L${pkgs.gmp}/lib -Wl,-rpath,${pkgs.gmp}/lib"
 EOF
               # the C/C# grammar the vendored shim links; the job did this with
               # `nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp`
-              ln -s  scry/native/tree-sitter-c-sharp
-              ( cd scry && HOME=$TMPDIR /bin/grail build scry )
+              ln -s ${tree-sitter-c-sharp} scry/native/tree-sitter-c-sharp
+              ( cd scry && HOME=$TMPDIR ${wiz}/bin/grail build scry )
               runHook postBuild
             '';
             installPhase = ''
