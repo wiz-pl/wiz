@@ -69,10 +69,11 @@ ROOT = Path(__file__).resolve().parent.parent
 HOST_PRELUDE = "lib/Prelude.wiz"
 FRONTEND = "selfhost/Frontend.wiz"
 #: The runtime part of the host prelude ends here; everything after it is the
-#: metaprogramming layer (reflected terms, tactics, macros, `Syntax` helpers), which
-#: the self-hosted frontend does not need and cannot express. The marker is a real
-#: line of lib/Prelude.wiz: moving or removing it is a parse error here, not a silent
-#: change of what "runtime surface" means.
+#: metaprogramming layer (reflected terms, tactics, macros, `Syntax` helpers). The
+#: embedded copy carries only the reflection slice its own deriver runner names
+#: (`BinderKind` … `Deriver`, `MacroM`, `Syntax.mkNode`), so this layer is not
+#: coverage-checked. The marker is a real line of lib/Prelude.wiz: moving or removing
+#: it is a parse error here, not a silent change of what "runtime surface" means.
 RUNTIME_END = "-- (end of the Boolean section)"
 
 #: `preludeText` is loaded by the module loader (`moduleRootSourcesAs`) and by the
