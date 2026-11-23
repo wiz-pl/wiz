@@ -279,7 +279,8 @@ def jsGroup : Group where
         checkEq ("host: missing ok\nopfs/opfs\n0\n11\n7\n7\n0\nhost: all checks passed\n") out },
     { name := "the emitted main checks the reachable capabilities before user code", run := fun _ => do
         let text ← jsEmit ("import Prelude\nimport IO\nimport Host\n" ++
-          "def main : IO Unit := do\n  fd ← Host.open \"a\" \"r\";\n  Host.close fd")
+          "def main : IO Unit := do\n  fd ← Host.open \"a\" \"r\";\n" ++
+          "  c ← Host.close fd;\n  IO.print (Nat.toString c)")
         unless (text.splitOn "wizHostReady([\"fs.close\", \"fs.open\"])").length > 1 do
           throw (IO.userError "the emitted main has no capability check") },
     { name := "an unimplemented runtime native is refused by name", run := fun _ => do
