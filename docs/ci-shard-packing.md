@@ -2,11 +2,11 @@
 
 > **Status (2026-11-23): historical.** The numbers below describe the 29-shard plan and
 > the 2026-11-19 timings; none of the repackings were applied. The live plan is
-> `.github/test-shards.json` and its authority is `scripts/ci.py plan`, which now models
-> each shard's wall as its case sum times a measured `wall-ratio` (library 0.60,
-> scaling 0.47) against a 75-minute budget. Read this note for the method, not for the
-> current split: library is 11 parts, selfhost 4, selfhost-libdiff 2, hdl 1, scaling 1,
-> semantics 1.
+> `.github/test-shards.json` and its authority is `scripts/ci.py plan`, which now
+> simulates each shard's wall (its serial groups summed, its `"jobs"` groups through an
+> in-order pool, builds unscaled) against a 75-minute budget. Read this note for the
+> method, not for the current split: library is 11 parts, selfhost 4, selfhost-libdiff 2,
+> hdl 1, scaling 1, semantics 1.
 
 CI's test matrix is one job per shard entry (`.github/test-shards.json`), and the
 organization's Actions plan allows **20 concurrent jobs** in all. With the current

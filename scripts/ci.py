@@ -17,12 +17,13 @@
                                      cases balanced by .github/test-timings.json (needs
                                      the test driver BIN; default .lake/build/bin/tests).
                                      The shards are ordered by predicted job wall, longest
-                                     first (a part's estimate times its shard's
-                                     "wall-ratio" when it runs with "jobs"), because
-                                     GitHub starts a matrix in that order and its 20-job
-                                     cap leaves the late entries waiting: the expensive
-                                     work should start in the first wave. A shard the
-                                     baseline cannot estimate goes last, by name.
+                                     first (the per-part simulation of `simulated_wall`:
+                                     serial groups summed, an in-order `--jobs` pool for
+                                     the parallel ones, builds unscaled), because GitHub
+                                     starts a matrix in that order and its 20-job cap
+                                     leaves the late entries waiting: the expensive work
+                                     should start in the first wave. A shard the baseline
+                                     cannot estimate goes last, by name.
   scripts/ci.py check-shards [BIN]   check that every test case is run by exactly one
                                      shard (after splitting), that every selector of a
                                      shard selects something, that the plan is total:
@@ -36,10 +37,15 @@
                                      does not exist or which a shard selects after all.
                                      Also fails on a .github/skip-allowlist.json entry
                                      whose group or case no case matches.
-  scripts/ci.py plan [BIN]           the split shards' parts with their estimated times,
-                                     then the longest predicted job wall and its margins
-                                     to the shard budget and the job timeout; exits 1
-                                     when a shard is over the budget
+  scripts/ci.py plan [--json] [BIN]  each shard's (or part's) estimated wall: serial
+                                     groups summed, the parallel groups' in-order
+                                     `--jobs` pool, builds unscaled; then the longest
+                                     predicted job wall and its margins to the shard
+                                     budget and the job timeout; exits 1 when a shard
+                                     is over the budget. --json prints the same as JSON
+                                     plus the calibration of `PARALLEL_CONTENTION`
+                                     against the measured 8-part and 12-part library
+                                     runs.
   scripts/ci.py changes BASE [HEAD]  what a change needs (path filters): reads the files
                                      that differ between BASE and HEAD (git diff
                                      BASE HEAD; CI: a PR's merge commit and its first
@@ -109,14 +115,16 @@
                                      runs. With jobs.json, a shard's prediction is
                                      scaled by its measured wall time over its case
                                      sum (`--jobs` overlaps cases), and a shard that is
-                                     not split is its median wall time. The measured
-                                     ratio is also what --write puts in the shard's
-                                     "wall-ratio" (the static `plan`/`matrix` model).
+                                     not split is its median wall time. That measured
+                                     ratio is rebalance's own planner only (it has the
+                                     run's real walls); it is no longer written to the
+                                     shard, because plan/matrix simulate each part
+                                     (see `simulated_wall`).
                                      Prints the new baseline's
                                      summary, the "split" count of each split shard and
                                      the predicted time of every job (min/median/max);
                                      with --write, writes .github/test-timings.json and
-                                     the "split" counts and "wall-ratio" of
+                                     the "split" counts of
                                      .github/test-shards.json.
                                      The case list is the test driver's (--bin, default
                                      .lake/build/bin/tests, when it exists), else the
@@ -172,6 +180,43 @@ NOTE_BUILT = "built "
 # docs/ci-runner.md "The shard budget".
 JOB_TIMEOUT_S = 120 * 60
 SHARD_BUDGET_S = 75 * 60
+
+# The per-part simulation (`simulated_wall`) multiplies only the parallel groups' pool
+# by this. Sharing the runner's vCPUs inflates a case's time, so the pool can be slower
+# than the sum of the case times says; the factor is measured, not guessed.
+#
+# Calibration, with each run's own `test-timings` artifact (the per-case seconds the
+# baseline would hold after a refresh; comparing through a stale committed baseline
+# measures its staleness, not the model). Measured walls are `tests` job walls in
+# minutes; the model's are its prediction from those per-case times:
+#
+#   8-part run 45191566067 (train11 9ee24e52b):
+#     library-1 65.8/64.0  library-2 83.5/84.3  library-3 73.8/72.3
+#     library-4 90.3/87.9 (CANCELLED at 90.3: censored, a lower bound)
+#     library-5 79.6/80.8  library-6 85.0/85.0  library-7 54.8/54.0
+#     library-8 62.0/59.9                      residuals -3.5 % .. +1.4 %
+#   12-part run 45210110113 (train11 77632f10a):
+#     library-12 49.5/48.4                     residual -2.2 %
+#
+# The least-squares factor on the parallel pool is 1.010 for the 8-part run and 1.035
+# for library-12: there is no systematic under-prediction to correct (the measured job
+# walls include about a minute of setup before the tests step, which the model does not),
+# so the constant stays 1.0. `plan --json` prints the table with residuals so a later
+# reader can see whether it still holds.
+PARALLEL_CONTENTION = 1.0
+CALIBRATION = {
+    # run: {shard: (measured tests-job wall min, simulated wall min, censored)}
+    "45191566067 (8 library parts, train11 9ee24e52b)": {
+        "library-1": (65.8, 64.0, False), "library-2": (83.5, 84.3, False),
+        "library-3": (73.8, 72.3, False),
+        "library-4": (90.3, 87.9, True),  # cancelled at 90.3: a lower bound
+        "library-5": (79.6, 80.8, False), "library-6": (85.0, 85.0, False),
+        "library-7": (54.8, 54.0, False), "library-8": (62.0, 59.9, False),
+    },
+    "45210110113 (12 library parts, train11 77632f10a)": {
+        "library-12": (49.5, 48.4, False),
+    },
+}
 
 # A skip whose reason names one of these says the CI dev shell (flake.nix,
 # `devShells.default`) lacks a tool the suite needs: a failure for every group, not an
@@ -374,64 +419,93 @@ def part_selectors(items):
 
 
 def expanded(binary, base=None):
-    """The shards with each split shard replaced by its parts: [(name, selectors,
-    estimated seconds or None, jobs)]; `jobs` is the shard's "--jobs" (None unless the
-    shard says "jobs": N: the number of cases of a parallel-opted-in group it runs at a
-    time). A shard without "jobs" is run without `--jobs`, so a case that has an auto
-    mode (selfhost-libdiff) can tell "not given" from "--jobs 1". A shard with
+    """The shards with each split shard replaced by its parts: [(name, selectors, items,
+    jobs)]; `items` is `estimate`'s [(group, index, name, seconds, uses)] for the cases
+    of the shard (or part), in listing order, and `jobs` is the shard's "--jobs" (None
+    unless the shard says "jobs": N: the number of cases of a parallel-opted-in group it
+    runs at a time). A shard without "jobs" is run without `--jobs`, so a case that has
+    an auto mode (selfhost-libdiff) can tell "not given" from "--jobs 1". A shard with
     "split-cases": true hands each case to `partition` on its own rather than keeping the
     cases that use one shared program together (see `partition`)."""
     out = []
+    base = base or baseline()
     for s in resolved(binary):
         n = s.get("split", 1)
         jobs = s.get("jobs")
         if n <= 1:
-            out.append((s["name"], s["select"], None, jobs))
+            out.append((s["name"], s["select"], estimate(list_cases(binary, s["select"]), base), jobs))
             continue
-        base = base or baseline()
         items = estimate(list_cases(binary, s["select"]), base)
         split_cases = bool(s.get("split-cases"))
         for k, p in enumerate(partition(items, n, base["builds"], split_cases), 1):
             if p:
-                out.append((f"{s['name']}-{k}", part_selectors(p), part_cost(p, base["builds"]), jobs))
+                out.append((f"{s['name']}-{k}", part_selectors(p), p, jobs))
     return out
 
 
-def wall_ratio(name, ss=None):
-    """The fraction of its case sum a job's wall takes: the shard's "wall-ratio" for a
-    shard that runs cases in parallel ("jobs": N), 1 for a serial one. A part name
-    (`library-3`) uses its base shard's ratio. The ratio is measured by `rebalance`
-    (its "Wall/case-sum ratios" line) and committed with the shard; `check-shards`
-    validates it."""
-    ss = ss or shards()
-    by_name = {s["name"]: s for s in ss}
-    base = name if name in by_name else name.rsplit("-", 1)[0]
-    return float(by_name.get(base, {}).get("wall-ratio", 1.0))
+_PARALLEL_GROUPS = {}
+
+
+def parallel_groups(binary):
+    """The groups that opt in to `--jobs N` (`Group.parallel`): `tests --list-parallel`
+    prints their names, one per line. Only these run cases through `Group.runJobs`; a
+    group that did not opt in runs its cases one at a time even when the shard passes
+    `--jobs` (a case may still use the count itself, and its measured seconds already
+    include that)."""
+    key = os.path.abspath(binary)
+    if key not in _PARALLEL_GROUPS:
+        try:
+            out = subprocess.run([binary, "--list-parallel"], capture_output=True,
+                                 text=True, check=True, cwd=ROOT).stdout
+        except (OSError, subprocess.CalledProcessError) as e:
+            raise ShardPlanError(
+                f"{binary} does not answer `--list-parallel` ({e}): the per-part wall "
+                f"simulation needs the groups' `Group.parallel` flags. Rebuild the test "
+                f"driver (`lake build wiz tests`)")
+        _PARALLEL_GROUPS[key] = {g for g in out.split("\n") if g}
+    return _PARALLEL_GROUPS[key]
+
+
+def simulated_wall(items, jobs, builds, parallel):
+    """The predicted job wall of a shard or part, in seconds, from `estimate`'s cases.
+
+    The driver runs the shard's groups one after another, with a barrier between them
+    (`Tests/Main.lean:375-378`): a group's cases finish before the next group starts. A
+    group that opted in (`parallel`) and a shard that passes `--jobs N` run their cases
+    through `Group.runJobs`, an in-order pool of N child processes (`Tests/Harness.lean`):
+    cases start in index order and results are collected in start order, so case i starts
+    when case i-N is collected -- slot i % N, not "whichever slot is free first" (a long
+    case at the head holds the next start). The pool's wall is its last slot. A serial
+    group is the sum of its cases. The programs the part builds (`uses`) do not overlap
+    the case that pays them, so their seconds are added once, unscaled: a build is not
+    parallelised and must not be discounted by `PARALLEL_CONTENTION`."""
+    by_group = {}
+    for g, i, n, s, uses in items:
+        by_group.setdefault(g, []).append(s)
+    serial = pool = 0.0
+    for g, secs in by_group.items():
+        if jobs and jobs > 1 and g in parallel and len(secs) > 1:
+            slots = [0.0] * jobs
+            for k, s in enumerate(secs):
+                slots[k % jobs] += s
+            pool += max(slots)
+        else:
+            serial += sum(secs)
+    used = {r for *_, u in items for r in u}
+    return serial + PARALLEL_CONTENTION * pool + sum(builds.get(r, 0.0) for r in used)
 
 
 def predicted_costs(binary, base=None):
-    """{job name: predicted job wall seconds} for every job of the full matrix: a split
-    part's case sum plus the programs it builds (its `expanded` estimate), times its
-    shard's `wall_ratio`; a non-split shard's selected cases and builds the same way.
-    None when a shard selects no case (`matrix` sorts it last). This is the model the
-    shard budget guards and the cost `matrix` orders by."""
+    """{job name: predicted job wall seconds} for every job of the full matrix, from
+    `simulated_wall` over the shard's cases and the programs it builds. None when a
+    shard selects no case (`matrix` sorts it last). This is the model the shard budget
+    guards and the cost `matrix` orders by."""
     base = base or baseline()
-    cases = list_cases(binary, [])
+    parallel = parallel_groups(binary)
     out = {}
-    for name, sel, est, _ in expanded(binary, base):
-        if est is None:
-            sel_cases = [(g, i, n) for g, i, n in cases if any(picks(g, i, s) for s in sel)]
-            est = part_cost(estimate(sel_cases, base), base["builds"]) if sel_cases else None
-        out[name] = est * wall_ratio(name) if est is not None else None
+    for name, sel, items, jobs in expanded(binary, base):
+        out[name] = simulated_wall(items, jobs, base["builds"], parallel) if items else None
     return out
-
-
-def picks(group, index, sel):
-    """Does the selector `sel` pick case `index` of `group` (as `list_cases` would)?"""
-    if not sel.startswith("="):
-        return group.startswith(sel)
-    name, has, ixs = sel[1:].partition("#")
-    return group == name and (not has or index in {int(i) for i in ixs.split(",") if i})
 
 
 def matrix_entries(binary, only=None):
@@ -453,18 +527,14 @@ def matrix_entries(binary, only=None):
     def wanted(n):
         return only is None or n in only or (n.rsplit("-", 1)[0] in split and n.rsplit("-", 1)[0] in only)
     base = baseline()
-    cases = list_cases(binary, [])
-    def cost(name, sel, est):
-        """Predicted job wall seconds: a split part's own estimate (which includes the
-        programs it builds), else the shard's cases from the baseline plus those builds,
-        times the shard's wall ratio (`"jobs"` overlaps cases). `None` when the shard
+    parallel = parallel_groups(binary)
+    def cost(name, items, jobs):
+        """Predicted job wall seconds from `simulated_wall` (serial groups summed, the
+        parallel groups' in-order `--jobs` pool, builds unscaled). `None` when the shard
         selects no case at all (`check-shards` reports that): it goes last."""
-        if est is None:
-            sel_cases = [(g, i, n) for g, i, n in cases if any(picks(g, i, s) for s in sel)]
-            est = part_cost(estimate(sel_cases, base), base["builds"]) if sel_cases else None
-        return est * wall_ratio(name) if est is not None else None
-    rows = [(n, sel, jobs, cost(n, sel, est))
-            for n, sel, est, jobs in expanded(binary, base) if wanted(n)]
+        return simulated_wall(items, jobs, base["builds"], parallel) if items else None
+    rows = [(n, sel, jobs, cost(n, items, jobs))
+            for n, sel, items, jobs in expanded(binary, base) if wanted(n)]
     # GitHub starts a matrix in its listed order and the 20-concurrent-job cap leaves the
     # late entries waiting (`test (prop)` started 16 minutes after the wave did), so the
     # longest shards come first: the expensive work is in the first wave, not the tail.
@@ -504,21 +574,49 @@ def budget_report(costs):
     return 1 if over else 0
 
 
-def plan(binary):
+def plan(binary, as_json=False):
     base = baseline()
-    for name, sel, est, _ in expanded(binary, base):
-        if est is None:
+    parallel = parallel_groups(binary)
+    rows = []
+    costs = {}
+    for name, sel, items, jobs in expanded(binary, base):
+        wall = simulated_wall(items, jobs, base["builds"], parallel) if items else None
+        costs[name] = wall
+        case_sum = sum(it[3] for it in items)
+        used = sorted({r for *_, u in items for r in u})
+        builds = sum(base["builds"].get(r, 0.0) for r in used)
+        rows.append({"name": name, "cases": len(items), "case_sum_s": round(case_sum, 1),
+                     "builds_s": round(builds, 1), "jobs": jobs, "builds": used,
+                     "predicted_wall_s": None if wall is None else round(wall, 1)})
+        if as_json or wall is None:
             continue
-        cases = list_cases(binary, sel)
-        uses = sorted({r for *_, u in estimate(cases, base) for r in u})
-        ratio = wall_ratio(name)
-        estimate_text = (f"~{est:.0f} s estimated" if ratio == 1.0 else
-                         f"~{est:.0f} s case sum, ~{est * ratio:.0f} s predicted wall")
-        print(f"{name}: {len(cases)} cases, {estimate_text}"
-              + (f" (builds {', '.join(uses)})" if uses else ""))
-        for g, i, n in cases:
+        if jobs and jobs > 1:
+            text = (f"~{wall:.0f} s predicted wall (~{case_sum:.0f} s cases + "
+                    f"{builds:.0f} s builds, --jobs {jobs})")
+        else:
+            text = f"~{wall:.0f} s estimated (~{case_sum:.0f} s cases + {builds:.0f} s builds)"
+        print(f"{name}: {len(items)} cases, {text}"
+              + (f" (builds {', '.join(used)})" if used else ""))
+        for g, i, n, s, uses in items:
             print(f"    {g} #{i} {n}")
-    return budget_report(predicted_costs(binary, base))
+    if as_json:
+        timed = {n: t for n, t in costs.items() if t is not None}
+        top = max(timed.items(), key=lambda kv: (kv[1], kv[0])) if timed else None
+        cal = [{"run": run, "shard": shard, "measured_min": m, "simulated_min": p,
+                "residual_pct": round((p - m) / m * 100, 1), "censored": censored}
+               for run, walls in CALIBRATION.items()
+               for shard, (m, p, censored) in walls.items()]
+        print(json.dumps({
+            "shards": rows,
+            "longest": None if top is None else {
+                "name": top[0], "predicted_wall_s": round(top[1], 1),
+                "shard_budget_s": SHARD_BUDGET_S, "job_timeout_s": JOB_TIMEOUT_S},
+            "over_budget": sorted(n for n, t in timed.items() if t > SHARD_BUDGET_S),
+            "parallel_contention": PARALLEL_CONTENTION,
+            "calibration": cal,
+        }, ensure_ascii=False))
+        return 1 if any(t > SHARD_BUDGET_S for t in timed.values()) else 0
+    return budget_report(costs)
 
 
 def check_shards(binary):
@@ -545,8 +643,11 @@ def check_shards(binary):
             errors.append(f"shard {s['name']!r}: no selectors (an empty selector list runs "
                           f"every case, so it is never what was meant)")
         ratio = s.get("wall-ratio")
-        if ratio is not None and not (isinstance(ratio, (int, float)) and 0 < ratio <= 1):
-            errors.append(f"shard {s['name']!r}: wall-ratio {ratio!r} is not in (0, 1]")
+        if ratio is not None:
+            errors.append(f"shard {s['name']!r}: wall-ratio {ratio!r} is obsolete: "
+                          f"`plan`/`matrix` simulate each part (`simulated_wall`: the "
+                          f"serial groups summed, the parallel groups' in-order `--jobs` "
+                          f"pool, builds unscaled), so remove the field")
         for sel in s["select"]:
             picked = [g for g in groups if selects(g, sel)]
             if not picked:
@@ -563,8 +664,8 @@ def check_shards(binary):
         errors.append(str(e))
         parts = []
     runs = {(g, i): [] for g, i, _ in list_cases(binary, []) if g not in excl}
-    for name, sel, _, _ in parts:
-        for g, i, _ in set(list_cases(binary, sel)):  # a case selected twice within a shard still runs once
+    for name, sel, items, _ in parts:
+        for g, i in {(g, i) for g, i, *_ in items}:  # a case selected twice within a shard still runs once
             runs[(g, i)].append(name)
     for g in groups:
         if g in excl:
@@ -616,10 +717,11 @@ def check_shards(binary):
             if new:
                 warn(f"{len(new)} cases of the split shard {s['name']!r} are unbalanced: not in "
                      f".github/test-timings.json (estimated at their group's median)", "Shard balance")
-    # the tail guard: the longest predicted job wall (case sum times the shard's
-    # wall-ratio) must stay under SHARD_BUDGET_S. A shard over it is an error, not a
-    # warning: the job timeout would cancel it with a partial log, which hides the case
-    # that hung (`balance` cannot see a cancelled job).
+    # the tail guard: the longest predicted job wall (`simulated_wall`: serial groups
+    # summed, the parallel groups' in-order `--jobs` pool, builds unscaled) must stay
+    # under SHARD_BUDGET_S. A shard over it is an error, not a warning: the job timeout
+    # would cancel it with a partial log, which hides the case that hung (`balance`
+    # cannot see a cancelled job).
     costs = predicted_costs(binary, base)
     timed = {n: t for n, t in costs.items() if t is not None}
     if not timed:
@@ -646,7 +748,8 @@ def check_shards(binary):
 
 FAKE_DRIVER = r'''#!/usr/bin/env python3
 """A stand-in for the test driver (`check-shards --self-test`): answers --list,
---list-shards and --list-cases from LISTING (group, index, name, shard hint)."""
+--list-shards, --list-parallel and --list-cases from LISTING (group, index, name,
+shard hint, parallel)."""
 import json, sys
 LISTING = json.loads(%r)
 def sel(group, s):
@@ -656,14 +759,16 @@ def picks(g, i, s):
         return False
     return "#" not in s or i in [int(x) for x in s.split("#", 1)[1].split(",")]
 a = sys.argv[1:]
-groups = list(dict.fromkeys(g for g, _, _, _ in LISTING))
+groups = list(dict.fromkeys(g for g, *_ in LISTING))
 if a == ["--list"]:
     print("\n".join(groups))
 elif a == ["--list-shards"]:
-    hint = {g: h for g, _, _, h in LISTING}
+    hint = {g: h for g, _, _, h, _ in LISTING}
     print("\n".join(f"{g}\t{hint[g]}" for g in groups))
+elif a == ["--list-parallel"]:
+    print("\n".join(g for g, _, _, _, par in LISTING if par))
 elif a[:1] == ["--list-cases"]:
-    for g, i, n, _ in LISTING:
+    for g, i, n, _, _ in LISTING:
         if not a[1:] or any(picks(g, i, s) for s in a[1:]):
             print(f"{g}\t{i}\t{n}")
 else:
@@ -673,7 +778,7 @@ else:
 
 def fake_driver(directory, listing):
     """Write a stand-in test driver answering from LISTING [(group, index, name, shard
-    hint)] (see FAKE_DRIVER) into DIRECTORY; its path."""
+    hint, parallel)] (see FAKE_DRIVER) into DIRECTORY; its path."""
     path = os.path.join(directory, "tests")
     with open(path, "w", encoding="utf-8") as f:
         f.write(FAKE_DRIVER % json.dumps(listing))
@@ -686,14 +791,16 @@ def check_shards_self_test():
     layout (with a split shard and an explicitly excluded group) passes; a dropped case,
     a case in two shards, a selector that selects nothing, a group no shard selects (the
     removed default fallback), a stale exclusion, an exclusion for a missing group, an
-    exclusion without a reason, and an allow-list entry no case matches fail. Exits 1 if
-    an expectation is wrong."""
+    exclusion without a reason, an obsolete wall-ratio and an allow-list entry no case
+    matches fail. Also checks `simulated_wall` on a synthetic part whose in-order
+    `--jobs 2` pool is not the mean (its first, long case holds the next start). Exits 1
+    if an expectation is wrong."""
     import contextlib, io, tempfile
     global SHARDS, TIMINGS, EXCLUSIONS, SKIPS
-    listing = ([("alpha", i, f"a{i}", "") for i in range(5)]
-               + [("beta", i, f"b{i}", "") for i in range(7)]
-               + [("gamma", i, f"c{i}", "") for i in range(3)]
-               + [("delta", 0, "d0", "solo")])
+    listing = ([("alpha", i, f"a{i}", "", False) for i in range(5)]
+               + [("beta", i, f"b{i}", "", True) for i in range(7)]
+               + [("gamma", i, f"c{i}", "", False) for i in range(3)]
+               + [("delta", 0, "d0", "solo", False)])
     good = [{"name": "solo", "select": ["=delta"]},
             {"name": "big", "split": 3, "default": True, "select": ["=beta", "=gamma"]},
             {"name": "small", "select": ["alp"]}]
@@ -736,11 +843,11 @@ def check_shards_self_test():
         ("an allow-list entry no case matches", listing, good, empty, dead, 1,
          "matches no case"),
         ("an allow-list entry that matches a case", listing, good, empty, live, 0, None),
-        ("a wall-ratio outside (0, 1]", listing,
+        ("an obsolete wall-ratio (the simulation subsumes it)", listing,
          [{"name": "solo", "select": ["=delta"]},
           {"name": "big", "split": 3, "default": True, "select": ["=beta", "=gamma"]},
-          {"name": "small", "select": ["alp"], "wall-ratio": 0}], empty, empty, 1,
-         "wall-ratio"),
+          {"name": "small", "select": ["alp"], "wall-ratio": 0.6}], empty, empty, 1,
+         "obsolete"),
         ("an empty group listing proves nothing", [], good, empty, empty, 1, "no groups"),
     ]
     saved, wrong = (SHARDS, TIMINGS, EXCLUSIONS, SKIPS), []
@@ -792,6 +899,57 @@ def check_shards_self_test():
                 got = check_shards(binary)
             text = err.getvalue()
             name = f"a part over the {SHARD_BUDGET_S / 60:.0f}-minute budget"
+            ok = got == 1 and "shard budget" in text
+            print(f"{'ok ' if ok else 'BAD'} {name}: exit {got} (expected 1)"
+                  + ("" if ok else f"; stderr: {text.strip()}"))
+            if not ok:
+                wrong.append(name)
+        # the simulation itself: a synthetic part with known case times and `--jobs 2`.
+        # The driver collects results in order, so case i starts when case i-2 is
+        # collected: [10,1,1,1,1,1] is 10+1+1 on one slot and 1+1+1 on the other (12 s),
+        # not the mean (7.5 s) and not "least-loaded first" (10 s).
+        trials = [
+            ("in-order `--jobs 2` pool, not the mean",
+             [("p", i, f"p{i}", s, ()) for i, s in enumerate([10.0, 1, 1, 1, 1, 1])],
+             2, {"p"}, {}, 12.0),
+            ("a serial group under `--jobs 2` is summed, not pooled",
+             [("s", i, f"s{i}", s, ()) for i, s in enumerate([10.0, 1, 1, 1, 1, 1])],
+             2, {"p"}, {}, 15.0),
+            ("builds are added unscaled, not pooled",
+             [("p", i, f"p{i}", s, ("compiler",) if i == 0 else ())
+              for i, s in enumerate([10.0, 1, 1, 1, 1, 1])],
+             2, {"p"}, {"compiler": 100.0}, 112.0),
+        ]
+        for name, items, jobs, par, builds, want in trials:
+            got = simulated_wall(items, jobs, builds, par)
+            ok = abs(got - want) < 1e-9
+            print(f"{'ok ' if ok else 'BAD'} {name}: {got:g} s (expected {want:g})")
+            if not ok:
+                wrong.append(name)
+        # end to end: check-shards reads the simulation, not the case sum (sum 5196 s,
+        # old 0.6 * sum = 3118 s; the in-order pool puts 4200 + 3 * 166 on one slot)
+        with tempfile.TemporaryDirectory() as d:
+            SHARDS = os.path.join(d, "shards.json")
+            TIMINGS = os.path.join(d, "timings.json")
+            EXCLUSIONS = os.path.join(d, "exclusions.json")
+            SKIPS = os.path.join(d, "allow.json")
+            with open(SHARDS, "w") as f:
+                json.dump([{"name": "solo", "select": ["=delta", "=gamma"]},
+                           {"name": "small", "select": ["alp"]},
+                           {"name": "pool", "jobs": 2, "select": ["=beta"]}], f)
+            for path, doc in ((EXCLUSIONS, empty), (SKIPS, empty)):
+                with open(path, "w") as f:
+                    json.dump(doc, f)
+            with open(TIMINGS, "w") as f:
+                json.dump({"cases": {"beta": {
+                    f"b{i}": {"seconds": 4200.0 if i == 0 else 166.0} for i in range(7)}},
+                    "builds": {}}, f)
+            binary = fake_driver(d, listing)
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                got = check_shards(binary)
+            text = err.getvalue()
+            name = "the budget uses the in-order pool, not the case sum"
             ok = got == 1 and "shard budget" in text
             print(f"{'ok ' if ok else 'BAD'} {name}: exit {got} (expected 1)"
                   + ("" if ok else f"; stderr: {text.strip()}"))
@@ -1985,10 +2143,9 @@ def rebalance(args):
     # (below 1 when "jobs" runs cases at once). The ratio comes from the most recent run
     # that recorded the shard: the matrix's `jobs` settings have changed over time, so an
     # older run's ratio (e.g. scaling before it ran 3 at once) mispredicts today's wall.
-    # A shard with "jobs" but no split (scaling after the merge) still has a ratio: the
-    # static `plan`/`matrix` model reads it from the shard's "wall-ratio", so --write
-    # refreshes that too.
-    by_name = {s["name"]: s for s in config}
+    # A shard with "jobs" but no split (scaling after the merge) still needs the ratio
+    # for this planner: it has the run's real walls. The ratio is not written back to the
+    # shard any more; `plan`/`matrix` simulate each part (`simulated_wall`).
     ratio = {s["name"]: (ratios[s["name"]][-1][1] if ratios.get(s["name"]) else 1.0)
              for s in config if s.get("jobs") or s["name"] in split}
     cost = lambda sh, p: part_cost(p, base["builds"]) * ratio[sh]
@@ -2093,25 +2250,11 @@ def rebalance(args):
             text, k = re.subn(r'("name": "' + re.escape(sh) + r'",\s*"split": )\d+', lambda m: m.group(1) + str(n), text)
             if k != 1:
                 sys.exit(f"rebalance: cannot find the \"split\" of {sh} in {SHARDS}")
-        if write:
-            for sh, r in sorted(ratio.items()):
-                if not by_name[sh].get("jobs"):
-                    continue
-                text, k = re.subn(
-                    r'("name": "' + re.escape(sh) + r'",\s*"split": \d+,\s*"jobs": \d+,\s*)'
-                    r'"wall-ratio": [0-9.]+',
-                    lambda m: m.group(1) + f'"wall-ratio": {r:.2f}', text)
-                if k == 0:  # a shard that gains "jobs" after this field existed
-                    text, k = re.subn(
-                        r'("name": "' + re.escape(sh) + r'",\s*"split": \d+,\s*"jobs": \d+,)',
-                        lambda m: m.group(1) + f'\n    "wall-ratio": {r:.2f},', text)
-                if k != 1:
-                    sys.exit(f"rebalance: cannot find the \"jobs\" of {sh} in {SHARDS}")
         with open(SHARDS, "w", encoding="utf-8") as f:
             f.write(text)
         print()
         wrote = (os.path.relpath(TIMINGS, ROOT) + " and ") if write else ""
-        print(f"Wrote {wrote}the split counts and wall ratios of {os.path.relpath(SHARDS, ROOT)}.")
+        print(f"Wrote {wrote}the split counts of {os.path.relpath(SHARDS, ROOT)}.")
     return 0
 
 
@@ -2124,6 +2267,12 @@ def _main(args):
     if args[:1] == ["subset-key"]:
         subset_key(args[1:])
         return 0
+    if args[:1] == ["plan"]:
+        rest = args[1:]
+        as_json = rest[:1] == ["--json"]
+        if as_json:
+            rest = rest[1:]
+        return plan(rest[0] if rest else DEFAULT_BIN, as_json=as_json)
     binary = args[1] if len(args) > 1 else DEFAULT_BIN
     if args[:1] == ["matrix"]:
         matrix(binary)
@@ -2134,8 +2283,6 @@ def _main(args):
         return check_shards(binary)
     if args[:1] == ["check-skips"]:
         return check_skips(args[1:])
-    if args[:1] == ["plan"]:
-        return plan(binary)
     if args[:1] == ["summary"] and len(args) >= 2:
         return summary(args[1], args[2:])
     if args[:1] == ["balance"]:
