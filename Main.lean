@@ -920,8 +920,9 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
     if m.severity == .error then IO.eprintln s!"{path}:{m.render input}"
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
-/-- The backend names `wiz build --target` accepts. -/
-def targets : List String := ["c", "llvm", "wasm", "bpf", "js"]
+/-- The backend names `wiz build --target` accepts. The table is the single declaration
+(`Wiz.Ext.backendEntries`); this list is only the help/error spelling. -/
+def targets : List String := Wiz.Ext.backendNames
 
 /-- `wiz verify [--attest FILE] [--artifact-only] ARTIFACT`. -/
 def verifyCmd (tc : Toolchain) (attest : Option String) (args : List String) : IO UInt32 := do
@@ -946,7 +947,9 @@ def takeTarget : List String → Except String (Option String × List String)
   | [] => pure (none, [])
   | "--target" :: [] => throw "--target needs c, llvm, wasm, bpf or js"
   | "--target" :: t :: rest => do
-    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm, wasm, bpf or js)"
+    match Wiz.Ext.resolveBackend t with
+    | .error r => throw r.message
+    | .ok _ => pure ()
     let (other, rest) ← takeTarget rest
     match other with
     | some u => if u != t then throw s!"two targets: {t} and {u}" else pure (some t, rest)

@@ -183,6 +183,7 @@
       "sized",
       "universes",
       "=args",
+      "=ext",
       "=library",
       "=list-lemmas",
       "=scry-modules",
