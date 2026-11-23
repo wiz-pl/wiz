@@ -4,7 +4,9 @@ import Scry.Sarif
 import Scry.Rules
 -- The SARIF baseline identity: `partialFingerprints.scry/v1` is the semantic id, which
 -- excludes line/column/program point, so a moved finding keeps its id and a changed sink
--- or path shape does not. `baselineState` is present only with a diff baseline.
+-- or path shape does not. The run's language namespaces the id (`scry/c/…`, `scry/cs/…`),
+-- and a rule id that already names its family (`scry/memory/…`) is never nested twice.
+-- `baselineState` is present only with a diff baseline.
 def check (label : String) (ok : Bool) : EIO Unit :=
   EIO.lift (match ok with
     | .true => IO.println (label ++ ": ok")
@@ -22,29 +24,43 @@ def main : IO Unit := EIO.toIO (do
   let f1 := finding 7 pathOf;
   let f2 := finding 99 pathOf;
   check "semantic id ignores the sink point"
-    (String.eq (Scry.semanticId f1 "a.c") (Scry.semanticId f2 "a.c"));
+    (String.eq (Scry.semanticId "c" f1 "a.c") (Scry.semanticId "c" f2 "a.c"));
   check "semantic id normalizes ./"
-    (String.eq (Scry.semanticId f1 "./a.c") (Scry.semanticId f1 "a.c"));
+    (String.eq (Scry.semanticId "c" f1 "./a.c") (Scry.semanticId "c" f1 "a.c"));
   check "semantic id changes with the file"
-    (Bool.not (String.eq (Scry.semanticId f1 "a.c") (Scry.semanticId f1 "b.c")));
+    (Bool.not (String.eq (Scry.semanticId "c" f1 "a.c") (Scry.semanticId "c" f1 "b.c")));
   check "semantic id changes with the path shape"
-    (Bool.not (String.eq (Scry.semanticId f1 "a.c")
-      (Scry.semanticId (finding 7 (List.cons (Scry.PathNode.mk "main" 3 0 Scry.PathKind.flow) pathOf)) "a.c")));
+    (Bool.not (String.eq (Scry.semanticId "c" f1 "a.c")
+      (Scry.semanticId "c" (finding 7 (List.cons (Scry.PathNode.mk "main" 3 0 Scry.PathKind.flow) pathOf)) "a.c")));
   check "semantic id has the f_ prefix and 16 hex digits"
-    (Bool.and (String.startsWith (Scry.semanticId f1 "a.c") "f_")
-      (Nat.beq (String.length (Scry.semanticId f1 "a.c")) 18));
+    (Bool.and (String.startsWith (Scry.semanticId "c" f1 "a.c") "f_")
+      (Nat.beq (String.length (Scry.semanticId "c" f1 "a.c")) 18));
+  check "semantic id is language-namespaced (C# differs from C)"
+    (Bool.and (Bool.not (String.eq (Scry.semanticId "c" f1 "a.c")
+        (Scry.semanticId "cs" f1 "a.c")))
+      (String.startsWith (Scry.semanticId "cs" f1 "a.c") "f_"));
+  check "ruleNs does not nest an already-namespaced rule"
+    (Bool.and (String.eq (Scry.ruleNs "c" "scry/memory/use-after-free")
+        "scry/memory/use-after-free")
+      (String.eq (Scry.ruleNs "cs" "scry/cs/nullable-assignment")
+        "scry/cs/nullable-assignment"));
+  check "ruleNs namespaces a bare rule per language"
+    (Bool.and (String.eq (Scry.ruleNs "c" "command-injection") "scry/c/command-injection")
+      (String.eq (Scry.ruleNs "cs" "command-injection") "scry/cs/command-injection"));
   check "the boundary id is stable and b_-prefixed"
     (Bool.and (String.eq (Scry.boundaryId "scry/memory/use-after-free" "a.c" "main" "detail")
       (Scry.boundaryId "scry/memory/use-after-free" "./a.c" "main" "detail"))
       (String.startsWith (Scry.boundaryId "scry/memory/use-after-free" "a.c" "main" "detail") "b_"));
 
-  let text := Scry.renderSarifWithBaselines "scry" .nil (Scry.RulePack.mk .nil)
+  let text := Scry.renderSarifWithBaselines "c" "scry" .nil (Scry.RulePack.mk .nil)
     (List.cons (Scry.SarifFinding.mk f1 .true (.some "new")) .nil) .nil;
   check "sarif: partialFingerprints is present"
-    (String.contains text (Scry.semanticId f1 ""));
+    (String.contains text (Scry.semanticId "c" f1 ""));
+  check "sarif: the result rule id is scry/c/<rule>"
+    (String.contains text "\"ruleId\":\"scry/c/command-injection\"");
   check "sarif: baselineState new is present"
     (String.contains text "\"baselineState\":\"new\"");
-  let text2 := Scry.renderSarifWithBaselines "scry" .nil (Scry.RulePack.mk .nil)
+  let text2 := Scry.renderSarifWithBaselines "c" "scry" .nil (Scry.RulePack.mk .nil)
     (List.cons (Scry.SarifFinding.mk f1 .true (.some "unchanged")) .nil) .nil;
   check "sarif: baselineState unchanged is present"
     (String.contains text2 "\"baselineState\":\"unchanged\"")

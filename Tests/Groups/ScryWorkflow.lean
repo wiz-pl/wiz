@@ -48,10 +48,10 @@ def group : Group where
   cases := [
     { name := "identity: normalized path, rule and path shape, line hash",
       run := fun _ => evalNats (prelude ++
-        "#eval if String.eq (Scry.wfId f \"src/a.c\") (Scry.wfId f \"./src/a.c\") then 1 else 0\n" ++
-        "#eval if String.eq (Scry.wfId f \"src/a.c\") (Scry.wfId (mkFind \"format-string\") \"src/a.c\") then 0 else 1\n" ++
-        "#eval if String.eq (Scry.wfLineHash f \"  system(cmd); \") (Scry.wfLineHash f \"system(cmd);\") then 1 else 0\n" ++
-        "#eval if String.eq (Scry.wfLineHash f \"system(cmd);\") (Scry.wfLineHash f \"system(other);\") then 0 else 1\n" ++
+        "#eval if String.eq (Scry.wfId \"c\" f \"src/a.c\") (Scry.wfId \"c\" f \"./src/a.c\") then 1 else 0\n" ++
+        "#eval if String.eq (Scry.wfId \"c\" f \"src/a.c\") (Scry.wfId \"c\" (mkFind \"format-string\") \"src/a.c\") then 0 else 1\n" ++
+        "#eval if String.eq (Scry.wfLineHash \"c\" f \"  system(cmd); \") (Scry.wfLineHash \"c\" f \"system(cmd);\") then 1 else 0\n" ++
+        "#eval if String.eq (Scry.wfLineHash \"c\" f \"system(cmd);\") (Scry.wfLineHash \"c\" f \"system(other);\") then 0 else 1\n" ++
         "#eval Nat.add (Nat.mul (List.length f.path) 100) (Nat.add (if String.eq (Scry.wfFirstFunc f.path) \"main\" then 10 else 0) (if String.eq (Scry.wfLastFunc f.path) \"main\" then 1 else 0))")
         [1, 1, 1, 1, 311] },
     { name := "triage: the state machine's edges and the history",

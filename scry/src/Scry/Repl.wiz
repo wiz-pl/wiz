@@ -429,9 +429,9 @@ structure Scry.Repl.ReportUnit where
 
 def Scry.Repl.findingRecordJson (rep : Scry.TaintReport) (st : Scry.WfStore)
     (now : Nat) (f : Scry.RuleFinding) (cert : Option Scry.Certificate) : Json × Scry.WfRecord :=
-  let id := Scry.wfId f rep.file;
-  let key := Scry.wfSemanticKey f rep.file;
-  let lineHash := Scry.wfLineHash f "";
+  let id := Scry.wfId "c" f rep.file;
+  let key := Scry.wfSemanticKey "c" f rep.file;
+  let lineHash := Scry.wfLineHash "c" f "";
   let checked := Scry.certVerified cert;
   let finding := Scry.findingJson rep.origins f checked;
   let old := Scry.wfFind st id;

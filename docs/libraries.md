@@ -2220,8 +2220,9 @@ The S4 rule pack and interprocedural slice are separate modules:
 * `import Scry.Sarif` — SARIF 2.1.0 JSON with rule metadata, primary and related
   locations from an `OriginMap` (S2's `Wil.Span` supplies the entries; a finding's
   `properties.derivation` is `checked`/`unchecked`), namespaced rule ids
-  (`scry/c/<rule>`, `scry/lowering/boundary`, `scry/lowering/parse-recovery`,
-  `scry/memory/<kind>`) and `columnKind: utf16CodeUnits`;
+  (`scry/<lang>/<rule>`: `scry/c/<rule>` for the C frontend and `scry/cs/<rule>` for
+  C#; `scry/lowering/boundary`, `scry/lowering/parse-recovery`, `scry/memory/<kind>`)
+  and `columnKind: utf16CodeUnits`;
   `Scry.boundaryResultJson` emits a warning result whose
   location is the offending statement's span.
 * `import Scry.Certify` — a finding as a `Scry.Derivation` checked by `Scry.Cert`

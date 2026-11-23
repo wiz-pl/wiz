@@ -947,7 +947,7 @@ def Scry.Cs.finish (opts : Scry.Cs.Opts) (t : Scry.Cs.Target)
   match opts.sarif with
   | .some out => do
     w ← Scry.Cs.attempt (FS.writeFile out (String.append
-      (Scry.renderSarifWith "scry" analysis.origins analysis.pack
+      (Scry.renderSarifWith "cs" "scry" analysis.origins analysis.pack
         (Scry.zipFindings analysis.raw analysis.checks) .nil) "\n"));
     match w with
     | .error e => do

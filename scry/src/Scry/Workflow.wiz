@@ -59,19 +59,19 @@ def Scry.wfLastFunc (path : List Scry.PathNode) : String := Scry.lastFunc path
 
 /-- The identity inputs (alias of `Scry.semanticKey`), rendered for debugging and for
 the record. No line, column, program point or timestamp. -/
-def Scry.wfSemanticKey (f : Scry.RuleFinding) (file : String) : String :=
-  Scry.semanticKey f file
+def Scry.wfSemanticKey (lang : String) (f : Scry.RuleFinding) (file : String) : String :=
+  Scry.semanticKey lang f file
 
 /-- `f_<16 hex>`: the semantic id (alias of `Scry.semanticId`). -/
-def Scry.wfId (f : Scry.RuleFinding) (file : String) : String :=
-  Scry.semanticId f file
+def Scry.wfId (lang : String) (f : Scry.RuleFinding) (file : String) : String :=
+  Scry.semanticId lang f file
 
 /-- The GitHub-compatible line identity (alias of `Scry.lineKey`). -/
-def Scry.wfLineKey (f : Scry.RuleFinding) (lineText : String) : String :=
-  Scry.lineKey f lineText
+def Scry.wfLineKey (lang : String) (f : Scry.RuleFinding) (lineText : String) : String :=
+  Scry.lineKey lang f lineText
 
-def Scry.wfLineHash (f : Scry.RuleFinding) (lineText : String) : String :=
-  Scry.lineHash f lineText
+def Scry.wfLineHash (lang : String) (f : Scry.RuleFinding) (lineText : String) : String :=
+  Scry.lineHash lang f lineText
 
 /-- The rest of a line (up to the newline) as characters. -/
 partial def Scry.wfLineTakeGo : List Char → List Char

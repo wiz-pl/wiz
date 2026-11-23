@@ -100,7 +100,7 @@ def lineAt : Scry.LineTextAt := fun uri line =>
   | .false => .none
 
 def main : IO Unit := EIO.toIO (do
-  let text := Scry.renderSarifWith "scry" origins pack [(finding, .true)] .nil;
+  let text := Scry.renderSarifWith "c" "scry" origins pack [(finding, .true)] .nil;
   j ← parseOk "complete run" text;
   let res := resultOf j;
   let inv := invocationOf j;
@@ -108,19 +108,19 @@ def main : IO Unit := EIO.toIO (do
   -- partialFingerprints, both keys
   check "fingerprints: scry/v1 is the semantic id"
     (String.eq (jStr res ["partialFingerprints", "scry/v1"])
-      (Scry.semanticId finding "demo.c"));
+      (Scry.semanticId "c" finding "demo.c"));
   check "fingerprints: primaryLocationLineHash is present"
     (Nat.lt 0 (String.length (jStr res ["partialFingerprints", "primaryLocationLineHash"])));
   check "fingerprints: without line text the semantic id is the fallback"
     (String.eq (jStr res ["partialFingerprints", "primaryLocationLineHash"])
-      (Scry.semanticId finding "demo.c"));
+      (Scry.semanticId "c" finding "demo.c"));
 
-  let textL := Scry.renderSarifWithLines "scry" origins pack
+  let textL := Scry.renderSarifWithLines "c" "scry" origins pack
     [Scry.SarifFinding.mk finding .true .none] .nil lineAt;
   jL ← parseOk "line-text run" textL;
   check "fingerprints: with line text the value is Scry.lineHash"
     (String.eq (jStr (resultOf jL) ["partialFingerprints", "primaryLocationLineHash"])
-      (Scry.lineHash finding "  system(buf);  "));
+      (Scry.lineHash "c" finding "  system(buf);  "));
 
   -- codeFlows: the source -> sink chain
   let flows := jList res ["codeFlows"];
@@ -154,7 +154,7 @@ def main : IO Unit := EIO.toIO (do
 
   -- deliberate truncation: a real finding and no other sign of trouble
   let notes := Scry.Budget.terminationNotes (Scry.Termination.rounds 2 2);
-  let textT := Scry.renderSarifPartialWith "scry" origins pack [(finding, .true)] .nil notes;
+  let textT := Scry.renderSarifPartialWith "c" "scry" origins pack [(finding, .true)] .nil notes;
   jT ← parseOk "truncated run" textT;
   let invT := invocationOf jT;
   let resT := resultOf jT;
@@ -180,7 +180,7 @@ def main : IO Unit := EIO.toIO (do
   -- the existing CLI shape: the note arrives as an extra boundary result
   let budgetResult := Scry.boundaryResultJson "scry/budget/max-rounds" .none "main" 0
     "stopped after 2 round(s) at --max-rounds 2";
-  let textA := Scry.renderSarifWith "scry" origins pack [(finding, .true)] [budgetResult];
+  let textA := Scry.renderSarifWith "c" "scry" origins pack [(finding, .true)] [budgetResult];
   jA ← parseOk "promoted run" textA;
   let invA := invocationOf jA;
   check "run: a budget boundary result is promoted to a notification"

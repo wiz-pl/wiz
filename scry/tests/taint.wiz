@@ -152,7 +152,7 @@ def main : IO Unit := EIO.toIO (do
     (List.any (fun f => Bool.and (String.eq f.name "execl") (Nat.beq f.arg 3))
       repE1.findings);
   check "exec: no memory warnings" (Nat.beq (List.length repE1.memory) 0);
-  let sarifExec := Scry.renderSarifWith "scry" repE1.origins repE1.pack
+  let sarifExec := Scry.renderSarifWith "c" "scry" repE1.origins repE1.pack
     (Scry.zipFindings repE1.findings repE1.checks)
     (List.map (fun b => Scry.boundaryResultJson b.rule b.origin b.func b.point b.message)
       (List.append repE1.boundaries repE1.memory));
@@ -571,7 +571,7 @@ def main : IO Unit := EIO.toIO (do
       rep8.boundaries);
 
   -- SARIF 2.1.0 shape, derivation status, primary span and related spans
-  let sarifText := Scry.renderSarifWith "scry" rep1.origins rep1.pack
+  let sarifText := Scry.renderSarifWith "c" "scry" rep1.origins rep1.pack
     (Scry.zipFindings rep1.findings rep1.checks)
     (List.map (fun b => Scry.boundaryResultJson b.rule b.origin b.func b.point b.message)
       rep1.boundaries);
