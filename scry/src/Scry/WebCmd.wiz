@@ -49,6 +49,7 @@ counts a code point.
 ```
 index.html                           first paint (the SSR of Web.Source.View) + app.js
 app.js, app.css, source-static.js    the host (copied from the checkout's web/)
+source-live.js, lsp-client.js        the live host (?lsp=); source-live.js imports lsp-client.js
 wiz-source-ui.mjs                    optional (--ui): the Loom runtime
 framework/{mount,driver,runtime}.js  optional: copied when the checkout has them
 data/manifest.json                   schema, tool, file table, hashes, counts
@@ -91,7 +92,8 @@ def Scry.webUsage : String :=
   ++ "                [--assets DIR] [--ui FILE] [--source FILE]...\n"
   ++ "  writes a static source-reader bundle (index.html + data/*.json).\n"
   ++ "  --assets DIR  the checkout's web/ directory (source-app.js, source.css,\n"
-  ++ "                source-static.js, framework/); default: the first web/ found here.\n"
+  ++ "                source-static.js, source-live.js, lsp-client.js, framework/);\n"
+  ++ "                default: the first web/ found here.\n"
   ++ "  --ui FILE     copy a built wiz-source-ui.mjs into the bundle (web/build-source-ui.sh).\n"
   ++ "  --source FILE also copy FILE in verbatim, with no analysis (repeatable): a\n"
   ++ "                Wiz file read in the pane, with the live host answering hover\n"
@@ -691,7 +693,8 @@ def Scry.webRun (o : Scry.WebOpts) : EIO Nat := do
     | .some d => Scry.webCopyHostGo d out
         [("source-app.js", "app.js"), ("source.css", "app.css"),
          ("source-static.js", "source-static.js"),
-         ("source-live.js", "source-live.js")]);
+         ("source-live.js", "source-live.js"),
+         ("lsp-client.js", "lsp-client.js")]);
   frameworkCopied ← (match assets with
     | .none => EIO.pure ([] : List String)
     | .some d => Scry.webCopyFrameworkGo d out

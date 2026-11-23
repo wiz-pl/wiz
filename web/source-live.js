@@ -79,6 +79,12 @@ export async function mountLive(el, { module, bundle, endpoint, token, root, env
   const label = withoutToken(url);
   const files = new Map(bundle.files.map((f) => [f.id, f]));
   const wiz = bundle.files.filter((f) => f.language === "wiz");
+  // `files.json` is metadata only; the text is in `data/f/<id>.json` (`perFile`). The
+  // runtime's position table needs the same bytes the pane shows.
+  const textOf = (file) => {
+    const data = file && bundle.perFile && bundle.perFile[file.id];
+    return data && typeof data.source === "string" ? data.source : "";
+  };
   // The mode is the page's provenance, not the export's: the same bundle bytes are
   // mounted here, so only the copied in-memory manifest says live.
   const liveBundle = {
@@ -140,14 +146,15 @@ export async function mountLive(el, { module, bundle, endpoint, token, root, env
     let fileId = "";
     let span = { start: 0, stop: 0 };
     if (tmeta) {
-      const start = offsetOf(tmeta.text, target.range.start.line, target.range.start.character);
-      const stop = offsetOf(tmeta.text, target.range.end.line, target.range.end.character);
+      const ttext = textOf(tmeta);
+      const start = offsetOf(ttext, target.range.start.line, target.range.start.character);
+      const stop = offsetOf(ttext, target.range.end.line, target.range.end.character);
       if (Number.isFinite(start) && Number.isFinite(stop)) {
         fileId = tmeta.id;
         const lo = Math.min(start, stop);
         const hi = Math.max(start, stop);
         // A caret/zero-width location still gets one unit, so the outline is visible.
-        span = { start: lo, stop: hi > lo ? hi : Math.min(tmeta.text.length, lo + 1) };
+        span = { start: lo, stop: hi > lo ? hi : Math.min(ttext.length, lo + 1) };
       }
     }
     const row = {
@@ -166,7 +173,7 @@ export async function mountLive(el, { module, bundle, endpoint, token, root, env
     if (!at) return null;
     const meta = files.get(at.fileId);
     if (!meta || meta.language !== "wiz") return null;
-    return { at, meta };
+    return { at, meta, text: textOf(meta) };
   };
 
   // Lazy `didOpen`: the server elaborates a document (with term info) the first time it
@@ -176,7 +183,7 @@ export async function mountLive(el, { module, bundle, endpoint, token, root, env
   const ensureOpen = (meta) => {
     if (opened.has(meta.id)) return;
     opened.add(meta.id);
-    client.openDocument(fileUri(root, meta.path), meta.text, { languageId: "wiz" });
+    client.openDocument(fileUri(root, meta.path), textOf(meta), { languageId: "wiz" });
   };
 
   const liveHover = async (payload) => {
@@ -186,7 +193,7 @@ export async function mountLive(el, { module, bundle, endpoint, token, root, env
       staticAnswer("hover", payload);
       return;
     }
-    const pos = positionOf(v.meta.text, v.at.start);
+    const pos = positionOf(v.text, v.at.start);
     if (!pos) {
       staticAnswer("hover", payload);
       return;
@@ -211,7 +218,7 @@ export async function mountLive(el, { module, bundle, endpoint, token, root, env
       noAnswer("definition", v ? v.at.fileId : (parsePayload(payload) || {}).fileId);
       return;
     }
-    const pos = positionOf(v.meta.text, v.at.start);
+    const pos = positionOf(v.text, v.at.start);
     if (!pos) {
       noAnswer("definition", v.at.fileId);
       return;

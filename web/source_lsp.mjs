@@ -11,7 +11,10 @@ import { spawn } from "node:child_process";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function startWizLsp(bin, root, { timeoutMs = 20000 } = {}) {
+// The bound is the test harness's, not the server's: `bin` is often a ~140 MB sshfs
+// path on a loaded shared node (a 20 s spawn bound failed once before the banner was
+// printed). A real hang still fails the test; it just takes longer to say so.
+export async function startWizLsp(bin, root, { timeoutMs = 60000 } = {}) {
   const proc = spawn(bin, ["lsp", "--ws", "0", "--ws-insecure", "--no-stdio"], {
     cwd: root, stdio: ["ignore", "pipe", "pipe"],
   });

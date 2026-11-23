@@ -23,7 +23,7 @@
 "use strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join, normalize, resolve, sep } from "node:path";
@@ -297,6 +297,12 @@ async function pointerAt(page, marker, needle, kind) {
 const { server, url } = await serve(bundle);
 let lsp = null;
 try {
+  // The live host imports its client at run time; a bundle missing it mounts the
+  // static page and the `?lsp=` navigation below never becomes live. Name the file
+  // here so that packaging mistake is one clear failure, not a cascade.
+  ok(existsSync(join(bundle, "lsp-client.js")),
+    "the bundle carries the live host's client (lsp-client.js)");
+
   // ## 1. The SSR is the page with JavaScript off
 
   const dom = await noScriptDom(url);

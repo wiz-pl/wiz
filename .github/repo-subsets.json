@@ -36,7 +36,7 @@
         "hdl/**",
         "tower/**"
       ],
-      "sha256": "32502671e58546156981420663956a2a73b8fa4aee6530fa5480d67e651205c6"
+      "sha256": "cfa9ac0b9b4c9980f621642b7ba191b0da2c60cbd4baeaac9cf4d6564ef35c58"
     },
     "runtime": {
       "files": 11,
@@ -52,7 +52,7 @@
         "Tests/**",
         "web/**"
       ],
-      "sha256": "5f7348be2f69a54d3b944178e22949bab2b171907a27fd955131313dde73ecc4"
+      "sha256": "f92a8048cea4afe410581467a563e220ac07d13673a362e715d83b275e98fcd4"
     },
     "wizlib": {
       "files": 109,

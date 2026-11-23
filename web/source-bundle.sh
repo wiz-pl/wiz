@@ -77,7 +77,7 @@ IFS=$oldIFS
 need() {
   [ -f "$OUT/$1" ] || { echo "source-bundle: scry web wrote no $OUT/$1" >&2; exit 1; }
 }
-for f in index.html app.js app.css source-static.js source-live.js \
+for f in index.html app.js app.css source-static.js source-live.js lsp-client.js \
          framework/mount.js framework/driver.js framework/runtime.js framework/adopt.js \
          data/manifest.json data/findings.json; do
   need "$f"
