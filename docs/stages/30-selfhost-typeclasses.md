@@ -131,7 +131,22 @@ The Lean toolchain's `deriving` is a **deriver**: a Wiz function
 which asks the elaborator for the type's shape (`MacroM.getInductive`) and returns the
 commands that make the instance. This frontend has no elaboration-time evaluation of Wiz
 code and no quotations (`wishful/selfhost-deriving.md`, items 1–3), so a Wiz deriver
-cannot be *run* here. It has the host's **table** instead: `Globals.derivers` maps a
+cannot be *run* here.
+
+The table is the host's, and so is the **runner**. `Frontend.wiz` now has the host's
+`Deriver`/`MacroM` interface and its reflection view: `runDeriver` answers
+`getInductive` from `Globals.view`, an `IndView` (parameters, constructors and fields;
+the host's shape, `Elab/Reflect.lean:17`) built from the already-elaborated `IndInfo`
+with the parameter types as syntax. The deriver returns ordinary commands, which
+`elabDerivedGo` elaborates through the normal `instance`/`def` path. `Inhabited`, the
+smallest of the five, is ported onto it (it is now a `Deriver` that reads the view and
+emits one `instance`, exactly as `lib/Deriving.wiz`'s `deriveInhabited` does); the other
+four are still hardcoded behind the same dispatch and are the remaining port. Running a
+deriver *written in Wiz source* still waits on the evaluator, and a field's type and a
+constructor's result indices are not reflected yet (`.missing`/count only), which is
+enough for the derivers here but not for `Lens`/`Bundle`.
+
+It has the host's **table**: `Globals.derivers` maps a
 class name to a deriver name, `attribute [deriver C] f` records a pair, and `deriving C`
 looks `C` up and dispatches on the registered name. The five derivers `lib/Deriving.wiz`
 registers in the Lean toolchain are implemented in `Frontend.wiz` under the same names

@@ -28,7 +28,10 @@ def wasmCompile (src : String) : IO (CommandState ZeroOneMany × Term ZeroOneMan
   let (decls, ty) ← match Build.irProgram s "main" with
     | .ok r => pure r
     | .error e => throw (IO.userError e)
-  let bytes ← match Wasm.program decls (Build.isIO ty) with
+  let externs ← match Build.selectWasmExterns s decls with
+    | .ok m => pure m
+    | .error e => throw (IO.userError e)
+  let bytes ← match Wasm.program decls (Build.isIO ty) externs with
     | .ok bytes => pure bytes
     | .error e => throw (IO.userError e)
   match WasmValidate.validate bytes with
@@ -54,9 +57,9 @@ def wasmRunBytes (bytes : ByteArray) : IO String := do
 /-- Compile `main` with the Wasm backend, run it under Node with `web/wasm-host.mjs`,
 and read its printed result back with `main`'s type (as `wiz run` does for C). -/
 def wasmRun (src expected : String) : IO Unit := do
-  unless ← nodeAvailable do skip "no node"; return
+  unless ← nodeAvailable do skipMissing "no node"; return
   let host : System.FilePath := "web" / "wasm-host.mjs"
-  unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+  unless ← host.pathExists do skipMissing "no web/wasm-host.mjs"; return
   let (s, ty, bytes) ← wasmCompile src
   let out ← wasmRunBytes bytes
   match Build.parseValue out with
@@ -84,9 +87,9 @@ def wasmGolden (src : String) : IO Unit := do
 /-- A program that must fail at run time (a trap), with a fragment of the engine's
 message. -/
 def wasmTrap (src fragment : String) : IO Unit := do
-  unless ← nodeAvailable do skip "no node"; return
+  unless ← nodeAvailable do skipMissing "no node"; return
   let host : System.FilePath := "web" / "wasm-host.mjs"
-  unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+  unless ← host.pathExists do skipMissing "no web/wasm-host.mjs"; return
   let (_, _, bytes) ← wasmCompile src
   let dir ← IO.FS.createTempDir
   let file := dir / "wiz_main.wasm"
@@ -101,9 +104,9 @@ def wasmTrap (src fragment : String) : IO Unit := do
 must report it (not print a value). This is the trap path without a source-level
 construct that Wiz's type system would reject. -/
 def wasmTrapIr (fragment : String) : IO Unit := do
-  unless ← nodeAvailable do skip "no node"; return
+  unless ← nodeAvailable do skipMissing "no node"; return
   let host : System.FilePath := "web" / "wasm-host.mjs"
-  unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+  unless ← host.pathExists do skipMissing "no web/wasm-host.mjs"; return
   let decls : Array Wiz.IR.Decl := #[{ name := "wiz.entry", params := #[], body := .unreachable }]
   let bytes ← match Wasm.program decls false with
     | .ok bytes => pure bytes
@@ -147,9 +150,14 @@ def wasmError (src : String) : IO String := do
   let (decls, ty) ← match Build.irProgram s "main" with
     | .ok r => pure r
     | .error e => throw (IO.userError e)
-  match Wasm.program decls (Build.isIO ty) with
-  | .ok _ => throw (IO.userError "the Wasm backend accepted the program")
+  -- the build path's target selection first (a reachable extern with no `wasm` row is
+  -- refused before codegen), then the emitter's own checks
+  match Build.selectWasmExterns s decls with
   | .error e => pure e
+  | .ok externs =>
+    match Wasm.program decls (Build.isIO ty) externs with
+    | .ok _ => throw (IO.userError "the Wasm backend accepted the program")
+    | .error e => pure e
 
 /-- Run a compiled module under Node with `web/wasm-host.mjs` and return the printed result
 together with the module's peak linear memory in 64 KiB pages. The module's memory only
@@ -181,9 +189,9 @@ def wasmPeakBytes (bytes : ByteArray) : IO (String × Nat) := do
 pages. A bump allocator's peak is everything the program allocated; the reference
 counting allocator's is its peak live set. -/
 def wasmRunPeak (src expected : String) (maxPages : Nat) : IO Unit := do
-  unless ← nodeAvailable do skip "no node"; return
+  unless ← nodeAvailable do skipMissing "no node"; return
   let host : System.FilePath := "web" / "wasm-host.mjs"
-  unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+  unless ← host.pathExists do skipMissing "no web/wasm-host.mjs"; return
   let (s, ty, bytes) ← wasmCompile src
   let (out, pages) ← wasmPeakBytes bytes
   match Build.parseValue out with
@@ -224,9 +232,9 @@ def wasmCafRunTwice (bytes : ByteArray) : IO (String × Nat × Nat) := do
 /-- A closed definition is evaluated once and shared: the module's CAF-build counter
 is non-zero after `main`, and running `main` a second time does not build it again. -/
 def wasmCafCached (src expected : String) : IO Unit := do
-  unless ← nodeAvailable do skip "no node"; return
+  unless ← nodeAvailable do skipMissing "no node"; return
   let host : System.FilePath := "web" / "wasm-host.mjs"
-  unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+  unless ← host.pathExists do skipMissing "no web/wasm-host.mjs"; return
   let (s, ty, bytes) ← wasmCompile src
   let (out, b1, b2) ← wasmCafRunTwice bytes
   match Build.parseValue out with
@@ -242,6 +250,29 @@ def wasmDeterministic (src : String) : IO Unit := do
   let (_, _, a) ← wasmCompile src
   let (_, _, b) ← wasmCompile src
   unless a == b do throw (IO.userError "two compilations of the same source differ")
+
+/-- Elaborate a source with every library importable, with no errors. -/
+def wasmState (src : String) : IO (CommandState ZeroOneMany) := do
+  let s := runFrontend (R := ZeroOneMany) src { loader := ← libLoader, trustedModule := Tests.libModule }
+  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  pure s
+
+/-- The IR of `main` and the `wasm` implementations Build selects for it, from `impls`
+(`IR.externImpls` unless a test removes or damages a row). -/
+def wasmSelect (src : String) (impls : List IR.ExternImpl := IR.externImpls) :
+    IO (CommandState ZeroOneMany × Array IR.Decl × Except String (Std.HashMap Name String)) := do
+  let s ← wasmState src
+  let (decls, _) ← match Build.irProgram s "main" with
+    | .ok r => pure r
+    | .error e => throw (IO.userError e)
+  pure (s, decls, Build.selectWasmExterns s decls impls)
+
+/-- The extern key a declaration registered (the C ABI key the cache and the ledger see). -/
+def externKeyOf (s : CommandState ZeroOneMany) (n : Name) : IO Name := do
+  match s.builtins.find? (·.2 == n) with
+  | some (key, _) => pure key
+  | none => throw (IO.userError s!"no extern key for `{n}`")
 
 def wasmGroup : Group where
   name := "wasm"
@@ -417,15 +448,19 @@ def wasmGroup : Group where
           "stack" },
     { name := "the validator rejects damaged bytes", run := fun _ => wasmValidatorCatchesDamage },
     { name := "IO main is rejected", run := fun _ => do
+        -- a reachable `IO.println` is refused before codegen (it has no `wasm` row), and
+        -- a program that reaches no foreign function but is in IO is refused by the
+        -- emitter itself: both say why, neither emits a call
         let e ← wasmError "import IO\ndef main : IO Unit := IO.println \"hi\""
-        unless (e.splitOn "IO-less").length > 1 do throw (IO.userError e) },
+        unless (e.splitOn "no-target-implementation").length > 1 do throw (IO.userError e)
+        unless (e.splitOn "`IO.println`").length > 1 do throw (IO.userError e) },
     { name := "Bytes (a native foreign type) is rejected", run := fun _ => do
         let e ← wasmError "import IO\ndef main : Nat := Bytes.size Bytes.empty"
-        unless (e.splitOn "not supported by the Wasm backend").length > 1 do throw (IO.userError e) },
+        unless (e.splitOn "no-target-implementation").length > 1 do throw (IO.userError e) },
     { name := "the build path validates, writes and runs the module", run := fun _ => do
-        unless ← nodeAvailable do skip "no node"; return
+        unless ← nodeAvailable do skipMissing "no node"; return
         let host : System.FilePath := "web" / "wasm-host.mjs"
-        unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+        unless ← host.pathExists do skipMissing "no web/wasm-host.mjs"; return
         let s := runFrontend (R := ZeroOneMany) "import Prelude\ndef main : Nat := 6 * 7"
           { loader := ← libLoader, trustedModule := Tests.libModule }
         let dir ← IO.FS.createTempDir
@@ -444,8 +479,8 @@ def wasmGroup : Group where
         -- an installed toolchain has `share/wiz/web/wasm-host.mjs` beside `share/wiz/lib`
         let host ← Build.wasmHostPath
         check (host.toString.endsWith "web/wasm-host.mjs") s!"unexpected host path: {host}"
-        unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
-        unless ← nodeAvailable do skip "no node"; return
+        unless ← host.pathExists do skipMissing "no web/wasm-host.mjs"; return
+        unless ← nodeAvailable do skipMissing "no node"; return
         let tc ← toolchain
         let dir ← IO.FS.createTempDir
         try
@@ -472,7 +507,114 @@ def wasmGroup : Group where
           unless (e.splitOn "not supported").length > 1 do throw (IO.userError e) },
     { name := "an unknown foreign function is reported, not called", run := fun _ => do
         let e ← wasmError ("import Std\ndef main : Nat := Str.size (Str.ofString \"abc\")")
-        unless (e.splitOn "not supported by the Wasm backend").length > 1 do throw (IO.userError e) }
+        unless (e.splitOn "no-target-implementation").length > 1 do throw (IO.userError e) },
+    { name := "the five Array externs are selected from the wasm registry, not a backend table", run := fun _ => do
+        -- (targets, slice 1) the declarations are lib/Std.wiz's; the implementations are
+        -- `wasm` rows in `IR.externImpls`, keyed by the declaration's Wiz name. The five
+        -- extern keys (what C/LLVM and the module cache already saw) are unchanged, and
+        -- no row is registered as a builtin: this is additive to the cache's effect.
+        let src := "import Std\ndef main : Nat := " ++
+          "Array.size (Array.set (Array.push (Array.push Array.empty 1) 2) 0 3) + " ++
+          "Array.getD (Array.push Array.empty 4) 0 0"
+        let (s, _, sel) ← wasmSelect src
+        let externs ← match sel with
+          | .ok m => pure m
+          | .error e => throw (IO.userError e)
+        let rows := [("Array.empty", "wiz_array_empty", "extern:wiz_array_empty:e:w:pure::"),
+          ("Array.push", "wiz_array_push", "extern:wiz_array_push:eww:w:pure::"),
+          ("Array.size", "wiz_array_size", "extern:wiz_array_size:ew:n:pure::"),
+          ("Array.getD", "wiz_array_get", "extern:wiz_array_get:ewnw:w:pure::"),
+          ("Array.set", "wiz_array_set", "extern:wiz_array_set:ewnw:w:pure::")]
+        for (n, symbol, key) in rows do
+          let got ← externKeyOf s n
+          checkEq key got
+          match externs.get? key with
+          | some got => checkEq symbol got
+          | none => throw (IO.userError s!"`{n}` was not selected for wasm")
+          let some row := IR.externImpl? .wasm n | throw (IO.userError s!"`{n}` has no wasm row")
+          checkEq symbol row.symbol
+          checkEq s!"wasm:{n}" row.key
+          check (IR.externImpl? .c n).isNone s!"`{n}` has a c row; c is implicit in extern"
+        check (s.builtins.all (fun (k, _) => !k.startsWith "wasm:")) "a wasm row entered builtins" },
+    { name := "no wasm row is a positioned refusal, not a wiz_unknown_prim call", run := fun _ => do
+        -- `Bytes.empty` is a library extern with only the C implementation; the build
+        -- must refuse before codegen, at its declaration, and name the implementations
+        let (_, _, sel) ← wasmSelect "import IO\ndef main : Bytes := Bytes.empty"
+        match sel with
+        | .ok _ => throw (IO.userError "an extern with no wasm implementation was selected")
+        | .error e =>
+          check ((e.splitOn "lib/IO.wiz:251:1").length > 1) e
+          check ((e.splitOn "no-target-implementation").length > 1) e
+          check ((e.splitOn "`Bytes.empty`").length > 1) e
+          check ((e.splitOn "implemented by: c").length > 1) e
+          check ((e.splitOn "wiz_unknown_prim").length == 1) e },
+    { name := "the build path refuses an unimplemented extern before codegen", run := fun _ => do
+        -- `wiz build --target wasm` goes through `Build.build`, which selects the rows
+        -- before it calls the emitter: the error is positioned, not a codegen message
+        let s ← wasmState "import IO\ndef main : Bytes := Bytes.empty"
+        let dir ← IO.FS.createTempDir
+        match ← Build.build ({} : Toolchain) s "main" (dir / "m.wasm") false false false 0 true with
+        | .ok _ => throw (IO.userError "the build accepted a program with no wasm implementation")
+        | .error e =>
+          check ((e.splitOn "lib/IO.wiz:251:1").length > 1) e
+          check ((e.splitOn "no-target-implementation").length > 1) e },
+    { name := "dropping the wasm row is a positioned refusal at lib/Std.wiz", run := fun _ => do
+        -- the row, not the C name, is what admits the target: remove Array.push's row and
+        -- the same program is refused at the declaration
+        let (_, _, sel) ← wasmSelect "import Std\ndef main : Nat := Array.size (Array.push Array.empty 1)"
+          (IR.externImpls.filter (·.decl != "Array.push"))
+        match sel with
+        | .ok _ => throw (IO.userError "Array.push was selected without a wasm row")
+        | .error e =>
+          check ((e.splitOn "lib/Std.wiz:37:1").length > 1) e
+          check ((e.splitOn "no-target-implementation").length > 1) e
+          check ((e.splitOn "`Array.push`").length > 1) e },
+    { name := "a wasm row whose symbol is not a runtime function fails as a codegen error", run := fun _ => do
+        -- anti-vacuity: the row is read, and its symbol is checked against the runtime
+        -- table (a bogus symbol must not become index 0 or a silent `unreachable`)
+        let src := "import Std\ndef main : Nat := Array.size (Array.push Array.empty 1)"
+        let (s, decls, _) ← wasmSelect src
+        let impls := IR.externImpls.map fun i =>
+          if i.decl == "Array.push" then { i with symbol := "wiz_no_such_runtime_fn" } else i
+        let externs ← match Build.selectWasmExterns s decls impls with
+          | .ok m => pure m
+          | .error e => throw (IO.userError e)
+        match Wasm.program decls false externs with
+        | .ok _ => throw (IO.userError "a bogus wasm symbol produced a module")
+        | .error e =>
+          check ((e.splitOn "wiz_no_such_runtime_fn").length > 1) e
+          check ((e.splitOn "not one of the backend's runtime functions").length > 1) e },
+    { name := "the implementation row is target-keyed and the module key is shared across targets", run := fun _ => do
+        -- (targets, note §6.2) elaboration is target-independent: the fast module key is
+        -- the same for two target namespaces, while the strong key/namespace carries the
+        -- target. The row itself is keyed `wasm:Array.push`, so a c build cannot select it.
+        let src := "import Std\ndef main : Nat := Array.getD (Array.push Array.empty 7) 0 0"
+        let (s, _, sel) ← wasmSelect src
+        match sel with
+        | .ok _ => pure ()
+        | .error e => throw (IO.userError e)
+        check (s.builtins.all (fun (k, _) => !k.startsWith "wasm:")) "a wasm row is a builtin"
+        let loader ← libLoader
+        let ms : Name → Option String := fun m => if m == "M" then some src else loader m
+        let headers : String → Option String := fun _ => none
+        let kC := ((Cache.moduleKeysAll ms headers 0 "" "target-c" ["M"]).get? "M").getD {}
+        let kW := ((Cache.moduleKeysAll ms headers 0 "" "target-wasm" ["M"]).get? "M").getD {}
+        check (kC.fast == kW.fast) "the module's fast key changed with the target (it must be one module)"
+        check (kC.strong != kW.strong) "the target is not in the module's strong key"
+        checkEq "target-c" kC.target
+        checkEq "target-wasm" kW.target
+        match IR.externImpl? .wasm "Array.push" with
+        | some row => checkEq "wasm:Array.push" row.key
+        | none => throw (IO.userError "Array.push has no wasm row")
+        -- a cache round-trip: the first elaboration records the module, the second is
+        -- served from it. The five declaration keys asserted above are what the entry
+        -- records, so the `wasm` rows added no cache input and no invalidation.
+        let init : CommandState ZeroOneMany :=
+          { loader := loader, trustedModule := Tests.libModule }
+        let dir ← IO.FS.createTempDir
+        let (_, h1) ← Cache.elaborateCached (some dir) [] src init 0
+        let (_, h2) ← Cache.elaborateCached (some dir) [] src init 0
+        check (h1 < h2) s!"the second elaboration was not a cache hit ({h1} vs {h2})" }
   ]
 
 builtin_initialize registerGroup wasmGroup

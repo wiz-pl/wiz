@@ -70,6 +70,16 @@ inductive AStmt where
   | assign (x : Nat) (e : AExpr)
   | assume (c : ACond)
   | store (arr : Nat) (idx : AExpr) (len : Nat)
+  /-- A dereference of `v` that the IR does not spell as a load or a store: a C#
+  receiver (a member access, an instance call, an element access, an unboxing). The
+  frontend that knows which register is a receiver supplies these; the alarm is the
+  same nullness alarm a load's base gets. -/
+  | check (v : Nat)
+  /-- An assignment to a variable the source's type annotation declares non-null. It
+  transfers like `assign`, and alarms (a separate class) when the assigned value may be
+  null: the C# CS8600 shape ("non-null-annotated variable assigned a maybe-null
+  value"). -/
+  | checkAssign (x : Nat) (e : AExpr)
   | skip
   deriving BEq, Repr
 
@@ -234,6 +244,8 @@ def AStmt.transfer (m : AiMach) (env : AiEnv) : AStmt → AiEnv
   | .assign x e => AiEnv.set x (AExpr.eval m env e) env
   | .assume c => ACond.refine m env c
   | .store _ _ _ => env
+  | .check _ => env
+  | .checkAssign x e => AiEnv.set x (AExpr.eval m env e) env
   | .skip => env
 
 /-- One CFG edge. A guard is the condition under which control takes the edge; `none`

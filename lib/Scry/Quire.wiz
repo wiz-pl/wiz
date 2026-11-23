@@ -94,6 +94,8 @@ def QDirCap : Nat := 1016
 def QIndexSlots : Nat := 1016
 /-- Facts in one index page: `(4096 - 32) / 24`. -/
 def QFactsPerPage : Nat := 169
+/-- Records in one leaf page: `(4096 - 32) / 32` (`Store.recordAt`'s slot size). -/
+def QLeafRecsPerPage : Nat := 127
 /-- The root level this writer maintains (two directory levels). -/
 def QRootDepth : Nat := 1
 
@@ -189,12 +191,13 @@ partial def QDirReadFrom (m : Map) (base : Nat) : Nat → Nat → List Nat
   | .zero, _ => []
   | .succ k, i => List.cons (QPage.entry m base i) (QDirReadFrom m base k (Nat.succ i))
 
-/-- The entries of a u32-array page (directory, or index root) padded to 1016. -/
+/-- The entries of a u32-array page (directory, or index root) padded to 1016. The
+header's `n` is capped first: it is disk input, and the reads below are unchecked. -/
 def QDirRead (m : Map) (page : Nat) : List Nat :=
   match QBase m page with
   | .none => QZeros QDirCap
   | .some base =>
-    let n := QPage.n m base;
+    let n := Store.capSlots (QPage.n m base) QDirCap;
     List.append (QDirReadFrom m base n 0) (QZeros (Nat.sub QDirCap n))
 
 /-- `n`th element, defaulting. -/
@@ -223,11 +226,15 @@ partial def QDirLookup (m : Map) (page : Nat) (level : Nat) (chunk : Nat) : Nat 
       let digit := Nat.mod (Nat.div chunk div) QDirCap;
       QDirLookup m (QPage.entry m base digit) l (Nat.mod chunk div)
 
-/-- The root's level (0 for an empty root). -/
+/-- The root's level (`QRootDepth` for an empty root), capped at the `QRootDepth` this
+format writes. The header's `flags` is disk input: without the cap a corrupt level would
+make the directory walk recurse that deep and compute `1016^level` in `QPow`. The writer
+only ever publishes a level-0 or level-`QRootDepth` root, so the cap is exact for a real
+store and bounds a corrupt one. -/
 def QRootLevel (m : Map) (root : Nat) : Nat :=
   match QBase m root with
   | .none => QRootDepth
-  | .some base => QPage.level m base
+  | .some base => Store.capSlots (QPage.level m base) QRootDepth
 
 /-- The leaf page for a node id. -/
 def QLeafOf (m : Map) (root : U64) (id : U64) : Nat :=
@@ -243,20 +250,22 @@ partial def QLeafRecsAt (m : Map) (base : Nat) (i : Nat) : Nat → List Rec
         r.version)
       (QLeafRecsAt m base (Nat.succ i) k)
 
-/-- The records of a leaf page. -/
+/-- The records of a leaf page (`n` capped to the slots that fit in the page). -/
 def QLeafRecs (m : Map) (page : Nat) : List Rec :=
   match QBase m page with
   | .none => []
-  | .some base => QLeafRecsAt m base 0 (QPage.n m base)
+  | .some base => QLeafRecsAt m base 0 (Store.capSlots (QPage.n m base) QLeafRecsPerPage)
 
 /-- The `(chunk, leaf)` pairs under a directory (level 0: leaves; level 1: a child
-directory per entry). Used by compaction and by the test's record walk. -/
+directory per entry). Used by compaction and by the test's record walk. Each page's `n`
+is capped to `QDirCap`, and `level` strictly decreases, so a corrupt page count or a
+page link back to an ancestor cannot turn the walk into an unbounded one. -/
 mutual
 partial def QWalkDir (m : Map) (page : Nat) (level : Nat) (base : Nat) : List (Nat × Nat) :=
   match QBase m page with
   | .none => []
   | .some b =>
-    let n := QPage.n m b;
+    let n := Store.capSlots (QPage.n m b) QDirCap;
     match level with
     | 0 => QWalkLevel0 m b n base 0
     | .succ l => QWalkLevelN m b n l base 0
@@ -305,7 +314,7 @@ partial def QFindRec (m : Map) (base : Nat) : Nat → Nat → U64 → Option Rec
 def QReadRec (m : Map) (root : U64) (id : U64) : Option Rec :=
   match QBase m (QLeafOf m root id) with
   | .none => .none
-  | .some base => match QPage.n m base with
+  | .some base => match Store.capSlots (QPage.n m base) QLeafRecsPerPage with
     | 0 => .none
     | n => QFindRec m base n 0 id
 
@@ -619,7 +628,8 @@ partial def QFactPage (m : Map) (base : Nat) : Nat → Nat → Nat → List QFac
     List.cons (QFact.mk ord value node (Nat.beq add.toNat 1))
       (QFactPage m base k (Nat.succ i) ord)
 
-/-- The facts of one chain, newest first, and the number of pages read. -/
+/-- The facts of one chain, newest first, and the number of pages read. `n` is capped to
+the facts that fit in a page before `QFactPage`'s unchecked loads. -/
 partial def QReadFactsGo (m : Map) (page : Nat) (fuel : Nat) (acc : List QFact)
     (ord : Nat) : List QFact × Nat :=
   match fuel with
@@ -628,7 +638,8 @@ partial def QReadFactsGo (m : Map) (page : Nat) (fuel : Nat) (acc : List QFact)
     match QBase m page with
     | .none => (acc, 0)
     | .some base =>
-      let facts := QFactPage m base (QPage.n m base) 0 ord;
+      let facts := QFactPage m base
+        (Store.capSlots (QPage.n m base) QFactsPerPage) 0 ord;
       let (rest, pages) := QReadFactsGo m (QPage.right m base) f
         (List.append acc facts) ord;
       (rest, Nat.succ pages)

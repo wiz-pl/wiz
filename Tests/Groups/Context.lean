@@ -128,6 +128,35 @@ def deepTest : IO Unit := do
   Tests.Elab.ok (prelude ++ deepLinear 64)
   Tests.Elab.ok (prelude ++ shadow)
 
+/-- A deep context's *usage vectors*, observed at a real 64-binder `Ctx` (not in
+`usageTest`'s hand-built lists): a term that uses nothing returns `Usage.zeros 64 = []`,
+and the innermost variable returns `[1]` — a length of 1, not one entry per binder. Both
+counts fail if the sparse representation is reverted to dense vectors, which is the
+property the module header claims and which `deepTest` alone cannot see. The variable 32
+binders out must keep its 32 interior zeros (de Bruijn order stays right). -/
+def deepUsageTest : IO Unit := do
+  let mut c : Ctx ZeroOneMany := { globals := {} }
+  for _ in [0:64] do c := c.bind "x" (QPoly.const 0) (.sort 0)
+  check (c.lvl == 64) s!"the deep context has {c.lvl} binders, expected 64"
+  -- a term that uses no variable: the empty vector, not 64 zeros
+  match infer c (.sort 0) with
+  | .ok (_, u) =>
+    check u.isEmpty s!"the usage of an unused term at 64 binders has length {u.length}, expected 0 (sparse)"
+  | .error e => throw (IO.userError s!"infer (.sort 0) failed: {e}")
+  -- the innermost variable: one entry
+  match infer c (.var 0) with
+  | .ok (_, u) => do
+    check (u.length == 1) s!"the innermost variable's usage has {u.length} entries at 64 binders, expected 1 (sparse)"
+    check (Usage.getD u 0 == QPoly.const 1) "the innermost variable is not used once"
+  | .error e => throw (IO.userError s!"infer (.var 0) failed: {e}")
+  -- a variable 32 binders out: 32 interior zeros, then its 1
+  match infer c (.var 32) with
+  | .ok (_, u) => do
+    check (u.length == 33) s!"a variable 32 out has {u.length} entries, expected 33"
+    check (Usage.getD u 32 == QPoly.const 1) "the variable 32 out is not used once"
+    check (Usage.getD u 31 == []) "the entry before a used variable was dropped (indices shifted)"
+  | .error e => throw (IO.userError s!"infer (.var 32) failed: {e}")
+
 def deepRejectTest : IO Unit := do
   Tests.Elab.fails (prelude ++ dropLin) "quantity"
 
@@ -142,6 +171,8 @@ def group : Group where
       run := fun _ => ctxTest },
     { name := "a deep context checks (innermost used, outermost used, linear outermost)",
       run := fun _ => deepTest },
+    { name := "a deep context's usage is sparse (0 at 64 binders, 1 at the innermost use)",
+      run := fun _ => deepUsageTest },
     { name := "a deep context still rejects a dropped linear variable",
       run := fun _ => deepRejectTest }]
 

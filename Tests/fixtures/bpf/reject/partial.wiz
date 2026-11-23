@@ -1,8 +1,0 @@
--- [UNRUN] P0 reject fixture: partial has a witness, not a bound the verifier can use.
-import Bpf
-
-partial def spin (ctx : XdpContext) : XdpAction := spin ctx
-
-bpf_program bad (section := "xdp", type := .xdp, license := "GPL")
-    : XdpContext -> BpfM XdpAction
-  | ctx => BpfM.pure (spin ctx)

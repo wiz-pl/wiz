@@ -1,0 +1,16 @@
+-- The packed wizc's behavioural gate (scripts/check-wizc-release.sh, R1): a program
+-- whose answer is pinned in accept.out. No `import` line: the release's one-shot wizc
+-- has the Prelude built in (docs/bootstrap-chain.md, "Terms"), and the chain's own
+-- input, self.wiz, is assembled the same way.
+partial def count (n : Nat) (acc : Nat) : Nat := match n with
+  | 0 => acc
+  | .succ k => count k (acc + n)
+
+def sumL : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => x + sumL xs
+
+def main : IO Unit := do
+  IO.println (Nat.toString (count 100 0));
+  IO.println (Nat.toString (sumL (List.cons 1 (List.cons 2 (List.cons 3 .nil)))));
+  IO.println (Nat.toString (Nat.mul 4096 268435456))

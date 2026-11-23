@@ -29,6 +29,9 @@ What stays in this directory:
 * `QuireTest.wiz`, `DurableTest.wiz`, `CompactTest.wiz`, `RegistryTest.wiz`,
   `MultiprocTest.wiz`, `MmapTest.wiz` — the runtime tests, now importing the `Scry.Quire*`
   modules;
+* `QuireFindingsTest.wiz` — the project findings index without the project driver: both
+  backends round-trip the same rows, the severity index, duplicate-id collapse, and the
+  corrupt/truncated cases (the `=scry-project` group covers the real driver in CI);
 * `Cursor.wiz`, `StorageCursor.wiz`, `CursorLoop.wiz`, `CursorRecursive.wiz`,
   `CursorReject.wiz`, `Tests.wiz`, `CompactPure.wiz` — the draft-only pure cursor and its
   `#eval` cases;

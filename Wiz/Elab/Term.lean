@@ -1923,8 +1923,17 @@ partial def inferData? (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Option (Term
     return some (.ind l (q I) (q D) v P' m' (q i) x' prop, vApp g (vApp g vP i) (← evalIn ctx x'))
   | "out", #[x] =>
     let (x', xty) ← infer ctx x
-    let .nu l I D i _ _ ← force xty | throwAt ctx.info s!"out expects a coinductive value, got {← showVal ctx xty}"
-    return some (.out x', vInterp g l I D (nuFamily l I D) i)
+    let .nu l I D i s _ ← force xty | throwAt ctx.info s!"out expects a coinductive value, got {← showVal ctx xty}"
+    -- (HDL 34c.1) `out`'s payload has the recursive fields at the **predecessor** size,
+    -- as in the kernel's `inferCore` rule (`Wiz/Core/Check.lean`) and `Mark`/`Erase`:
+    -- `out x : Desc.interp D (ν^{s'}) i` for `x : ν^{↑s} D i`, `s' = sizePred? s`
+    -- (`∞ = ↑∞` for observation purposes). Typing the payload at `ν^∞` instead made
+    -- `let p := out a` — one observation per cycle, shared — carry a size the kernel's
+    -- sized `cocon` check rejects ("expected … ν (Signal.desc d A) … inferred … ν^j …").
+    -- Only `↑s` and `∞` can be observed, as in the kernel.
+    let some s' := sizePred? s
+      | throwAt ctx.info s!"only a value of size ↑s or ∞ can be observed, not {← showVal ctx s}"
+    return some (.out x', vInterp g l I D (nuFamilyAt l I D s') i)
   | _, _ => return none
 
 /-- Check `(a, b, c)` against a (right-nested) Σ. -/
@@ -4171,6 +4180,10 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
       | some gl => gl.isOpen
       | none => pure false
     return ← runTac code info { st with «open» := opens } (apply code (fld 0) (encodeList (opens.map encodeNat)))
+  if tag == TacTag.getOpen then
+    -- (P0) the raw open list: the main goal a tactic has just solved is still first, so
+    -- `replaceMainGoal` knows which goal it replaces and keeps the next ones
+    return ← runTac code info st (apply code (fld 0) (encodeList (st.open.map encodeNat)))
   if tag == TacTag.setGoals then
     let some gs := decodeList (fld 0) | throwAt info "tactic: malformed goal list"
     return ← runTac code info { st with «open» := ← gs.mapM num } (fld 1)
@@ -4522,7 +4535,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
       (.eq boolT (eT.lift 1) (.var 0)) (goalT.lift 2) .hole)
     let some d := g.find? "Bool.casesOn"
       | throwAt info "by_cases: Bool.casesOn is not in scope" ErrorCode.tacticFailed
-    let us ← d.levelParams.mapM fun _ => freshLevelMeta
+    let us ← d.levelParams.mapM fun _ => pure Level.zero
     -- `Bool.casesOn motive (fun h => mF) (fun h => mT) e (refl e) : G`
     let proof : Term R :=
       .app (.app (.app (.app (.app (.const "Bool.casesOn" us) motive) (.lam hf mF))

@@ -1,5 +1,6 @@
 import Wiz.Core.Value
 import Wiz.Core.Templates
+import Wiz.Core.Stats
 
 /-!
 # Evaluation, quotation, normalisation
@@ -48,7 +49,8 @@ def qtyApart (a b : Val R) : Bool :=
 
 /-- Unfold glued values (`Val.unfold`) until the head is not a definition: do this before
 matching on a value's shape. -/
-partial def whnf : Val R → Val R
+partial def whnf (v : Val R) : Val R :=
+  Stats.countedVal Stats.cells.whnf <| match v with
   | .unfold _ _ _ v => whnf v.get
   | .lazyInd _ _ _ _ _ _ _ _ _ _ v => whnf v.get
   | v => v
@@ -336,10 +338,10 @@ partial def eval (g : Globals R) (env : Env R) : Term R → Val R
   -- (the checker rejects a variable out of scope before anything evaluates it; if one
   -- gets here it is a stuck unknown, not a panic's default value, `Sort 0`)
   | .var ix => env[ix]?.getD (.neutral (.global "out of scope✝" []) #[])
-  | .const n us => if let some v := vBuiltin? g n then v else match g.find? n with
+  | .const n us => Stats.countedVal Stats.cells.evalConst <| if let some v := vBuiltin? g n then v else match g.find? n with
     | some { value := some v, levelParams, inline, .. } =>
       if inline || g.eager then eval g [] (g.instValue n v levelParams us)
-      else .unfold n us #[] (memoThunk fun _ => eval g [] (g.instValue n v levelParams us))
+      else .unfold n us #[] (memoThunk fun _ => Stats.closedEval Stats.cells.closedEval Stats.cells.closedMiss n us (eval g [] (g.instValue n v levelParams us)))
     | _ => .neutral (.global n us) #[]
   | .natLit n => .natLit n
   | .natOp op args => vNatOp g op (args.map (eval g env))
@@ -507,7 +509,7 @@ partial def vApp (g : Globals R) : Val R → Val R → Val R
 /-- **Exercise 1.2b.** Instantiate a closure with a value for its bound variable. -/
 partial def Closure.inst (g : Globals R) : Closure R → Val R → Val R
   --<sol
-  | .mk env body, a => match g.budget with
+  | .mk env body, a => Stats.countedVal Stats.cells.inst <| match g.budget with
     | none => eval g (a :: env) body
     -- (P2, outside the kernel) reading a proof back, within its step budget
     | some b => if b.tick then eval g (a :: env) body else outOfSteps
@@ -517,7 +519,7 @@ partial def Closure.inst (g : Globals R) : Closure R → Val R → Val R
 
 /-- Instantiate a closure over two binders (`a` first, then `b`). -/
 partial def Closure.inst2 (g : Globals R) : Closure R → Val R → Val R → Val R
-  | .mk env body, a, b => match g.budget with
+  | .mk env body, a, b => Stats.countedVal Stats.cells.inst <| match g.budget with
     | none => eval g (b :: a :: env) body
     | some bud => if bud.tick then eval g (b :: a :: env) body else outOfSteps
 

@@ -193,7 +193,7 @@ def parserDiffGroup : Group where
         let tables ← preludeTables
         match ← selfhostParser tables with
         | .error e =>
-          if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+          if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
         | .ok exe =>
           let out ← IO.Process.output { cmd := exe.toString, args := files.toArray }
           unless out.exitCode == 0 do

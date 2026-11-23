@@ -4,8 +4,12 @@
 # pre-commit
 .pre-commit-config.yaml
 
+# local check ledger (scripts/checks-ledger.py): per-worktree, untrusted, advisory
+/.checks/
+
 # Lean
 .lake
+.lake-seed*
 .wiz-cache/
 web/out/
 doc-site/

@@ -11,7 +11,7 @@ def check (label : String) (ok : Bool) : EIO Unit :=
         (fun _ => Process.exit 1))
 
 def step (kind : String) (line : Nat) : Scry.ReportStep :=
-  Scry.ReportStep.mk kind "main" line 3
+  Scry.ReportStep.mk kind "main" line 3 line 12
 
 def sourceFinding : Scry.ReportFinding :=
   Scry.ReportFinding.mk "f_0123456789abcdef" "f_0123456789abcdef" "xss.c"
@@ -19,7 +19,7 @@ def sourceFinding : Scry.ReportFinding :=
     "Attacker-controlled data reaches a command interpreter" "main" "system" 0
     3 3 .true
     [step "source" 2, step "sink" 3]
-    .true "" 0
+    .true "" 0 3 12
 
 def sourceFile : Scry.ReportFile :=
   Scry.ReportFile.mk "xss.c" "file_0123456789abcdef"

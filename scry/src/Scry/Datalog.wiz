@@ -24,6 +24,15 @@ positive body atom; every lattice head variable by a lattice body atom) and
 **stratification** (a negated atom's relation must be in a strictly lower stratum than
 the rule's head). `check` returns the stratum of every relation, or `.none`.
 
+`Program.checkMono` adds the engine's **monotonicity obligation**: a `MonoDecl`
+registers every rule that writes a lattice relation, and every transfer function a
+lattice head `map`s. A rule registered monotone whose head expression is not
+structurally monotone is a gap, and a checked evaluator refuses the program. Because a
+Wiz function's behaviour is not decidable here, the flags are the author's claim and the
+checker verifies the shape where it can. `Scry.Termination` is the matching termination
+contract: a run stopped at its round budget carries `.rounds limit ran`, never a silent
+short answer.
+
 The evaluator is in `Scry.Eval`. The theorems a later stage wants (`Program.sem` is the
 least fixpoint, `Derivation.check`) are not here: this stage is the executable
 semantics and its reference implementation.
@@ -241,6 +250,99 @@ def Scry.Program.stratify {L : Type} (p : Scry.Program L) : Option (List Nat) :=
 /-- Range restriction and stratification, the checks the surface macro will perform. -/
 def Scry.Program.check {L : Type} (p : Scry.Program L) : Option (List Nat) :=
   if Scry.Program.wellFormed p then Scry.Program.stratify p else .none
+
+-- ## The monotonicity and termination obligation
+
+/-- How a lattice fixpoint stopped. `fixpoint` is the complete run; `rounds limit ran`
+is a run that hit its round budget, so every derived relation is a lower bound and an
+absence claim is not allowed. -/
+inductive Scry.Termination where
+  | fixpoint
+  | rounds (limit : Nat) (ran : Nat)
+
+def Scry.Termination.complete : Scry.Termination → Bool
+  | .fixpoint => .true
+  | .rounds _ _ => .false
+
+/-- A one-line explanation of a truncated run (`none` when the fixpoint was reached). -/
+def Scry.Termination.reason : Scry.Termination → Option String
+  | .fixpoint => .none
+  | .rounds limit ran =>
+    .some ("fixpoint stopped after " ++ Nat.repr ran ++ " round(s) at --max-rounds "
+      ++ Nat.repr limit ++ ": the derived relations are a lower bound, so recall is"
+      ++ " reduced (a reported finding is still a real derivation)")
+
+/-- The **monotonicity registration** of a program: one flag per rule (in
+`Program.rules` order) and one per transfer function (in `Program.funcs` order).
+
+The engine's delta loop assumes every lattice value only moves up a finite order. That
+assumption is not decidable for an arbitrary Wiz function, so it is an explicit
+obligation here: a rule that writes a lattice relation must be registered (`true`), and
+a registered rule's head expression must be built only from `lit`, `var`, `join` and a
+`map` whose transfer is also registered `true`. `checkMono` verifies that shape; the
+flags themselves are the author's claim about the transfer's behaviour. A run without a
+full registration is reported as `monoChecked = false`. -/
+structure Scry.MonoDecl where
+  /-- One entry per `Program.rules`; `true` registers the rule as monotone. -/
+  rules : List Bool
+  /-- One entry per `Program.funcs`; `true` registers the transfer as monotone. -/
+  funcs : List Bool
+
+/-- The structural half of the obligation: every `map` names a transfer registered
+monotone, and `join` is monotone when both sides are. -/
+def Scry.LExpr.monoOk {L : Type} (funcs : List Bool) : Scry.LExpr L → Bool
+  | .lit _ => .true
+  | .var _ => .true
+  | .join a b => if Scry.LExpr.monoOk funcs a then Scry.LExpr.monoOk funcs b else .false
+  | .map i a => if List.getD funcs i .false then Scry.LExpr.monoOk funcs a else .false
+
+/-- The first rule the declaration does not cover, with a reason. A lattice-head rule
+that is not registered, or is registered but whose head expression is not structurally
+monotone, is a gap; a tuple-head rule is monotone by construction. -/
+def Scry.Program.monoGapFrom {L : Type} (p : Scry.Program L) (decl : Scry.MonoDecl) :
+    List (Scry.Rule L) → Nat → Option String
+  | .nil, _ => .none
+  | .cons r rest, i =>
+    match r.head with
+    | .tuple _ _ => Scry.Program.monoGapFrom p decl rest (Nat.succ i)
+    | .lat rel _ val =>
+      match List.getD decl.rules i .false with
+      | .false =>
+        .some ("rule " ++ Nat.repr i ++ " writes lattice relation " ++ Nat.repr rel
+          ++ " but is not registered in the monotonicity declaration")
+      | .true =>
+        match Scry.LExpr.monoOk decl.funcs val with
+        | .true => Scry.Program.monoGapFrom p decl rest (Nat.succ i)
+        | .false =>
+          .some ("rule " ++ Nat.repr i ++ " is registered monotone, but its lattice head"
+            ++ " maps a transfer function that is not declared monotone (or nests a map"
+            ++ " under one)")
+
+def Scry.Program.monoGap {L : Type} (p : Scry.Program L) (decl : Scry.MonoDecl) :
+    Option String :=
+  Scry.Program.monoGapFrom p decl p.rules 0
+
+/-- The result of `check` plus the monotonicity registration. `none` still means the
+program is not well formed or not stratified; `gap` names the first uncovered lattice
+rule (a checked evaluator refuses such a program). -/
+structure Scry.MonoCheck where
+  strata : List Nat
+  /-- `none` means every lattice rule has a structural monotonicity registration. -/
+  gap : Option String
+
+def Scry.Program.checkMono {L : Type} (p : Scry.Program L) (decl : Scry.MonoDecl) :
+    Option Scry.MonoCheck :=
+  match Scry.Program.check p with
+  | .none => .none
+  | .some strata => .some (Scry.MonoCheck.mk strata (Scry.Program.monoGap p decl))
+
+/-- Why a program fails the obligation: a structural error, or the first uncovered
+lattice rule. `none` means the registration is complete. -/
+def Scry.Program.obligationError {L : Type} (p : Scry.Program L) (decl : Scry.MonoDecl) :
+    Option String :=
+  match Scry.Program.check p with
+  | .none => .some "program failed range restriction or stratification"
+  | .some _ => Scry.Program.monoGap p decl
 
 -- ## Equality-sorted columns (S12 seam)
 

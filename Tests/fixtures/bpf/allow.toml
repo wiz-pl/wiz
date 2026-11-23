@@ -1,5 +1,7 @@
 # P0 fixture: the IPv4 allow-list of ebpf-target.md §5.5.
-# [UNRUN] — the tests that consume this file are written but have not run (P0 coding lane).
+# Consumed by `Tests/Groups/Bpf.lean`'s "the manifest parses" case, which checks the
+# entry name, both maps and `hits.max_entries`; the typed terms next to it
+# (`allow.bpfcore`) are consumed by the same group's emitter case.
 #
 # The manifest declares the program and its maps; the typed terms are in allow.bpfcore.
 # `wiz build allow.toml -o allow.c --target bpf` writes allow.c and bpf_rt.h.

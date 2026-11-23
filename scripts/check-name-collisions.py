@@ -106,7 +106,7 @@ Ignored (documented non-goals)
   not create false declarations.
 
 Usage
-  scripts/check-name-collisions.py                 check lib/, scry/src/, selfhost/
+  scripts/check-name-collisions.py                 check lib/, scry/src/, hdl/src/, selfhost/
   scripts/check-name-collisions.py --root DIR      check one module root (repeatable)
   scripts/check-name-collisions.py --reachable     only groups that share an importer
   scripts/check-name-collisions.py --quiet         summary; fail only unbaselined groups
@@ -1084,7 +1084,15 @@ def self_test() -> int:
 
 
 def default_roots(repo: Path) -> list[Path]:
-    candidates = [repo / "lib", repo / "scry" / "src", repo / "selfhost"]
+    candidates = [
+        repo / "lib",
+        repo / "scry" / "src",
+        # `hdl/src` is the Hdl package's module root (`hdl/src/Hdl/Core.wiz` is
+        # `Hdl.Core`), like `scry/src` for Scry: the package's declarations are in
+        # the same project-wide scope until module namespaces land.
+        repo / "hdl" / "src",
+        repo / "selfhost",
+    ]
     present = [root for root in candidates if root.is_dir()]
     return present or [repo]
 
@@ -1099,7 +1107,7 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         action="append",
         metavar="DIR",
-        help="module root to scan (repeatable; default: lib, scry/src, selfhost)",
+        help="module root to scan (repeatable; default: lib, scry/src, hdl/src, selfhost)",
     )
     parser.add_argument(
         "--self-test",

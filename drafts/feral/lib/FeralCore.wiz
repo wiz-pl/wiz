@@ -20,6 +20,8 @@ import Text
 -- `u64`/`usize`: invariant `val < 2^64`, kept by every operation.
 structure U64 where
   val : Nat
+-- `U64` is a scope result type (a borrow's value), and it packages no region.
+instance : RegionFree U64 := RegionFree.mk ()
 def U64.size : Nat := 18446744073709551616
 def USize : Type := U64
 
@@ -55,6 +57,7 @@ def U64.midpoint (a b : U64) : U64 := U64.mk (Nat.add a.val (Nat.half (Nat.sub b
 
 structure Vec (A : Type) where
   items : List A
+instance {A : Type} [RegionFree A] : RegionFree (Vec A) := RegionFree.mk ()
 
 def Vec.new {A : Type} : Vec A := Vec.mk List.nil
 def Vec.len {0 ρ : Region} {A : Type} (v : Shr ρ (Vec A)) : U64 := U64.mk (List.length v.val.items)
@@ -106,6 +109,8 @@ def Vec.ofList {A : Type} (xs : List A) : Vec A := Vec.mk xs
 inductive Flow (B R : Type) where
   | brk (b : B)
   | ret (r : R)
+-- a scope whose body may `return` has result type `Flow B R` at the scope boundary
+instance {B R : Type} [RegionFree B] [RegionFree R] : RegionFree (Flow B R) := RegionFree.mk ()
 
 -- ## Running lowered code from Wiz (RD16 helpers)
 

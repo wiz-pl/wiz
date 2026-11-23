@@ -1,0 +1,464 @@
+import Ring
+/-!
+# Omega certificates (prototype)
+
+A proof-producing linear-arithmetic tactic for `Nat`: the search builds an explicit
+certificate (a derivation tree), and a checker replays it into a proof term that the
+kernel infers when the tactic assigns it. Nothing here is a solver axiom.
+
+This first slice (`omega_cert`) covers the *additive* fragment:
+
+* atoms `a ≤ b`, `a < b` and `a = b`, with `+` and numerals;
+* hypotheses used directly, by transitivity, by adding two inequalities
+  (`Nat.add_le_add`), by cancelling a common summand
+  (`Nat.le_of_add_le_add_right`), and from an equality whose side is a sum
+  (`Nat.le_of_eq_add'`/`Nat.le_of_eq_add`);
+* equality goals by antisymmetry.
+
+Products, division, modulo, powers and subtraction are outside the fragment and are
+refused with a positioned message. The search is untrusted: a wrong certificate makes
+the checker or the kernel fail, never a false goal pass.
+
+The design and the next slices are in `wiz-notes/omega-certificate.md`.
+-/
+
+/-- The `n`th element of a list, if any. -/
+def Omega.nth {A : Type} : List A → Nat → Option A
+  | .nil, _ => .none
+  | .cons x _, .zero => .some x
+  | .cons _ xs, .succ n => Omega.nth xs n
+
+/-- `Nat.succ e`, as a term. -/
+def Omega.succ (e : Expr) : Expr := .app (.const "Nat.succ") e
+
+-- ## Reading atoms
+
+/-- `e` as `Nat.Le a b` (or the class form `LE.le a b`). -/
+def Omega.asLe (e : Expr) : Option (Expr × Expr) :=
+  match Expr.appOf "Nat.Le" e with
+  | .some (.cons a (.cons b .nil)) => .some (a, b)
+  | .some _ => .none
+  | .none => match Expr.constApp e with
+    | .some (n, args) =>
+      if Expr.nameEq n "LE.le" then
+        match List.dropN 2 args with
+        | .cons a (.cons b .nil) => .some (a, b)
+        | _ => .none
+      else .none
+    | .none => .none
+
+/-- `e` as `Nat.Lt a b` (or the class form `LT.lt a b`). -/
+def Omega.asLt (e : Expr) : Option (Expr × Expr) :=
+  match Expr.appOf "Nat.Lt" e with
+  | .some (.cons a (.cons b .nil)) => .some (a, b)
+  | .some _ => .none
+  | .none => match Expr.constApp e with
+    | .some (n, args) =>
+      if Expr.nameEq n "LT.lt" then
+        match List.dropN 2 args with
+        | .cons a (.cons b .nil) => .some (a, b)
+        | _ => .none
+      else .none
+    | .none => .none
+
+/-- The conclusion a certificate node proves. -/
+inductive Omega.Conc where
+  | le (a b : Expr)
+  | eq (a b : Expr)
+  | impossible
+
+-- ## The certificate
+
+/-- A derivation tree. Each constructor is one order lemma; the checker replays it into
+the corresponding proof term. The search is untrusted: the checker computes each
+conclusion, and the kernel checks the finished term. -/
+inductive Omega.Cert where
+  /-- hypothesis `i`, whose type is the conclusion -/
+  | hyp (i : Nat)
+  /-- an equality hypothesis `u = v`, used left-to-right (`dir = true`) or right-to-left -/
+  | hypEq (i : Nat) (dir : Bool)
+  /-- `a ≤ a` -/
+  | refl (a : Expr)
+  /-- `a ≤ a + k` -/
+  | leAddRight (a k : Expr)
+  /-- `a ≤ k + a` -/
+  | leAddLeft (a k : Expr)
+  /-- `a ≤ succ a` -/
+  | leSucc (a : Expr)
+  /-- `a ≤ b` and `b ≤ c` give `a ≤ c` -/
+  | trans (a b c : Expr) (p q : Omega.Cert)
+  /-- `a ≤ b` and `c ≤ d` give `a + c ≤ b + d` -/
+  | add (a b c d : Expr) (p q : Omega.Cert)
+  /-- `a + k ≤ b + k` gives `a ≤ b` -/
+  | cancelR (k a b : Expr) (p : Omega.Cert)
+  /-- `k + a ≤ k + b` gives `a ≤ b` -/
+  | cancelL (k a b : Expr) (p : Omega.Cert)
+  /-- an equality hypothesis `a + k = c` (`left = true`) or `c = a + k` gives `a ≤ c` -/
+  | leOfEqAdd (a c k : Expr) (i : Nat) (left : Bool)
+  /-- `a ≤ b` and `b ≤ a` give `a = b` -/
+  | eqOfLe (a b : Expr) (p q : Omega.Cert)
+  /-- `a + (k + 1) ≤ a` gives `False` -/
+  | falseOf (a k : Expr) (p : Omega.Cert)
+  /-- the real shadow: `A + a*x ≤ B` and `C ≤ D + b*x` give
+  `b*A + a*C ≤ b*B + a*D` -/
+  | fm (A B C D a b x : Expr) (p q : Omega.Cert)
+
+/-- **The checker.** Replay a certificate into a proof term. `hyps` is
+`TacticM.goalHyps` (index `i` is `Expr.var i`); the return is the conclusion the node
+*claims* and the term. The root is assigned once by the tactic; the kernel infers the
+whole term then, so a claim that does not match the term is a kernel error, never a
+proof. -/
+partial def Omega.check (g : Nat) (hyps : List (String × Expr)) (c : Omega.Cert) :
+    TacticM (Omega.Conc × Expr) :=
+  match c with
+  | .hyp i => match Omega.nth hyps i with
+    | .none => TacticM.fail "omega: certificate: hypothesis index out of range"
+    | .some h =>
+      match Omega.asLe h.2 with
+      | .some ab => TacticM.pure (.le ab.1 ab.2, Expr.var i)
+      | .none => match Omega.asLt h.2 with
+        | .some ab => TacticM.pure (.le (Omega.succ ab.1) ab.2, Expr.var i)
+        | .none => TacticM.fail "omega: certificate: hypothesis is not an order atom"
+  | .hypEq i dir => match Omega.nth hyps i with
+    | .none => TacticM.fail "omega: certificate: hypothesis index out of range"
+    | .some h => do
+      ev ← TacticM.eqView g h.2;
+      match ev with
+      | .none => TacticM.fail "omega: certificate: hypothesis is not an equality"
+      | .some q => match q with
+        | (_, u, v) => match dir with
+          | .true => TacticM.pure (.le u v, Expr.ap3 (.const "Nat.le_of_eq") u v (Expr.var i))
+          | .false => TacticM.pure (.le v u, Expr.ap3 (.const "Nat.le_of_eq_sym") u v (Expr.var i))
+  | .refl a => TacticM.pure (.le a a, .app (.const "Nat.le_refl") a)
+  | .leAddRight a k =>
+    TacticM.pure (.le a (Expr.ap2 (.const "Nat.add") a k),
+      Expr.ap2 (.const "Nat.le_add_right") a k)
+  | .leAddLeft a k =>
+    TacticM.pure (.le a (Expr.ap2 (.const "Nat.add") k a),
+      Expr.ap2 (.const "Nat.le_add_left") a k)
+  | .leSucc a =>
+    TacticM.pure (.le a (Omega.succ a), .app (.const "Nat.le_succ") a)
+  | .trans a b c p q => do
+    dp ← Omega.check g hyps p;
+    dq ← Omega.check g hyps q;
+    TacticM.pure (.le a c, Expr.ap5 (.const "Nat.le_trans") a b c dp.2 dq.2)
+  | .add a b c d p q => do
+    dp ← Omega.check g hyps p;
+    dq ← Omega.check g hyps q;
+    TacticM.pure (.le (Expr.ap2 (.const "Nat.add") a c) (Expr.ap2 (.const "Nat.add") b d),
+      Expr.mkApp (.const "Nat.add_le_add")
+        (.cons a (.cons b (.cons c (.cons d (.cons dp.2 (.cons dq.2 .nil)))))))
+  | .cancelR k a b p => do
+    dp ← Omega.check g hyps p;
+    TacticM.pure (.le a b, Expr.ap4 (.const "Omega.cancelR") k a b dp.2)
+  | .cancelL k a b p => do
+    dp ← Omega.check g hyps p;
+    TacticM.pure (.le a b, Expr.ap4 (.const "Omega.cancelL") k a b dp.2)
+  | .leOfEqAdd a c k i left => match left with
+    | .true =>
+      TacticM.pure (.le a c, Expr.ap4 (.const "Nat.le_of_eq_add'") a c k (Expr.var i))
+    | .false =>
+      TacticM.pure (.le a c, Expr.ap4 (.const "Nat.le_of_eq_add") a c k (Expr.var i))
+  | .eqOfLe a b p q => do
+    dp ← Omega.check g hyps p;
+    dq ← Omega.check g hyps q;
+    TacticM.pure (.eq a b, Expr.ap4 (.const "Nat.le_antisymm") a b dp.2 dq.2)
+  | .falseOf a k p => do
+    dp ← Omega.check g hyps p;
+    TacticM.pure (.impossible, Expr.ap3 (.const "Nat.not_add_succ_le") a k dp.2)
+  | .fm A B C D a b x p q => do
+    dp ← Omega.check g hyps p;
+    dq ← Omega.check g hyps q;
+    let mul := fun (u v : Expr) => Expr.ap2 (.const "Nat.mul") u v;
+    let add := fun (u v : Expr) => Expr.ap2 (.const "Nat.add") u v;
+    TacticM.pure (.le (add (mul b A) (mul a C)) (add (mul b B) (mul a D)),
+      Expr.mkApp (.const "Nat.omegaFM")
+        (.cons A (.cons B (.cons C (.cons D (.cons a (.cons b (.cons x
+          (.cons dp.2 (.cons dq.2 .nil))))))))))
+
+/-- Transport an inequality's left side along an equation: `a = b` and `a ≤ c` give
+`b ≤ c`. -/
+def Omega.leL (a b c : Nat) (e : a = b) (h : Nat.Le a c) : Nat.Le b c :=
+  Eq.mp' (fun (t : Nat) => Nat.Le t c) e h
+
+/-- Transport an inequality's right side along an equation: `b = c` and `a ≤ b` give
+`a ≤ c`. -/
+def Omega.leR (a b c : Nat) (e : b = c) (h : Nat.Le a b) : Nat.Le a c :=
+  Eq.mp' (fun (t : Nat) => Nat.Le a t) e h
+
+/-- Cancellation with addition written as `Nat.add` (the raw lemma's `+` notation can
+leave an instance argument the kernel cannot solve from the hypothesis' own `+`). -/
+def Omega.cancelR (k a b : Nat) (h : Nat.Le (Nat.add a k) (Nat.add b k)) : Nat.Le a b :=
+  Nat.le_of_add_le_add_right k a b h
+
+/-- `Nat.add`-form cancellation on the left. -/
+def Omega.cancelL (k a b : Nat) (h : Nat.Le (Nat.add k a) (Nat.add k b)) : Nat.Le a b :=
+  Nat.le_of_add_le_add_left k a b h
+
+/-- `omega`'s real shadow (Fourier–Motzkin for one variable): from a lower bound
+`A + a*x ≤ B` and an upper bound `C ≤ D + b*x`, derive `b*A + a*C ≤ b*B + a*D`.
+Sound over `Nat` for every `a, b`; the search is untrusted, this theorem is not. -/
+def Nat.omegaFM (A B C D a b x : Nat)
+    (h₁ : Nat.Le (A + a * x) B) (h₂ : Nat.Le C (D + b * x)) :
+    Nat.Le (b * A + a * C) (b * B + a * D) :=
+  let h₁' : Nat.Le (b * (A + a * x)) (b * B) :=
+    Nat.mul_le_mul_left b (A + a * x) B h₁;
+  let h₂' : Nat.Le (a * C) (a * (D + b * x)) :=
+    Nat.mul_le_mul_left a C (D + b * x) h₂;
+  let h : Nat.Le (b * (A + a * x) + a * C) (b * B + a * (D + b * x)) :=
+    Nat.add_le_add (b * (A + a * x)) (b * B) (a * C) (a * (D + b * x)) h₁' h₂';
+  let e₁ : b * (A + a * x) + a * C = (b * A + a * C) + b * a * x :=
+    nat_ring! b * (A + a * x) + a * C = (b * A + a * C) + b * a * x;
+  let e₂ : b * B + a * (D + b * x) = (b * B + a * D) + b * a * x :=
+    nat_ring! b * B + a * (D + b * x) = (b * B + a * D) + b * a * x;
+  let hL : Nat.Le ((b * A + a * C) + b * a * x) (b * B + a * (D + b * x)) :=
+    Omega.leL (b * (A + a * x) + a * C) ((b * A + a * C) + b * a * x)
+      (b * B + a * (D + b * x)) e₁ h;
+  let hR : Nat.Le ((b * A + a * C) + b * a * x) ((b * B + a * D) + b * a * x) :=
+    Omega.leR ((b * A + a * C) + b * a * x) (b * B + a * (D + b * x))
+      ((b * B + a * D) + b * a * x) e₂ hL;
+  Nat.le_of_add_le_add_right (b * a * x) (b * A + a * C) (b * B + a * D) hR
+
+-- ## The search (untrusted)
+
+/-- The sum edges of one term. -/
+def Omega.addEdgesOf (node : Expr) (t : Expr) : List (Expr × Omega.Cert) :=
+  match Expr.addPair t with
+  | .some (u, k) =>
+    let right : List (Expr × Omega.Cert) := match Expr.beq node u with
+      | .true => .cons (t, .leAddRight u k) .nil
+      | .false => .nil;
+    let left : List (Expr × Omega.Cert) := match Expr.beq node k with
+      | .true => .cons (t, .leAddLeft k u) .nil
+      | .false => .nil;
+    List.append right left
+  | .none => .nil
+
+/-- The sum edges of every collected term. -/
+def Omega.addEdges (node : Expr) : List Expr → List (Expr × Omega.Cert)
+  | .nil => .nil
+  | .cons t ts => List.append (Omega.addEdgesOf node t) (Omega.addEdges node ts)
+
+/-- The hypothesis edges out of `node`: `≤`, `<`, and equalities in both directions. -/
+def Omega.hypEdges (g : Nat) (i : Nat) (node : Expr) : List (String × Expr) →
+    TacticM (List (Expr × Omega.Cert))
+  | .nil => TacticM.pure .nil
+  | .cons h hs => do
+    rest ← Omega.hypEdges g (Nat.succ i) node hs;
+    match Omega.asLe h.2 with
+    | .some ab => match Expr.beq node ab.1 with
+      | .true => TacticM.pure (.cons (ab.2, .hyp i) rest)
+      | .false => TacticM.pure rest
+    | .none => match Omega.asLt h.2 with
+      | .some ab => match Expr.beq node (Omega.succ ab.1) with
+        | .true => TacticM.pure (.cons (ab.2, .hyp i) rest)
+        | .false => TacticM.pure rest
+      | .none => do
+        ev ← TacticM.eqView g h.2;
+        match ev with
+        | .none => TacticM.pure rest
+        | .some q => match q with
+          | (_, u, v) =>
+            let fwd : List (Expr × Omega.Cert) := match Expr.beq node u with
+              | .true => .cons (v, .hypEq i .true) .nil
+              | .false => .nil;
+            let bwd : List (Expr × Omega.Cert) := match Expr.beq node v with
+              | .true => .cons (u, .hypEq i .false) .nil
+              | .false => .nil;
+            TacticM.pure (List.append (List.append fwd bwd) rest)
+
+/-- All successor edges of `node`, in deterministic order: successor, sums, hypotheses. -/
+def Omega.allEdges (g : Nat) (hyps : List (String × Expr)) (terms : List Expr) (node : Expr) :
+    TacticM (List (Expr × Omega.Cert)) := do
+  hs ← Omega.hypEdges g 0 node hyps;
+  let succEdge : List (Expr × Omega.Cert) := .cons (Omega.succ node, .leSucc node) .nil;
+  TacticM.pure (List.append succEdge (List.append (Omega.addEdges node terms) hs))
+
+/-- A path of the DFS: its start, its current node, the nodes already on the path, and
+the certificate for `start ≤ current`. -/
+structure Omega.Path where
+  start : Expr
+  node : Expr
+  seen : List Expr
+  proof : Omega.Cert
+
+/-- Push each edge of `es` onto the stack, composing it with the path's proof and
+skipping edges that revisit a node on the path. -/
+partial def Omega.pushEdges (start node : Expr) (seen : List Expr) (proof : Omega.Cert)
+    (rest : List Omega.Path) : List (Expr × Omega.Cert) → List Omega.Path
+  | .nil => rest
+  | .cons e es =>
+    let cycle := Bool.or (Expr.inList e.1 seen) (Expr.beq e.1 node);
+    let here : List Omega.Path :=
+      .cons (Omega.Path.mk start e.1 (.cons node seen)
+        (.trans start node e.1 proof e.2)) (Omega.pushEdges start node seen proof rest es);
+    match cycle with
+    | .true => Omega.pushEdges start node seen proof rest es
+    | .false => here
+
+/-- **Depth-first search** for `start ≤ target` inside the edge graph of `Omega.allEdges`.
+The stack holds partial paths; expanding a node pushes its edges (skipping cycles), so
+the search is deterministic and never loops. `fuel` bounds the number of expansions. -/
+partial def Omega.search (g : Nat) (hyps : List (String × Expr)) (terms : List Expr)
+    (fuel : Nat) (target : Expr) (stack : List Omega.Path) : TacticM (Option Omega.Cert) :=
+  match fuel with
+  | .zero => TacticM.pure .none
+  | .succ f => match stack with
+    | .nil => TacticM.pure .none
+    | .cons p rest => match Expr.beq p.node target with
+      | .true => TacticM.pure (.some p.proof)
+      | .false => do
+        es ← Omega.allEdges g hyps terms p.node;
+        Omega.search g hyps terms f target (Omega.pushEdges p.start p.node p.seen p.proof rest es)
+
+/-- A direct match: a hypothesis or equality that is exactly `lhs ≤ rhs` (or the
+equality-add shortcut). -/
+def Omega.direct (g : Nat) (i : Nat) (lhs rhs : Expr) : List (String × Expr) →
+    TacticM (Option Omega.Cert)
+  | .nil => TacticM.pure .none
+  | .cons h hs => do
+    match Omega.asLe h.2 with
+    | .some ab => match Bool.and (Expr.beq ab.1 lhs) (Expr.beq ab.2 rhs) with
+      | .true => TacticM.pure (.some (.hyp i))
+      | .false => Omega.direct g (Nat.succ i) lhs rhs hs
+    | .none => match Omega.asLt h.2 with
+      | .some ab => match Bool.and (Expr.beq (Omega.succ ab.1) lhs) (Expr.beq ab.2 rhs) with
+        | .true => TacticM.pure (.some (.hyp i))
+        | .false => Omega.direct g (Nat.succ i) lhs rhs hs
+      | .none => do
+        ev ← TacticM.eqView g h.2;
+        match ev with
+        | .none => Omega.direct g (Nat.succ i) lhs rhs hs
+        | .some q => match q with
+          | (_, u, v) =>
+            let direct : Option Omega.Cert := match Bool.and (Expr.beq u lhs) (Expr.beq v rhs) with
+              | .true => .some (.hypEq i .true)
+              | .false => match Bool.and (Expr.beq v lhs) (Expr.beq u rhs) with
+                | .true => .some (.hypEq i .false)
+                | .false => .none;
+            match direct with
+            | .some c => TacticM.pure (.some c)
+            | .none => match Expr.addPair u with
+              | .some (a, k) => match Bool.and (Expr.beq a lhs) (Expr.beq v rhs) with
+                | .true => TacticM.pure (.some (.leOfEqAdd lhs rhs k i .true))
+                | .false => Omega.direct g (Nat.succ i) lhs rhs hs
+              | .none => match Expr.addPair v with
+                | .some (a, k) => match Bool.and (Expr.beq a lhs) (Expr.beq u rhs) with
+                  | .true => TacticM.pure (.some (.leOfEqAdd lhs rhs k i .false))
+                  | .false => Omega.direct g (Nat.succ i) lhs rhs hs
+                | .none => Omega.direct g (Nat.succ i) lhs rhs hs
+
+/-- A hypothesis `a + k ≤ b + k` proves `a ≤ b`; likewise on the left. -/
+def Omega.cancelDirect (i : Nat) (lhs rhs : Expr) : List (String × Expr) →
+    TacticM (Option Omega.Cert)
+  | .nil => TacticM.pure .none
+  | .cons h hs => match Omega.asLe h.2 with
+    | .some ab => match Expr.addPair ab.1, Expr.addPair ab.2 with
+      | .some (u, k1), .some (v, k2) =>
+        match Bool.and (Expr.beq u lhs) (Bool.and (Expr.beq v rhs) (Expr.beq k1 k2)) with
+        | .true => TacticM.pure (.some (.cancelR k1 lhs rhs (.hyp i)))
+        | .false => Omega.cancelDirect (Nat.succ i) lhs rhs hs
+      | _, _ => Omega.cancelDirect (Nat.succ i) lhs rhs hs
+    | .none => Omega.cancelDirect (Nat.succ i) lhs rhs hs
+
+/-- Prove `lhs ≤ rhs`: direct hypothesis, cancellation, addition of two inequalities,
+then a chain search. The add split is tried before the chain so that two independent
+chains (`a ≤ b`, `c ≤ d ⊢ a + c ≤ b + d`) are found. -/
+partial def Omega.proveLe (g : Nat) (hyps : List (String × Expr)) (terms : List Expr) (fuel : Nat)
+    (lhs rhs : Expr) : TacticM (Option Omega.Cert) :=
+  match fuel with
+  | .zero => TacticM.pure .none
+  | .succ f => match Expr.beq lhs rhs with
+    | .true => TacticM.pure (.some (.refl lhs))
+    | .false => do
+      d ← Omega.direct g 0 lhs rhs hyps;
+      match d with
+      | .some c => TacticM.pure (.some c)
+      | .none => do
+        c ← Omega.cancelDirect 0 lhs rhs hyps;
+        match c with
+        | .some c => TacticM.pure (.some c)
+        | .none => match Expr.addPair lhs, Expr.addPair rhs with
+          | .some (l1, l2), .some (r1, r2) => do
+            p ← Omega.proveLe g hyps terms f l1 r1;
+            match p with
+            | .none => Omega.search g hyps terms f rhs (.cons (Omega.Path.mk lhs lhs .nil (.refl lhs)) .nil)
+            | .some p1 => do
+              q ← Omega.proveLe g hyps terms f l2 r2;
+              match q with
+              | .some q1 => TacticM.pure (.some (.add l1 r1 l2 r2 p1 q1))
+              | .none => Omega.search g hyps terms f rhs (.cons (Omega.Path.mk lhs lhs .nil (.refl lhs)) .nil)
+          | _, _ => Omega.search g hyps terms f rhs (.cons (Omega.Path.mk lhs lhs .nil (.refl lhs)) .nil)
+
+/-- Prove `lhs = rhs` by antisymmetry (both directions). -/
+def Omega.proveEq (g : Nat) (hyps : List (String × Expr)) (terms : List Expr) (fuel : Nat)
+    (lhs rhs : Expr) : TacticM (Option Omega.Cert) := do
+  p ← Omega.proveLe g hyps terms fuel lhs rhs;
+  match p with
+  | .none => TacticM.pure .none
+  | .some p1 => do
+    q ← Omega.proveLe g hyps terms fuel rhs lhs;
+    match q with
+    | .none => TacticM.pure .none
+    | .some q1 => TacticM.pure (.some (.eqOfLe lhs rhs p1 q1))
+
+/-- The subterms of every type in a list (the add-term index). -/
+def Omega.collect : List Expr → List Expr
+  | .nil => .nil
+  | .cons e es => List.append (Expr.subterms e) (Omega.collect es)
+
+/-- The types of the hypotheses, for `Omega.collect`. -/
+def Omega.hypTypes : List (String × Expr) → List Expr
+  | .nil => .nil
+  | .cons h hs => .cons h.2 (Omega.hypTypes hs)
+
+-- ## The tactic
+
+syntax (name := omegaCert) "omega_cert" : tactic
+/-- `omega_cert`: linear `Nat` arithmetic by a kernel-checked certificate. The current
+slice covers `≤`, `<`, `=` over `+` and numerals: hypotheses, transitivity, adding two
+inequalities, cancelling a common summand, the equality-add shortcut, and antisymmetry.
+Everything non-linear is refused; no external solver is called. -/
+def Tactic.omegaCert : Tactic := fun _ => do
+  g ← TacticM.mainGoal;
+  ty ← TacticM.goalType g;
+  hyps ← TacticM.goalHyps g;
+  ty' ← TacticM.normalize g ty;
+  let bad : List String := .cons "Nat.mul" (.cons "Nat.div" (.cons "Nat.mod" (.cons "Nat.pow"
+    (.cons "HMul.hMul" (.cons "Mul.mul" (.cons "HDiv.hDiv" (.cons "HMod.hMod" .nil)))))));
+  hb ← TacticM.omegaHypsBad g bad hyps;
+  gb ← TacticM.omegaEqBad g bad ty;
+  match Bool.or (Expr.hasOp bad ty') (Bool.or hb gb) with
+  | .true => TacticM.fail "omega: non-linear (multiplication/division is outside the linear Nat fragment)"
+  | .false => do
+    let terms := Omega.collect (.cons ty (Omega.hypTypes hyps));
+    match Omega.asLe ty with
+    | .some ab => do
+      r ← Omega.proveLe g hyps terms 64 ab.1 ab.2;
+      match r with
+      | .none => TacticM.fail "omega: no proof (linear Nat fragment)"
+      | .some c => do
+        d ← Omega.check g hyps c;
+        TacticM.assign g d.2
+    | .none => match Omega.asLt ty with
+      | .some ab => do
+        r ← Omega.proveLe g hyps terms 64 (Omega.succ ab.1) ab.2;
+        match r with
+        | .none => TacticM.fail "omega: no proof (linear Nat fragment)"
+        | .some c => do
+          d ← Omega.check g hyps c;
+          TacticM.assign g d.2
+      | .none => do
+        ev ← TacticM.eqView g ty;
+        match ev with
+        | .none => TacticM.fail "omega: not a linear Nat goal (expected ≤, < or =)"
+        | .some q => match q with
+          | (_, lhs, rhs) => do
+            r ← Omega.proveEq g hyps terms 64 lhs rhs;
+            match r with
+            | .none => TacticM.fail "omega: no proof (linear Nat fragment)"
+            | .some c => do
+              d ← Omega.check g hyps c;
+              TacticM.assign g d.2
+
+attribute [tactic tactic.omegaCert] Tactic.omegaCert

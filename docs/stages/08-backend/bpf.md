@@ -23,7 +23,7 @@ The target is **verifier-shaped by construction**, not "Wiz on eBPF":
 | `Wiz/Compiler/Bpf/Sexp.lean` | `bpf-core/1`, the serialised typed core the P0 CLI consumes. A fixture format, not yet the public §9.4 schema. |
 | `Wiz/Compiler/Bpf/C.lean` | the flat-C emitter: `SEC`, BTF map declarations, `static __always_inline` functions, `#line`, checked packet accessors, copy-out map lookups, `Map.add` as lookup + `XADD`. |
 | `Wiz/Compiler/Bpf.lean` | the manifest reader (`bpf.toml`, §5.1) and `buildCmd`. |
-| `Tests/fixtures/bpf/` | the IPv4 allow-list fixture (`allow.toml` + `allow.bpfcore`) and the source-level reject/accept corpus. |
+| `Tests/fixtures/bpf/` | the IPv4 allow-list fixture (`allow.toml` + `allow.bpfcore`), consumed by the group's manifest and emitter cases. There is no source-level `.wiz` corpus: it could not run before the elaborator adapter existed, so it was removed rather than left `[UNRUN]`. |
 | `Tests/Groups/Bpf.lean` | pure rejection/value tests. **Green, 22/22.** |
 
 Implemented in P0:
@@ -120,9 +120,9 @@ with the clang/loader work.
 ## Roadblocks that need a queue slot
 
 1. **The elaborator adapter** (`Term R` with types and spans → `STm`). Without it the
-   CLI cannot take a `.wiz` file, and the source-level `.wiz` reject fixtures in
-   `Tests/fixtures/bpf/reject/` can only be checked by inspection. This is the largest
-   P0 item after the emitter.
+   CLI cannot take a `.wiz` file. (The source-level `.wiz` reject fixtures that assumed
+   this adapter had been removed — nothing could run them; the rejection contract is the
+   `STm` group in `Tests/Groups/Bpf.lean`.) This is the largest P0 item after the emitter.
 2. **The build and the test group.** Nothing here has been elaborated by Lean; the
    unrun marker in `Tests/Groups/Bpf.lean` is deliberate.
 3. **`clang -target bpf` and the post-`clang` checks.** The emitter is a text printer;
@@ -151,3 +151,129 @@ Still unverified until the `clang`/verifier slot:
   accepts the helper-pointer idiom with `(void *)N`;
 * the BTF macro forms for an anonymous map struct whose key/value are typedefs;
 * the object's stack/symbol/relocation shape and the kernel verifier's acceptance.
+
+## The tracing program kind (2026-11-22)
+
+This is the sensor half of `wiz-notes/ebpf-dynamic.md`: a `tracepoint` (and a declared
+layout `uprobe`) program kind beside `xdp`/`tc`. It is **not** a packet program with a
+different section, and it is not an `ext` entry (`wiz-notes/targets-ext.md` §0): a
+program kind is a target capability, selected before any module is read.
+
+### The table
+
+| kind | `bpf_attr.prog_type` | section | context | return |
+|---|---|---|---|---|
+| `xdp` | 6 `BPF_PROG_TYPE_XDP` | `xdp` | `struct xdp_md` | `XdpAction` enum |
+| `tc` | 3 `BPF_PROG_TYPE_SCHED_CLS` | `tc`/`classifier`/`sched_cls` | `struct __sk_buff` | `TcAction` enum |
+| `tracepoint` | 5 `BPF_PROG_TYPE_TRACEPOINT` | `tracepoint/<category>/<event>` | `struct bpf_trace_event` | `Unit` or `UIntN 32` |
+| `uprobe` | 2 `BPF_PROG_TYPE_KPROBE` | `uprobe/<binary>:<symbol>` | `struct bpf_pt_regs` (x86_64) | `Unit` or `UIntN 32` |
+
+The helper table grew by `Bpf.pidTgid` (14). The emitter also calls
+`bpf_probe_read_user` (112, GPL-only), `bpf_probe_read_user_str` (115, GPL-only),
+`bpf_perf_event_output` (25), `bpf_get_current_comm` (16), and, for the fallback
+transport, `bpf_trace_printk` (6, GPL-only). Every one appears in the descriptor's `helpers` list with its numeric id and
+`gpl_only` flag, so a loader checks `bpftool feature probe` instead of guessing. The map
+table grew by `perf_event_array` (4): an output ring with a `u32` CPU key, a `u32` fd
+value, and **no** lookup/update/delete in this subset.
+
+### The declared layouts (no `vmlinux.h`, no BTF/CO-RE)
+
+The tracepoint context is the tracepoint's own format file, not a kernel-internal type.
+For `syscalls:sys_enter_execve` the format file is
+`common_type:0/2 common_flags:2/1 common_preempt_count:3/1 common_pid:4/4 id:8/8
+filename:16/8 argv:24/8 envp:32/8`; the declared struct is therefore
+
+```c
+struct bpf_trace_event { __u64 common; __s64 id; __u64 args[6]; };  /* 64 B */
+```
+
+and `args[0..5]` are the syscall arguments. `TraceCtx.arg` yields an opaque `UserPtr`
+token, `TraceCtx.argWord` yields the raw `u64`; `TraceCtx.readUserStr` is the capped
+`bpf_probe_read_user_str` accessor, and `TraceCtx.argvSlot` reads one pointer at
+`argv + 8*slot` with `bpf_probe_read_user`, rejects a null slot, and then reads the
+string — a literal `slot < 4`, never a runtime `argc`. Both check `-EFAULT`. A uprobe's context is the x86_64 uapi `struct pt_regs` (21 words,
+168 B). The first six C argument registers are rdi, rsi, rdx, rcx, r8, r9. `-target
+bpfel` does not define `__x86_64__` (the object is BPF, not the host), so the descriptor
+pins `"arch":"x86_64"` and the loader refuses another architecture rather than guessing.
+
+The event is one POD struct, `struct scry_probe_event` (128 B):
+
+| field | offset | size | meaning |
+|---|---|---|---|
+| `kind` | 0 | 4 | 1 execve, 2 openat, 3 write, 4 connect, 5 heartbeat |
+| `pid` | 4 | 4 | thread id (`bpf_get_current_pid_tgid` low 32) |
+| `tgid` | 8 | 4 | process id (high 32) |
+| `ppid` | 12 | 4 | 0 when the `ppids` map has no entry |
+| `ts` | 16 | 8 | `bpf_ktime_get_ns` (unordered) |
+| `len` | 24 | 4 | valid bytes in `data` |
+| `meta` | 28 | 4 | low 16 = slot (0 = filename, 1.. = argv); bit 16 = truncated |
+| `data` | 32 | 80 | captured prefix (literal cap) |
+| `comm` | 112 | 16 | `bpf_get_current_comm` |
+
+### The event encoder
+
+`Wiz.Compiler.Bpf.Probe.ProbeEvent.toJson` writes one JSON line
+(`scry-probe-event/1`) with no trailing newline (`toLine` adds it):
+
+```json
+{"schema":"scry-probe-event/1","probe":"execve","attach":"syscalls:sys_enter_execve",
+ "ts":123,"pid":4711,"tid":4711,"tgid":4711,"ppid":4700,"comm":"sh",
+ "kind":"execve","slot":0,"data":"/bin/sh","truncated":false,
+ "marker":"scry-poc-f_edbaeb86bcfed108"}
+```
+
+`pid` is the process id and `tid` the thread id; `slot` identifies the captured field; the
+`marker` is host-side convenience and the authoritative match is Wiz over `data`. The
+encoder escapes quotes, backslashes and control characters, because the payload is user
+bytes. The descriptor pins the event offsets and the literal `data_cap`, so a decoder
+does not infer the ABI from the C text.
+
+### The refusal
+
+The host `wiz build --target bpf` (alias `--target ebpf`) consumes `bpf.toml` +
+`bpf-core/1` and writes `OUT.c`, `bpf_rt.h`, and, for a tracing program,
+`OUT.probe.json` (`wiz-probe/1`). The selfhost has no serialised program, so it refuses
+by name, before any entry runs:
+
+```
+unsupported-target: the backend 'ebpf' reads bpf-core/1. This toolchain emits c-text/1
+and does not serialise its program (docs/selfhost-compiler.md:114). Build the probe with
+the host wiz.
+```
+
+### CI and the local gate
+
+CI (`Tests/Groups/BpfTrace.lean`) is compile-only and unprivileged: the tracepoint
+fixture, the descriptor's section/type/attach fields, the exact JSON line, the
+out-of-bounds array index, the helper-kind refusal, the manifest's unsupported `type`,
+the `perf_event_array` misuse, the `uprobe` layout, the unchanged `xdp` object, and the
+selfhost refusal. It never calls `bpf()`.
+
+The positive attach/read/detach path is a **local gate** and needs root or `CAP_BPF`:
+
+```sh
+bpftool feature probe            # record the kernel and the available helpers
+clang -target bpfel -mcpu=v2 -O2 -g -ffreestanding -fno-builtin \
+      -fno-stack-protector -fno-asynchronous-unwind-tables -nostdlibinc \
+      -Wall -Werror -c execve.c -o execve.o
+llvm-objdump -h execve.o         # the section is tracepoint/syscalls/sys_enter_execve
+bpftool prog load execve.o /sys/fs/bpf/execve type tracepoint log_level 1 \
+      log_buf /tmp/verifier.log
+```
+
+Then attach the tracepoint (`perf_event_open` + `bpf_link`, or `bpftool`), spawn the
+harness **after** attach, read the perf buffer, and detach. A run with no event must
+report `heartbeat=false` and `skipped`, never `clean`; a run with a lost counter is
+`unvalidated`. Tracepoints are not `BPF_PROG_TEST_RUN`-able in general, which is why this
+is not a required PR gate.
+
+### What remains
+
+* the userspace `wiz-trace` process: attach/read/detach, the perf-buffer decoder into
+  `ProbeEvent`, and the `wiz-probe/1` → `dynamic.json` join;
+* the `sched_process_fork` probe that fills the `ppids` map (the execve probe's `ppid` is
+  0 in this slice);
+* the policy's choice of argv slots (the accessor is a constant bound; the fixture reads
+  slot 2) and the marker match over `data`;
+* `clang -target bpf` and the ELF/relocation/stack checks, which need the object and a
+  queue slot; the descriptor is the text-level contract, not the object.

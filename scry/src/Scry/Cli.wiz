@@ -11,6 +11,8 @@ import Scry.WorkflowCmd
 import Scry.Repl
 import Scry.FuzzCmd
 import Scry.ReportCmd
+import Scry.Output
+import Scry.WebCmd
 import Scry.Native
 import Scry.Lower
 import Scry.EgraphWil
@@ -33,6 +35,7 @@ scry explain FILE NODE          one node: span, parent, children, arcs, relation
 scry parse FILE… --stats        stats of JSON or scry-cst stores (no tree-sitter: S1)
 scry cst FILE OUT.cst           convert a JSON fact store to the native spill format
 scry report FILE.c|DIR          one self-contained HTML page of the taint evidence
+scry web FILE.c|DIR --out DIR   static source-reader bundle (Loom UI + data/*.json)
 scry fuzz-span FILE             map a fuzz artifact to CST spans (dynamic evidence)
 scry egraph FILE.c [--fuel N] [--rewrite]
                                 build Wil e-classes and print fold/rewrite stats;
@@ -88,12 +91,18 @@ def Scry.usage : String :=
   ++ "                              --taint reports cross-TU findings/SARIF\n"
   ++ "  project query DIR --rel NAME | --func NAME\n"
   ++ "                              a project relation (symbols, callgraph, …) or function table\n"
-  ++ "  findings scan|list|show|refine|triage|repro|verify …\n"
-  ++ "                             finding identity, triage and evidence bundles\n"
+  ++ "  findings scan|list|show|refine|triage|repro|verify|emit …\n"
+  ++ "                             finding identity, triage and evidence bundles;\n"
+  ++ "                             `emit` writes per-finding JSON + SARIF with a\n"
+  ++ "                             baseline and a finding-count budget\n"
   ++ "  report FILE.c|DIR [--out FILE] [--rules FILE] [--allow-errors]\n"
   ++ "              [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
   ++ "              [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
   ++ "                             self-contained HTML page of the taint evidence\n"
+  ++ "  web FILE.c|DIR --out BUNDLE [--rules FILE] [--allow-errors]\n"
+  ++ "              [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
+  ++ "              [--assets DIR] [--ui FILE]\n"
+  ++ "                             static source-reader bundle (Loom UI + data/*.json)\n"
   ++ "  cs PATH [--json] [--sarif OUT] [--fail-on error|warning|note]\n"
   ++ "          [--rules FILE] [--no-taint]\n"
   ++ "                             walk a directory/.csproj/.sln for *.cs, parse and lower\n"
@@ -450,8 +459,9 @@ def Scry.helpText (cmd : String) : Option String :=
   | "bench" => .some Scry.usage
   | "repl" => .some Scry.usage
   | "report" => .some Scry.usage
+  | "web" => .some Scry.usage
   | "fuzz-span" => .some Scry.usage
-  | "findings" => .some Scry.findingsUsage
+  | "findings" => .some (String.append Scry.findingsUsage Scry.emitHelpLine)
   | "cs" => .some Scry.Cs.usage
   | "egraph" => .some Scry.egraphUsage
   | "prover" => .some Scry.proverUsage
@@ -491,8 +501,10 @@ def Scry.dispatchGo (args : List String) : EIO Nat := match args with
   | .cons "dynamic" rest => Scry.dynCmd rest
   | .cons "bench" rest => Scry.benchCmd rest
   | .cons "repl" rest => Scry.replCmd rest
+  | .cons "findings" (.cons "emit" rest) => Scry.emitCmd rest
   | .cons "findings" rest => Scry.findingsCmd rest
   | .cons "report" rest => Scry.reportCmd rest
+  | .cons "web" rest => Scry.webCmd rest
   | .cons "cs" rest => Scry.Cs.run rest
   | .cons "fuzz-span" rest => Scry.fuzzSpanCmd rest
   | .cons "egraph" rest => Scry.egraphArgs rest

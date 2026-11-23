@@ -1,4 +1,5 @@
 import Tests.Grail
+import Tests.Groups.GrailModules
 
 namespace Tests.Grail
 open Wiz Tests
@@ -368,7 +369,8 @@ def toolchainGroup : Group where
           #[Cache.ManifestEntry.ofEffect man.binary cmdKey forged] man.region
         let tampered ← snapshot pkg
         let served : IO (CommandState ZeroOneMany) := do
-          pure (← Cache.elaborateCached none [pkg] "import M\n" init 0 (verify := .warn) (rig := rig)).1
+          let (s, _) ← Cache.elaborateCached none [pkg] "import M\n" init 0 (verify := .warn) (rig := rig)
+          pure s
         -- (the documented default: the layer is refused, so the module is elaborated)
         let s0 ← served
         check (!s0.globals.contains "forgedFalse") "the forged declaration was served by default"
@@ -377,8 +379,8 @@ def toolchainGroup : Group where
         checkEq tampered (← snapshot pkg)
         -- (the explicit opt-in really does serve it: this is what the default refuses, not a
         -- fixture that happens to miss)
-        let s1 ← (Cache.elaborateCached none [pkg] "import M\n" init 0 (verify := .warn)
-          (rig := rig) (roUnsigned := true)).1
+        let (s1, _) ← Cache.elaborateCached none [pkg] "import M\n" init 0 (verify := .warn)
+          (rig := rig) (roUnsigned := true)
         check (s1.globals.contains "forgedFalse") "the opt-in did not serve the forged entry"
         check (match s1.globals.find? "forgedFalse" with
           | some d => (match d.type with | .const "False" _ => true | _ => false)

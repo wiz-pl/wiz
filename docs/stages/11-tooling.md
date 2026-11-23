@@ -901,10 +901,27 @@ implicit binders, a string with comment markers, comments in odd places).
   (25 cases); `wiz fmt --self-test` runs the fixtures, and the `fmt` gate group formats a
   fixed six-file corpus twice (`lake test -- '=fmt'`, about 12 s) and requires an
   idempotent reprint with no refused command. Both groups are in CI's `core` shard.
+* **In the language server.** `wiz lsp` advertises `documentFormattingProvider` and
+  `documentRangeFormattingProvider` and answers `textDocument/formatting` (one
+  `TextEdit`: the smallest span that changes) and `textDocument/rangeFormatting` (only
+  the commands wholly inside the range; the rest of the file is kept byte for byte).
+  Both run the same `Fmt.run`, from the server's libraries and the document's
+  `include_str` table, so `import` and `syntax` resolve exactly as they do for the
+  document's diagnostics. A file
+  that does not parse gets no edit (its diagnostics say why), and a range request whose
+  change would straddle the range gets none either. `insertSpaces: false` is refused
+  rather than ignored: the formatter's indentation is two spaces, a tab counts as one
+  column to the parser, and `tabSize` therefore does not apply. The playground's editor
+  has a format action (`format()`/`formatSelection()` in `web/playground-lsp.js`,
+  Ctrl/⌘+Shift+F): the `TextEdit`s go through one `WorkspaceEdit` applier
+  (`LspClient.applyWorkspaceEdit`; UTF-16 positions, reverse-order application, a
+  document-version guard, and the caret mapped through the edits), and the page's normal
+  `input` path sends `didChange`.
 * **Not done.** Signatures never break (a long header stays long: wrapping binder lists
   needs `fill`/alignment); a multi-line block comment keeps the indentation of its
-  continuation lines; the self-hosted frontend has no formatter; and the LSP does not
-  offer `textDocument/formatting` yet (`Wiz/Format.lean` is that plumbing's core).
+  continuation lines; the self-hosted frontend has no formatter; range formatting
+  formats whole commands (a selection that cuts through a command formats nothing);
+  and `insertSpaces: false` is refused.
 
 ## 11ab: a static playground
 
@@ -1118,3 +1135,37 @@ and records no cache manifest.
 `DIR/NAME.attest.json`, with the package's module roots (verify with
 `wiz verify -I PKG -I PKG/src …`). Its statements have no `byproducts` (the generated C
 stays in `.grail/build/<key>/`, whose key the CLI does not expose).
+## 11ag: the attribute/option registry in the toolchain
+
+The command frontend now keeps two small registries (`Wiz/Elab/Registry.lean`), so a
+tool can ask what a name is instead of matching the fixed set:
+
+```lean
+s.attrDecl? "inline"       -- some { name := "inline", payload := .flag, action := .inline }
+s.optDecl? "pp.notation"   -- some { name := "pp.notation", kind := .boolean, default := .bool true, … }
+s.optValue? "pp.notation"  -- the module's value, or the declared default
+```
+
+* `CommandState.attrDecls` / `optDecls` are the registries (built-ins plus user
+  registrations, latest first); `attrUses` records no-op applications as
+  `(attribute, target, arguments)`, and `optValues` holds the options set in the module.
+  `register_attribute` / `register_option` are ordinary commands, so their effect is in
+  the per-command content-hash chain (`Wiz/Query.lean`) and the language server sees the
+  same state as the batch frontend.
+* **Diagnostics.** One path produces `unknown attribute 'foo' (registered: …)`,
+  `unknown option 'foo' (registered: …)`, `attribute '[inline]' takes no arguments`,
+  ``option 'pp.notation' expects `true` or `false` `` and `… is already registered`, instead
+  of a parse failure per attribute. A user attribute with an unknown target is
+  `unknown declaration 'x'`.
+* **Cache and modules.** `attribute`, `set_option`, `register_attribute` and
+  `register_option` stay out of `Cache.cacheable` (like `syntax`/`macro_rules`), so an
+  import replays them; no `Effect` field or cache-salt bump is needed. `local`
+  registrations and no-op applications are removed by `CommandState.endModule`, and a
+  module's options are restored when its import ends. The isolation cache key includes
+  the starting registries and option values (`Frontend.isoKey`), so a custom initial
+  state cannot reuse a module elaborated under another one.
+* `AttributeDecl` and `OptDecl` are deliberately small typed entries: they are the seed
+  for the ext layer (`Wiz/Ext/Basic.lean`'s `Kind`/`Stage`/`Payload`/`Entry`, CORE-3.3),
+  not that layer. `[term_elab]` and per-deriver options can land here without a new
+  parser rule or a new match arm; user code today gets no-op attributes/options as data.
+  `[simp]` and `[hint]` are registered entries too, each with its dedicated parser rule.

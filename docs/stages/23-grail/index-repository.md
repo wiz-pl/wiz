@@ -254,9 +254,13 @@ without `--allowed-signers`, and refuse (even when the flag is omitted):
 
 `grail index verify INDEX [--locked] [--allowed-signers FILE]` is the offline verifier:
 it prints the signer, fingerprint, sequence, expiry and snapshot digest; `--locked` also
-requires the snapshot to match `grail.lock` (the key, sequence and digest), which detects a
-mirror serving an older or altered index. `grail index check --require-signature` audits
-a repository the same way and refuses an unsigned or expired one. A deliberate key
+requires the snapshot to match `grail.lock` (the key, sequence and digest) **and** checks
+every `pkg` entry of the lock against the signed entries (name, version, archive
+SHA-256, and tree/size when the snapshot has them). The lock is not signed, so this is
+the check that notices a hand-edited `pkg` line (a swapped archive or tree hash, with
+bytes supplied by `--vendor`); `fetch --locked` reads no index and cannot see it.
+`grail index check --require-signature` audits a repository the same way and refuses an
+unsigned or expired one. A deliberate key
 change means removing the lock's `(index-signature …)` (or deleting `grail.lock`) and
 updating once with the new `--allowed-signers`; nothing rotates silently.
 

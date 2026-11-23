@@ -1,8 +1,0 @@
--- [UNRUN] P0 reject fixture: a bound read from data cannot be verified. (P0 rejects
--- Bpf.repeat entirely; P1 adds the literal/clamped forms and this message.)
-import Bpf
-
-bpf_map counts : Map (UIntN 32) (UIntN 32) (kind := .array, max_entries := 256)
-
-def bad (p : Packet) (n : UIntN 32) : UIntN 32 :=
-  Bpf.repeat (bound := n) (UIntN.ofNat 32 0) (fun acc i => UIntN.add acc i)

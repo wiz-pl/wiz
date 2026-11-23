@@ -269,7 +269,7 @@ def group : Group where
       (some "duplicate-constructor") "x" "declared twice",
     rejected "attribute: unknown attribute"
       (prelude ++ "def f (n : Nat) : Nat := n\nattribute [bogus] f\n")
-      (some "parse-error") "bogus" "expected" (cli := true),
+      none "bogus" "unknown attribute" (cli := true),
     rejected "attribute: malformed []"
       (prelude ++ "attribute [inline]\n")
       (some "parse-error") "" "expected identifier",

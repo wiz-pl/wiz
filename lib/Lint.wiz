@@ -1,0 +1,345 @@
+import Prelude
+import Text
+/-!
+# Lint
+
+Typed names for the lint registry's data and a parser for the `wiz-lint/1` view. The
+mirror is of `Wiz/Lint/Basic.lean` (the enums) and `Wiz/Lint.lean`'s `CommandView`
+(the stable view); `docs/lint-abi.md` is the wire format. It is an ergonomic wrapper,
+not a second ABI: the host still builds the text, and a rule still returns findings as
+text.
+
+A package rule can therefore name a capability, a category, a severity or a scope as a
+value, and read the view through fields and typed numbers instead of splitting strings
+by hand:
+
+```
+import Lint
+
+def rawDecls (view : String) : String :=
+  let c := Lint.Command.parse view;
+  List.foldr (fun (d : Lint.Decl) (acc : String) =>
+      match d.isPublic with
+      | .true => String.append (String.append "0\t0\t" (String.append d.name "\ta public declaration\n")) acc
+      | .false => acc)
+    "" c.decls
+```
+
+`Lint.Capability.stable` is the same split the registry enforces: a package set may
+declare `decl`, `spans`, `imports`, `globals`, `messages` and `facts`, and the unstable
+views (`info`, `tactics`, `kernelTerm`, `sourceText`) are refused at registration. The
+names, spellings and stable/unstable split must match the host; a test compares each
+one with `Wiz/Lint/Basic.lean`.
+
+A finding is still four tab-separated fields, `start`, `stop`, `anchor`, `text`, and
+`anchor` is the stable baseline key (a declaration name plus an occurrence, never a
+line). `Lint.Finding.parseAll` reads a runner's output and `Lint.Finding.render` writes
+one, so a package can test its rule with `#eval`.
+-/
+
+-- ## The registry's enums (mirroring Wiz/Lint/Basic.lean)
+
+/-- The capability a rule declares; the registry builds exactly the declared view. -/
+inductive Lint.Capability where
+  | decl
+  | spans
+  | imports
+  | globals
+  | messages
+  | facts
+  | info
+  | tactics
+  | kernelTerm
+  | sourceText
+
+/-- Every capability, in the registry's order (for `ofKey` and a totality check). -/
+def Lint.Capability.all : List Lint.Capability :=
+  .cons .decl (.cons .spans (.cons .imports (.cons .globals (.cons .messages
+    (.cons .facts (.cons .info (.cons .tactics (.cons .kernelTerm (.cons .sourceText .nil)))))))))
+
+/-- The spelling a view's `caps` line and a rule's `requires` use. -/
+def Lint.Capability.key : Lint.Capability → String
+  | .decl => "decl"
+  | .spans => "spans"
+  | .imports => "imports"
+  | .globals => "globals"
+  | .messages => "messages"
+  | .facts => "facts"
+  | .info => "info"
+  | .tactics => "tactics"
+  | .kernelTerm => "kernelTerm"
+  | .sourceText => "sourceText"
+
+/-- The capability with this spelling, if any. -/
+def Lint.Capability.ofKey (s : String) : Option Lint.Capability :=
+  List.find (fun c => String.eq (Lint.Capability.key c) s) Lint.Capability.all
+
+/-- The package ABI's capabilities; the rest are unstable host views. This is
+`packageCapability` in `Wiz/Lint/Basic.lean`. -/
+def Lint.Capability.stable : Lint.Capability → Bool
+  | .decl => .true
+  | .spans => .true
+  | .imports => .true
+  | .globals => .true
+  | .messages => .true
+  | .facts => .true
+  | .info => .false
+  | .tactics => .false
+  | .kernelTerm => .false
+  | .sourceText => .false
+
+/-- The stable category of a rule. The `W` block allocates codes by category. -/
+inductive Lint.Category where
+  | correctness
+  | performance
+  | api
+  | maintainability
+  | ecosystem
+
+/-- Every category, in the registry's order. -/
+def Lint.Category.all : List Lint.Category :=
+  .cons .correctness (.cons .performance (.cons .api (.cons .maintainability (.cons .ecosystem .nil))))
+
+def Lint.Category.key : Lint.Category → String
+  | .correctness => "correctness"
+  | .performance => "performance"
+  | .api => "api"
+  | .maintainability => "maintainability"
+  | .ecosystem => "ecosystem"
+
+def Lint.Category.ofKey (s : String) : Option Lint.Category :=
+  List.find (fun c => String.eq (Lint.Category.key c) s) Lint.Category.all
+
+/-- The default severity of a rule; `off` means it is registered but does not run. -/
+inductive Lint.Severity where
+  | off
+  | hint
+  | warning
+  | error
+
+/-- Every severity, in the registry's order. -/
+def Lint.Severity.all : List Lint.Severity :=
+  .cons .off (.cons .hint (.cons .warning (.cons .error .nil)))
+
+def Lint.Severity.key : Lint.Severity → String
+  | .off => "off"
+  | .hint => "hint"
+  | .warning => "warning"
+  | .error => "error"
+
+def Lint.Severity.ofKey (s : String) : Option Lint.Severity :=
+  List.find (fun v => String.eq (Lint.Severity.key v) s) Lint.Severity.all
+
+/-- What a rule sees: a command's declarations, or the whole module. -/
+inductive Lint.Scope where
+  | declaration
+  | module
+  | workspace
+
+/-- Every scope, in the registry's order. -/
+def Lint.Scope.all : List Lint.Scope :=
+  .cons .declaration (.cons .module (.cons .workspace .nil))
+
+def Lint.Scope.key : Lint.Scope → String
+  | .declaration => "declaration"
+  | .module => "module"
+  | .workspace => "workspace"
+
+def Lint.Scope.ofKey (s : String) : Option Lint.Scope :=
+  List.find (fun v => String.eq (Lint.Scope.key v) s) Lint.Scope.all
+
+-- ## The stable view (`wiz-lint/1`)
+
+/-- A span in the view: `start`/`stop` offsets in the target file. -/
+structure Lint.Span where
+  start : Nat
+  stop : Nat
+
+/-- One declaration the command added (the `decl` capability). -/
+structure Lint.Decl where
+  name : String
+  kind : String
+  isPublic : Bool
+  hasDoc : Bool
+
+/-- One binder of the command's declarations (the `facts` capability): whether it is
+used in its scope, and its depth in the binder stack. -/
+structure Lint.Binder where
+  name : String
+  used : Bool
+  depth : Nat
+
+/-- One direct import (the `imports` capability). -/
+structure Lint.Import where
+  name : String
+  start : Nat
+  stop : Nat
+
+/-- One message the command produced (the `messages` capability). `severity` is the
+elaborator's severity (`error`, `warning` or `info`), not a rule's default. -/
+structure Lint.Message where
+  severity : String
+  code : String
+  start : Nat
+  stop : Nat
+  text : String
+
+/-- The stable `Lint.Command` view. `capabilities` is the `caps` line, so a rule can
+tell an absent capability from an empty one; the lists are in the view's line order. -/
+structure Lint.Command where
+  capabilities : List Lint.Capability
+  module : String
+  path : String
+  kind : String
+  name : String
+  span : Option Lint.Span
+  decls : List Lint.Decl
+  binders : List Lint.Binder
+  imports : List Lint.Import
+  globals : List String
+  messages : List Lint.Message
+
+/-- An empty view; `Lint.Command.parse` fills it line by line. -/
+def Lint.Command.empty : Lint.Command :=
+  Lint.Command.mk .nil "" "" "" "" .none .nil .nil .nil .nil .nil
+
+/-- The fields of a line after its tag (`[]` for a tag-only line). -/
+def Lint.Command.fields (fs : List String) : List String :=
+  match fs with
+  | .cons _ rest => rest
+  | .nil => .nil
+
+/-- The first field after the tag (`""` when absent). -/
+def Lint.Command.field (rest : List String) (i : Nat) : String :=
+  match List.drop i rest with
+  | .cons s _ => s
+  | .nil => ""
+
+/-- The field at `i` as a number (`0` when absent or not a number). -/
+def Lint.Command.natField (rest : List String) (i : Nat) : Nat :=
+  match String.parseNat (Lint.Command.field rest i) with
+  | .some n => n
+  | .none => 0
+
+/-- The field at `i` as a bool (`true` only for the spelling `true`). -/
+def Lint.Command.boolField (rest : List String) (i : Nat) : Bool :=
+  String.eq (Lint.Command.field rest i) "true"
+
+/-- Parse a `caps` list: the comma-separated stable capability names. An unknown name
+is dropped (the host never writes one for the ABI this crate is pinned to). -/
+def Lint.Command.capsOf (cs : String) : List Lint.Capability :=
+  List.foldr (fun (s : String) (acc : List Lint.Capability) =>
+    match Lint.Capability.ofKey (String.trim s) with
+    | .some c => .cons c acc
+    | .none => acc) .nil (String.splitOn cs ",")
+
+/-- One line of the view. Unknown tags are ignored, so a later ABI line is not an
+error for a rule pinned to `wiz-lint/1`. -/
+def Lint.Command.line (c : Lint.Command) (line : String) : Lint.Command :=
+  let fs := String.splitOn line "\t"
+  let tag := Lint.Command.field fs 0
+  let rest := Lint.Command.fields fs
+  if String.eq tag "caps" then
+    { c with capabilities := Lint.Command.capsOf (Lint.Command.field rest 0) }
+  else if String.eq tag "module" then
+    { c with module := Lint.Command.field rest 0 }
+  else if String.eq tag "path" then
+    { c with path := Lint.Command.field rest 0 }
+  else if String.eq tag "command" then
+    { c with kind := Lint.Command.field rest 0, name := Lint.Command.field rest 1 }
+  else if String.eq tag "span" then
+    { c with span := .some (Lint.Span.mk (Lint.Command.natField rest 0) (Lint.Command.natField rest 1)) }
+  else if String.eq tag "decl" then
+    { c with decls := .cons (Lint.Decl.mk (Lint.Command.field rest 0) (Lint.Command.field rest 1)
+        (Lint.Command.boolField rest 2) (Lint.Command.boolField rest 3)) c.decls }
+  else if String.eq tag "binder" then
+    { c with binders := .cons (Lint.Binder.mk (Lint.Command.field rest 0)
+        (Lint.Command.boolField rest 1) (Lint.Command.natField rest 2)) c.binders }
+  else if String.eq tag "import" then
+    { c with imports := .cons (Lint.Import.mk (Lint.Command.field rest 0)
+        (Lint.Command.natField rest 1) (Lint.Command.natField rest 2)) c.imports }
+  else if String.eq tag "global" then
+    { c with globals := .cons (Lint.Command.field rest 0) c.globals }
+  else if String.eq tag "message" then
+    { c with messages := .cons (Lint.Message.mk (Lint.Command.field rest 0)
+        (Lint.Command.field rest 1) (Lint.Command.natField rest 2)
+        (Lint.Command.natField rest 3)
+        (String.intercalate "\t" (List.drop 4 rest))) c.messages }
+  else c
+
+/-- Parse the view's text. The fact lists are accumulated in reverse (linear time) and
+restored to the view's order here. -/
+def Lint.Command.parse (text : String) : Lint.Command :=
+  let c := List.foldl (fun c line => Lint.Command.line c line) Lint.Command.empty (String.splitOn text "\n")
+  { c with decls := List.reverse c.decls, binders := List.reverse c.binders,
+           imports := List.reverse c.imports, globals := List.reverse c.globals,
+           messages := List.reverse c.messages }
+
+/-- Whether the view declares `cap` (`caps` names exactly the sections present). -/
+def Lint.Command.has (c : Lint.Command) (cap : Lint.Capability) : Bool :=
+  List.any (fun x => String.eq (Lint.Capability.key x) (Lint.Capability.key cap)) c.capabilities
+
+-- ## Findings
+
+/-- One finding, as a runner returns it: four tab-separated fields. `anchor` is the
+stable baseline key (a declaration name plus an occurrence, never a line number); the
+host supplies the rule's code and severity. -/
+structure Lint.Finding where
+  start : Nat
+  stop : Nat
+  anchor : String
+  text : String
+
+/-- `String.parseNat`, with `0` for a field that is not a number. -/
+def Lint.Finding.natOr (s : String) : Nat :=
+  match String.parseNat s with
+  | .some n => n
+  | .none => 0
+
+/-- Parse one `<start>\t<stop>\t<anchor>\t<text>` line. -/
+def Lint.Finding.parse (line : String) : Option Lint.Finding :=
+  match String.splitOn line "\t" with
+  | .cons a (.cons b (.cons c rest)) =>
+    .some (Lint.Finding.mk (Lint.Finding.natOr a) (Lint.Finding.natOr b) c
+      (String.intercalate "\t" rest))
+  | _ => .none
+
+/-- Every finding in a runner's output (blank lines are skipped). -/
+def Lint.Finding.parseAll (text : String) : List Lint.Finding :=
+  List.foldr (fun (line : String) (acc : List Lint.Finding) =>
+    match Lint.Finding.parse line with
+    | .some f => .cons f acc
+    | .none => acc) .nil (String.splitOn text "\n")
+
+/-- One finding as the runner's four fields (without the trailing newline). -/
+def Lint.Finding.render (f : Lint.Finding) : String :=
+  String.intercalate "\t" (.cons (Nat.repr f.start) (.cons (Nat.repr f.stop)
+    (.cons f.anchor (.cons f.text .nil))))
+
+/-- A runner's output for a list of findings: one rendered finding per line, each
+terminated by a newline (empty for no findings). -/
+def Lint.Finding.renderAll (fs : List Lint.Finding) : String :=
+  String.join (List.map (fun (f : Lint.Finding) => String.append (Lint.Finding.render f) "\n") fs)
+
+-- ## The code blocks
+
+/-- The number in a `W`+three-digits code, if it is one. -/
+def Lint.codeNumber (code : String) : Option Nat :=
+  match String.chars code with
+  | .cons c rest => match Char.code c with
+    | 87 => String.parseNat (.mk rest)
+    | _ => .none
+  | .nil => .none
+
+/-- Whether `code` is in the package block `W500`–`W999` (the host refuses anything
+else from a package's `lint` command). -/
+def Lint.packageCode (code : String) : Bool :=
+  match Lint.codeNumber code with
+  | .some n => Bool.and (Nat.le 500 n) (Nat.le n 999)
+  | .none => .false
+
+/-- Whether `code` is in the registry's core block `W001`–`W499`. -/
+def Lint.coreCode (code : String) : Bool :=
+  match Lint.codeNumber code with
+  | .some n => Bool.and (Nat.le 1 n) (Nat.le n 499)
+  | .none => .false

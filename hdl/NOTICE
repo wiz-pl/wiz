@@ -1,0 +1,15 @@
+Hdl
+Copyright (C) 2026 Reuben Steenekamp
+
+The Hdl package is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software Foundation,
+either version 3 of the License, or (at your option) any later version (LICENSE).
+
+Its Wiz sources are compiled by the Wiz toolchain. The toolchain's runtime library
+carries the Wiz Runtime Library Exception (COPYING.RUNTIME), which lets you distribute
+programs compiled by Wiz under terms of your choice; that exception covers the runtime,
+not this package's sources.
+
+The package has no third-party source of its own. Its only dependency is the toolchain's
+standard library (the `lib/` of the Wiz release that builds it), whose notices are in
+the toolchain's NOTICE and LICENSES/.

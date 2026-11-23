@@ -140,6 +140,14 @@ sizes) is O(n) as well; a cached measure would be a node carrying its value and 
 equation (the `Digits`/`Node` of the textbook `FingerTree (V := …) A`). The deque ends
 (push, pop, pushFront, popFront) are the amortised-constant operations.
 
+The package's examples are its tests: `hdl/grail.wiz` declares
+`Package.tests "examples" "examples"`, so `cd hdl && grail test` compares every
+`hdl/examples/*.wiz` with its `.expected`. CI's `hdl-examples` group (shard `hdl`) runs
+the same comparisons (`Tests/Groups/HdlExamples.lean`).
+
+The package as a package — its layout, the standalone build and `HDL_ROOT`, its licence
+and tag policy — is [hdl.md](hdl.md).
+
 ## H14 S0: hardware as tagless-final code, with sharing
 
 `hdl/src/Hdl/Core.wiz` (`import Hdl.Core`) is the L2 layer of the HDL plan: combinational
@@ -444,7 +452,7 @@ counter (the counter lemmas `Rx.incs` are already per value).
   `Loop.firstByte`); "nothing is reported that was not sent" (needs reasoning backwards
   from a report).
 
-## H14 T3: formal harness emission (`hdl/src/Hdl/Formal.wiz`)
+## H14 T3: property-monitor emission (`hdl/src/Hdl/Formal.wiz`)
 
 `Verilog.emitFormal` emits the same module as `Verilog.emit` plus an
 `` `ifdef FORMAL `` harness: the properties declared with the monitor language become
@@ -454,6 +462,13 @@ immediate `assert`/`assume`/`cover` statements clocked by the design's clock, wi
 unaffected. `Formal.sby` writes a SymbiYosys job (`mode bmc` or `prove`, `depth`,
 `smtbmc`); the harness also runs directly under `yosys -formal` +
 `yosys-smtbmc`.
+
+`Hdl.Formal` is an **unverified second rendering** of the properties, not a proof that
+the monitors mean what `FProp` says. Nothing relates `FProp` to the `TL` formulas it is
+supposed to denote; the emitted text is checked only by running an external tool. The
+`hdl` group's formal case is **skipped when `yosys`, `yosys-smtbmc` or `z3` is missing**
+(`Tests/Groups/Hdl.lean:196-203`), so on a runner without the toolchain the case is
+evidence of nothing.
 
 ```wiz no-check
 def props : List FProp := [
@@ -474,8 +489,9 @@ IO.writeFile "queue.sby" (Formal.sby "queue.v" "queue" "bmc" 8)
   cycle), `rose` and `fell`.
 * **Monitors** are named `FProp`s: `always`, `implies` (`|->`), `impliesNext` (`|=>`),
   `nexts n`, `cover`, and the environment assumptions `assumeAlways`,
-  `assumeInitial` and `assumeImplies`/`assumeImpliesNext`. Each is the corresponding
-  `TL` formula from H14 T on the observation trace; the module docs give the table.
+  `assumeInitial` and `assumeImplies`/`assumeImpliesNext`. Each is *intended* to mean the
+  corresponding `TL` formula from H14 T on the observation trace (the module docs give the
+  table); the emission does not prove that it does.
 * **History** is handled by a saturating cycle counter: a check that reads `n` cycles of
   history is gated until the counter reaches `n`, so the unconstrained value of a
   `$past` before cycle 0 is never mistaken for a failure. A circuit built with
@@ -485,7 +501,8 @@ IO.writeFile "queue.sby" (Formal.sby "queue.v" "queue" "bmc" 8)
   correct RTL and finds a two-or-three-cycle counterexample for the variant (the
   stability monitor fails; the other four still pass). The test group runs the same
   proof with `yosys -formal`, `prep`, `clk2fflogic`, `write_smt2` and `yosys-smtbmc -s
-  z3`; `sby` consumes the generated `.sby` unchanged.
+  z3`; `sby` consumes the generated `.sby` unchanged. The case requires all three
+  tools and is a skip, not a pass, when one is absent (`Tests/Groups/Hdl.lean:196-203`).
 
 Not emitted yet: SVA sequences (`##[m:n]`, repetition, `throughout`), `until`,
 unbounded liveness (`◇`, leads-to, fairness — safety solvers do not prove it), and
@@ -694,11 +711,13 @@ Netlist.simulate n (Hdl.map (HwTy.leaves i) xs) = Hdl.map (HwTy.leaves o) (Circu
 for the infinite `Circuit.trace`: every finite prefix of the value trace is what the
 netlist simulates.
 
-**The obligations are discharged for a synthesised design.**
+**The obligations are discharged for one template, not generally.**
 `hdl/examples/hdl-sim-theorem.wiz` builds a one-bit delay with `Circuit.netlist "delay"`,
 proves `Circuit.Simulates` for it by `rfl` (the kernel evaluates the netlist's nodes),
 and applies the theorem to a four-cycle trace. That is a proof about the actual
-`Circuit.netlist` output, not a hand-written netlist; the test case in the `hdl` group
+`Circuit.netlist` output for that template, not a hand-written netlist and not a proof
+that scales: the same `rfl` gets stuck on a symbolic `BitVec` operation such as a 32-bit
+adder (`wiz-notes/sota-hdl-verification.md` §0.2). The test case in the `hdl` group
 runs the example and compares the netlist and value traces.
 
 **Outside the theorem** (stated in the module header too): multi-clock `Multi`/`Cdc`
@@ -800,17 +819,39 @@ are `hdl/examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches w
   For an **inductive with fields** (no parameters) or a **plain structure** it adds
   `T.tagWidth` (`⌈log₂ #constructors⌉`; 0 for a single constructor or a structure),
   `T.payloadWidth` (the widest constructor's field widths), `T.width`
-  (`tagWidth + payloadWidth`), `T.code = HwTy.bits T.width`, `T.pack`/`T.unpack` (the tag
-  in the high bits, then the fields, the first highest, zero-padded to the widest
-  constructor; a structure has no tag), `T.toNat`, `T.lit` and `T.bitPack`. A field is
-  `BitVec n`, `Bool`, or a type with its own derived `width`/`pack`/`unpack`. The round
-  trip `T.unpack (T.pack x) = x` holds by `rfl` on closed values (samples; the general
-  lemma is the same value-level one as a bundle's). A recursive, implicit or proof field,
-  a field of a type with no `BitPack`, and a type with no constructors are errors; so is a
+  (`tagWidth + payloadWidth`), `T.width_eq` (`refl`: `T.width` is that sum),
+  `T.code = HwTy.bits T.width`, `T.pack`/`T.decode`/`T.unpack` (the tag in the high
+  bits, then the fields, the first highest, zero-padded to the widest constructor; a
+  structure has no tag), `T.toNat`, `T.lit`, `T.pack_lt` (a theorem: the packed value's
+  `toNat` is below `2^T.width`, so the width and the value agree for every `x`) and
+  `T.bitPack`. A field is `BitVec n`, `Bool`, or a type with its own derived
+  `width`/`pack`/`unpack`. The round trip `T.unpack (T.pack x) = x` holds by `rfl` on
+  closed values (samples); its general proof is not emitted yet. The bit arithmetic is
+  in place (`Bits.pack_field`, the high-fields-aware `Bits.pack_field_high`,
+  `Bits.packed_tag`, `BitVec.ofNat_low`, …). The named follow-up is:
+
+  **HDL-2.4b — general `unpack_pack` for multi-field inductives.** Blocked on the
+  list split
+  `packFields fs · 2^pad = high · 2^(pad+s+w) + (v · 2^s + rest) · 2^pad`
+  for fields after the first, and on the kernel equality step with a symbolic
+  `Nat.shiftLeft` payload: the stuck goal is
+  `T.unpack (T.pack (T.c f…)) = T.c f…`, whose canonical form is
+  `T.decode tag (Nat.shiftLeft …) = T.c f…` (the kernel keeps the `decode`
+  application glued and reports the equality tuple
+  `(field = field) × True × True` instead). It needs a list-level
+  `Bits.unpack_field : (fs : List (Nat × Nat)) → …` proved by recursion, and a
+  `Nat`/power split lemma for `packFields`; the pinned bit strings and the
+  emitted/netlist concat checks already establish the *layout*, so this is a law
+  gap, not an encoding question.
+
+  A recursive, implicit or proof field, a field of a type with no `BitPack`, and a type
+  with no constructors are errors; so is a
   constructor payload wider than the declared payload width. A representation-
   parameterised `T Δ r` (fields `r Tᵢ`) also gets `T.toBits`/`T.ofBits` (packed on wires
   through `Hw.packBits`/`Hw.unpackBits`). `hdl/examples/hdl-bitpack.wiz` checks the UART's
-  `TxState` and the CPU's `Instr` shapes.
+  `TxState` and the CPU's `Instr` shapes, a nested `Point`, a `Bool`/enum/`BitVec`
+  `Flags`, an `Option`-shaped `Maybe`, and the emitted/netlist concat for `Point` and
+  `Flags`.
 * **Reset and enable: the convention.** A design with a reset or a clock enable takes
   them as its first inputs, named `rst` and `en`, reset first: both synchronous and
   active high, and the reset wins over the enable, as
@@ -1080,13 +1121,18 @@ parameters and no memory map:
   flight). A read in the answering cycle returns the word read before the store: there
   is no read-during-write bypass, so a write is visible to the next transaction only.
 
-`hdl/src/Hdl/BusLaw.wiz` (`import Hdl.BusLaw`) states the protocol laws over value traces:
+`hdl/src/Hdl/BusLaw.wiz` (`import Hdl.BusLaw`) states the protocol laws as Boolean checks
+over the finite value traces the example generates:
 `Stable`/`ValidStable`/`PayloadStable`/`AddressStable` (the source holds `valid` and the
 payload while stalled), `AnsweredAfter` (a response answers a request `d` cycles
-earlier; 0 for the router, 2 for the RAM), `AtMostOneAck` (arbiter mutual exclusion),
-`NoStarvation` (progress under a fair sink), `RouteCorrect` (hit forwards unchanged, miss
+earlier; 0 for the arbiter's forwarded request, 2 for the RAM), `AtMostOneAck` (arbiter
+mutual exclusion),
+`SingleOwner` (the forwarded request is held and at most one master is answered),
+`NoStarvation` (every offered request is answered within `k` cycles under a fair sink;
+the example uses `k = 16`), `RouteCorrect` (hit forwards unchanged, miss
 answers with `err`) and `ReadAfterWrite` (the RAM reads back a completed write, with byte
-strobes). The kernel-checked part now includes the arbiter: `arbStepAt_mutex` (one
+strobes; `ReadAfterWriteStep` is its executable form, which the example calls). The
+kernel-checked part now includes the arbiter: `arbStepAt_mutex` (one
 step never acknowledges both masters), `pick_busy` (`pick` grants to the owner while a
 request is in flight), `arbStepAt_ownerAck` (only the owner is answered),
 `arbStepAt_someAck`/`arbProgress` (every cycle in which the sink acknowledges answers
@@ -1104,9 +1150,10 @@ alias), `ramWStep_no_write` (an untaken request writes nothing),
 wait-timeline lemmas `ramW_go_first`/`_second`/`_third` and
 `ramW_wait_first`/`_second`/`_third`/`_withdraw0`/`_withdraw1` (one outstanding
 request, two cycles of delay, reset on withdrawal).
-The remaining laws (`StableStep`, `RouteOk`, per-master `NoStarvation`, …) are Boolean
-checks over exhaustively generated or long pseudo-random traces, compared against
-`Netlist.simulate` and `Circuit.simFast`: **tested, not proved**.
+Every Boolean check above is called by `hdl/examples/hdl-bus-law.wiz` on exhaustively
+generated or long pseudo-random traces, compared against `Netlist.simulate` and
+`Circuit.simFast`: **tested, not proved**. The remaining per-cycle and per-input pieces
+(`StableStep`, `RouteOk`, per-master `NoStarvation`, …) are what those checks call.
 
 `hdl/examples/hdl-bus.wiz` (test group `bus-crc`) writes and reads the RAM, checks the
 arbiter's grants alternate (and hold while the slave is not ready), and routes hits and
@@ -1199,15 +1246,17 @@ response/request matching, response order and strobe preservation, its value sim
 `Netlist.simulate` and `Circuit.simFast` agree cycle for cycle, and the four bridge
 netlists are `Netlist.wellFormed`.
 
-`hdl/src/Hdl/Axi4Law.wiz` (`import Hdl.Axi4Law`) is the AXI4 burst obligation set:
-`Axi4.Law.AddressProgression` (the bus addresses are `Axi4.beatSeq`), `Axi4.Law.BeatCount`
-(`LEN + 1` beats), `Axi4.Law.WrBeatOk`/`RdBeatOk` (one beat's address, data and byte
-strobes at the adapter pins), `Axi4.Law.WLastOk`/`RLastOk` (the last marker is on beat
-`LEN`), `Axi4.Law.BRespOk`/`RRespOk` (the response ID, data and `SLVERR`) and
-`Axi4.ResponseOrder`/`Axi4.orderOf` (per-ID completion order). The kernel checks only the
-small facts (`legalWrap` for 2/4/8/16 beats and its rejection of 5, `beats 0 = 1`,
-`bytes 0 = 1`, the quiet channels and the reset phases, and the `respOfErr` codes); the
-rest are Boolean checks over generated traces: **tested, not proved**.
+`hdl/src/Hdl/Axi4Law.wiz` (`import Hdl.Axi4Law`) is the AXI4 burst obligation set, as
+Boolean checks over the generated burst traces: `Axi4.Law.addrsOk` (the bus addresses
+are `Axi4.beatSeq`), `Axi4.Law.beatCountOk` (`LEN + 1` beats), `Axi4.Law.WrBeatOk`/
+`RdBeatOk` (one beat's address, data and byte strobes at the adapter pins),
+`Axi4.Law.WLastOk`/`RLastOk` (the last marker is on beat `LEN`),
+`Axi4.Law.BRespOk`/`RRespOk` (the response ID, data and `SLVERR`) and `Axi4.orderOf`
+(the per-ID completion order, checked on interleaved completions). The
+kernel checks only the small facts (`legalWrap` for 2/4/8/16 beats and its rejection of
+5, `beats 0 = 1`, `bytes 0 = 1`, the quiet channels and the reset phases, and the
+`respOfErr` codes); every other check is evaluated on generated traces in
+`hdl/examples/hdl-axi4.wiz`: **tested, not proved**.
 
 `hdl/examples/hdl-axi4.wiz` (test group `bus-protocol`) runs an INCR and a WRAP write burst
 and an INCR and a WRAP read burst, four beats each, through `Axi4.wrC`/`Axi4.rdC` with a
@@ -1216,7 +1265,8 @@ the WRAP write, and one `R` accepted in three for the reads). It checks the `LEN
 (INCR `16 18 20 22`; WRAP `22 16 18 20`), every beat's data and byte strobes, `WLAST`
 only on the last `W`, `RLAST` only on the last `R`, the echoed IDs and one `B` per burst,
 the `SLVERR` mapping for a bus error, and the multi-ID `Axi4.orderOf` model on
-interleaved completions. The `SlaveIn`/`SlaveOut` bundles round-trip through
+interleaved completions; each of the law checks above is evaluated on those traces.
+The `SlaveIn`/`SlaveOut` bundles round-trip through
 `Bundle.toEl`/`Bundle.ofEl`. The value simulation, `Netlist.simulate` and `Circuit.simFast`
 agree cycle for cycle, the two adapter netlists are `Netlist.wellFormed`, and yosys
 `check -assert`/`synth_ice40` runs on their Verilog when yosys is on PATH; without yosys
@@ -1250,13 +1300,14 @@ sequence.
   `AxiStream.sliceInReady`, `AxiStream.upInReady` and `AxiStream.downInReady` expose the
   input-ready term to wire back to a source.
 
-`hdl/src/Hdl/AxiStreamLaw.wiz` (`import Hdl.AxiStreamLaw`) is the obligation set:
-`AxiStream.Law.Stable` (a stalled beat is held unchanged and stays valid),
-`NoLoss`/`NoDup`/`Order` (the accepted output payloads are exactly the accepted input
-payloads: same count, each once, in order), `Backpressure` (the three together) and
-`SliceNoLoss`. The kernel checks the small facts (`accepted_nil`,
-`keepW_8`, the slice/source/sink initial values); the rest are Boolean checks over
-generated traces, **tested, not proved**.
+`hdl/src/Hdl/AxiStreamLaw.wiz` (`import Hdl.AxiStreamLaw`) is the obligation set, as
+Boolean checks over the traces the example generates: `AxiStream.Law.Stable` (a stalled
+beat is held unchanged and stays valid, over a source trace) and `AxiStream.Law.Order`
+(the sink's accepted payload sequence is exactly the sequence the generator handed over:
+same count, each once, in order; the register slice and both width converters are
+checked this way). The kernel checks the small facts (`accepted_nil`, `keepW_8`, the
+slice/source/sink initial values); `Stable` and `Order` are evaluated on generated
+traces, **tested, not proved**.
 
 `hdl/examples/hdl-stream.wiz` (test group `bus-protocol`) runs the source/sink pair with an
 always-ready, a 2-cycle and a 3-cycle stall pattern, the slice with a stalling sink
@@ -1441,13 +1492,14 @@ counter, and three chip selects selecting slaves 0, 1 and 2), `examples/rune-ddr
 value simulation = `Netlist.simFast`, the loopback bytes, the SPI shift order and edges,
 the chip-select patterns, the DDR handshake and masked write.
 
-`hdl/src/Hdl/SpiLaw.wiz` (`import Hdl.SpiLaw`) states the SPI obligations over link traces:
-`Spi.Law.SampleStable` (`mosi` does not change on a sample edge),
-`Spi.Law.MosiOnShift` (after the start cycle it changes only on a shift edge),
-`Spi.Law.SampleCount` (eight samples per transfer), `Spi.Law.Divider` (`done` exactly
-`16 * div` cycles after `start`), and `Spi.Law.ByteRoundTrip` (the master receives the
-reply and the slave the sent byte). The mode table, the sample/shift levels, `divN` and
-concrete loopback bytes are kernel-checked; the trace laws are **tested, not proved**.
+`hdl/src/Hdl/SpiLaw.wiz` (`import Hdl.SpiLaw`) states the SPI obligations as Boolean
+checks on the generated link traces: `Spi.Law.SampleStable` (`mosi` does not change on
+a sample edge), `Spi.Law.MosiOnShift` (after the start cycle it changes only on a shift
+edge), `Spi.Law.SampleCount` (eight samples per transfer), `Spi.Law.Divider` (`done`
+exactly `16 * div` cycles after `start`), and `Spi.Law.ByteRoundTrip` (the master
+receives the reply and the slave the sent byte). The mode table, the sample/shift
+levels, `divN` and concrete loopback bytes are kernel-checked; all five trace checks are
+called by `hdl/examples/hdl-spi.wiz`'s `linkOk`, and are **tested, not proved**.
 `hdl/examples/hdl-spi.wiz` runs all four modes, a divider sweep `1 … 8`, the loopback and
 the mock-slave link, checks the timing and divider laws, exercises `Spi.transferLoop` on
 all 256 bytes in every mode, and compares the value simulation, `Netlist.simulate` and
@@ -2092,6 +2144,15 @@ complexity, persistence guarantees and the benchmark plan are in
 > no longer documents them; `scry/README.md` is the package's own guide. The sections
 > below remain as a cross-reference for the language features they exercise.
 
+The one exception is the **Quire storage engine** (`lib/Scry/Quire.wiz`,
+`QuireCursor.wiz`, `QuireFindings.wiz` and the `Quire*` siblings). It is library-level,
+not part of the analyser: the suite's module loader and the toolchain's `lib` root serve
+`lib/`, and the engine has no scry dependency (it imports `Sys`, `Word`, `WordMap`,
+`Optic` and friends). Its only consumer is the scry package's project cache
+(`scry/src/Scry/ProjectCache.wiz`); `drafts/storage-engine/README.md` maps the files and
+`wiz-notes/storage-engine.md` and `wiz-notes/quire-perf.md` are the design and
+measurements.
+
 ## Scry: Wil, the analysis IR (`scry/src/Scry/Wil.wiz`)
 
 `import Scry.Wil` is the small three-address IR of the `scry` analyser
@@ -2182,6 +2243,11 @@ The S4 rule pack and interprocedural slice are separate modules:
   `scry/memory/null-dereference` diagnostic, and a `p != NULL`/`!p` guard kills the null
   value on the other edge. It reuses `Scry.AiFixpoint`'s worklist and `Alarm.nullDeref`;
   `Scry.analyze` does not run it; `Scry.analyzeWithNull` does (the CLI flag is `--null-deref`).
+  A frontend that knows more than Wil's types can pass a `Scry.NullTables` per function
+  (the C# lowering does, through `Scry.CsNull`): annotated-maybe-null parameters enter as
+  maybe-null, receiver dereferences become `AStmt.check`, and an assignment to a
+  non-null-annotated variable that may be null is the separate
+  `Alarm.nullableAssign` (`scry/cs/nullable-assignment`).
 * `import Scry.RuleTaint` also carries the memory rules: `mstore`/`mload`/`mtainted`
   make a `store` taint the locations it may alias and a later `load` receive it, with
   `store`/`load` path nodes. Diagnostics that are not findings (unknown memory, use after
@@ -2312,9 +2378,13 @@ shape; and the CWE tier names from
 and writes `scry-workflow/findings.json` plus `scry-workflow/<id>/` (`static.json`,
 certificate, assumptions, boundaries, `finding.json`). `repro`
 (`scry/src/Scry/Repro.wiz`) selects/generates an input and harness, builds under
-ASAN/UBSAN when available (recording a fallback), runs under `timeout`, and stores
-`dynamic.json`, `repro.sh` and `run.log`. `verify` re-runs the analysis and the repro and
-reports "not reported by this run" (never absence).
+ASAN/UBSAN when available (recording a fallback), runs under `timeout`, and stores the
+run as two records: `repro.json` (the recipe) and `dynamic.json` (the evidence), with
+`repro.sh` and `run.log` beside them. The two records are written together by one
+function and tied by a pair id and the recipe's digest. `verify` re-runs
+the recipe, refuses a torn or disagreeing pair loudly, and reports "not reported by this
+run" (never absence). A probe run whose event stream is empty is `skipped` with
+`probe-no-heartbeat`, not clean: a silent sensor is not evidence of absence.
 
 The root bundle keeps `static`, `dynamic`, `verify` and `repro` separate and adds an
 `evidenceItems` array with `kind` (`static`, `dynamic-observed`, `smt-model`,

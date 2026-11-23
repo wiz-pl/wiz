@@ -23,7 +23,13 @@ def squares : Array Nat :=
 ```
 -/
 
-/-- Arrays of any values: a native buffer, indexed from 0. -/
+/-- Arrays of any values: a native buffer, indexed from 0.
+
+The five operations below are the library's **one** declaration of `Array`: every
+backend resolves the same `extern:` keys. C and LLVM get their implementation from
+`runtime/`; the Wasm backend selects the `wasm` rows in `IR.externImpls` (keyed by
+these declaration names) and calls the in-module runtime functions they name. A new
+target adds an implementation row, not a name table in an emitter. -/
 axiom Array : Type → Type
 /-- The empty array. -/
 extern "wiz_array_empty" Array.empty : {A : Type} → Array A
