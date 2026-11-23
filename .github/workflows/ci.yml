@@ -962,11 +962,10 @@ jobs:
         env:
           TRUST_CACHE_MODE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && '--cache' || '--cache-ro' }}
         run: |
-          # The packaged `wiz` cache is a Nix derivation (substituted with the store
-          # path), read-only here like the restored layer; the writable cache is only
-          # the PR's own (master writes it).
-          scripts/trust-ledger.sh --check --strict-legacy "$TRUST_CACHE_MODE" .lake/trust-cache \
-            --cache-ro "${{ steps.nix.outputs.wiz }}/share/wiz/cache" --cache-ro-unsigned
+          # This job builds only the driver (`tests`), not `wiz`, so it has no packaged
+          # `share/wiz/cache` to add as a layer; its own `.lake/trust-cache` is the
+          # driver's cache and is `--cache-ro` on every non-master run.
+          scripts/trust-ledger.sh --check --strict-legacy "$TRUST_CACHE_MODE" .lake/trust-cache
           Tests/trust-ledger/run.sh
           scripts/trust-ledger-merge_test.sh
           python3 scripts/host-unsafe-ledger.py --check
