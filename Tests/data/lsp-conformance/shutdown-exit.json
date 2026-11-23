@@ -1,0 +1,10 @@
+{
+  "name": "shutdown-exit",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/shutdown-exit.wiz",
+  "text": "import Prelude\ndef one : Nat := 1\n",
+  "note": "The shutdown result is JSON null (not missing, not an object) and the process exits with code 0 after `exit`; the driver checks the exit status.",
+  "requests": [],
+  "expected": [],
+  "shutdown": [{ "match": "exact", "path": "result", "value": null }]
+}

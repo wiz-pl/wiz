@@ -1,0 +1,13 @@
+{
+  "name": "goal-d1-higher-order-hyp",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-d1-higher-order-hyp.wiz",
+  "text": "import Prelude\ndef h (f : (Nat → Nat) → Nat) : Nat := by\n  exact f (fun x => x)\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 2 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.goals", "value": ["f : (Nat → Nat) → Nat\n⊢ Nat"] }
+  ],
+  "note": "D1 (task 26 review): a hypothesis whose type is a higher-order Pi. The arrow domain must be parenthesised — `(Nat → Nat) → Nat`, not `Nat → Nat → Nat` (arrows associate to the right, so the bare form is a different type). No knownGap: task 27a's goal-mode printer parenthesises the domain, so the selfhost gives this text; a compiler built before 27a prints the old binder form and fails the case."
+}

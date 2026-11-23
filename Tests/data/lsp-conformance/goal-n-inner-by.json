@@ -1,0 +1,11 @@
+{
+  "name": "goal-n-inner-by",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-n-inner-by.wiz",
+  "text": "import Prelude\ndef f (n : Nat) : Nat := by\n  exact (by exact n)\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 9 } } }
+  ],
+  "expected": [{ "match": "exact", "path": "result.goals", "value": ["n : Nat\n⊢ Nat"] }],
+  "note": "9n': the inner `by` itself, with a hypothesis in scope. Same pin as 9n one character earlier; no knownGap (it passes today and after 4b, and the goal has no function type for the Pi printer to spell)."
+}

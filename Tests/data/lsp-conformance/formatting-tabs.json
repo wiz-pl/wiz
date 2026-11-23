@@ -1,0 +1,13 @@
+{
+  "name": "formatting-tabs",
+  "servers": ["host"],
+  "uri": "file:///conf/formatting-tabs.wiz",
+  "text": "import Prelude\ndef  f :Nat:=1\n",
+  "requests": [
+    {
+      "method": "textDocument/formatting",
+      "params": { "options": { "tabSize": 8, "insertSpaces": false } }
+    }
+  ],
+  "expected": [{ "match": "error", "path": "error.code", "value": -32602 }]
+}

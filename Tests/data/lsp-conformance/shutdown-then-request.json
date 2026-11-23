@@ -1,0 +1,28 @@
+{
+  "name": "shutdown-then-request",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/shutdown-then-request.wiz",
+  "text": "import Prelude\ndef one : Nat := 1\ndef two : Nat := one\n",
+  "requests": [
+    { "method": "textDocument/hover", "params": { "position": { "line": 2, "character": 17 } } }
+  ],
+  "afterShutdown": [
+    { "method": "textDocument/hover", "params": { "position": { "line": 2, "character": 17 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.contents.value", "value": "```wiz\none : Nat\n```" },
+    { "match": "error", "path": "error.code", "value": -32600 }
+  ],
+  "knownGap": [
+    {
+      "server": "host",
+      "reason": "a request after shutdown is answered, not refused with -32600",
+      "issue": "shutdown"
+    },
+    {
+      "server": "selfhost",
+      "reason": "a request after shutdown is answered, not refused with -32600",
+      "issue": "shutdown"
+    }
+  ]
+}

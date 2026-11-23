@@ -1,0 +1,14 @@
+{
+  "name": "sync-mode",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/sync-mode.wiz",
+  "text": "import Prelude\ndef one : Nat := 1\ndef two : Nat := one\n",
+  "note": "Both servers count positions in UTF-16 code units and take whole-document didChange (textDocumentSync 1, full). The corpus applies a range edit client-side and sends the whole text, so a move to incremental sync (2) must fail here, not silently mis-drive the session.",
+  "initialize": [
+    { "match": "exact", "path": "result.capabilities.positionEncoding", "value": "utf-16" },
+    { "match": "type", "path": "result.capabilities.textDocumentSync", "value": "integer" },
+    { "match": "exact", "path": "result.capabilities.textDocumentSync", "value": 1 }
+  ],
+  "requests": [],
+  "expected": []
+}

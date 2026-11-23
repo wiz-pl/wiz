@@ -1,0 +1,11 @@
+{
+  "name": "goal-n-before-first-inner",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-n-before-first-inner.wiz",
+  "text": "import Prelude\ndef f (n : Nat) : Nat := by\n  exact (by exact n)\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 11 } } }
+  ],
+  "expected": [{ "match": "exact", "path": "result.goals", "value": ["n : Nat\n⊢ Nat"] }],
+  "note": "9n: with a hypothesis in scope, the caret before the inner block's first step. A swap pin: the answer must be the inner block's entry goal, not the outer step's `no goals`. Passes today (through a fallback span) and after 4b (through the threaded span), so no knownGap; the goal is not a function type, so the Pi printer does not show."
+}

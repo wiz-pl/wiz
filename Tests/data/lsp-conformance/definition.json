@@ -1,0 +1,17 @@
+{
+  "name": "definition",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/definition.wiz",
+  "text": "import Prelude\ndef one : Nat := 1\ndef two : Nat := one\n",
+  "note": "The range's start character differs: the host's is the declaration's (0), the self-hosted server's the name token's (4). Both are legitimate Hover/Definition ranges, so the corpus pins the line.",
+  "requests": [
+    { "method": "textDocument/definition", "params": { "position": { "line": 2, "character": 17 } } }
+  ],
+  "expected": [
+    {
+      "match": "subset",
+      "path": "result",
+      "value": { "uri": "$URI", "range": { "start": { "line": 1 } } }
+    }
+  ]
+}

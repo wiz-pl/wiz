@@ -1,0 +1,11 @@
+{
+  "name": "goal-between-inner",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-between-inner.wiz",
+  "text": "import Prelude\ndef k : Nat → Nat := by\n  exact (by intro x; exact x)\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 20 } } }
+  ],
+  "expected": [{ "match": "exact", "path": "result.goals", "value": ["x : Nat\n⊢ Nat"] }],
+  "note": "between the two inner steps: the state after `intro x`, not the outer step's. The selfhost matches today because `intro`'s word-searched fallback span contains the caret (not because an inner block entry exists); 4b makes it match for the right reason. The caret is not a span-less position, so there is no knownGap."
+}

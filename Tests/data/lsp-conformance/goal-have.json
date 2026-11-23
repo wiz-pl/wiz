@@ -1,0 +1,11 @@
+{
+  "name": "goal-have",
+  "servers": ["selfhost"],
+  "uri": "file:///conf/goal-have.wiz",
+  "text": "import Prelude\ndef h (n : Nat) : Nat := by\n  have m : Nat := by exact n\n  exact m\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 18 } } }
+  ],
+  "expected": [{ "match": "exact", "path": "result.goals", "value": ["n : Nat\n⊢ Nat"] }],
+  "note": "the host has no `have` tactic, so this pins the self-hosted server alone. No knownGap: it answers `n : Nat ⊢ Nat` today (a fallback span) and 4b threads the `have` term's span so it matches for the right reason; the expected goal is not a function type, so the Pi printer does not show."
+}
