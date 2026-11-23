@@ -1171,7 +1171,9 @@ def libDiffGroup : Group where
         let dir ← IO.FS.createTempDir
         let rx : IO.AccessRight := { read := true, execution := true }
         let host := dir / "host.sh"
-        IO.FS.writeFile host "#!/bin/sh\necho '{\"accepted\":true,\"decls\":2}'\n"
+        -- (the host record carries the elaborated types: R3 compares them, not only the
+        -- declaration count; the stub's self side prints the same two lines)
+        IO.FS.writeFile host "#!/bin/sh\necho '{\"accepted\":true,\"decls\":2,\"types\":[\"a : Nat\",\"b : Nat\"]}'\n"
         let selfExe := dir / "self.sh"
         IO.FS.writeFile selfExe (String.intercalate "\n" [
           "#!/bin/sh",
