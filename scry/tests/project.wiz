@@ -271,6 +271,24 @@ def main : IO Unit := EIO.toIO (do
               | .nil => .false
             | .none => .false
           | .nil => .false);
+      check "sarif: every result has a fingerprinted identity"
+        (List.all (fun r => match Json.get r "partialFingerprints" with
+          | .some fp => Bool.or (String.startsWith (jStr fp "scry/v1") "f_")
+              (String.startsWith (jStr fp "scry/v1") "b_")
+          | .none => .false) results);
+      check "sarif: a finding uses the project-relative semantic id"
+        (match results with
+          | .cons r _ => match rep.findings with
+            | .cons f _ => match Json.get r "partialFingerprints" with
+              | .some fp => String.eq (jStr fp "scry/v1")
+                  (Scry.semanticId f (rep.findingRel f))
+              | .none => .false
+            | .nil => .false
+          | .nil => .false);
+      check "sarif: the C rule id is namespaced"
+        (match results with
+          | .cons r _ => String.startsWith (jStr r "ruleId") "scry/c/"
+          | .nil => .false);
 
   -- cache: cold, warm, changed declaration, corrupt entry
   tmp ← FS.createTempDir;

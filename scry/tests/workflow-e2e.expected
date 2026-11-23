@@ -5,6 +5,10 @@ refine: exit 0: ok
 refine: C candidate is triaged with a derived env plan: ok
 refine: C# candidate's plan is stdin (Console.ReadLine): ok
 refine: candidate.json is written: ok
+rerun: exit 0: ok
+rerun: one record per finding: ok
+rerun: the C finding keeps its id and stays triaged: ok
+rerun: the C# finding keeps its id when rescanned by an absolute path: ok
 f_edbaeb86bcfed108: repro ran (address+undefined) exit exited 0
   marker: observed
 repro: exit 0: ok

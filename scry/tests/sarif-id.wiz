@@ -47,5 +47,27 @@ def main : IO Unit := EIO.toIO (do
   let text2 := Scry.renderSarifWithBaselines "scry" .nil (Scry.RulePack.mk .nil)
     (List.cons (Scry.SarifFinding.mk f1 .true (.some "unchanged")) .nil) .nil;
   check "sarif: baselineState unchanged is present"
-    (String.contains text2 "\"baselineState\":\"unchanged\"")
+    (String.contains text2 "\"baselineState\":\"unchanged\"");
+
+  -- The rule id names the frontend; the identity does not. A `.cs` finding whose rule,
+  -- path and sink agree with a `.c` finding is the same triage record.
+  check "rule id names the frontend"
+    (Bool.and (String.eq (Scry.sarifRuleIdFor "a.c" "r") "scry/c/r")
+      (Bool.and (String.eq (Scry.sarifRuleIdFor "a.cs" "r") "scry/cs/r")
+        (String.eq (Scry.sarifRuleId "r") "scry/c/r")));
+  check "identity is frontend-neutral"
+    (String.eq (Scry.semanticId f1 "a.c") (Scry.semanticId f1 "a.cs"));
+  check "identity file strips the analysis root"
+    (Bool.and (String.eq (Scry.identityFile "/w" "/w/src/a.c") "src/a.c")
+      (String.eq (Scry.identityFile "/w" "src/a.c") "src/a.c"));
+
+  -- A related step is `{id, message, physicalLocation, properties}`: one wrapper, the
+  -- same shape the project writer emits (this used to nest the wrapper twice).
+  let om : Scry.OriginMap :=
+    List.cons (Scry.OriginEntry.mk "main" 1 (Scry.Origin.mk "a.c" 1 1 1 2)) .nil;
+  let textRel := Scry.renderSarifWith "scry" om (Scry.RulePack.mk .nil)
+    (List.cons (f1, .true) .nil) .nil;
+  check "sarif: a related step has one physicalLocation wrapper"
+    (Bool.and (String.contains textRel "\"relatedLocations\":[{\"id\":1")
+      (Bool.not (String.contains textRel "\"physicalLocation\":{\"physicalLocation\"")))
 )

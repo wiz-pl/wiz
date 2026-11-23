@@ -98,13 +98,42 @@ def main : IO Unit := EIO.toIO (do
       | .some j => String.eq (Json.getStr j "stage") "refined"
       | .none => (.false : Bool));
 
+  -- A rerun keeps the identity and the triage state: one record per finding, the same
+  -- id, still `triaged` (not reopened), firstSeen unchanged, candidate stage kept. The
+  -- C# file is rescanned by its absolute path: the id is relative to the directory the
+  -- scan runs in, so the spelling of the path does not create a second record.
+  cwd ← FS.currentDir;
+  let absCs := String.append (String.append cwd "/") csFixture;
+  nr1 ← Scry.findingsCmd ["scan", "corpus/workflow/cwe78-getenv.c", "--db", db,
+    "--artifacts", dir, "--quiet"];
+  nr2 ← Scry.findingsCmd ["scan", absCs, "--rules", "corpus/csharp/csharp.scry",
+    "--db", db, "--artifacts", dir, "--quiet"];
+  stR ← loadStore db;
+  check "rerun: exit 0" (Bool.and (Nat.beq nr1 0) (Nat.beq nr2 0));
+  check "rerun: one record per finding"
+    (Nat.beq (List.length stR.findings) (List.length st2.findings));
+  check "rerun: the C finding keeps its id and stays triaged"
+    (match findIn st2 "cwe78-getenv.c", findIn stR "cwe78-getenv.c" with
+      | .some a, .some b => Bool.and (String.eq a.id b.id)
+          (Bool.and (String.eq (Scry.WfState.show b.state) "triaged")
+            (Bool.and (Nat.beq a.firstSeen b.firstSeen)
+              (String.eq (candOf b).stage "refined")))
+      | _, _ => (.false : Bool));
+  check "rerun: the C# finding keeps its id when rescanned by an absolute path"
+    (match findIn st2 "cwe78-process-unsafe.cs", findIn stR "cwe78-process-unsafe.cs" with
+      | .some a, .some b => String.eq a.id b.id
+      | _, _ => (.false : Bool));
+  let cRecR := match findIn stR "cwe78-getenv.c" with
+    | .some r => r
+    | .none => Scry.WfRecord.mk "" "" "" .new [] "" .none .false Json.mkNull "" .none .none .none .none .none 0 0;
+
   -- 3. repro with the plan-derived harness and input
   chain ← Scry.dynResolve .none dir;
   let cc := match chain.tool with
     | .some t => t.cc
     | .none => "cc";
-  n4 ← Scry.findingsCmd ["repro", cRec.id, "--db", db, "--cc", cc];
-  dyn ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "dynamic.json");
+  n4 ← Scry.findingsCmd ["repro", cRecR.id, "--db", db, "--cc", cc];
+  dyn ← Scry.wfReadJsonOpt (Path.join cRecR.artifacts "dynamic.json");
   st3 ← loadStore db;
   check "repro: exit 0" (Nat.beq n4 0);
   check "repro: derived from the candidate, not a template"
@@ -119,8 +148,8 @@ def main : IO Unit := EIO.toIO (do
       | .none => (.false : Bool));
 
   -- 4. verify: static plus the stored PoC, side by side
-  n5 ← Scry.findingsCmd ["verify", cRec.id, "--db", db];
-  ver ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "verify/verify.json");
+  n5 ← Scry.findingsCmd ["verify", cRecR.id, "--db", db];
+  ver ← Scry.wfReadJsonOpt (Path.join cRecR.artifacts "verify/verify.json");
   st4 ← loadStore db;
   check "verify: exit 0 (PoC observed)" (Nat.beq n5 0);
   check "verify: verdict names the observed PoC"
@@ -132,7 +161,7 @@ def main : IO Unit := EIO.toIO (do
       | .none => (.false : Bool));
 
   -- 5. the root bundle carries the same candidate value
-  bundle ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "finding.json");
+  bundle ← Scry.wfReadJsonOpt (Path.join cRecR.artifacts "finding.json");
   check "bundle: candidate.stage is verified"
     (String.eq (strAt bundle ["candidate", "stage"]) "verified");
   check "bundle: evidence has a poc item with the marker observed"

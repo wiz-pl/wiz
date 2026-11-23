@@ -412,13 +412,14 @@ def Scry.wfCertList : List Scry.RuleFinding → List (Option Scry.Certificate) �
   | .cons f rest, .cons c cs => List.cons (f, c) (Scry.wfCertList rest cs)
   | .cons f rest, .nil => List.cons (f, .none) (Scry.wfCertList rest .nil)
 
-partial def Scry.wfScanPairs (o : Scry.ScanOpts) (st : Scry.WfStore) (file rulesPath rulesText
+partial def Scry.wfScanPairs (o : Scry.ScanOpts) (st : Scry.WfStore) (root file rulesPath rulesText
     source : String) (now started finished : Nat) (rep : Scry.TaintReport) (smt : Json) :
     List (Scry.RuleFinding × Option Scry.Certificate) → EIO Scry.WfStore
   | .nil => EIO.pure st
   | .cons (f, cert) rest => do
-    let id := Scry.wfId f file;
-    let key := Scry.wfSemanticKey f file;
+    let idFile := Scry.identityFile root file;
+    let id := Scry.wfId f idFile;
+    let key := Scry.wfSemanticKey f idFile;
     let origin := Scry.originAt rep.origins f.func f.sink;
     let lineText := match origin with
       | .some org => Scry.wfLineAt source org.line
@@ -433,12 +434,12 @@ partial def Scry.wfScanPairs (o : Scry.ScanOpts) (st : Scry.WfStore) (file rules
       | .some e => e
       | .none => Json.mkNull;
     stepw2 ← Scry.wfWrite (Path.join art "environment.json") (String.append (Json.render envJson) "\n");
-    let candidate := Scry.wfScanCandidate;
+    let old := Scry.wfFind st id;
+    let candidate := Scry.wfRescanCandidate old;
     stepw3 ← Scry.wfWrite (Path.join art "candidate.json")
       (String.append (Json.render (Scry.wfCandidateJson candidate)) "\n");
     let finding := Scry.findingJson rep.origins f
       (match cert with | .some c => c.verified | .none => .false);
-    let old := Scry.wfFind st id;
     let firstSeen := match old with | .some r => r.firstSeen | .none => now;
     let history := match old with
       | .some r => r.history
@@ -458,7 +459,7 @@ partial def Scry.wfScanPairs (o : Scry.ScanOpts) (st : Scry.WfStore) (file rules
             (String.append (Nat.repr org.line) (String.append ":" (Nat.repr org.column)))) | .none => file)
           (String.append "  " (String.append (Scry.WfState.show state)
             (String.append "  " (String.append f.rule (String.append "  " f.name)))))))));
-    Scry.wfScanPairs o (Scry.wfUpsert st record) file rulesPath rulesText source now started
+    Scry.wfScanPairs o (Scry.wfUpsert st record) root file rulesPath rulesText source now started
       finished rep smt rest
 
 def Scry.wfScanOne (o : Scry.ScanOpts) (st : Scry.WfStore) (file rulesPath rulesText : String)
@@ -469,8 +470,9 @@ def Scry.wfScanOne (o : Scry.ScanOpts) (st : Scry.WfStore) (file rulesPath rules
   rep ← Scry.analyzeFile opts;
   finished ← EIO.lift Clock.monotonic;
   source ← FS.readFile file;
+  cwd ← FS.currentDir;
   smt ← Scry.wfSmtJson o.smt;
-  Scry.wfScanPairs o st file rulesPath rulesText source now started.ns finished.ns rep smt
+  Scry.wfScanPairs o st cwd file rulesPath rulesText source now started.ns finished.ns rep smt
     (Scry.wfCertList rep.findings rep.certificates)
 
 partial def Scry.wfScanFiles (o : Scry.ScanOpts) (st : Scry.WfStore) (rulesPath rulesText : String)
@@ -1235,7 +1237,9 @@ def Scry.verifyCmd (args : List String) : EIO Nat :=
         let opts := { Scry.emptyTaintOpts rec0.source with
           rules := rec0.rules, allowErrors := rec0.allowErrors };
         rep ← Scry.analyzeFile opts;
-        let ids := List.map (fun f => Scry.wfId f rec0.source) rep.findings;
+        cwd ← FS.currentDir;
+        let ids := List.map (fun f => Scry.wfId f (Scry.identityFile cwd rec0.source))
+          rep.findings;
         let present := List.any (fun x => String.eq x rec0.id) ids;
         let after := Scry.wfStaticAfterJson rec0.source rep ids present;
         reproJson ← Scry.wfReadJsonOpt (Path.join rec0.artifacts "repro.json");

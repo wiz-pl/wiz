@@ -599,6 +599,16 @@ def Scry.wfUpsert (st : Scry.WfStore) (r : Scry.WfRecord) : Scry.WfStore :=
       | .true => r
       | .false => x) st.findings)
 
+/-- The candidate a **re**scan keeps: a finding already refined/verified by an earlier
+run keeps that value (a rescan adds no new evidence), so a rerun never reopens the
+pipeline at `scan`; a first scan starts from `Scry.wfScanCandidate`. -/
+def Scry.wfRescanCandidate (old : Option Scry.WfRecord) : Scry.WfCandidate :=
+  match old with
+  | .some r => match r.candidate with
+    | .some c => c
+    | .none => Scry.wfScanCandidate
+  | .none => Scry.wfScanCandidate
+
 -- ## JSON parsing (lenient, but the schema and id are checked)
 
 def Scry.wfGetOptStr (j : Json) (k : String) : Option String :=

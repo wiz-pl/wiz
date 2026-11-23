@@ -5,9 +5,9 @@ import Scry.Rules
 # Scry.Identity: one hash, one semantic id
 
 The **one** place a finding's stable identity is computed, and the **one** 64-bit hash
-the rest of scry uses for its maps and content digests. `Scry.Sarif.semanticId` and
-`Scry.Workflow.wfId` are names over `Scry.semanticId` here; the boundary/memory id and
-the GitHub-compatible line hash are here too, so an id is never assembled twice.
+the rest of scry uses for its maps and content digests. `Scry.Sarif` and
+`Scry.Workflow` (`wfId`) are names over `Scry.semanticId` here; the boundary/memory id
+and the GitHub-compatible line hash are here too, so an id is never assembled twice.
 
 ## The hash
 
@@ -34,7 +34,10 @@ The id is a *stable handle for triage*, not a claim that two runs found the same
 the sense of a proof. It includes the rule id, the normalized file path, the sink
 function/callee/argument and the path shape. A rename of the sink or a change from
 `source -> sink` to `source -> store -> load -> sink` is a new id: a deliberate review
-event, not a silent match.
+event, not a silent match. The file component is canonicalized by the caller with
+`Scry.identityFile`, so the same source spelled `./x`, `x` or `<cwd>/x` is one finding
+when the analysis root is the same; the identity is also language-neutral, so a C and a
+C# frontend reporting the same rule and location agree.
 -/
 
 -- ## The hash
@@ -84,6 +87,26 @@ def Scry.normPath (p : String) : String :=
   | .some r => r
   | .none => q
 
+/-- The file component of a finding identity: `normPath`, and when `root` is non-empty a
+path under it is made relative to it, so `/work/src/a.c`, `./src/a.c` and `src/a.c` are
+one identity when the analysis root is `/work`. This is the **only** path
+canonicalization: the key stays exact (no suffix matching, no case folding), and a path
+outside the root keeps its own spelling. The workflow scan passes the directory it runs
+in and `scry project` the project root; the single-file SARIF writer uses the origin URI
+as written. A frontend never contributes to the identity beyond the file it read. -/
+def Scry.identityFile (root file : String) : String :=
+  let p := Scry.normPath file;
+  match String.isEmpty root with
+  | .true => p
+  | .false =>
+    let r := Scry.normPath root;
+    let prefix := String.append r "/";
+    match String.startsWith p prefix with
+    | .true => String.drop (String.length prefix) p
+    | .false => match String.eq p r with
+      | .true => ""
+      | .false => p
+
 /-- The coarse role path (`source>flow>sink`): roles, not program points. -/
 def Scry.pathShape (path : List Scry.PathNode) : String :=
   String.intercalate ">" (List.map (fun p => Scry.PathKind.show p.kind) path)
@@ -97,12 +120,20 @@ def Scry.lastFunc : List Scry.PathNode → String
   | .cons p .nil => p.func
   | .cons _ ps => Scry.lastFunc ps
 
+/-- The **identity namespace**: the first component of the key. It names the identity
+algorithm (version 1, the `scry/c` spelling every stored finding has used), *not* the
+frontend: a `.cs` finding whose rule, path and sink agree with a `.c` finding has the
+same id. The SARIF `ruleId` does name the frontend (`scry/c/…` or `scry/cs/…`); it is
+computed separately in `Scry.Sarif` and is never an input here. Changing this string
+would reopen every record in every `scry-workflow/findings.json`. -/
+def Scry.identityNamespace : String := "scry/c"
+
 /-- The semantic identity inputs: rule, normalized path, sink function/callee/argument,
 the path shape and its first/last function. No line, column, program point or timestamp,
 so a moved finding keeps its id and a renamed sink/path gets a new one. -/
 def Scry.semanticKey (f : Scry.RuleFinding) (file : String) : String :=
   String.intercalate "|"
-    [ String.append "scry/c/" f.rule
+    [ String.append (String.append Scry.identityNamespace "/") f.rule
     , Scry.normPath file
     , f.func
     , f.name
@@ -143,7 +174,9 @@ whitespace-only change keeps it; a line move keeps it (there is no line number);
 changed sink creates a new one. -/
 def Scry.lineKey (f : Scry.RuleFinding) (lineText : String) : String :=
   String.intercalate "|"
-    [ String.append "scry/c/" f.rule, f.func, Scry.normLine lineText ]
+    [ String.append (String.append Scry.identityNamespace "/") f.rule
+    , f.func
+    , Scry.normLine lineText ]
 
 def Scry.lineHash (f : Scry.RuleFinding) (lineText : String) : String :=
   Scry.hex16 (Scry.fnv (Scry.lineKey f lineText))

@@ -23,9 +23,11 @@ Three views are produced from one `Scry.ProjectReport`:
 * JSON (`--json`), with a `files` array carrying each file's findings, boundary warnings
   and memory warnings, plus project counts and the cache stats;
 * SARIF 2.1.0 (`--sarif`), with `artifacts` whose URIs are relative to the project root,
-  `uriBaseId: "%SRCROOT%"`, and an `index` on every physical location. This is the
-  multi-file difference from the single-file writer (`Scry.renderSarifWith`), which is
-  intentionally left unchanged.
+  `uriBaseId: "%SRCROOT%"`, and an `index` on every physical location. The result and
+  log writers are `Scry.Sarif`'s (`resultJsonFor`, `boundaryResultJsonAt`,
+  `sarifLogFor`); this module supplies only the artifact table, the project-relative
+  identity file, and the `%SRCROOT%` locations, so the single-file and project logs
+  cannot drift apart.
 -/
 
 /-- Counts for one source file. -/
@@ -131,10 +133,28 @@ def Scry.ProjectReport.findingFile (r : Scry.ProjectReport) (f : Scry.RuleFindin
   | .some o => o.uri
   | .none => ""
 
+/-- The file a finding's identity is computed from: its sink's path relative to the
+project root (`Scry.identityFile`). The id therefore depends on the artifact path, not
+on the absolute path the preprocessor saw, so the same file keeps one id across runs. -/
+def Scry.ProjectReport.findingRel (r : Scry.ProjectReport) (f : Scry.RuleFinding) : String :=
+  Scry.identityFile r.project.root (r.findingFile f)
+
 def Scry.boundaryFile (b : Scry.BoundaryFinding) : String :=
   match b.origin with
   | .some o => o.uri
   | .none => ""
+
+/-- The identity file of a boundary warning (see `findingRel`). -/
+def Scry.ProjectReport.boundaryRel (r : Scry.ProjectReport)
+    (b : Scry.BoundaryFinding) : String :=
+  Scry.identityFile r.project.root (Scry.boundaryFile b)
+
+/-- The run's frontend namespace (`c`, or `cs` for a C# project, which the project
+driver does not produce today). -/
+def Scry.ProjectReport.sarifLang (r : Scry.ProjectReport) : String :=
+  match r.findings with
+  | .nil => "c"
+  | .cons f _ => Scry.sarifLangOf (r.findingRel f)
 
 /-- The `checked` flag of a finding (`false` when the check list is shorter). -/
 def Scry.ProjectReport.checkedOf (r : Scry.ProjectReport) (i : Nat) : Bool :=
@@ -313,102 +333,47 @@ def Scry.Project.artifactLocationJson (p : Scry.Project) (path : String) : Json 
 
 /-- A physical location whose artifact is in the run's `artifacts` table. -/
 def Scry.Project.physicalJson (p : Scry.Project) (o : Scry.Origin) : Json :=
-  Json.mkObj
-    [ ("physicalLocation", Json.mkObj
-        [ ("artifactLocation", Scry.Project.artifactLocationJson p o.uri)
-        , ("region", Scry.regionJson o) ]) ]
+  Json.mkObj [("physicalLocation", Scry.physicalOf (Scry.Project.artifactLocationJson p) o)]
 
 def Scry.Project.locationJsonAt (p : Scry.Project) (m : Scry.OriginMap) (func : String)
     (point : Nat) : Json :=
-  match Scry.originAt m func point with
-  | .some o => Scry.Project.physicalJson p o
-  | .none => Scry.logicalLocationJson func point
+  Scry.locationJsonWith m (Scry.Project.artifactLocationJson p) func point
 
-partial def Scry.Project.relatedJsonGo (p : Scry.Project) (m : Scry.OriginMap) :
-    List Scry.PathNode → Nat → List Json
-  | .nil, _ => .nil
-  | .cons n rest, i => match Scry.originAt m n.func n.point with
-    | .none => Scry.Project.relatedJsonGo p m rest (Nat.succ i)
-    | .some o => List.cons (Json.mkObj
-        [ ("id", Json.ofNat i)
-        , ("message", Json.mkObj [("text", Json.mkStr
-            (String.append (String.append (Scry.PathKind.show n.kind) " in ") n.func))])
-        , ("physicalLocation", Json.mkObj
-            [ ("artifactLocation", Scry.Project.artifactLocationJson p o.uri)
-            , ("region", Scry.regionJson o) ])
-        , ("properties", Json.mkObj
-            [ ("programPoint", Json.ofNat n.point), ("function", Json.mkStr n.func) ]) ])
-        (Scry.Project.relatedJsonGo p m rest (Nat.succ i))
-
-def Scry.Project.relatedJsonAt (p : Scry.Project) (m : Scry.OriginMap)
-    (path : List Scry.PathNode) : List Json :=
-  Scry.Project.relatedJsonGo p m (Scry.dropLast path) 1
-
+/-- A project finding's result: the one result writer (`Scry.resultJsonFor`), with the
+`artifacts`-relative location and the project-relative identity file. -/
 def Scry.Project.resultJsonAt (p : Scry.Project) (m : Scry.OriginMap) (pack : Scry.RulePack)
     (f : Scry.RuleFinding) (checked : Bool) : Json :=
-  Json.mkObj
-    [ ("ruleId", Json.mkStr (Scry.sarifRuleId f.rule))
-    , ("ruleIndex", Json.ofNat (Scry.ruleIndexOf pack f.rule))
-    , ("level", Json.mkStr (Scry.Severity.sarif f.severity))
-    , ("message", Json.mkObj [("text", Json.mkStr f.message)])
-    , ("locations", Json.mkArr [Scry.Project.locationJsonAt p m f.func f.sink])
-    , ("relatedLocations", Json.mkArr (Scry.Project.relatedJsonAt p m f.path))
-    , ("properties", Json.mkObj
-        [ ("kind", Json.mkStr (Scry.FindingKind.show f.kind))
-        , ("function", Json.mkStr f.func)
-        , ("sink", Json.ofNat f.sink)
-        , ("callee", Json.mkStr f.name)
-        , ("sinkArgument", Json.ofNat f.arg)
-        , ("pathLength", Json.ofNat (List.length f.path))
-        , ("derivation", Json.mkStr (Scry.derivationText checked))
-        , ("packRuleId", Json.mkStr f.rule) ]) ]
+  let file := match Scry.originAt m f.func f.sink with
+    | .some o => Scry.identityFile p.root o.uri
+    | .none => "";
+  Scry.resultJsonFor m (Scry.Project.artifactLocationJson p) file pack f checked .none
 
+/-- A project boundary/memory result: the one warning writer
+(`Scry.boundaryResultJsonAt`) with the project artifact table and identity file. -/
 def Scry.Project.boundaryResultJsonAt (p : Scry.Project) (b : Scry.BoundaryFinding) : Json :=
-  let loc := match b.origin with
-    | .some o => Scry.Project.physicalJson p o
-    | .none => Scry.logicalLocationJson b.func b.point;
-  let kind := match String.startsWith b.rule "scry/memory/" with
-    | .true => "memory"
-    | .false => "boundary";
-  Json.mkObj
-    [ ("ruleId", Json.mkStr b.rule)
-    , ("level", Json.mkStr "warning")
-    , ("message", Json.mkObj [("text", Json.mkStr b.message)])
-    , ("locations", Json.mkArr [loc])
-    , ("properties", Json.mkObj
-        [ ("kind", Json.mkStr kind)
-        , ("function", Json.mkStr b.func)
-        , ("programPoint", Json.ofNat b.point)
-        , ("derivation", Json.mkStr "unchecked") ]) ]
+  let file := match b.origin with
+    | .some o => Scry.identityFile p.root o.uri
+    | .none => "";
+  Scry.boundaryResultJsonAt (Scry.Project.artifactLocationJson p) b.rule b.origin b.func
+    b.point b.message file .none
 
 /-- The project SARIF log: run `artifacts` are the real project files (relative URIs,
-`%SRCROOT%`), and every result's `artifactLocation` names its index. -/
+`%SRCROOT%`), and every result's `artifactLocation` names its index. The assembler is
+`Scry.sarifLogFor`; this supplies only the artifact table and the project-relative
+identity, so the project and single-file logs cannot drift apart. -/
 def Scry.ProjectReport.sarifJson (r : Scry.ProjectReport) : Json :=
   let p := r.project;
-  let artifacts := Json.mkArr (List.map (fun path =>
+  let artifacts := List.map (fun path =>
     Json.mkObj [("location", Scry.Project.artifactLocationJson p path)])
-    p.artifactPaths);
-  let rules := Json.mkArr (List.map Scry.ruleJson r.pack.rules);
-  let driver := Json.mkObj
-    [ ("name", Json.mkStr "scry")
-    , ("version", Json.mkStr "0.1.0")
-    , ("informationUri", Json.mkStr "https://github.com/wiz-pl/wiz")
-    , ("rules", rules) ];
+    p.artifactPaths;
   let findingResults := List.map (fun pair =>
     Scry.Project.resultJsonAt p r.origins r.pack pair.1 pair.2)
     (Scry.zipFindings r.findings r.checks);
   let extra := List.append
     (List.map (Scry.Project.boundaryResultJsonAt p) r.boundaries)
     (List.map (Scry.Project.boundaryResultJsonAt p) r.memory);
-  let run := Json.mkObj
-    [ ("tool", Json.mkObj [("driver", driver)])
-    , ("columnKind", Json.mkStr "utf16CodeUnits")
-    , ("artifacts", artifacts)
-    , ("results", Json.mkArr (List.append findingResults extra)) ];
-  Json.mkObj
-    [ ("$schema", Json.mkStr "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json")
-    , ("version", Json.mkStr "2.1.0")
-    , ("runs", Json.mkArr [run]) ]
+  Scry.sarifLogFor r.sarifLang "scry" r.pack artifacts
+    (List.append findingResults extra)
 
 def Scry.renderProjectSarif (r : Scry.ProjectReport) : String :=
   Json.render r.sarifJson

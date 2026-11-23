@@ -101,7 +101,21 @@ def group : Group where
         "      | .none => 0\n" ++
         "    | .none => 0\n" ++
         "  | .error _ => 0")
-        [1, 1, 1, 1, 1, 95, 1, 1, 111] }
+        [1, 1, 1, 1, 1, 95, 1, 1, 111] },
+    { name := "identity: one id across frontends and a rerun; rule ids name the frontend",
+      run := fun _ => evalNats (prelude ++
+        "#eval if String.eq (Scry.sarifRuleIdFor \"a.c\" \"r\") \"scry/c/r\" then 1 else 0\n" ++
+        "#eval if String.eq (Scry.sarifRuleIdFor \"a.cs\" \"r\") \"scry/cs/r\" then 1 else 0\n" ++
+        "#eval if String.eq (Scry.sarifRuleId \"r\") \"scry/c/r\" then 1 else 0\n" ++
+        "#eval if String.eq (Scry.wfId f \"a.c\") (Scry.wfId f \"a.cs\") then 1 else 0\n" ++
+        "#eval if String.eq (Scry.identityFile \"/w\" \"/w/src/a.c\") \"src/a.c\" then 1 else 0\n" ++
+        "#eval if String.eq (Scry.identityFile \"/w\" \"src/a.c\") \"src/a.c\" then 1 else 0\n" ++
+        "def st0 : Scry.WfStore := Scry.wfUpsert Scry.wfEmptyStore (Scry.WfRecord.mk (Scry.wfId f \"a.c\") \"k\" \"h\" .new [] \"a.c\" .none .false Json.mkNull \"art\" .none .none .none .none .none 1 1)\n" ++
+        "def rerun : Scry.WfStore := Scry.wfUpsert st0 (Scry.WfRecord.mk (Scry.wfId f \"a.c\") \"k\" \"h\" .new [] \"a.c\" .none .false Json.mkNull \"art\" .none .none .none .none .none 1 9)\n" ++
+        "#eval Nat.add (Nat.mul (List.length rerun.findings) 100) (match Scry.wfFind rerun (Scry.wfId f \"a.c\") with | .some r => r.firstSeen | .none => 99)\n" ++
+        "def refined : Scry.WfRecord := Scry.WfRecord.mk \"f_x\" \"k\" \"h\" .triaged [] \"a.c\" .none .false Json.mkNull \"art\" .none .none .none (.some (Scry.WfCandidate.mk \"refined\" 90 \"pursue\" [] .none Scry.wfEmptyPlan)) .none 1 2\n" ++
+        "#eval Nat.add (if String.eq (Scry.wfRescanCandidate (.some refined)).stage \"refined\" then 100 else 0) (if String.eq (Scry.wfRescanCandidate .none).stage \"scan\" then 1 else 0)")
+        [1, 1, 1, 1, 1, 1, 101, 101] }
   ]
 
 builtin_initialize registerGroup group

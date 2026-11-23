@@ -369,9 +369,11 @@ external's pointer (1 finding + two `unknown-memory` warnings and one `unmodelle
 
 **Boundary warnings now carry spans.** `Scry.Warning` has a `Wil.Span`, so a
 `lowering-boundary` result points at the construct (a cast, `sizeof`, a skipped `goto`, …)
-instead of the function definition. SARIF rule ids are namespaced (`scry/c/<rule>`,
-`scry/lowering/boundary`, `scry/lowering/parse-recovery`, `scry/memory/<kind>`) and the
-run declares
+instead of the function definition. SARIF rule ids are namespaced by the frontend
+(`scry/c/<rule>`, or `scry/cs/<rule>` for a `.cs` file) and by warning kind
+(`scry/lowering/boundary`, `scry/lowering/parse-recovery`, `scry/memory/<kind>`); the
+`partialFingerprints.scry/v1` identity is language-neutral, so the same rule and
+location has one id whichever frontend reported it. The run declares
 `columnKind: utf16CodeUnits` (the C slice is ASCII, where a byte column is a UTF-16
 column; a non-ASCII source would need an explicit conversion).
 
@@ -485,7 +487,10 @@ stats. Human output groups the same counts by file.
 SARIF is the multi-file writer: `runs[0].artifacts` lists the real project files with
 URIs relative to the project root and `uriBaseId: "%SRCROOT%"`; every result's
 `artifactLocation` carries the matching `index`, so a result in a header points at the
-header. The single-file `scry taint` SARIF writer is unchanged.
+header. It shares `Scry.Sarif`'s result and log writers with the single-file
+`scry taint` output, so both carry `partialFingerprints.scry/v1`: a project finding's
+id is computed from its project-relative path, and a boundary/memory result from its
+`b_` id.
 
 `--cache[=DIR]` (default `.scry-project-cache`) caches each TU's `scry-cst 1` store. The
 key covers the source path/text and flags; the entry is validated against a digest of the

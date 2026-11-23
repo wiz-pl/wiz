@@ -7,3 +7,7 @@ the boundary id is stable and b_-prefixed: ok
 sarif: partialFingerprints is present: ok
 sarif: baselineState new is present: ok
 sarif: baselineState unchanged is present: ok
+rule id names the frontend: ok
+identity is frontend-neutral: ok
+identity file strips the analysis root: ok
+sarif: a related step has one physicalLocation wrapper: ok

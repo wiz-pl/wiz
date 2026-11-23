@@ -42,6 +42,9 @@ sarif: four artifacts: ok
 sarif: first artifact is app.c: ok
 sarif: one result per finding and warning: ok
 sarif: result artifact has uriBaseId and index: ok
+sarif: every result has a fingerprinted identity: ok
+sarif: a finding uses the project-relative semantic id: ok
+sarif: the C rule id is namespaced: ok
 cache: cold miss for every TU: ok
 cache: warm hit for every TU: ok
 cache: corrupt entries are recomputed: ok
