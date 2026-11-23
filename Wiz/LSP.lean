@@ -30,8 +30,8 @@ line (`includeTable`; docs/stages/13-language/include-str.md).
 With `--infoview SOCK` it also serves infoviews on a Unix socket, and with `--ws PORT` on
 a WebSocket (`serveWith`).
 
-Positions: LSP counts lines and UTF-16 code units; we count Unicode characters, which
-agree except for characters outside the Basic Multilingual Plane.
+Positions: LSP lines and UTF-16 code units (`toPos`/`ofPos`); offsets inside are
+Unicode characters.
 -/
 
 namespace Wiz.LSP
@@ -140,22 +140,29 @@ structure Server where
   with their info trees: by module, with the hash of the source they were made from -/
   modules : Std.HashMap String (UInt64 × St) := {}
 
-/-- Line and column (0-based) of a character offset. -/
+/-- Line and UTF-16 column (0-based) of a character offset. -/
 def toPos (text : String) (off : Nat) : Json :=
   let pre := (text.toList.take off)
   let line := pre.count '\n'
-  let col := (pre.reverse.takeWhile (· != '\n')).length
+  let col := (pre.reverse.takeWhile (· != '\n')).foldl (fun n c => n + Semantic.utf16Width c) 0
   Json.mkObj [("line", line), ("character", col)]
 
-/-- The character offset of an LSP position. -/
+/-- The character offset of an LSP position (`character` in UTF-16 code units). A
+`character` past the line's end is clamped to the end (LSP 3.17 `Position`); one that
+lands inside a surrogate pair rounds down to the character's start. A `line` past the
+end gives the end of the text. -/
 def ofPos (text : String) (line col : Nat) : Nat := Id.run do
-  let cs := text.toList
+  let cs := text.toList.toArray
   let mut l := 0
   let mut i := 0
-  while l < line && i < cs.length do
+  while l < line && i < cs.size do
     if cs[i]! == '\n' then l := l + 1
     i := i + 1
-  pure (i + col)
+  let mut u := 0
+  while i < cs.size && cs[i]! != '\n' && u + Semantic.utf16Width cs[i]! ≤ col do
+    u := u + Semantic.utf16Width cs[i]!
+    i := i + 1
+  pure i
 
 def range (text : String) (info : SourceInfo) : Json :=
   Json.mkObj [("start", toPos text info.start), ("end", toPos text (max info.stop (info.start + 1)))]
@@ -323,6 +330,10 @@ def infoviewMethods : List String :=
 
 def capabilities : Json :=
   Json.mkObj [("capabilities", Json.mkObj [
+    -- Positions are UTF-16 code units (`toPos`/`ofPos`), the encoding every client
+    -- supports: the LSP default, said explicitly so a client never falls back to
+    -- guessing the encoding from the text
+    ("positionEncoding", "utf-16"),
     ("textDocumentSync", (1 : Nat)), ("hoverProvider", true), ("definitionProvider", true),
     ("declarationProvider", true),
     -- (also so that editors report cursor moves, for `--infoview`)
@@ -1031,7 +1042,10 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
         | j => some j
       pure (srv, #[reply (if ts.size == 1 then ts[0]! else if ts.isEmpty then Json.null else Json.arr ts)])
     | _ => pure (srv, #[reply (completion srv doc off)])
-  | _ => pure (srv, if id.isSome then #[reply Json.null] else #[])
+  -- An unknown request is an error (JSON-RPC -32601 MethodNotFound); an unknown
+  -- notification is ignored, and so is any `$/…` notification (LSP §"$ Notifications
+  -- and Requests"). A `$/…` *request* is still answered with -32601.
+  | _ => pure (srv, if id.isSome then #[replyError (-32601) s!"{method} is not supported"] else #[])
 
 /-! ## The infoview socket (`wiz lsp --infoview SOCK`, protocol §8)
 
