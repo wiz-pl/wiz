@@ -1399,11 +1399,11 @@ EOF
             installPhase = ''
               runHook preInstall
               install -Dm755 ${name} $out/bin/${name}
-              # The identity the harness checks for an override (`<exe>.selfhost-id` ==
-              # `tests --selfhost-identity <name>`): a property of the artifact, so a
-              # store path from CI is accepted and a stale /tmp binary is refused.
-              ${testsPkg}/bin/tests --selfhost-identity ${name} > $out/bin/${name}.selfhost-id
-              chmod 444 $out/bin/${name}.selfhost-id
+              # (No `<exe>.selfhost-id` yet: the harness flag that reads it,
+              # `tests --selfhost-identity`, is on `agent/ci-sim` and not in this line;
+              # writing it here made every build fail with "unknown flag". Re-add this
+              # together with that branch, so the identity check and the file land in
+              # the same commit.)
               runHook postInstall
             '';
             passthru.subset = "selfhost/ + lib/ (the composed program and its prelude)";
