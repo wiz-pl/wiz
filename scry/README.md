@@ -104,7 +104,7 @@ grouped as the CLI groups them, are:
 | `findings list` | `--db FILE`, `--state STATE`, `--json` |
 | `findings show` | `ID` + `--db FILE`, `--json` |
 | `findings triage` | `ID --state new\|triaged\|confirmed\|false-positive\|fixed` + `--reason TEXT`, `--by NAME`, `--db FILE` |
-| `findings repro` | `ID` + `--db FILE`, `--artifacts DIR`, `--cc CMD`, `--sanitize address\|undefined\|both\|none` (`both`), `--input FILE`, `--harness FILE`, `--env K=V` (repeatable), `--witness FILE`, `--timeout SECS` (10), `--json` |
+| `findings repro` | `ID` + `--db FILE`, `--artifacts DIR`, `--cc CMD`, `--sanitize address\|undefined\|both\|none` (`both`), `--input FILE`, `--harness FILE`, `--env K=V` (repeatable), `--witness FILE`, `--timeout SECS` (10), `--probe FILE`, `--probe-events FILE`, `--json` |
 | `findings verify` | `ID` + `--db FILE`, `--json` |
 | `fuzz-span` | `FILE` + `--offset N`, `--json`, `--out FILE` |
 | `egraph` | `FILE.c` + `--fuel N` (8), `--rewrite`, `--json`, `--sarif OUT`, `--fail-on-rewrite` |
@@ -838,12 +838,14 @@ illegal edge is an error. `fixed` is a triage decision, never an automatic resul
 `repro` selects or generates a deterministic harness/input, builds with
 `-fsanitize=address,undefined` when the compiler accepts it (and records a fallback to an
 uninstrumented build when it does not), runs under `timeout`, and stores the exact
-commands, exit status, stdout/stderr and the first sanitizer lines as `dynamic.json`.
-`verify` re-runs the same analysis and the stored repro and reports the verdict
-`not-reported-and-repro-clean` (or `...no-dynamic`), `still-reported`,
-`not-reported-but-repro-crashed`, or `inconclusive`: **"not reported by this run" is
-never "absent from the program"**. The static certificate and the dynamic trace are
-separate evidence items; see `wiz-notes/scry-workflow.md`.
+commands, exit status, stdout/stderr and the first sanitizer lines as `dynamic.json`,
+beside the `repro.json` recipe that `verify` re-runs. The two are written together and a
+torn pair is refused. `verify` re-runs the same analysis and the stored recipe and
+reports the verdict `not-reported-and-repro-clean` (or `...no-dynamic`), `still-reported`,
+`not-reported-but-repro-crashed`, or `not-reported-dynamic-skipped`: **"not reported by
+this run" is never "absent from the program"**. A probe with no event (`heartbeat=false`)
+is skipped, never clean. The static certificate and the dynamic trace are separate
+evidence items; see `wiz-notes/scry-workflow.md`.
 
 A concolic-witness slot is reserved for the future S6a slice
 (`wiz-notes/prior-art/symbolic-execution.md` §11): `repro --witness FILE` accepts a
