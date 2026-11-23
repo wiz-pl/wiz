@@ -7,7 +7,7 @@ refusal semantics, and `--target` as the first user. The note also fixes the min
 term/decl ABI a Wiz-side entry sees.
 
 The prototype is `Wiz/Ext/Basic.lean` plus `Tests/Groups/Ext.lean`, with `Main.lean`'s
-`targets`/`takeTarget` reading the table (≈ 335 lines including comments and tests, not
+`targets`/`takeTarget` reading the table (≈ 370 lines including comments and tests, not
 the ~100 the brief hoped for; §8 says exactly what is and is not converted). Every
 `file:line` below was read in the tree above. §9 is the honesty ledger: what ran, what
 did not, and what I could not verify.
@@ -149,13 +149,14 @@ inductive Cap  -- emit check link run attest library split repl
 inductive Payload
   | core (key : String)        -- host code, core only
   | wizRule (decl : String)    -- a Wiz declaration run by the interpreter
-  | data (schema : String)     -- a validated document
+  | data                        -- a validated document; `Entry.schema` names the format
   | process (command : String) -- a child process with a declared contract
   | unsupported (reason : String) -- this toolchain/platform cannot serve it
 
 structure Entry where
   kind : Kind
   name : String
+  aliases : List String := []        -- names share one namespace per kind
   provider : String := "wiz-lang"  -- the core table, or the package
   set : String := ""               -- the enablement set; empty for core
   schema : String := ""            -- the document the payload consumes
@@ -172,10 +173,10 @@ structure Entry where
 | deriver | class name, absolute; no `Derive.` stripping | `deriver/BEq` | `.wizRule "Derive.deriveBEq"` | host `runDeriver`; selfhost refuses |
 | tactic | syntax kind | `tactic/tactic.exact` | `.wizRule "Tactic.exact"` | host `runTac`; selfhost refuses |
 | macro | syntax kind | `macro/term.listLit` | `.wizRule "ListLit.expand"` | host `runProcMacro`; selfhost refuses |
-| lint set | set name | `lint-set/scry` | `.data "wiz-lint/1"` + rules | host `callRunner`; selfhost no |
+| lint set | set name | `lint-set/scry` | `.data` + `schema "wiz-lint/1"` | host `callRunner`; selfhost no |
 | lint rule | `W` code | `lint-rule/W501` | `.wizRule` + metadata | host `callRunner`; selfhost no |
 | backend | lowercase target name | `target/bpf`, `target/c` | `.core` or `.process` | driver; selfhost compiled-in or `unsupported` |
-| doc language | `[A-Za-z][A-Za-z0-9_+-]*`, case-insensitive match | `doc-language/python` | `.data "wiz.doc.languages/1"` | host `wiz doc`; no package renderer |
+| doc language | `[A-Za-z][A-Za-z0-9_+-]*`, case-insensitive match | `doc-language/python` | `.data` + `schema "wiz.doc.languages/1"` | host `wiz doc`; no package renderer |
 | term elab (future) | syntax kind | `term-elab/term.τ` | `.wizRule` | host (item ②); selfhost refuses |
 
 The payload is a **reference**, never a function value. That is what lets the same record
@@ -198,7 +199,10 @@ Package.backend "demo" (Backend.process "demo-backend" "c-text/1" [.emit, .run])
 ```
 
 The first is the prototype; the second is the existing syntax, kept as the ergonomic
-front-end; the third is Step 8. None of them is a per-kind branch in `Main.lean`.
+front-end; the third is Step 8. None of them is a per-kind branch in `Main.lean`. A new
+`ext` command is not needed for this item: the four attribute/lint forms are sugar over
+`register`, so the *declaration* is one record without a new grammar. Adding `ext` later
+would be a parser convenience, not a second registry.
 
 ### 2.2 One resolver, several tables
 
@@ -291,21 +295,26 @@ entryDigest = sha256("wiz-target-entry-v1", [kind, name, schema, abi, caps, payl
 Replace the body of `Toolchain.targetTag` (`Wiz/Toolchain.lean:67-72`) with the digest of
 the resolved entry, keeping the field name so `Cache.Key.target`, manifests and region
 names inherit it without a format change (`Wiz/Cache.lean:598,693`; `Main.lean:426`).
+`targetTag` is pure and currently has no entry argument, so the selected entry has to
+reach it: add a `Toolchain.backend : String := "c"` field (set from the resolved entry
+right after `takeTarget`, `Main.lean:1343-1347`) and have `targetTag` look up its digest,
+or pass the digest explicitly to `elaborateHitsCore`. The field is the smaller change and
+keeps the `Toolchain` structure as the one place the cache learns what was selected.
 The selfhost injects the same digest as a literal, as it already does for `toolchainId`
 (`Wiz/Selfhost.lean:155-181`); it cannot hash its own table cheaply and does not need to.
-`isoKey` (`Wiz/Frontend/Frontend.lean:77-100`) gains the digest only when an entry declares
-`affectsElaboration`; no entry does today. A Wiz rule's module source is already in the
-module key; the digest is for the *target* selection, not for the rule body.
+`isoKey` (`Wiz/Frontend/Frontend.lean:77-100`) gains the digest only when a future entry
+declares `affectsElaboration`; no entry does today. A Wiz rule's module source is already
+in the module key; the digest is for the *target* selection, not for the rule body.
 
 The **elaboration** table has a second cache constraint. `Cache.Effect`
 (`Wiz/Cache.lean:281-299`) carries declarations, messages, builtins, classes, instances,
 types, code, infos and docs, but **not** `procMacros`, `tactics`, `cmdMacros` or
-`derivers`; `Effect.cacheable` (`:299-305`) excludes every `command.attr*`. A module that
-registers a tactic is therefore re-elaborated on a cache miss unless the registry is
-reconstructed from the existing lists. Step 5 must either add a serializable entry list
-to `Effect` (a `.wizr` format change, `regionFormat` bump) or keep the four existing lists
-as the storage and build the `Entry` view at lookup time. The latter is smaller and does
-not change the cache format; it is the recommended first cut.
+`derivers`; `Effect.cacheable` (`:299-305`) excludes every `command.attr*`, so a module
+with a registration is not `complete` and its non-cacheable commands are replayed
+(`:809-814`). Step 5 must either add a serializable entry list to `Effect` (a `.wizr`
+format change, `regionFormat` bump) or keep the four existing lists as the storage and
+build the `Entry` view at lookup time. The latter is smaller and does not change the
+cache format; it is the recommended first cut.
 
 ---
 
@@ -330,6 +339,15 @@ two profiles: **term/decl** (deriver, tactic, macro, future term elaborator) and
 
 `MacroM A = TacticM A = (A → Tac) → Tac` (`lib/Prelude.wiz:646`); the request chain is
 the only effect. The entry is a *total function over a stable view*, not a host hook.
+
+**Declaration side.** The entry is a Wiz declaration whose type is unified with the
+interface at registration — `Deriver` (`Wiz/Elab/Command.lean:3707-3717`), `Tactic`
+(`:3509-3517`), `Macro`/`CommandMacro` (`:3437-3466`), `String → String` for a lint rule
+(`Wiz/Lint.lean:598-648`). The registry records the declaration's name, not its body;
+the body is compiled and run by the interpreter on first use. There is no
+`quoteDecl`/declaration quotation in v1: a declaration is visible only through
+`IndView` (inductive shape) and `getType` (one declaration's type as `Syntax`), both of
+which are views, not kernel terms.
 
 ### 3.2 Quotation
 
@@ -443,6 +461,10 @@ central limit of this ABI and the reason item ② (term elaborators) is a host i
 * There is no capture avoidance for *free* names: an entry that writes a name which is
   shadowed at the use site can capture it. The entry must use dotted global names or a
   fresh local; the host does not rename free identifiers.
+* `macro.source` is **generated source text**, not a `Syntax` quote: it is parsed and
+  positioned with mark spans (`locateMarked`), but its names are ordinary source names
+  and are not scoped by `scopeQuoted`. A command macro that emits text is responsible for
+  its own freshness; the `✝` mechanism does not reach it.
 
 ### 3.5 Error reporting
 
@@ -513,6 +535,9 @@ acceptance for any default-on entry includes a budget-exhaustion case (`entry-bu
 hygiene/error conventions. `wiz-lint/1` and `wiz.doc.languages/1` stay as they are.
 Rules:
 
+* The attribute front-ends insert `abi := "wiz-meta/1"`; a package that must pin another
+  range uses the lint-set/manifest form or a future `ext` command. There is no silent
+  version negotiation: the resolver refuses an unknown major.
 * adding a `TacTag` is append-only and backward compatible for an old entry (it does not
   ask the new tag); removing or renumbering a tag is a major bump;
 * changing a constructor of `SyntaxF`/`Expr`/`IndView`, or the meaning of `✝`, is a major
@@ -563,7 +588,7 @@ and `expr` and grow one request family at a time; a package tactic that needs `s
 
 ### 4.3 Lint
 
-`lint-set/NAME` is the set entry (payload `.data "wiz-lint/1"` plus the rules);
+`lint-set/NAME` is the set entry (payload `.data`, schema `wiz-lint/1`, plus the rules);
 `lint-rule/CODE` is the rule entry (payload `.wizRule runner` plus metadata). The existing
 `checkSet` (`Wiz/Lint.lean:598-648`) already implements most of the semantics: ABI
 `wiz-lint/1`, stable capabilities, code block, duplicate code, trust/`partial` checks,
@@ -573,7 +598,7 @@ a term-shaped view is item ③, not this item.
 
 ### 4.4 Doc language
 
-`doc-language/NAME`, payload `.data "wiz.doc.languages/1"`, capabilities none (the host
+`doc-language/NAME`, payload `.data`, schema `wiz.doc.languages/1`, capabilities none (the host
 builds the page). The existing merge rules (case-insensitive name/alias, duplicate name in
 one file, `override`, reserved `wiz`, unknown fields refused, fixed eight classes) become
 the kind's conflict/validation semantics (`Wiz/Doc/Registry.lean:8-20,127-146`). A
@@ -675,9 +700,9 @@ payload tag, not `Option String`; `:968-1005` `buildCmd` takes the entry and dis
 `entry.payload`/`entry.name` with a final `entry-unsupported` refusal; `:1006-1029`
 `runCmd` checks `caps.contains .run`; `:1366-1379` the REPL checks `.repl`;
 `Wiz/Compiler/Build.lean:267-289` is called only from the core payload and stops
-re-refusing shapes; `Wiz/Toolchain.lean:67-72` becomes the entry digest; `Wiz/Cache.lean:
-598,693` inherit it. `selfhost/Cli.wiz:1181-1186` becomes the same names with
-`supported`/`reason`.
+re-refusing shapes; `Wiz/Toolchain.lean:67-72` gains a `backend` field and hashes the
+entry digest; `Wiz/Cache.lean:598,693` inherit it. `selfhost/Cli.wiz:1181-1186` becomes
+the same names with `supported`/`reason`.
 
 Acceptance: `=backend` unchanged (23 cases); `=js`, `=bpf`, `=wasm` unchanged;
 `--target bpf2` exits 1, writes nothing; `--attest --target bpf` exits 2 and never enters
@@ -690,6 +715,9 @@ no payload refuses instead of building C; `targetTag` differs for `c` and `bpf`.
 ("llvm", supported), ("wasm", unsupported "…"), ("bpf", unsupported "reads bpf-core/1;
 this toolchain emits c-text/1"), ("js", unsupported "…")]`; the `unknown` vs
 `unsupported` distinction and the reasons are data; `--target bogus` still exits 1.
+Generate the names/reasons from the host table (the `Wiz/Selfhost.lean:155-181` splice
+already does this for `toolchainId`) or pin a test that compares the two tables: a
+hand-copied list is the fifth-target bug again.
 Acceptance: `=selfhost-cli-diff` gains a case that `--target bpf` is `unsupported-target`
 with the `bpf-core/1` reason on the selfhost and a real build on the host; `--target c`
 still builds.
@@ -776,13 +804,14 @@ they are this design's teeth):
 
 ## 8. Prototype: what is actually in the tree
 
-* `Wiz/Ext/Basic.lean` (new, 242 lines with comments): the model, `Table`, the five
+* `Wiz/Ext/Basic.lean` (new, 260 lines with comments): the model, `Table`, the five
   `backendEntries`, `resolveBackend`/`resolveBackendFor`, `choicesText`. Pure Lean, no
   imports, no IO.
-* `Tests/Groups/Ext.lean` (new, 91 lines): six pure cases (the five targets and their
-  caps; unknown refusal; duplicate naming both providers; capability refusal before
-  dispatch; an `entry-unsupported` refusal with its reason; illegal `override`/empty
-  name/empty ABI). No compiler, no process, no scratch directory.
+* `Tests/Groups/Ext.lean` (new, 101 lines): six pure cases (the five targets and their
+  caps; unknown refusal; duplicate naming both providers and an alias collision;
+  capability refusal before dispatch; an `entry-unsupported` refusal with its reason;
+  illegal `override`/empty name/empty ABI). No compiler, no process, no scratch
+  directory.
 * `Wiz.lean`: one import line.
 * `Main.lean:924`: `targets := Wiz.Ext.backendNames`; `:945-966`: `takeTarget` calls
   `Wiz.Ext.resolveBackend` and throws the refusal message. This makes `--target` the
@@ -843,6 +872,9 @@ on the controller; everything goes through `heavy`.
 * The selfhost target table and the deriver flag (Steps 3–4).
 * The elaboration registry conversion (Step 5), lint/doc conversion (Step 6), the ABI
   marker/corpus/fuel (Step 7), manifest discovery (Step 8).
+* Per-kind name shapes and doc-language case-folding; the prototype's `nameOk` only
+  rejects whitespace/slashes, and the existing doc registry still owns the case-insensitive
+  merge (`Wiz/Doc/Registry.lean:127-146`).
 * No package adapter, no `ext-set`, no `grail` manifest key.
 
 **Unverified / open.**
@@ -872,7 +904,44 @@ synthetic names (`demo`, `x`, `myBEq`).
 
 ---
 
-## 10. References
+## 10. Integration map (file:line → change → test)
+
+This is the checklist behind §6; the prototype already covers the first two rows and the
+new module/group.
+
+| site | current | change | test |
+|---|---|---|---|
+| `Wiz/Ext/Basic.lean` (new) | absent | `Entry`/`Table`/`Refusal`, five target entries | `=ext` |
+| `Wiz.lean` after `Wiz.Lint` | no import | import the new module | build |
+| `Main.lean:924` | literal five names | `Wiz.Ext.backendNames` (done) | help/unknown text |
+| `Main.lean:945-966` | `targets.contains` | `resolveBackend` (done) | `=ext`, `=selfhost-cli-diff` |
+| `Main.lean:968-1004` | `target ==` branches + C fall-through | entry payload + `caps` + final refusal | `=backend`, `=bpf`, `=js`, `=wasm` |
+| `Main.lean:1006-1029` | `target ==` branches | `caps.contains .run` | `=js`, `=wasm`, `=bpf` |
+| `Main.lean:1343-1347` | `takeTarget` → string | keep the entry; set `Toolchain.backend` | cache probe |
+| `Main.lean:1366-1379` | REPL by name | `caps.contains .repl` | `=selfhost-cli-diff` |
+| `Main.lean:426` | constant `tc.targetTag` | entry digest | cache probe |
+| `Wiz/Toolchain.lean:67-72` | ignores its argument | `backend` field + digest | `targetTag c ≠ bpf` |
+| `Wiz/Cache.lean:598,693` | `Key.target` slot | inherit the digest | cache format test |
+| `Wiz/Elab/Command.lean:124-152` | four lists | registry view over the lists (or `Effect` field) | `=tactics`, `=deriving` |
+| `:3437-3466` | macro attribute | construct + register `Entry` | duplicate-macro test |
+| `:3509-3517` | tactic attribute | construct + register `Entry` | duplicate-tactic test |
+| `:3707-3717` | deriver attribute | construct + register `Entry` | duplicate-deriver test |
+| `:1856-1915` | `endModule` | `local` entries for the missing kinds | local-scope test |
+| `Term.lean:280,4110-4117` | `List.lookup` | resolve `Entry`, not a bare name | `=meta`, `=tactics` |
+| `ProcMacro.lean:152-172` | runners | unchanged; carry the entry name for messages | macro/deriver errors |
+| `Lint.lean:598-665` | `checkSet`/`loadPackageSets` | wrap as `lint-set`/`lint-rule` entries | `=wiz-lint` |
+| `Doc/Registry.lean:8-20,127-146` | JSON merge | `doc-language` entries, same rules | doc goldens |
+| `selfhost/Cli.wiz:1181-1186,1274-1301` | three names | five names + `supported`/reason | `=selfhost-cli-diff` |
+| `selfhost/Frontend.wiz:815-824,10834-10847,11435-11447` | name dispatch | builtin/user flag | `=selfhost` A11 |
+| `ErrorCode.lean:102+`, `docs/error-codes.md` | no entry codes | `entry-*`, `duplicate-*` | `lsp-server` table |
+| `.github/test-shards.json` | no `=ext` | add to the compiler shard (done) | `check-shards.py` |
+
+The rows that are *not* done are deliberately not claimed as passing; §9 lists the
+selectors that were not run.
+
+---
+
+## 11. References
 
 * `wiz-notes/extensibility.md` — item ①, blockers B1–B5/C1–C5, the ordered plan.
 * `wiz-notes/targets-ext.md` — the target-entry fields, refusals, cache digest and the

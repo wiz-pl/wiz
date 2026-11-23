@@ -89,7 +89,7 @@ is the selfhost/current-platform face of an entry that exists but cannot be serv
 inductive Payload where
   | core (key : String)
   | wizRule (decl : String)
-  | data (schema : String)
+  | data
   | process (command : String)
   | unsupported (reason : String)
   deriving BEq, Repr, Inhabited
@@ -101,6 +101,8 @@ doc language, whose existing registry allows replacing a built-in by name
 structure Entry where
   kind : Kind
   name : String
+  /-- other spellings of this entry; a name and an alias share one namespace per kind -/
+  aliases : List String := []
   provider : String := "wiz-lang"
   set : String := ""
   schema : String := ""
@@ -155,7 +157,22 @@ def Table.register (t : Table) (e : Entry) : Except Refusal Table := do
   if e.override && e.kind != .docLanguage then
     throw { code := s!"invalid-{e.kind.key}-override",
             message := s!"{e.kind.key} {e.name}: only a doc language may override a built-in" }
-  match t.entries.find? (fun x => x.kind == e.kind && x.name == e.name) with
+  for a in e.aliases do
+    unless nameOk a do
+      throw { code := s!"invalid-{e.kind.key}-alias",
+              message := s!"{e.kind.key} {e.name}: '{a}' is not a valid alias" }
+    if a == e.name then
+      throw { code := s!"invalid-{e.kind.key}-alias",
+              message := s!"{e.kind.key} {e.name}: the name is repeated as an alias" }
+    match t.entries.find? (fun x => x.kind == e.kind && (x.name == a || x.aliases.contains a)) with
+    | some old =>
+      throw { code := s!"duplicate-{e.kind.key}",
+              message := s!"{e.kind.key} {a} is provided by both '{old.provider}' and '{e.provider}'" }
+    | none => pure ()
+  if e.aliases.eraseDups.length != e.aliases.length then
+    throw { code := s!"invalid-{e.kind.key}-alias",
+            message := s!"{e.kind.key} {e.name}: an alias is listed twice" }
+  match t.entries.find? (fun x => x.kind == e.kind && (x.name == e.name || x.aliases.contains e.name)) with
   | some old =>
     throw { code := s!"duplicate-{e.kind.key}",
             message := s!"{e.kind.key} {e.name} is provided by both '{old.provider}' and '{e.provider}'" }
@@ -164,11 +181,12 @@ def Table.register (t : Table) (e : Entry) : Except Refusal Table := do
 /-- Build a table from a list; the first duplicate or malformed entry refuses the whole
 table (no partial table is ever returned). -/
 def Table.ofEntries (es : List Entry) : Except Refusal Table :=
-  es.foldlM (fun t e => t.register e) { entries := [] }
+  es.foldlM (fun t e => t.register e) ({ entries := [] } : Table)
 
-/-- The entry for `(kind, name)`, if any. -/
+/-- The entry for `(kind, name)`, if any. An alias resolves to its entry; the alias and
+the name occupy one namespace per kind. -/
 def Table.find? (t : Table) (k : Kind) (n : String) : Option Entry :=
-  t.entries.find? fun e => e.kind == k && e.name == n
+  t.entries.find? fun e => e.kind == k && (e.name == n || e.aliases.contains n)
 
 /-- Resolve one name. There is no default: an unknown name is a refusal, and the message
 lists the names of that kind (a typo must not silently build a different entry). -/

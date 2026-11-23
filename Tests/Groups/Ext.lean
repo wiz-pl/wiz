@@ -60,7 +60,17 @@ def extGroup : Group where
         | .error e => do
           checkEq "duplicate-target" e.code
           check (e.message.contains "wiz-a" && e.message.contains "wiz-b") s!"provider names missing: {e.message}"
-        | .ok _ => throw (IO.userError "a duplicate target was registered") },
+        | .ok _ => throw (IO.userError "a duplicate target was registered")
+        let aliased : Wiz.Ext.Entry :=
+          { kind := .backend, name := "demo", aliases := ["old-demo"], abi := "wiz-backend/1" }
+        let t ← match Wiz.Ext.Table.ofEntries [aliased] with
+          | .ok t => pure t
+          | .error r => throw (IO.userError r.message)
+        match t.resolve .backend "old-demo" with
+        | .ok e => checkEq "demo" e.name
+        | .error r => throw (IO.userError s!"the alias did not resolve: {r.code}: {r.message}")
+        let clash : Wiz.Ext.Entry := { aliased with name := "old-demo", aliases := [] }
+        expectRefusal "duplicate-target" (Wiz.Ext.Table.ofEntries [aliased, clash]) },
     { name := "a capability the entry does not declare is refused before dispatch", run := fun _ => do
         expectRefusal "target-capability" (Wiz.Ext.resolveBackendFor "js" [.link])
         expectRefusal "target-capability" (Wiz.Ext.resolveBackendFor "bpf" [.run])
