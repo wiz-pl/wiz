@@ -30,8 +30,8 @@ line (`includeTable`; docs/stages/13-language/include-str.md).
 With `--infoview SOCK` it also serves infoviews on a Unix socket, and with `--ws PORT` on
 a WebSocket (`serveWith`).
 
-Positions: LSP counts lines and UTF-16 code units; we count Unicode characters, which
-agree except for characters outside the Basic Multilingual Plane.
+Positions: LSP lines and UTF-16 code units (`toPos`/`ofPos`); offsets inside are
+Unicode characters.
 -/
 
 namespace Wiz.LSP
@@ -140,11 +140,11 @@ structure Server where
   with their info trees: by module, with the hash of the source they were made from -/
   modules : Std.HashMap String (UInt64 × St) := {}
 
-/-- Line and column (0-based) of a character offset. -/
+/-- Line and UTF-16 column (0-based) of a character offset. -/
 def toPos (text : String) (off : Nat) : Json :=
   let pre := (text.toList.take off)
   let line := pre.count '\n'
-  let col := (pre.reverse.takeWhile (· != '\n')).length
+  let col := (pre.reverse.takeWhile (· != '\n')).foldl (fun n c => n + Semantic.utf16Width c) 0
   Json.mkObj [("line", line), ("character", col)]
 
 /-- The character offset of an LSP position. -/
@@ -323,6 +323,10 @@ def infoviewMethods : List String :=
 
 def capabilities : Json :=
   Json.mkObj [("capabilities", Json.mkObj [
+    -- Positions are UTF-16 code units (`toPos`/`ofPos`), the encoding every client
+    -- supports: the LSP default, said explicitly so a client never falls back to
+    -- guessing the encoding from the text
+    ("positionEncoding", "utf-16"),
     ("textDocumentSync", (1 : Nat)), ("hoverProvider", true), ("definitionProvider", true),
     ("declarationProvider", true),
     -- (also so that editors report cursor moves, for `--infoview`)
