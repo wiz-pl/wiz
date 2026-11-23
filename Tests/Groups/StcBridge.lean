@@ -67,4 +67,6 @@ def group : Group where
           -- the exact line for the record; the driver only shows it if the case fails
           IO.println s!"stc-bridge: deliberate failure: {line}" } ]
 
+builtin_initialize registerGroup group
+
 end Tests.StcBridge
