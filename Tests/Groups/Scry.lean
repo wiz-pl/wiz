@@ -5,9 +5,9 @@ import Tests.Elab
 /-!
 # scry's Datalog engine (S3, deep embedding)
 
-The group `scry-datalog` checks `lib/Scry/Store.wiz`, `lib/Scry/Datalog.wiz` and
-`lib/Scry/Eval.wiz` through `examples/scry-datalog-*.wiz`; the group `scry-egraph`
-checks the S12 e-graph (`lib/Scry/Egraph.wiz`) through `examples/scry-egraph-*.wiz`.
+The group `scry-datalog` checks `scry/src/Scry/Store.wiz`, `scry/src/Scry/Datalog.wiz` and
+`scry/src/Scry/Eval.wiz` through `examples/scry-datalog-*.wiz`; the group `scry-egraph`
+checks the S12 e-graph (`scry/src/Scry/Egraph.wiz`) through `examples/scry-egraph-*.wiz`.
 The Datalog group's cases are:
 
 * transitive closure and a provenance witness;
@@ -15,12 +15,14 @@ The Datalog group's cases are:
 * a lattice-valued relation (a product of a min and a max lattice);
 * constant propagation with a conflict joining to `top`;
 * stratified negation, and the same file's non-stratified program rejected;
-* the pure list model of the relation store.
+* the pure list model of the relation store;
+* the monotonicity registration (a gapped rule is refused) and a round-budget stop
+  that reports `Termination.rounds` instead of a silent short answer.
 
 The engine is ordinary Wiz, so the same examples run under the interpreter (`#eval`) and
 compiled (C and LLVM); the transitive-closure case runs both. The embedding and the
-evaluator are described in the module docs of `lib/Scry/Datalog.wiz` and
-`lib/Scry/Eval.wiz`.
+evaluator are described in the module docs of `scry/src/Scry/Datalog.wiz` and
+`scry/src/Scry/Eval.wiz`.
 -/
 
 open Wiz
@@ -65,9 +67,53 @@ def strataCase : IO Unit := do
   -- strata [0, 1, 0] read from the right by the fold: 010
   Elab.okLibs src ["10"]
 
+/-- The monotonicity obligation (`Program.checkMono`/`MonoDecl`) and the budgeted
+evaluator (`evalBudget`): a rule registered monotone whose head maps an undeclared
+transfer is a gap and a checked run refuses it; a round budget returns the facts derived
+so far plus `Termination.rounds limit ran`, never a silent short answer. -/
+def monoCase : IO Unit := do
+  let base := "import Scry.Eval\n" ++
+    "def ops : Scry.LatOps Nat := Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq\n" ++
+    "def bump (x : Nat) : Nat := if Nat.lt x 5 then Nat.add x 1 else 5\n" ++
+    "def grow : Scry.Rule Nat := Scry.Rule.mk (Scry.Head.lat 0 [Scry.Term.lit (U64.ofNat 0)] (Scry.LExpr.map 0 (Scry.LExpr.var 0))) [Scry.Atom.lat 0 [Scry.Term.lit (U64.ofNat 0)] 0]\n" ++
+    "def prog : Scry.Program Nat := Scry.Program.mk ops [1] [0] [bump] [grow]\n" ++
+    "def good : Scry.MonoDecl := Scry.MonoDecl.mk [.true] [.true]\n" ++
+    "def bad : Scry.MonoDecl := Scry.MonoDecl.mk [.true] [.false]\n" ++
+    "def valAt (st : Scry.State Nat) : Nat := match Scry.Db.findLat st.db 0 [U64.ofNat 0] with | .some v => v | .none => 0\n" ++
+    "def db : Scry.State Nat := Scry.State.addLatFact Scry.State.empty ops 0 [U64.ofNat 0] 1\n";
+  -- A complete registration has no gap; the bad one names the undeclared transfer.
+  Elab.okLibs (base ++
+    "#eval (match Scry.Program.obligationError prog good with | .none => 1 | .some _ => 0)") ["1"];
+  Elab.okLibs (base ++
+    "#eval (match Scry.Program.obligationError prog bad with | .some e => if String.contains e \"not declared monotone\" then 1 else 0 | .none => 0)") ["1"];
+  -- The checked evaluator refuses the gapped registration ...
+  Elab.okLibs (base ++
+    "#eval (match Scry.evalBudget prog (.some bad) .none db with | .none => 1 | .some _ => 0)") ["1"];
+  -- ... and a two-round budget stops after exactly two rounds, incomplete.
+  Elab.okLibs (base ++
+    "#eval (match Scry.evalBudget prog (.some good) (.some 2) db with | .none => 0 | .some o => match o.termination with | .rounds l r => if Nat.beq l 2 then (if Nat.beq r 2 then (if Scry.EvalOutcome.complete o then 0 else 1) else 2) else 3 | .fixpoint => 4)") ["1"];
+  -- With enough rounds the fixpoint is reached, the value is 5, and the result is
+  -- certified (complete + registered).
+  Elab.okLibs (base ++
+    "#eval (match Scry.evalBudget prog (.some good) (.some 10) db with | .none => 0 | .some o => match o.termination with | .fixpoint => (match Scry.Db.findLat o.state.db 0 [U64.ofNat 0] with | .some v => if Nat.beq v 5 then (if Scry.EvalOutcome.certified o then 1 else 2) else 3 | .none => 4) | .rounds _ _ => 5)") ["1"];
+  -- Without a declaration the run is allowed but its outcome says the obligation is
+  -- not covered.
+  Elab.okLibs (base ++
+    "#eval (match Scry.evalBudget prog .none (.some 20) db with | .some o => if o.monoChecked then 0 else 1 | .none => 0)") ["1"];
+  -- The bounded loop is faithful: an unbounded `eval` and `evalBudget` with generous
+  -- rounds reach the same value.
+  Elab.okLibs (base ++
+    "#eval (match Scry.eval prog db with | .some a => (match Scry.evalBudget prog (.some good) (.some 20) db with | .some o => if Nat.beq (valAt a) (valAt o.state) then 1 else 0 | .none => 0) | .none => 0)") ["1"];
+  -- A map nested under a registered map is checked recursively: one undeclared inner
+  -- transfer is still a gap.
+  Elab.okLibs (base ++
+    "#eval (if Scry.LExpr.monoOk (L := Nat) [.true, .false] (Scry.LExpr.map 0 (Scry.LExpr.map 1 (Scry.LExpr.var 0))) then 0 else 1)") ["1"];
+  Elab.okLibs (base ++
+    "#eval (if Scry.LExpr.monoOk (L := Nat) [.true, .true] (Scry.LExpr.map 0 (Scry.LExpr.map 1 (Scry.LExpr.var 0))) then 1 else 0)") ["1"]
+
 def scryEgraphGroup : Group where
   name := "scry-egraph"
-  exercise := "S12: lib/Scry/Egraph.wiz"
+  exercise := "S12: scry/src/Scry/Egraph.wiz"
   parallel := true
   cases := [
     { name := "congruence: a = b also equates f a = f b and g (f a) = g (f b)", run := fun _ =>
@@ -121,7 +167,7 @@ def scryEgraphGroup : Group where
 
 def scryGroup : Group where
   name := "scry-datalog"
-  exercise := "S3: lib/Scry/Store.wiz, lib/Scry/Datalog.wiz, lib/Scry/Eval.wiz"
+  exercise := "S3: scry/src/Scry/Store.wiz, scry/src/Scry/Datalog.wiz, scry/src/Scry/Eval.wiz"
   parallel := true
   cases := [
     { name := "transitive closure: the delta loop, and a witness for (1, 4) (interp)", run := fun _ =>
@@ -141,7 +187,9 @@ def scryGroup : Group where
     { name := "range restriction: an unbound negated variable is rejected", run := fun _ =>
         rangeRestrictionCase },
     { name := "stratification: a negative dependency raises the head's stratum", run := fun _ =>
-        strataCase }
+        strataCase },
+    { name := "monotonicity: a registered rule with an undeclared transfer is refused; a round budget reports truncation", run := fun _ =>
+        monoCase }
   ]
 
 builtin_initialize registerGroup scryGroup

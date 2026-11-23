@@ -4,7 +4,7 @@ import Tests.Harness
 /-!
 # Tests for the CWE-416 lifetime rule (`Scry.Lifetime`)
 
-The Wil corpus is `lib/Scry/UafExamples.wiz`; the C end-to-end fixtures are
+The Wil corpus is `scry/src/Scry/UafExamples.wiz`; the C end-to-end fixtures are
 `scry/tests/fixtures/uaf-*.c`, driven by `scry/tests/uaf.wiz` (grail). Here we test the
 engine directly: the `kind memory` rule pack, the alloc -> free -> use path, the
 may-branch case, and the false-positive kills (free-then-null, realloc reassignment, a

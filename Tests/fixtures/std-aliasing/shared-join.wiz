@@ -1,0 +1,10 @@
+import Std
+
+-- Negative case for `Str.join`: its accumulator is unique and grows in place, but
+-- the first piece is shared with `p.1`. The join must copy that piece, so `p.1`
+-- stays "a" and the joined text is "ab".
+def main : IO Unit := do
+  let a := Str.ofString "a";
+  let p := (a, Str.join (.cons a (.cons (Str.ofString "b") .nil)));
+  IO.println (Str.toString p.1);
+  IO.println (Str.toString p.2)

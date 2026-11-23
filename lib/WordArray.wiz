@@ -53,10 +53,13 @@ def List.dropLast {A : Type} : List A → List A
 
 -- Laws (the arrays' laws below follow from these)
 
-def List.length_snoc {A : Type} (x : A) : (l : List A) →
-    List.length (List.append l (.cons x .nil)) = Nat.succ (List.length l)
-  | .nil => rfl
-  | .cons _ xs => Eq.congrArg Nat.succ (List.length_snoc x xs)
+-- The model stores the list **reversed** (see the module note), so `push` is a
+-- `cons` and `U8Array.size_push` is `rfl`; the old `List.length_snoc` lemma (the
+-- `List.append l [x]` push) is neither used nor needed. It is deliberately absent:
+-- the self-hosted frontend rejected its equation (libdiff classified it as the
+-- `WordArray.wiz:50 List.length_snoc` real bug, which then hid `U32Array`/`U64Array`
+-- from `Egraph`, `EqPlan` and `Lower`). Keep the invariant: add a snoc-shaped law
+-- only if a definition goes back to appending at the end of the stored list.
 def List.getD_snoc {A : Type} (x d : A) : (l : List A) →
     List.getD (List.append l (.cons x .nil)) (List.length l) d = x
   | .nil => rfl

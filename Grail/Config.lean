@@ -81,6 +81,14 @@ structure Req where
   req : String
   deriving Repr, Inhabited, BEq
 
+/-- A package lint set the manifest declares: the set's name and the module that
+defines it. `Package.lintSet "fixture" "lint/Lints.wiz"`. The registry checks the
+module when it loads it; the config reader only checks the declaration. -/
+structure LintSet where
+  name : String
+  module : String
+  deriving Repr, Inhabited, BEq
+
 structure Package where
   name : String
   targets : List Target
@@ -95,6 +103,9 @@ structure Package where
   /-- (lock v3, R37) machine-local overrides from `grail.local.wiz`:
   `Package.override NAME PATH` takes `NAME` from `PATH` instead of the registry -/
   overrides : List (String × String) := []
+  /-- (lint P2) the package's lint sets, by name and module (`Package.lintSet`);
+  `lint.conf` enables them, and a name it enables that is not here is an error -/
+  lintSets : List LintSet := []
   deriving Repr, Inhabited
 
 open Cache in
@@ -155,10 +166,12 @@ def decodePackage (x : Sx) : Except String Package := do
   -- (23m) the last three fields (version, toolchain, requires) are optional, so a
   -- manifest written for an older grail still decodes
   let .l xs := x | throw "expected (package name targets settings deps)"
-  let (name, ts, ss, ds, extra) ← match xs with
-    | #[.a "package", .a name, ts, ss, ds] => pure (name, ts, ss, ds, #[])
-    | #[.a "package", .a name, ts, ss, ds, v, tc, rs] => pure (name, ts, ss, ds, #[v, tc, rs])
-    | _ => throw "expected (package name targets settings deps [version toolchain requires])"
+  let (name, ts, ss, ds, extra, lss) ← match xs with
+    | #[.a "package", .a name, ts, ss, ds] => pure (name, ts, ss, ds, #[], .l #[])
+    | #[.a "package", .a name, ts, ss, ds, v, tc, rs] => pure (name, ts, ss, ds, #[v, tc, rs], .l #[])
+    | #[.a "package", .a name, ts, ss, ds, v, tc, rs, ls] =>
+      pure (name, ts, ss, ds, #[v, tc, rs], ls)
+    | _ => throw "expected (package name targets settings deps [version toolchain requires [lint-sets]])"
   let some ts := items? ts | throw "targets: expected a list"
   let targets ← ts.toList.drop 1 |>.mapM fun
     | .l #[.a "lib", .a n, .a r] => pure (Target.lib n r)
@@ -186,7 +199,18 @@ def decodePackage (x : Sx) : Except String Package := do
         | r => throw s!"bad requirement {r.render}"
       pure (v, tc, requires)
     | _ => throw "expected (package name targets settings deps version toolchain requires)"
-  pure { name, targets, settings := ← decodeSettings ss, deps, version, toolchain, requires }
+  let some lsx := items? lss | throw "lint sets: expected a list"
+  let lintSets : List LintSet ← lsx.toList.drop 1 |>.mapM fun
+    | .l #[.a "lint-set", .a n, .a m] =>
+      if n.isEmpty then throw "a lint set needs a name (`Package.lintSet NAME MODULE`)"
+      else if m.isEmpty then throw s!"lint set '{n}' needs a module (`Package.lintSet \"{n}\" \"path/to/Lints.wiz\"`)"
+      else pure ({ name := n, module := m } : LintSet)
+    | l => throw s!"bad lint set {l.render} (expected (lint-set NAME MODULE))"
+  let mut lintNames : List String := []
+  for ls in lintSets do
+    if lintNames.contains ls.name then throw s!"two lint sets are called {ls.name}"
+    lintNames := ls.name :: lintNames
+  pure { name, targets, settings := ← decodeSettings ss, deps, version, toolchain, requires, lintSets }
 
 /-- Evaluate `expr` (a `String`) in the build file `path`. -/
 def evalBuildFile (tc : Toolchain) (salt : UInt64) (roots : List System.FilePath) (path : System.FilePath)
@@ -231,7 +255,20 @@ def readConfig (tc : Toolchain) (salt : UInt64) (std dir : System.FilePath) :
         if isOverrideKey k then some (overrideName k, v) else none
       pure (.ok ({ pkg with overrides }, ss.filter fun (k, _) => !isOverrideKey k))
 
-/-- (23m) The manifest of a `grail-index` repository (`index.wiz`): the index's name,
+/-- (lint P2) Read `dir/lint.conf`, if it is there: the package sets to enable (each
+resolved to the module the manifest declared) and the public roots. A name the manifest
+does not declare, a duplicate, or an unknown directive is an error that names the line;
+a policy file never silently enables nothing. -/
+def readLintPolicy (dir : System.FilePath) (pkg : Package) :
+    IO (Except String Wiz.Lint.LintConf) := do
+  let file := dir / "lint.conf"
+  if !(← file.pathExists) then return .ok {}
+  let text ← IO.FS.readFile file
+  match Wiz.Lint.parseLintConf (pkg.lintSets.map fun s => (s.name, s.module)) text with
+  | .ok c => pure (.ok c)
+  | .error e => pure (.error s!"{file}: {e}")
+
+/-- (23m) The manifest of a `fate-index` repository (`index.wiz`): the index's name,
 its format, and the packages it publishes. `Index.render` turns it into
 `(index (name "…") (format N) (package "…") …)`, which `grail index check` compares
 with the static `index/*.sexpr` files. Keeping it Wiz code means the index repository

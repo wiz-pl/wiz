@@ -1,4 +1,5 @@
 -- test: run
+import Scry.NativeLink
 import Sys
 import Scry.TaintCmd
 -- `scry taint --changed-lines`: exit codes for an in-diff finding, a finding on an

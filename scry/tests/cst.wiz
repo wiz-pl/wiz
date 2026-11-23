@@ -1,5 +1,6 @@
 -- test: check
 import Scry.Facts
+import Scry.NativeLink
 import Scry.CstStore
 import C.Schema
 -- The native columns and the generated schema, on one inline store (corpus/hello's

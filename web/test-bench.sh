@@ -27,6 +27,7 @@ done
 : > "$WEB/wiz-playground.mjs"
 : > "$WEB/wiz-playground.wasm"
 : > "$WEB/wiz-playground-ui.mjs"
+: > "$WEB/wiz-playground-ui.wasm"
 
 sh "$ROOT/web/build-site.sh" "$SITE" "$WEB" >/dev/null
 sh "$ROOT/web/check-site.sh" "$SITE"

@@ -32,8 +32,8 @@ inductive Binding where
 structure Ctx where
   /-- parameters of top-level functions -/
   arities : Std.HashMap Name Nat
-  /-- registered native operations: global ↦ key -/
-  natives : Std.HashMap Name Name
+  /-- registered native operations: global ↦ typed primitive -/
+  natives : Std.HashMap Name PrimOp
   /-- the function being lowered, for naming lifted lambdas -/
   owner : Name
   /-- functions inlined when fully applied: constructors (bodies that only build objects) -/
@@ -47,7 +47,23 @@ inductive Cont where
   | fn (k : Var → LowerM Body)
 
 /-- The wrapper function for a native operation, for partial applications. -/
-def nativeWrapper (op : Name) : Name := "wiz.native." ++ op
+def nativeWrapper (op : PrimOp) : Name := "wiz.native." ++ op.key
+
+/-- A primitive's arity. A closed primitive's is table metadata; a foreign function's
+comes from its signature (the `IO` world counts as an argument). -/
+def primArity (op : PrimOp) : Nat :=
+  match op with
+  | .extern key => RVal.nativeArity key
+  | _ => op.arity
+
+/-- Resolve a registered native key to a typed primitive. An unknown key is an error
+here, at lowering, rather than a `wiz_unknown_prim` call at run time. -/
+def resolvePrim (key : Name) : Except String PrimOp :=
+  match PrimOp.ofKey? key with
+  | some p => pure p
+  | none =>
+    if (RVal.ExternSig.ofKey? key).isSome then pure (.extern key)
+    else throw s!"unknown primitive `{key}` (register it with `builtin` or a matching `extern`)"
 
 def freshVar : LowerM Var := modifyGet fun (v, j, ds) => (v, (v + 1, j, ds))
 def freshJoin : LowerM JoinId := modifyGet fun (v, j, ds) => (j, (v, j + 1, ds))
@@ -111,7 +127,7 @@ partial def lower (env : List Binding) (e : ETerm) (k : Cont) : LowerM Body := d
     match (← read).natives.get? n with
     | some op =>
       -- `nat.zero` is a number; a foreign constant is a call
-      bind (if op == "nat.zero" then .lit 0 else if RVal.nativeArity op == 0 then .prim op #[]
+      bind (if op == .natZero then .lit 0 else if primArity op == 0 then .prim op #[]
         else .pap (nativeWrapper op) #[]) k
     | none =>
       let a := ((← read).arities.get? n).getD 0
@@ -129,19 +145,19 @@ partial def lower (env : List Binding) (e : ETerm) (k : Cont) : LowerM Body := d
     | .unreachable => pure .unreachable
     | .coit => lowerArgs env args.toList fun xs => bind (.ctor 1000 xs.toArray) k
     | .scofix => lowerArgs env args.toList fun xs => bind (.ctor 1001 xs.toArray) k
-    | .lazyTag => lowerArgs env args.toList fun xs => bind (.prim "lazyTag" xs.toArray) k
-    | .lazySet => lowerArgs env args.toList fun xs => bind (.prim "lazySet" xs.toArray) k
+    | .lazyTag => lowerArgs env args.toList fun xs => bind (.prim .lazyTag xs.toArray) k
+    | .lazySet => lowerArgs env args.toList fun xs => bind (.prim .lazySet xs.toArray) k
     | .ind => lowerArgs env args.toList fun xs => bind (.fap "wiz.ind" xs.toArray) k
     | .delim => lowerArgs env args.toList fun xs => bind (.fap "wiz.delim" xs.toArray) k
     | .out => lowerArgs env args.toList fun xs => bind (.fap "wiz.out" xs.toArray) k
     | .pack => lowerArgs env args.toList fun xs => bind (.fap "wiz.pack" xs.toArray) k
     | .unpack | .view .. => lowerArgs env args.toList fun xs => bind (.fap "wiz.unpack" xs.toArray) k
-    | .tag => lowerArgs env args.toList fun xs => bind (.prim "tag" xs.toArray) k
-    | .natTag => lowerArgs env args.toList fun xs => bind (.prim "natTag" xs.toArray) k
-    | .natPred => lowerArgs env args.toList fun xs => bind (.prim "nat.pred" xs.toArray) k
-    | .natSucc => lowerArgs env args.toList fun xs => bind (.prim "nat.succ" xs.toArray) k
-    | .fieldAt => lowerArgs env args.toList fun xs => bind (.prim "fieldAt" xs.toArray) k
-    | .mkObj => lowerArgs env args.toList fun xs => bind (.prim "mkObj" xs.toArray) k
+    | .tag => lowerArgs env args.toList fun xs => bind (.prim .tag xs.toArray) k
+    | .natTag => lowerArgs env args.toList fun xs => bind (.prim .natTag xs.toArray) k
+    | .natPred => lowerArgs env args.toList fun xs => bind (.prim .natPred xs.toArray) k
+    | .natSucc => lowerArgs env args.toList fun xs => bind (.prim .natSucc xs.toArray) k
+    | .fieldAt => lowerArgs env args.toList fun xs => bind (.prim .fieldAt xs.toArray) k
+    | .mkObj => lowerArgs env args.toList fun xs => bind (.prim .mkObj xs.toArray) k
 
 partial def lowerArgs (env : List Binding) (es : List ETerm) (k : List Var → LowerM Body) : LowerM Body :=
   match es with
@@ -227,8 +243,8 @@ partial def lowerApp (env : List Binding) (e : ETerm) (k : Cont) : LowerM Body :
     match h, known with
     | .global n, none =>
       -- a native operation
-      let op := ((← read).natives.get? n).getD n
-      let a := RVal.nativeArity op
+      let op := ((← read).natives.get? n).getD (.extern n)
+      let a := primArity op
       if xs.size ≥ a then
         let x ← freshVar
         let rest := xs.extract a xs.size
@@ -261,10 +277,10 @@ wrappers for native operations, and `main`. The result is sorted by name, so the
 output doesn't depend on hash order (deterministic builds). -/
 def lowerProgram (code : Code) (main : ETerm) (extra : Array (Name × ETerm) := #[]) : Except String (Array Decl) := do
   let mut defs : Array (Name × ETerm) := #[]
-  let mut natives : Std.HashMap Name Name := {}
+  let mut natives : Std.HashMap Name PrimOp := {}
   for (n, e) in code.toList do
     match e with
-    | .prim .unreachable #[.global key] => natives := natives.insert n key
+    | .prim .unreachable #[.global key] => natives := natives.insert n (← resolvePrim key)
     | e => defs := defs.push (n, e)
   defs := (defs.qsort (·.1 < ·.1)) ++ PrimCode.all.toArray ++ #[("wiz.entry", main)] ++ extra
   let arities : Std.HashMap Name Nat := defs.foldl (fun m (n, e) => m.insert n (peelLams e).1.length) {}
@@ -274,10 +290,11 @@ def lowerProgram (code : Code) (main : ETerm) (extra : Array (Name × ETerm) := 
     if !xs.isEmpty && ctorShaped b then m.insert n b else m) {}
   let mut out : Array Decl := #[]
   -- wrappers for partially applied native operations
-  for key in (natives.toList.map (·.2)).eraseDups.toArray.qsort (· < ·) do
-    let ps := (List.range (RVal.nativeArity key)).toArray
+  let keys := (natives.toList.map (·.2)).eraseDups.toArray.qsort (fun a b => a.key < b.key)   -- complexity: ok (one pass over the native primitive map)
+  for key in keys do
+    let ps := (List.range (primArity key)).toArray
     -- (`nat.zero` is a number, not an operation)
-    let e : Expr := if key == "nat.zero" then .lit 0 else .prim key ps
+    let e : Expr := if key == .natZero then .lit 0 else .prim key ps
     out := out.push { name := nativeWrapper key, params := ps, body := .vdecl ps.size e (.ret ps.size) }
   for (n, e) in defs do
     let (xs, body) := peelLams e

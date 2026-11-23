@@ -1,4 +1,5 @@
 -- test: run
+import Scry.NativeLink
 import Sys
 import Scry.TaintCmd
 -- The large-file path, as a **scale test**: the vendored tree-sitter-c grammar is a

@@ -26,6 +26,10 @@ node "$ROOT/web/framework/test.mjs" "$OUT/fixture.json"
 node "$ROOT/web/framework/driver_test.mjs"
 # The mount contract (one export; element, module, events, host capabilities): Node only.
 node "$ROOT/web/framework/mount_test.mjs"
+# The wire envelope/monitor and the adopt/replace contract: Node only.
+node "$ROOT/web/framework/wire_test.mjs"
+# The typed style/class encoder/validator (row 11): Node only.
+node "$ROOT/web/framework/style_test.mjs"
 # The page is the mount contract (no ABI calls of its own): source-level, Node only.
 node "$ROOT/web/playground_entry_test.mjs"
 # A runtime that cannot start is a text reason, not a second UI: Node only.

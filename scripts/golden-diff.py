@@ -81,7 +81,8 @@ class Result:
 
 
 GROUP = re.compile(r"^── (.*) \(.*\)$")
-FAIL = re.compile(r"^  ✗ (.*?)(?: \([\d.]+ s\))?$")
+# a case line starts with its position in the run (`[n/total] `; optional for older logs)
+FAIL = re.compile(r"^(?:\[\d+/\d+\] )?  ✗ (.*?)(?: \([\d.]+ s\))?$")
 TESTS_LINE = re.compile(r'Package\.tests\s+"[^"]*"\s+"([^"]+)"')
 WIZ = re.compile(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.wiz")
 
@@ -330,7 +331,7 @@ def self_test() -> int:
 
         # the log reader and the tests-root mapping (no grail needed)
         log = tmp / "shard.log"
-        log.write_text("── tour (docs/tour.md)\n  ✗ examples/tour/00-hello.wiz (0.1 s)\n"
+        log.write_text("── tour (docs/tour.md)\n[1/1]   ✗ examples/tour/00-hello.wiz (0.1 s)\n"
                        "      examples/tour/00-hello.wiz: line 1\n")
         parsed = parse_log(log)
         assert len(parsed) == 1 and parsed[0].group == "tour" and \

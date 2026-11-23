@@ -1,10 +1,13 @@
 # The self-hosted toolchain chain
 
-Status: **design; checked in CI, not pinned.** CI builds the release on every master
-push and runs the chain's step checks nightly (see "Continuous integration"), but no
-commit pins a toolchain and no `toolchain-*` release or attestation has been published.
-The chain starts when its root is declared (see "The start condition"). The pieces: `scripts/repro-fixpoint.sh`, `scripts/check-toolchain-pin.py` and the
-Nix prototype in `nix/bootstrap-chain.nix` (`packages.wizc`, `packages.wizc-release`,
+Status: **design; checked in CI, not pinned.** CI builds the release after every CI run
+of a master push — including a failed one; the release job only skips cancelled and
+skipped runs — and runs the chain's step checks nightly (see "Continuous integration");
+its seed inputs are pinned by `scripts/wizc-seed.json`, but no commit pins a *toolchain*
+and no `toolchain-*` release or attestation has been published. The chain starts when
+its root is declared (see "The start condition"). The pieces:
+`scripts/repro-fixpoint.sh`, `scripts/check-toolchain-pin.py` and the Nix prototype in
+`nix/bootstrap-chain.nix` (`packages.wizc`, `packages.wizc-release`,
 `legacyPackages.SYSTEM.bootstrapChain`).
 
 ## The goal
@@ -25,7 +28,9 @@ Requirements this design meets, each in its own section below:
    buildable at the root for diverse double compiling.
 3. The release is the fixpoint stage, so its hash depends only on the source and
    nixpkgs, not on which predecessor built it. Building it from two predecessors and
-   getting one hash is a DDC check.
+   getting one hash is a *convergence* check; it is not diverse double compilation
+   (DDC — the predecessors are builds of the same Wiz source by the same Lean host
+   lineage; see "What credible bootstrap claims").
 4. Attestations bind the source's narHash, the nixpkgs lock and the input toolchain's
    hash to the output's hash. The git commit is metadata only (git hashes are SHA-1).
 5. Reproducibility across machines is shown before any attestation counts.
@@ -69,8 +74,11 @@ release = s2
 
 `s2` is a function of `C*` and the cc recipe, and `C*` is a function of the source.
 So the release's bytes do not depend on `P`: building the same commit from the Lean
-host and from the previous release must give one sha256. That equality is the chain's
-diverse double compiling (DDC) check, and it is run at the root (see below).
+host and from the previous release must give one sha256. That equality is a
+**convergence** check, not diverse double compilation in Wheeler's sense: both paths
+compile the same Wiz source with compilers of the same lineage, and cross mode's `c1`
+is informational. DDC-1 is root requirement 6 and is open (see "What credible
+bootstrap claims").
 
 From the Lean host the first two steps collapse: the Lean-built compiler is already
 the new compiler, so its output (`seed.c`, fixpoint.sh's `self1.c`) is `C*` when the
@@ -85,6 +93,68 @@ the symbol table (an `STT_FILE` entry), so `cc self1.c` and `cc self2.c` give
 different bytes from identical C. Every stage compiles a copy named `wizc.c`;
 `scripts/fixpoint.sh` now does the same and prints the stage executables' sha256 (with
 `--stages 3`, stage2 against stage3).
+
+## What each check claims, separately
+
+Four properties are often written as one word, "trustworthy". This tree claims the first
+three only where it names the mechanism, and does not claim the fourth end to end. Keep
+them separate when describing a release.
+
+| property | what it would mean | what provides it today | what it does **not** provide |
+|---|---|---|---|
+| **Reproducibility** | the same source, recipe and pinned toolchain give the same bytes on two builders | `scripts/repro-fixpoint.sh` (two copies, `--stages 2`: 6/6 byte-identical) and the source tarball's two-build check (`scripts/test-source-tarball.sh`) | a *pinned* chain: `wizc-seed.json` records the chain's inputs (the seed pin, below) and the `release` job checks it, and the claim is for a pinned toolchain and image, not across compilers (`docs/release/v0.1-checklist.md` §4) |
+| **Differential equality** | the two implementations (Lean host, Wiz-written frontend) make the same judgement on the same input | `=selfhost-libdiff`: acceptance, first error code/span/message, declaration count (`Tests/Groups/SelfhostLibDiff.lean:389-412`); `=selfhost-cli-diff` on case-sized inputs | **not elaborated types** (a declaration count is the observable), **not a gate** ("never fails because of a gap", `:33-34`), and **not the backend**: nothing in libdiff compiles or runs, so erasure, IR, C emitter and runtime are outside it. Today 2 files are `ok`, 8 both-reject, 194 diverge and 35 are bounded of 239 (`wiz-notes/libdiff-classification.md:8-27`) |
+| **Fixpoint / build stability** | the emitter prints the same C for its own source when that C is recompiled | `scripts/fixpoint.sh`: three stages by default (`self1.c = self2.c = self3.c`) | **not correctness**: a self-reproducing emitter bug passes forever, because one implementation is compared with itself, not Lean against Wiz; `--stages 2` ("one coincident round") is allowed (`fixpoint.sh:8-10`); no expected hash is pinned; the stage executables are printed but not in the verdict (`:245-257`); the nightly job is a clean skip without `WIZ_RUNNER_HEAVY` |
+| **Semantic preservation** | if the source program has a value, the compiled program has the same value | **no end-to-end claim.** The kernel checks each compiled equation against its definition (T1, partial correctness: if the compiled code terminates, its result is the value's); `#eval`/`#run`/C differentials and `=selfhost-cli-diff` compare behaviour on cases | a theorem from source semantics to C. Erasure, the IR, `inlineCalls` (typing only), RC, the C/LLVM/Wasm backends, `runtime/` and the C compiler are trusted, not proved (`docs/Status.md` §7.0) |
+
+**The fixpoint is the third row, not the first or the fourth.** It is a build-stability and
+bootstrappability check; it does not compare the two implementations and it says nothing
+about whether the common design is right. The Nix chain's `cmp seed.c self.c` is stronger
+on reproducibility, but in cross mode `c1` is informational and both paths use compilers
+of the same ancestry, so it is a convergence check, not Wheeler's diverse double
+compilation (`wiz-notes/bootstrap-chain-root.md` §4; DDC-1 is still root requirement 6).
+**libdiff is the second row at the frontend only**: it is a measurement, not a gate, and
+its observable is a projection that hides the elaborated term, which is the product of a
+dependent type checker.
+
+**Where the assurance budget goes.** The next formal step belongs to the *kernel*: a
+declarative specification and a checked equivalence with the algorithmic checker (WizMeta
+is that third voter today, 0 disagreements, with validity and subject reduction stated but
+not proved), plus a proof-carrying export that serialises an elaborated term for
+independent re-checking. Not a verified elaborator. The reason is one line: the kernel is
+the only component whose wrong answer a proof cannot outrun, and it is 6,286 lines against
+an elaborator with metavariables, unification, type classes and an extensible macro system
+(`docs/Status.md` §7.0–§7.1). CompCert's roughly 100 kLoC and six person-years bought a
+far simpler language than dependent type theory.
+
+## The seed pin
+
+`scripts/wizc-seed.json` records the sha256 of the chain's inputs:
+
+| entry | source | why |
+|---|---|---|
+| `self.wiz` | the `.#wizc-seed` derivation | the exact program every stage compiles |
+| `selfhost/Tables.wiz` | the checkout | the parser tables are the bootstrap ABI (a seed parses them) |
+| `selfhost/rt.c` | the checkout | the runtime the release's C is linked with |
+| `Wiz/Selfhost.lean`, `Wiz/Version.lean` | the checkout | the assembly and the version it bakes into `self.wiz` |
+
+`seed.c` (`C*`) is an **output** of that derivation, not an input: it is not pinned. A
+codegen change is a new `C*`, and the behavioural gate below runs the packed `wizc`, so
+the pin does not have to be regenerated (and reviewed) for every emitter change. The
+`release` job of `bootstrap-chain.yml` checks the pin with
+`scripts/check-wizc-release.sh --tarball … --seed …`; a mismatch prints the file and
+both hashes and fails the job, so the release is not pushed to Cachix. Updating the pin
+is a reviewed change: run
+
+```sh
+nix build .#wizc-seed --no-link
+seed=$(nix path-info .#wizc-seed)
+scripts/check-wizc-release.sh --write-pin --seed "$seed"
+```
+
+and read the diff. A changed `self.wiz` means the assembled source changed; a change to
+`Wiz/Selfhost.lean`'s assembly or to `Wiz.version` moves it too. `--write-pin` writes
+the same five entries the checked-in file has.
 
 ## The artifact: a static executable
 
@@ -187,6 +257,51 @@ above is merged:
 * `wizc-toolchain.json` does not exist in the repository, and `flake.nix` does not read
   one.
 
+## What "credible bootstrap" claims
+
+"Credible bootstrap" is not one claim and is not a correctness claim. It is four
+properties, each stated and evidenced separately; none implies another, and a green row
+does not make the next one true.
+
+1. **Reproducible for a pinned toolchain.**
+   * *Source tarball*: bit-identical from the same commit in two roots
+     (`release.yml`, "The source tarball and its manifest (reproducible)";
+     `docs/building.md`, "Reproducible source tarball").
+   * *Binary tarball*: reproducible for a pinned toolchain and image — the release job
+     packages the same commit twice in different roots and compares the archives, their
+     `.sha256` files and a per-member manifest (`release.yml`, "The binary tarball is
+     reproducible"; `scripts/test-release-tarball.sh --strict`). It is **not** claimed
+     across images or different compilers.
+   * *The chain's release*: not yet built on two machines. Root requirement 5 is open;
+     the release job runs on GitHub Actions only.
+2. **Three-stage byte fixpoint.**
+   `scripts/fixpoint.sh --stages 3` checks `self1.c = self2.c = self3.c` in both modes,
+   and the chain checks `cmp seed.c self.c` (`nix/bootstrap-chain.nix`). That is a
+   build-stability property over **one input**, `self.wiz`, produced by one
+   implementation built two ways: a compiler that quines `self.wiz` passes it. The
+   nightly `fixpoint.yml` job is a clean skip when `WIZ_RUNNER_HEAVY` is unset, and the
+   weekly `ci.yml` job is not part of `CI result`; the chain's self/cross check is the
+   fixpoint that runs on an ordinary night.
+3. **Diverse double compilation of `seed.c` through two C compilers, with behavioural
+   equality of the two `wizc`s.**
+   Not done. Cross mode compares two *builds from the same Wiz source lineage* (`c1` is
+   informational; `c2` and the tarball must agree), which is convergence, not DDC.
+   DDC-1 is root requirement 6 and is open. The behavioural gate below is not DDC: it
+   adds a second **input** to one compiler, not a second independent compiler.
+4. **No Lean in the path after the root.**
+   Not true today: no root is declared, and every current release is built from the Lean
+   host (`nix/bootstrap-chain.nix`, the `seed` derivation). Lean-free assembly is
+   prerequisite P2 and is open; after a declared root, a later link is
+   `pred/bin/wizc` → cc → `wizc`, with no Lean in that path.
+
+Two things the repository does **not** claim, and should not: that the compiler is
+correct (no semantic-preservation theorem; the C compiler, assembler and linker are
+outside it), and that "reproducible" means bit-identical across different toolchains.
+The one new behavioural check is deliberately narrow: `scripts/check-wizc-release.sh`
+runs the **packed** `wizc` on one frozen fixture with a known stdout, requires a
+one-byte variant to disagree, and checks the seed pin. That raises claim 2's input count
+from one to two; it does not turn any of the four claims into a correctness theorem.
+
 ## Continuous integration
 
 Adopted 2026-11-16. `.github/workflows/bootstrap-chain.yml`, separate from `ci.yml` and
@@ -194,12 +309,13 @@ not a merge gate:
 
 | when | job | what | cost (estimate) |
 |---|---|---|---|
-| after each CI run of a master push (`workflow_run`, so the Lean host is already in Cachix; a run cancelled by a newer push is skipped) | `release` | `nix build .#wizc-release .#wizc .#wizc-seed`: seed, static `wizc`, the fixpoint `cmp`, the tarball; sha256 and MANIFEST in the job summary; the paths pushed to Cachix; the tarball as artifact `wizc-release-SHA` (14 days) | a substitution when `selfhost/`, the Lean host and nixpkgs are unchanged; else about 15 min, about 3 GB |
+| after each CI run of a master push (`workflow_run`, so the Lean host is already in Cachix; a run cancelled by a newer push is skipped) | `release` | `nix build .#wizc-release .#wizc .#wizc-seed`: seed, static `wizc`, the fixpoint `cmp`, the tarball; then `scripts/check-wizc-release.sh` runs the packed `wizc` on a frozen fixture (and requires a one-byte variant to disagree) and checks `scripts/wizc-seed.json`; sha256 and MANIFEST in the job summary; the paths pushed to Cachix; the tarball as artifact `wizc-release-SHA` (14 days) | a substitution when `selfhost/`, the Lean host and nixpkgs are unchanged; else about 15 min, about 3 GB |
 | nightly 05:17 UTC on master, and from "Run workflow" | `chain` | `scripts/chain-step-check.sh` in self mode; then in cross mode with `--pred` the newest earlier `wizc-nightly` artifact of master (skipped on the first night or when it is of the same commit); this night's tarball kept as `wizc-nightly` (90 days) and its fixed-output path `wizc-SYSTEM-COMMIT.tar.gz` pushed to Cachix, so `fetchToolchain` finds it by `(commit, hash)` | about 30 min per mode, about 3 GB |
 
 Nothing generated is committed. A `DIFFER` fails the `chain` job and blocks declaring a
-root at that commit (requirement 8); the three-stage collector fixpoint stays in
-`fixpoint.yml` (nightly, self-hosted runner, 7 GiB).
+root at that commit (requirement 8); a failed behavioural gate or seed pin fails the
+`release` job, so that release is not pushed to Cachix. The three-stage collector
+fixpoint stays in `fixpoint.yml` (nightly, self-hosted runner, 7 GiB).
 
 ## The flake interface
 

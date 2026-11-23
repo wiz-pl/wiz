@@ -133,7 +133,8 @@ def Scry.reportTaintOpts (o : Scry.ReportOpts) (file : String) : Scry.TaintOpts 
 def Scry.reportStepOf (m : Scry.OriginMap) (p : Scry.PathNode) : Scry.ReportStep :=
   match Scry.originAt m p.func p.point with
   | .some o => Scry.ReportStep.mk (Scry.PathKind.show p.kind) p.func o.line o.column
-  | .none => Scry.ReportStep.mk (Scry.PathKind.show p.kind) p.func 0 0
+      o.endLine o.endColumn
+  | .none => Scry.ReportStep.mk (Scry.PathKind.show p.kind) p.func 0 0 0 0
 
 def Scry.reportFindingOf (file : String) (m : Scry.OriginMap) (f : Scry.RuleFinding)
     (checked : Bool) (hit : Option Scry.DiffHit) : Scry.ReportFinding :=
@@ -169,6 +170,8 @@ def Scry.reportFindingOf (file : String) (m : Scry.OriginMap) (f : Scry.RuleFind
     shown
     matchedBy
     diffLine
+    sink.endLine
+    sink.endColumn
 
 def Scry.reportWarningOf (w : Scry.BoundaryFinding) (hit : Option Scry.DiffHit) :
     Scry.ReportWarning :=

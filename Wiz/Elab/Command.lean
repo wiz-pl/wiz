@@ -12,6 +12,8 @@ import Wiz.Elab.Reflect
 import Wiz.Frontend.Parse
 import Wiz.Elab.Witness
 import Wiz.Elab.Info
+import Wiz.Lint.Basic
+import Wiz.Elab.Registry
 
 /-!
 # Elaborating commands
@@ -48,6 +50,10 @@ structure Msg where
   text : String
   /-- a stable name for the kind of error (`unknown-identifier`, …), or `""` -/
   code : String := ""
+  /-- (lint) a finding's stable baseline key (a declaration name plus an occurrence,
+  never a line); `""` for an ordinary message. `Lint.Finding.toMsg` carries it, so a
+  baseline can be compared without re-running the rule. -/
+  anchor : String := ""
   deriving Repr, Inhabited
 
 def Msg.render (input : String) (m : Msg) : String :=
@@ -81,6 +87,40 @@ structure DeclDoc where
   a `mutual` block's definitions each have their own -/
   start : Nat := 0
   deriving Inhabited, Repr, BEq
+
+/-- (lint P1) One rule a package lint module registered with a `lint` command. The
+metadata is the registry's data; `runner` names the module's pure `String → String`
+function, which reads the stable `Lint.Command` view and writes its findings. -/
+structure LintRuleDecl where
+  code : String := ""
+  name : String := ""
+  category : Lint.Category := .api
+  defaultSeverity : Lint.Severity := .warning
+  scope : Lint.Scope := .declaration
+  requires : List Lint.Capability := []
+  suppressible : Bool := true
+  runner : Name := "_"
+  deriving Repr, Inhabited
+
+/-- (lint P1) The header a package lint module declares with `lint-set`: the set's name,
+the ABI range it was written against, and the capabilities its rules may read. The
+registry checks every rule's `requires` against `capabilities`. -/
+structure LintSetDecl where
+  name : String := ""
+  abi : String := ""
+  capabilities : List Lint.Capability := []
+  rules : Array LintRuleDecl := #[]
+  deriving Repr, Inhabited
+
+/-- (lint P1) A validated package lint set: the metadata and the erased code of the
+set's module (its runners run in the interpreter, never as host code). -/
+structure LintPackageSet where
+  name : String
+  abi : String
+  capabilities : List Lint.Capability
+  rules : Array LintRuleDecl
+  code : Code := {}
+  deriving Inhabited
 
 structure CommandState (R : Type) where
   globals : Globals R := {}
@@ -141,12 +181,49 @@ structure CommandState (R : Type) where
   infos : Array (Info R) := #[]
   /-- record the expected type of every checked term (the language server turns it on) -/
   termInfo : Bool := false
+  /-- (lint) run `Wiz.Lint` after each command of the target. Off by default: `wiz lint`
+  turns it on; `wiz check`, `wiz build` and the language server do not. -/
+  lintEnabled : Bool := false
+  /-- (lint) the file being linted, for public-root decisions and reports -/
+  lintPath : String := ""
+  /-- (lint) the roots whose declarations are public (`lib/`, a package's library
+  roots); a path under one is linted by `W301` -/
+  lintPublicRoots : List String := ["lib"]
+  /-- (lint) only these rule ids (empty: the registry's defaults) -/
+  lintRules : List String := []
+  /-- (lint) the target's direct imports, with the `import` command's range -/
+  lintImports : Array (Name × SourceInfo) := #[]
+  /-- (lint) direct imports that contribute an effect (instance, syntax, notation,
+  builtin, attribute, export, FFI/link code), so `W302` never reports them -/
+  lintEffectful : Std.HashSet Name := {}
+  /-- (lint P1) the package lint sets the driver loaded (a package contributes one; the
+  loader validates it before it enters the state) -/
+  lintPackageSets : Array LintPackageSet := #[]
+  /-- (lint P1) the package set names enabled for this run (`wiz lint --set NAME`);
+  empty means none. A package set is opt-in and never transitive. -/
+  lintSets : List String := []
+  /-- (lint P1) what a package lint module's `lint-set`/`lint` commands declared; the
+  loader reads it once, and a target elaboration never carries it -/
+  lintSetDecl : LintSetDecl := {}
   declSites : Std.HashMap Name (SourceInfo × String) := {}
   /-- (11s) what each declaration is and its doc comment (`/-- … -/`), for `wiz doc` and
   hovers: filled by the frontend (`runFrontend.step`), replayed by the cache -/
   declDocs : Std.HashMap Name DeclDoc := {}
   /-- the module being elaborated (`""` for the main file) -/
   module : String := ""
+  /-- (13t) whether a module's declarations take its path as their default namespace
+  (`Module.nameOf`), so `lib/Scry/CstStore.wiz`'s `def f` is `Scry.CstStore.f`. This is
+  stage 3: off by default, because it renames every existing module declaration. A run
+  turns it on together with `legacy` (the stage-0 allowlist). -/
+  modulePrefix : Bool := false
+  /-- (13t) the stage-0 allowlist: `legacy module writtenName` is true when the
+  declaration keeps its current absolute name (a `legacy-names.tsv` row), so turning
+  `modulePrefix` on changes no existing name. -/
+  legacy : Name → String → Bool := fun _ _ => false
+  /-- (13t) the `namespace`s opened in this file, innermost first, with where each was
+  declared (for a missing `end` at the end of the file), and the `open`s and aliases the
+  block started with (`open` is block-scoped: `end` restores them) -/
+  nsStack : List (Name × SourceInfo × List Name × List (Name × Name)) := []
   /-- the modules whose `builtin` registrations are trusted: the toolchain's library
   (`lib/`). The main file never is, nor a module from a `-I` directory. -/
   trustedModule : String → Bool := fun _ => false
@@ -173,6 +250,11 @@ structure CommandState (R : Type) where
   /-- no command has been elaborated into this state yet (it is the initial state, up to
   messages and the info tree) -/
   pristine : Bool := true
+  /-- (import header) a command that is not an `import` has been elaborated in this file:
+  from then on an `import` is an error ("imports must precede declarations"). A module's
+  own state starts `false`; `endModule` restores the importer's value, so importing a
+  module does not close the importer's header. -/
+  headerDone : Bool := false
   /-- (13m) what `local` commands of the module being elaborated added, latest first: node
   kinds and syntax categories, and macro rules and `attribute [macro]` registrations
   (numbered from the oldest). They are dropped when the module's import ends
@@ -186,6 +268,24 @@ structure CommandState (R : Type) where
   /-- (6h S2) `local attribute [simp]` registrations: their positions in `simpLemmas`
   (numbered from the oldest) -/
   localSimps : List Nat := []
+
+  /-- the attribute registry, latest first: the built-in names and user no-ops
+  (`register_attribute`). `[inline]` and every no-op application are looked up here. -/
+  attrDecls : List AttributeDecl := builtinAttributes
+  /-- the option registry, latest first (`pp.notation`, `pp.all`, and user no-ops from
+  `register_option`). -/
+  optDecls : List OptDecl := builtinOptions
+  /-- the options explicitly set in this module; an option not here has its declared
+  default (`CommandState.optValue?`). A module's options end with its import. -/
+  optValues : Std.HashMap Name OptValue := {}
+  /-- no-op attribute applications `(attribute, target, arguments)`, latest first -/
+  attrUses : List (Name × Name × Array String) := []
+  /-- (local) the positions of no-op applications that end with the module -/
+  localAttrUses : List Nat := []
+  /-- (local) the positions of attributes registered by `local register_attribute` -/
+  localAttrDecls : List Nat := []
+  /-- (local) the positions of options registered by `local register_option` -/
+  localOptDecls : List Nat := []
 
   /-- (11r) unexpanders declared with `app_unexpander c` and `attribute [app_unexpander c] f`,
   latest first, and which of them are `local` (numbered from the oldest) -/
@@ -217,6 +317,29 @@ def withMarksOnDemand (g : Globals R) (d : Decl R) (k : Decl R → TCM (Globals 
 /-- (11s) The doc comment of a declaration, if it has one. -/
 def CommandState.docOf? (s : CommandState R) (n : Name) : Option String :=
   (s.declDocs.get? n).bind (·.doc)
+
+/-- The registry entry for an attribute, if `n` is registered. -/
+def CommandState.attrDecl? (s : CommandState R) (n : Name) : Option AttributeDecl :=
+  s.attrDecls.find? (·.name == n)
+
+/-- The registry entry for an option, if `n` is registered. -/
+def CommandState.optDecl? (s : CommandState R) (n : Name) : Option OptDecl :=
+  s.optDecls.find? (·.name == n)
+
+/-- The value of an option in this state: what was set, or its declared default. -/
+def CommandState.optValue? (s : CommandState R) (n : Name) : Option OptValue :=
+  match s.optValues.get? n with
+  | some v => some v
+  | none => (s.optDecl? n).map (·.default)
+
+/-- Set an option's value in the state, and apply its action (`pp.notation`/`pp.all`
+update the pretty printer's `useNotation`). -/
+def CommandState.setOptValue (s : CommandState R) (d : OptDecl) (v : OptValue) : CommandState R :=
+  let s := { s with optValues := s.optValues.insert d.name v }
+  match d.action, v with
+  | .ppNotation, .bool b => { s with globals := { s.globals with pp := { s.globals.pp with useNotation := b } } }
+  | .ppAll, .bool b => { s with globals := { s.globals with pp := { s.globals.pp with useNotation := !b } } }
+  | _, _ => s
 
 /-- "'n' has already been declared", naming the module that declared it if that is not
 the one being elaborated (two modules, or a module and the file importing it). -/
@@ -335,7 +458,7 @@ def renamePrivate (s : CommandState R) (added : Array Name) : CommandState R :=
   let instCache := added.foldl (fun c n => match decls[f n]? with
     | some d => { g with instCache := c.erase n }.cacheInst d
     | none => c.erase n) g.instCache
-  { s with globals := { g with decls, order, heights, instCache, builtins := rb g.builtins, assumed := rb g.assumed },
+  { s with globals := { g with decls, order, heights, instCache, assumed := rb g.assumed }.setBuiltins (rb g.builtins),
            builtins := rb s.builtins }
 
 /-- Metas are untyped, so `?A : Sort ?u` never learns `?u` from `?A := A`, and
@@ -357,13 +480,14 @@ def solveSortConstraints : ElabM R Unit := do
   let typeOf (ctx : LocalCtx R) (t : Term R) : ElabM R (Option (VTy R)) := do
     let t ← zonk ctx.lvl t
     if !t.mvars.isEmpty then return none
-    let kctx : Ctx R := { globals := { (← getGlobals) with sortHolesOk := true }, env := ctx.env, names := ctx.names,
-                          qtys := ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault,
-                          types := ctx.types, lvl := ctx.lvl, proof := true }
+    let kctx : Ctx R := { globals := { (← getGlobals) with sortHolesOk := true }, env := ctx.env,
+                          names := ctx.names.reverse.toArray,
+                          qtys := (ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault).reverse.toArray,
+                          types := ctx.types.reverse.toArray, lvl := ctx.lvl, proof := true }
     match Wiz.infer kctx t with
     | .ok (ty, _) => return some ty
     | .error _ =>
-      match Wiz.infer { kctx with types := (← zonkedTypes ctx).toList.reverse } t with
+      match Wiz.infer { kctx with types := (← zonkedTypes ctx) } t with
       | .ok (ty, _) => return some ty
       | .error _ => return none
   let solvedLevels : ElabM R Nat := do
@@ -449,6 +573,11 @@ def checkGuessedDecl (info : SourceInfo) (name : Name) (ty : Term R) (val : Opti
         throw { info, msg := s!"a hole solved by shape takes a private type for a look-alike; with the definition hidden: {e}",
                 code := ErrorCode.private_ }
 
+/-- Does the syntax contain a named match (`match h : e with`)? Those need their
+expected equation kept as written, below. -/
+partial def hasNamedMatch (stx : Syntax) : Bool :=
+  stx.isOfKind "match.scrut" || stx.args.any hasNamedMatch
+
 /-- Elaborate the header and body of a `def` or `axiom` to closed, zonked terms. -/
 def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : Option Syntax)
     (info : SourceInfo) (declName? : Option (Name × SourceInfo × Nat) := none)
@@ -474,7 +603,8 @@ def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : O
   -- definition instead. (Only the instance holes, `zonkInsts`: the other holes stay, so
   -- the equation stays as written, as above.)
   let ty ← if (← get).pendingInsts.isEmpty then zonkInsts ctx.lvl ty else pure ty
-  let val ← valStx.mapM fun s => do Elab.check ctx s (← evalIn ctx ty)
+  let val ← valStx.mapM fun s => do
+    Elab.check ctx s (← if hasNamedMatch s then evalExpected ctx ty else evalIn ctx ty)
   let ty := tele.foldr (fun (x, bi, q, a) b => Term.pi x bi q a b .hole) ty
   let val := val.map fun v => tele.foldr (fun (x, _, _, _) b => Term.lam x b) v
   solveSortConstraints
@@ -489,6 +619,13 @@ def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : O
 universe parameters and the binders. -/
 def declInsertAt (cmd : Syntax) : Nat :=
   [1, 2, 3].foldl (fun acc i => max acc (cmd.getArg i).info.stop) 0
+
+/-- The number of leading λs of a declaration's value, through proof markers
+(`Decl.withTopMarks`): its parameters, as opposed to the Πs written in its type. -/
+private partial def declLeadingLambdas : Term R → Nat
+  | .lam _ b => declLeadingLambdas b + 1
+  | .prf _ v => declLeadingLambdas v
+  | _ => 0
 
 partial def syntaxMentions (n : Name) : Syntax → Bool
   | .ident _ m => m == n
@@ -753,7 +890,7 @@ def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
   let n := (clauses.head?.map (·.pats.length)).getD 0
   -- introduce `n` arguments of the type
   let mut ctx' := ctx
-  let mut tyv ← evalIn ctx ty
+  let mut tyv ← if clauses.any fun c => hasNamedMatch c.rhs then evalExpected ctx ty else evalIn ctx ty
   let mut vars : List Lvl := []
   let mut names : List Name := []
   let mut colExplicit : List Bool := []
@@ -1229,6 +1366,20 @@ def elabCopatternsCocon (name : Name) (cmd : Syntax) (obs : List (Name × Bool))
   --| sorry
   --sol>
 
+/-- Does `stx` contain a recursive call `f e…` with a bare sized binder as an
+argument? That is a call at the body size (the state at `↑j`), which subtyping would
+otherwise accept as a value at the predecessor; it must be a size error. -/
+partial def sameSizeRec? (name : Name) (sized : List Name) (stx : Syntax) : Bool :=
+  let bare (a : Syntax) : Bool := match a with
+    | .node _ "term.ident" #[.ident _ x] => sized.contains x
+    | _ => false
+  match stx with
+  | .node _ "term.app" #[h, .node _ "null" args] =>
+    (h.isOfKind "term.ident" && (h.getArg 0).getId? == some name && args.any bare) ||
+      args.any (sameSizeRec? name sized) || sameSizeRec? name sized h
+  | .node _ _ as => as.any (sameSizeRec? name sized)
+  | _ => false
+
 /-- The sized case of `elabCopatterns`: `def f {i : Size} … : T^i | .o => rhs` with a
 binder at size `i` compiles to `scofix`. The state family is the tuple of the explicit
 binders at a size, the seed is their tuple at `i`, and the body is checked at a fresh
@@ -1313,7 +1464,10 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
   for (o, isRec) in obs do
     let some alt := copatternAlt? alts o
       | throwAt info s!"missing copattern .{o}" ErrorCode.missingCopattern
-    let rhs := rewriteSizedRhs info name recName idxName n coid (alt.getArg 3)
+    let rhs0 := alt.getArg 3
+    if sameSizeRec? name (coid.map (·.1)) rhs0 then
+      throwAt info s!"type mismatch: the recursive call must be at the predecessor size, not the body size (a combinational loop)"
+    let rhs := rewriteSizedRhs info name recName idxName n coid rhs0
     let .sigma _ _ Aty B _ ← force pty
       | throwAt info "internal error: observation type"
     let Aty := if isRec then .nu l I D vIdx vJ hint else Aty
@@ -1322,7 +1476,7 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
       | _, _ => pure (Aty, false)
     let c ← Elab.check cctx rhs Aty
     let c := if lifted then .up c else c
-    comps := comps ++ [c]
+    comps := comps ++ [c]   -- complexity: ok (one component per constructor argument)
     pty ← instM B (← evalIn cctx c)
   let e : Term R ← match ← force I with
     | .unit _ => pure .tt
@@ -1360,7 +1514,7 @@ def elabCopatterns (name : Name) (cmd : Syntax) (obs : List (Name × Bool)) : El
     if (copatternAlt? alts o).isNone then throwAt cmd.info s!"missing copattern .{o}" ErrorCode.missingCopattern
   let corecursive := obs.any fun (o, isRec) =>
     isRec && ((copatternAlt? alts o).map fun a => isCorecCall name (a.getArg 3)).getD false
-  let sized := sizedVarSyntax? ((cmd.getArg 4).getArg 1)
+  let sized := corecursive && sizedVarSyntax? ((cmd.getArg 4).getArg 1)
   let r ← if sized then elabCopatternsScofix name cmd obs
     else if corecursive then elabCopatternsCoit name cmd obs else elabCopatternsCocon name cmd obs
   checkGuessedDecl cmd.info name r.1 (some r.2)
@@ -1543,7 +1697,7 @@ def builtinShapeError (g : Globals R) (key : Name) (d : Decl R) : Option String 
     | .sort _, some (.mu _ _ _ _ _ (some (T, _, _)) _) => if T == d.name then none else some "it must be an inductive type"
     | _, _ => some "it must be an inductive type"
   else if key == "memo" then none
-  else match g.builtins.lookup "nat" with
+  else match g.builtinOf? "nat" with
     | none => some "register `builtin nat := …` first"
     | some N =>
       let (as, r) := doms d.type
@@ -1582,7 +1736,16 @@ partial def mutualInductive (tables : ParserTables) (defs : Array Syntax) : Exce
     let sig := d.getArg 4
     unless sig.args.isEmpty || sig.args.any (·.isOfKind "term.prop") do
       throw "mutual inductive types may not have indices (yet)"
-  let fam := "_".intercalate names.toList
+  -- (13t) in a namespace the members are `N.A`, `N.B`: one family `N.A_B` (the
+  -- namespace before the underscore, so that `N.A_B.Tag` parses as a name)
+  let last (n : Name) : Name := (n.splitOn ".").getLast!
+  let nsParts : List String :=
+    match names[0]? with
+    | some n => (n.splitOn ".").dropLast
+    | none => []
+  let shorts := names.toList.map last
+  let fam := if nsParts.isEmpty then "_".intercalate shorts
+    else ".".intercalate nsParts ++ "." ++ "_".intercalate shorts
   -- (issue #252) a block of inductive propositions is one propositional family
   let isPropCmd (d : Syntax) : Bool := (d.getArg 4).args.any (·.isOfKind "term.prop")
   let anyProp := defs.any isPropCmd
@@ -1743,16 +1906,54 @@ def CommandState.endModule (inner outer : CommandState R) : CommandState R :=
   let insts := inner.localInsts.take (inner.localInsts.length - outer.localInsts.length)
   let simps := inner.localSimps.take (inner.localSimps.length - outer.localSimps.length)
   let pps := inner.localPP.take (inner.localPP.length - outer.localPP.length)
-  -- (11r) `set_option pp.…` is the module's own
+  let useIxs := inner.localAttrUses.take (inner.localAttrUses.length - outer.localAttrUses.length)
+  let regAttrs := inner.localAttrDecls.take (inner.localAttrDecls.length - outer.localAttrDecls.length)
+  let regOpts := inner.localOptDecls.take (inner.localOptDecls.length - outer.localOptDecls.length)
+  -- (positions are numbered from the oldest, as `local` recorded them)
+  let atFromOldest {α : Type} (xs : List α) (i : Nat) : Option α := (xs.reverse.drop i).head?
+  let dropAt {α : Type} (xs : List α) (dropped : List Nat) : List α :=
+    let n := xs.length
+    (xs.zipIdx.filter fun (_, i) => !dropped.contains (n - 1 - i)).map (·.1)
+  -- (an application of a locally registered attribute ends with the registration)
+  let localAttrNames := regAttrs.filterMap fun i => (atFromOldest inner.attrDecls i).map (·.name)
+  -- (11r) `set_option pp.…` is the module's own; (13t) so are its namespaces and opens;
+  -- (TT-04) so is anything `local` registered
+  let g2 : PPTable := { inner.globals.pp with useNotation := outer.globals.pp.useNotation }
+  let g1 : Globals R := { inner.globals with pp := g2, namespacePrefix := outer.globals.namespacePrefix, opens := outer.globals.opens, aliases := outer.globals.aliases }
   let reset := { inner with localKinds := outer.localKinds, localCats := outer.localCats,
                             localRules := outer.localRules, localProcs := outer.localProcs,
                             localInsts := outer.localInsts, localSimps := outer.localSimps,
                             localPP := outer.localPP,
-                            globals := { inner.globals with pp := { inner.globals.pp with useNotation := outer.globals.pp.useNotation } } }
+                            localAttrUses := outer.localAttrUses,
+                            localAttrDecls := outer.localAttrDecls,
+                            localOptDecls := outer.localOptDecls,
+                            attrDecls := dropAt inner.attrDecls regAttrs,
+                            optDecls := dropAt inner.optDecls regOpts,
+                            attrUses := (dropAt inner.attrUses useIxs).filter
+                              fun (a, _, _) => !localAttrNames.contains a,
+                            optValues := outer.optValues,
+                            -- (import header) the importer's header is not the module's
+                            headerDone := outer.headerDone,
+                            nsStack := outer.nsStack,
+                            -- (lint) the driver's configuration and its import facts belong
+                            -- to the importer, not the module: an isolated (cached) module
+                            -- state must not clear the consumer's enabled sets, sources or
+                            -- accumulated imports/effects
+                            lintEnabled := outer.lintEnabled,
+                            lintPath := outer.lintPath,
+                            lintPublicRoots := outer.lintPublicRoots,
+                            lintRules := outer.lintRules,
+                            lintImports := outer.lintImports,
+                            lintEffectful := outer.lintEffectful,
+                            lintPackageSets := outer.lintPackageSets,
+                            lintSets := outer.lintSets,
+                            lintSetDecl := outer.lintSetDecl,
+                            globals := g1 }
   -- (11w) a `local instance` is found only in its module (its definition stays: a name)
   let reset := if insts.isEmpty then reset else
     { reset with instances := (reset.instances.zipIdx.filter fun (_, i) => !insts.contains i).map (·.1) }
-  if kinds.isEmpty && cats.isEmpty && rules.isEmpty && procs.isEmpty && pps.isEmpty && simps.isEmpty then reset else
+  if kinds.isEmpty && cats.isEmpty && rules.isEmpty && procs.isEmpty && pps.isEmpty && simps.isEmpty &&
+      useIxs.isEmpty && regAttrs.isEmpty && regOpts.isEmpty then reset else
   let t := inner.tables
   let cats' := t.cats.fold (init := ({} : Std.HashMap Name Category)) fun acc c cat =>
     if cats.contains c then acc else
@@ -1809,8 +2010,133 @@ where
         (.node info k args', msgs)
       | stx => (stx, msgs)
 
+/-- (13t/13v) `__root__` (Lean's `_root_`): the leading segment that resets the
+namespace prefix to the empty one. `__root__` on its own is the root namespace
+(`namespace __root__`); `__root__.Shared` is the root-level namespace `Shared`. -/
+def rootEscape : Name := "__root__"
+
+/-- (13v) Where a written namespace name opens, relative to `p`: `__root__` and
+`__root__.X` are absolute, anything else is `p`-relative. -/
+def namespaceTarget (p : Name) (n : Name) : Name :=
+  if n == rootEscape then ""
+  else if n.startsWith (rootEscape ++ ".") then (n.drop (rootEscape.length + 1)).toString
+  else if p.isEmpty then n else p ++ "." ++ n
+
+/-- (13v) A declaration name written with the `__root__.` escape: the true-global
+name it declares (`__root__.f` is `f`). Other names are unchanged. -/
+def stripRootEscape (n : Name) : Name :=
+  if n.startsWith (rootEscape ++ ".") then (n.drop (rootEscape.length + 1)).toString else n
+
+/-- (13v) The declaration name a command writes in its name position (the first one for
+`mutual`, whose members are checked when each is elaborated). -/
+partial def cmdDeclName? (cmd : Syntax) : Option Name :=
+  match cmd.kind with
+  | "command.def" | "command.defEqns" | "command.axiom" | "command.glue"
+  | "command.foreignType" | "command.inductive" | "command.structure"
+  | "command.class" | "command.coinductive" => (cmd.getArg 1).getId?
+  | "command.extern" | "command.cStruct" => (cmd.getArg 3).getId?
+  | "command.instance" =>
+    let stx := cmd.getArg 2
+    match stx.getId? with
+    | some n => some n
+    | none => (stx.args[0]?).bind fun x => x.getId?
+  | "command.private" | "command.sealed" | "command.local" => cmdDeclName? (cmd.getArg 1)
+  | "command.partial" => cmdDeclName? (cmd.getArg 2)
+  | _ => none
+
+/-- (13t) Prefix the name a declaration command declares with the current namespace, so
+that `def bar` in `namespace Foo` is the global `Foo.bar`. The command's syntax is
+rewritten once, where the command is elaborated (`Frontend.step`, `elabExpansion`); the
+recursive `elabCommand` calls of `private`, `partial`, `mutual`, … then see the full name,
+and references to `bar` in the body resolve through `Globals.namespacePrefix`
+(`Globals.resolveName`). A written `__root__.` escape resets the prefix (13v). Commands
+that declare no name (`open`, `end`, `#check`, …) are unchanged; a command that declares
+several names has one in the position handled here (`mutual` recurses into its members). -/
+partial def prefixDeclName (p : Name) (module : Name) (legacy : Name → String → Bool) (cmd : Syntax) : Syntax :=
+  let prefixed (n : Name) : Name :=
+    if n == rootEscape then n
+    else if n.startsWith (rootEscape ++ ".") then
+      (n.drop (rootEscape.length + 1)).toString
+    else if (n.splitOn rootEscape).length > 1 then n
+    else if legacy module n then n
+    else if p.isEmpty then n else p ++ "." ++ n
+  let namedAt (i : Nat) : Syntax :=
+    match (cmd.getArg i).getId? with
+    | some n => Syntax.ident (cmd.getArg i).info (prefixed n)
+    | none => cmd.getArg i
+  -- an optional name: the `null` node `optional ident` makes, bare ident, or nothing
+  let optIdent (stx : Syntax) : Syntax :=
+    match stx.getId? with
+    | some n => Syntax.ident stx.info (prefixed n)
+    | none => match stx.args[0]? with
+      | some x => match x.getId? with
+        | some n => stx.setArg 0 (Syntax.ident x.info (prefixed n))
+        | none => stx
+      | none => stx
+  match cmd.kind with
+  | "command.def" | "command.defEqns" | "command.axiom" | "command.glue"
+  | "command.foreignType" => cmd.setArg 1 (namedAt 1)
+  | "command.inductive" | "command.structure" | "command.class" | "command.coinductive" =>
+    -- the type's own name, written unqualified in its fields (`| mk : T → T`), is the
+    -- prefixed one: the elaborator binds `N.T`, not `T`, while checking them
+    let short? := (cmd.getArg 1).getId? |>.map stripRootEscape
+    let cmd := cmd.setArg 1 (namedAt 1)
+    match short? with
+    | some sh => cmd.renameIdents fun n =>
+        if n == sh then some (prefixed sh)
+        else if n.startsWith (sh ++ ".") then some (prefixed n)
+        else none
+    | none => cmd
+  | "command.extern" | "command.cStruct" => cmd.setArg 3 (namedAt 3)
+  | "command.instance" => cmd.setArg 2 (optIdent (cmd.getArg 2))
+  | "command.partial" => cmd.setArg 2 (prefixDeclName p module legacy (cmd.getArg 2))
+  | "command.private" | "command.sealed" | "command.local" =>
+    cmd.setArg 1 (prefixDeclName p module legacy (cmd.getArg 1))
+  | "command.mutual" =>
+    let body := cmd.getArg 1
+    let members := body.args.map (prefixDeclName p module legacy)
+    -- the block's type names, as written (`A`, `B`): a member refers to the others
+    -- unqualified (`| mk : B → A`), and the elaborator binds them as `N.A`, `N.B`
+    let typeShorts := body.args.filterMap fun d =>
+      let d := if d.isOfKind "command.private" then d.getArg 1 else d
+      if ["command.inductive", "command.structure", "command.class", "command.coinductive"].contains d.kind then
+        (d.getArg 1).getId?.map stripRootEscape else none
+    let rewrite (c : Syntax) : Syntax := c.renameIdents fun n =>
+      typeShorts.findSome? fun sh =>
+        if n == sh then some (prefixed sh)
+        else if n.startsWith (sh ++ ".") then some (prefixed n)
+        else none
+    cmd.setArg 1 (.node body.info body.kind (members.map rewrite))
+  | _ => cmd
+
+/-- (13t) Start elaborating a module: its `namespace`s and `open`s are its own (a file's
+`open` does not reach the modules it imports). -/
+def CommandState.atModuleStart (s : CommandState R) : CommandState R :=
+  -- (13t) stage 3: a module's default namespace is its path (`Module.nameOf`); the
+  -- stage-0 allowlist (`legacy`) keeps the old names until a batch deletes its rows
+  let p := if s.modulePrefix then s.module else ""
+  { s with globals := { s.globals with namespacePrefix := p, opens := [], aliases := [] },
+           nsStack := [] }
+
+/-- (13t) A file must close every `namespace` it opens: report each unclosed one at the
+line of its `namespace` (the error belongs there, not at the end of the file). -/
+def CommandState.checkUnclosedNamespaces (s : CommandState R) : CommandState R :=
+  if s.nsStack.isEmpty then s else
+  { s with nsStack := [], messages := s.messages ++ s.nsStack.reverse.toArray.map fun (n, info, _, _) =>
+      let shown := if n.isEmpty then rootEscape else n
+      let short := if n.isEmpty then rootEscape else (n.splitOn ".").getLast!
+      { info, severity := .error, code := ErrorCode.unclosedNamespace
+        text := s!"namespace {shown} is not closed: add `end` (or `end {short}`)" } }
+
 /-- Elaborate one command, updating the state and adding messages. -/
 partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
+  -- (13v) `__root__` is a leading segment only: a declaration named exactly `__root__`,
+  -- or one with `__root__` anywhere else in the name, is an error
+  if let some n := cmdDeclName? cmd then
+    if n == rootEscape || ((n.splitOn ".").drop 1).contains rootEscape then
+      let text := s!"`__root__` is only meaningful as the first segment of a name ('{n}')"
+      modify fun s => { s with messages := s.messages.push { info := cmd.info, severity := .error, code := ErrorCode.rootName, text } }
+      return
   -- (13b) privacy is per module: the globals know which one is being elaborated
   modify fun s => if s.globals.module == s.module then s else { s with globals := { s.globals with module := s.module } }
   let s ← get
@@ -1927,7 +2253,9 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     | .error e => report .error info s!"{what}: {e}"
     | .ok (cmds, next) =>
       modify fun s => { s with nextScope := next }
-      for c in cmds do elabCommand c
+      let st ← get
+      for c in cmds do
+        elabCommand (prefixDeclName st.globals.namespacePrefix st.module st.legacy c)
   -- `deriving C` for the type `T`: run `C`'s deriver
   let derive (C T : Name) (info : SourceInfo) : StateM (CommandState R) Unit := do
     let s ← get
@@ -1951,14 +2279,14 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       for c in (stx.getArg 1).args do
         if let some C := c.getId? then derive C T c.info
   let addDeclChecked (name : Name) (levelParams : List Name) (ty : Term R) (val : Option (Term R))
-      (impl : Option (Term R) := none) := do
-    match addDeclSorted s.globals { name, levelParams, type := ty, value := val, impl } with
+      (impl : Option (Term R) := none) (typeWritten : Bool := false) := do
+    match addDeclSorted s.globals { name, levelParams, type := ty, value := val, impl, typeWritten } with
     | .ok g => modify fun s => { s with globals := g }
     | .error e =>
       -- the implementation (a recursive definition's equations compiled a second time,
       -- `elabDefEqns`) is the elaborator's own: if only it fails, the bug is ours
       let ours := impl.isSome &&
-        (addDeclSorted s.globals { name, levelParams, type := ty, value := val }) matches .ok _
+        (addDeclSorted s.globals { name, levelParams, type := ty, value := val, typeWritten }) matches .ok _
       -- ...except a quantity error. The definition is checked through the eliminator, whose
       -- recursive results need none of the arguments, while the implementation calls
       -- itself, passing them: a parameter at ω (a data implicit's default, rule (b)) given a
@@ -1980,10 +2308,79 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       else
         reportKernel cmd.info name e (if ours then
           "\n(the definition itself checks: this is a bug in Wiz's compilation of recursive definitions, not in your code; please report it)" else "")
+  -- (import header) `import` is parsed only at the top level, before every other command
+  -- (`Wiz.Frontend.Parse.parseCommand`, `Builtin.importDescr`); it is not a rule of the
+  -- extensible `command` category, so `syntax`/`macro_rules` cannot write it. A node of
+  -- this kind that still reaches the elaborator was built by a command macro (`Macro`
+  -- output) or hand-built: reject it here, the second half of the extension-proofing.
+  if cmd.isOfKind "command.import" || cmd.isOfKind "command.openImport" then
+    reportC cmd.info "`import` is only allowed at the top level of a file, before every other command (a command macro cannot produce one)" ErrorCode.importOrder
+    return
+  -- the wrapper commands parse an `import` only to report which one contains it
+  let rejectImportIn (what : String) (inner : Syntax) : StateM (CommandState R) Bool := do
+    if inner.isOfKind "command.import" || inner.isOfKind "command.openImport" then
+      reportC inner.info s!"`import` is not allowed inside {what}: imports go at the top level of a file, before every other command" ErrorCode.importOrder
+      pure true
+    else pure false
   match cmd.kind with
+  | "command.namespace" =>
+    -- (13t) `namespace Foo`: declarations from here to the matching `end` are `Foo.x`
+    -- (nested: `A.B.x`). A namespace is only a prefix, not a privacy boundary.
+    -- (13v) `namespace __root__` opens the root (an empty prefix) and
+    -- `namespace __root__.X` opens the root-level `X`, for a file that must stay global.
+    let n := ((cmd.getArg 1).getId?).getD "_"
+    let p := s.globals.namespacePrefix
+    let full := namespaceTarget p n
+    -- (13t) the block's `open`s start from what the enclosing block has: `end` restores
+    -- them, so an `open` inside the body does not outlive it
+    modify fun s => { s with nsStack := (full, cmd.info, s.globals.opens, s.globals.aliases) :: s.nsStack,
+                             globals := { s.globals with namespacePrefix := full } }
+  | "command.end" =>
+    -- (13t) `end` closes the innermost `namespace`; `end Foo` must name it (its last
+    -- component, or its full name)
+    let given? := (cmd.getArg 1).args.filterMap Syntax.getId? |>.toList.head?
+    match s.nsStack with
+    | [] => reportC cmd.info "`end` without an open `namespace`" ""
+    | (full, _, savedOpens, savedAliases) :: rest =>
+      let short := if full.isEmpty then rootEscape else (full.splitOn ".").getLast!
+      let closes (g : Name) : Bool := g == short || g == full || (full.isEmpty && g == rootEscape)
+      if let some g := given? then
+        unless closes g do
+          report .error cmd.info s!"`end {g}` does not close the namespace `{full}` (write `end` or `end {short}`)"
+      let outerNs := match rest with
+        | (p, _, _, _) :: _ => p
+        | [] => ""
+      -- (13t) `open` is block-scoped: the enclosing block's opens and aliases come back
+      let g1 : Globals R := { s.globals with namespacePrefix := outerNs,
+                                             opens := savedOpens, aliases := savedAliases }
+      modify fun s => { s with nsStack := rest, globals := g1 }
+  | "command.open" =>
+    -- (13t) `open M`: M's names are visible unqualified from here to the end of the
+    -- enclosing block (at file top, to the end of the file: `nsStack` saves the opens).
+    -- `open M as A` only makes `A.x` a spelling of `M.x`: it opens nothing unqualified.
+    let n0 := ((cmd.getArg 1).getId?).getD "_"
+    -- (13v) `open __root__.X` opens the root-level `X`; `open __root__` is a no-op (the
+    -- root's names are always candidates)
+    let n := stripRootEscape n0
+    let asAlias? := (cmd.getArg 2).args.filterMap Syntax.getId? |>.toList.head?
+    -- (13t) the namespace must have a declaration visible here: a public one (named
+    -- `N.x`), or this module's own private one (`_private.m._0.N.x`, which only this
+    -- module can name). Another module's private names open nothing.
+    let privPrefix := if s.module.isEmpty then "" else "_private." ++ s.module ++ "._0."
+    let declares := s.globals.order.any fun d =>
+      d.startsWith (n ++ ".") || (privPrefix != "" && d.startsWith (privPrefix ++ n ++ "."))
+    if n.isEmpty then pure ()
+    else if !declares then
+      report .error (cmd.getArg 1).info s!"unknown namespace '{n}': there is no declaration `{n}.…`"
+    else match asAlias? with
+    | some a =>
+      modify fun s => { s with globals := { s.globals with aliases := (a, n) :: s.globals.aliases } }
+    | none =>
+      modify fun s => { s with globals := { s.globals with opens := s.globals.opens ++ [n] } }
   | "command.private" =>
     -- (13b) every name the command declares is private to this module
     let before := s.globals.order.size
+    if ← rejectImportIn "`private`" (cmd.getArg 1) then return
     -- In a module, a private type (`inductive`, `structure`, `class`, `coinductive`, or a
     -- `mutual` block of inductives) is declared under its private kernel name
     -- (`Globals.privateName`) from the start, so that its constructors, fields,
@@ -1998,10 +2395,22 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         (inner.getArg 1).args.filterMap (·.getArg 1 |>.getId?)
       else #[]
     let inner := if typeNames.isEmpty then inner else
-      inner.renameIdents fun n => typeNames.findSome? fun T =>
-        if n == T then some (Globals.privateName s.module T)
-        else if n.startsWith (T ++ ".") then some (Globals.privateName s.module T ++ (n.drop T.length).toString)
-        else none
+      let nsPrefix := s.globals.namespacePrefix
+      -- (13t) inside a namespace a declaration writes `T` for `Foo.T`: rename that
+      -- spelling too, so a private recursive type's fields still refer to the type
+      let shortOf (T : Name) : Option Name :=
+        if !nsPrefix.isEmpty && T.startsWith (nsPrefix ++ ".") then
+          some ((T.drop (nsPrefix.length + 1)).toString) else none
+      let renameOf (T : Name) : Name → Option Name := fun n =>
+        let kernel := Globals.privateName s.module T
+        if n == T then some kernel
+        else if n.startsWith (T ++ ".") then some (kernel ++ (n.drop T.length).toString)
+        else match shortOf T with
+          | some sh => if n == sh then some kernel
+            else if n.startsWith (sh ++ ".") then some (kernel ++ (n.drop sh.length).toString)
+            else none
+          | none => none
+      inner.renameIdents fun n => typeNames.findSome? fun T => renameOf T n
     elabCommand inner
     modify fun s =>
       let added := s.globals.order.extract before s.globals.order.size
@@ -2024,6 +2433,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     -- declaration can write the name, and a constant is compared by name, so no other
     -- declaration is convertible to `T`.
     let inner := cmd.getArg 1
+    if ← rejectImportIn "`sealed`" inner then return
     if !inner.isOfKind "command.inductive" then
       report .error cmd.info "`sealed` applies to an `inductive` declaration"
     else
@@ -2034,8 +2444,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         match addDeclSorted s.globals { name := sealName T, levelParams := [], type := .sort 1, value := none } with
         | .error e => reportKernel cmd.info (sealName T) e
         | .ok g =>
-          let g := { g with privates := g.privates.insert (sealName T) s.module,
-                            builtins := (sealKey T, sealName T) :: g.builtins }
+          let g := g.addBuiltin (sealKey T) (sealName T)
+          let g := { g with privates := g.privates.insert (sealName T) s.module }
           modify fun s => { s with globals := g, builtins := (sealKey T, sealName T) :: s.builtins }
           -- (`T.desc` is private when a constructor is, 13b: a native type's always is, so
           -- `μ (T.desc …) i` written out elsewhere can't hand the seal to unification; a
@@ -2044,10 +2454,23 @@ a proposition is not data (proofs are erased and all its proofs are definitional
   | "command.local" =>
     -- (13m) grammar that stays in this module: remember what the command adds
     let inner := cmd.getArg 1
+    if ← rejectImportIn "`local`" inner then return
     unless ["command.syntax", "command.declareSyntaxCat", "command.notation", "command.infix",
-            "command.macroRules", "command.attrMacro", "command.attrSimp", "command.instance", "command.appUnexpander", "command.attrUnexpander"].contains inner.kind do
-      report .error cmd.info "only `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`, `macro_rules`, `attribute [macro …]`, `attribute [simp]`, `instance` and unexpanders can be `local`"
+            "command.macroRules", "command.attrMacro", "command.attrSimp", "command.attrHint",
+            "command.attrHintKind", "command.attr", "command.instance",
+            "command.appUnexpander", "command.attrUnexpander",
+            "command.registerAttribute", "command.registerOption", "command.setOption"].contains inner.kind do
+      report .error cmd.info "only `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`, `macro_rules`, `attribute [macro …]`/`[simp]`/`[hint]`/a no-op attribute, `register_attribute`/`register_option`, `set_option`, `instance` and unexpanders can be `local`"
       return
+    -- (TT-04) a semantic attribute (`[inline]`, `[macro]`, …) cannot be undone by
+    -- `endModule`; only a no-op registration records data that can be dropped
+    if inner.isOfKind "command.attr" then
+      match s.attrDecl? ((inner.getArg 2).getId?.getD "_") with
+      | some d =>
+        unless d.action == .noop do
+          report .error inner.info s!"only a no-op attribute can be `local`; '{d.name}' has an effect that outlives its module"
+          return
+      | none => pure ()
     let before ← get
     elabCommand inner
     modify fun s =>
@@ -2058,7 +2481,10 @@ a proposition is not data (proofs are erased and all its proofs are definitional
                localProcs := (List.range' before.procMacros.length (s.procMacros.length - before.procMacros.length)).reverse ++ s.localProcs
                localInsts := (List.range' before.instances.size (s.instances.size - before.instances.size)).reverse ++ s.localInsts
                localSimps := (List.range' before.simpLemmas.length (s.simpLemmas.length - before.simpLemmas.length)).reverse ++ s.localSimps
-               localPP := (List.range' before.ppUser.length (s.ppUser.length - before.ppUser.length)).reverse ++ s.localPP }
+               localPP := (List.range' before.ppUser.length (s.ppUser.length - before.ppUser.length)).reverse ++ s.localPP
+               localAttrUses := (List.range' before.attrUses.length (s.attrUses.length - before.attrUses.length)).reverse ++ s.localAttrUses
+               localAttrDecls := (List.range' before.attrDecls.length (s.attrDecls.length - before.attrDecls.length)).reverse ++ s.localAttrDecls
+               localOptDecls := (List.range' before.optDecls.length (s.optDecls.length - before.optDecls.length)).reverse ++ s.localOptDecls }
   | "command.def" | "command.axiom" =>
     let name := ((cmd.getArg 1).getId?).getD "_"
     let levelParams := ((cmd.getArg 2).getArg 1).args.toList.filterMap Syntax.getId?
@@ -2124,7 +2550,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     else match runElabS (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) (smt := { s.smt with trustNative := s.trustNative, nativeFuel := s.nativeFuel }) (smtDecl := name) s.globals (elabDeclTerms binders typeStx valStx cmd.info (declName? := some (name, (cmd.getArg 1).info, declInsertAt cmd))) levelParams with
       | (.ok ((ty, val), sides), hv) =>
         addInfos hv
-        if sides.isEmpty then addDeclChecked name levelParams ty val
+        if sides.isEmpty then addDeclChecked name levelParams ty val (typeWritten := typeStx.isSome)
         else
           -- (28) declarations a tactic added: definitions (28c, `TacticM.define`), checked
           -- by the kernel like any other, and axioms, checked as types (an axiom's
@@ -2153,7 +2579,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             | .ok g' => g := g'
             | .error e => report .error cmd.info s!"kernel rejected {d.name}: {e}"; ok := false; break
           if ok then
-            match addDeclSorted g { name, levelParams, type := ty, value := val } with
+            match addDeclSorted g { name, levelParams, type := ty, value := val, typeWritten := typeStx.isSome } with
             | .ok g' =>
               modify fun s => { s with globals := g' }
               let axs := sides.filter (·.value.isNone)
@@ -2174,6 +2600,10 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       else (d, none)
     let members := if cmd.isOfKind "command.partial" then #[unwrap cmd] else (cmd.getArg 1).args.map unwrap
     let defs := members.map (·.1)
+    -- an `import` is not a definition: say which wrapper contains it
+    let container := if cmd.isOfKind "command.mutual" then "a `mutual` block" else "`partial`"
+    for (d, _) in members do
+      if ← rejectImportIn container d then return
     if cmd.isOfKind "command.mutual" && defs.all (·.isOfKind "command.inductive") then
       match mutualInductive s.tables defs with
       | .ok cmds =>
@@ -2261,7 +2691,15 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .ann tm _ => tm
         | t => t
       let g ← getGlobals
-      pure s!"{t.pretty [] (some g)} : {ty.pretty [] (some g)}"
+      -- A declaration's type as written keeps the names of the Π binders of its type
+      -- ascription, not only its parameters': the value's leading λs (its parameters)
+      -- print as arrows when unused, as before, but a Π beyond them was written in the
+      -- type (`def f (n : Nat) : (m : Nat) → … := by …`), so `#check` keeps their names.
+      let keepFrom : Option Nat := match t with
+        | .const n _ => (g.find? n).bind fun d =>
+          if d.typeWritten then d.value.map declLeadingLambdas else none
+        | _ => none
+      pure s!"{t.pretty [] (some g)} : {ty.pretty [] (some g) keepFrom}"
     match r with
     | .ok text => report .info cmd.info text
     | .error e => reportErr e
@@ -2318,7 +2756,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       match r with
       | (.ok (ty, val, impl), hv) =>
         addInfos hv
-        addDeclChecked name levelParams ty (some val) impl
+        addDeclChecked name levelParams ty (some val) impl (typeWritten := true)
       | (.error e, hv) => addInfos hv; reportErr e
   | "command.coinductive" =>
     let name := ((cmd.getArg 1).getId?).getD "_"
@@ -2392,7 +2830,10 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       if stx.isOfKind "term.depArrow" then concl (stx.getArg 2) else stx
     -- ((13b) this module's private types and classes by their kernel names, so that two
     -- modules' instances for their private `Color`s have different names)
-    let base := "inst" ++ String.join ((idents (concl typeStx)).map fun n => ((s.globals.resolve (stripScope n)).replace "." "").capitalize)
+    let base := "inst" ++ String.join ((idents (concl typeStx)).map fun n =>
+      (((s.globals.resolveName (stripScope n)).toOption.getD (stripScope n)).replace "." "").capitalize)
+    -- (13t) an anonymous instance declared in a namespace is `Foo.inst…` too
+    let base := if s.globals.namespacePrefix.isEmpty then base else s.globals.namespacePrefix ++ "." ++ base
     let given? : Option Name := if nameOpt.isNone then none else
       (if nameOpt.isOfKind "null" then nameOpt.getArg 0 else nameOpt).getId?
     let name := match given? with
@@ -2410,7 +2851,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let valStx : Except (String × String × SourceInfo) Syntax :=
       if !isWhere then pure body else do
         let some C := headIdent typeStx | throw ("an instance's type must be an application of a class", ErrorCode.unknownClass, cmd.info)
-        let C := s.globals.resolve C
+        let C := (s.globals.resolveName C).toOption.getD C
         let some info := s.classes.find? (·.name == C)
           | throw (if s.globals.contains C then s!"{C} is not a class" else s!"unknown class '{C}'", ErrorCode.unknownClass, cmd.info)
         let given := body.args.toList.map fun f => (((f.getArg 0).getId?).getD "_", f, f.getArg 2)
@@ -2447,7 +2888,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         match (Term.spine concl).1 with
         | .const C _ =>
           if s.classes.any (·.name == C) then
-            addDeclChecked name levelParams ty val
+            addDeclChecked name levelParams ty val (typeWritten := true)
             modify fun s => { s with instances := s.instances.push { name, cls := C, priority } }
           else reportC cmd.info s!"{C} is not a class" ErrorCode.unknownClass
         | _ => report .error cmd.info "an instance's type must be an application of a class"
@@ -2551,14 +2992,15 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         derivingClause (cmd.child "deriving") name
   | "command.builtin" =>
     let key := ((cmd.getArg 1).getId?).getD "_"
-    let n := ((cmd.getArg 3).getId?).getD "_"
+    let n0 := ((cmd.getArg 3).getId?).getD "_"
+    let n := (s.globals.resolveName n0).toOption.getD n0
     let known := ["nat", "nat.zero", "nat.succ", "nat.pred", "nat.add", "nat.sub", "nat.mul", "nat.beq", "nat.blt", "string", "memo", "int",
       "nat.div", "nat.mod", "nat.pow", "nat.land", "nat.lor", "nat.xor", "nat.shiftLeft", "nat.shiftRight", "nat.log2"]
     if !known.contains key then report .error cmd.info s!"unknown builtin {key}; known: {known}"
     -- one registration per key, and one key per constant: a second `builtin nat.add := K`
     -- would redirect how the first one's constant unfolds (the kernel finds the definition
     -- by key), an assumption that no declaration using it would show
-    else if let some m := s.globals.builtins.lookup key then
+    else if let some m := s.globals.builtinOf? key then
       report .error cmd.info s!"builtin {key} is already registered (as {m}); a builtin can be registered only once"
     else if let some (k, _) := s.globals.builtins.find? fun (k, m) => m == n && known.contains k then
       report .error cmd.info s!"{n} is already registered as builtin {k}"
@@ -2573,28 +3015,79 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         -- operation, so the registration is an axiom of whatever depends on `n`
         -- (`builtin int` only says how values print: nothing to trust)
         let trusted := s.trustedModule s.module || key == "int"
+        let g := s.globals.addBuiltin key n
         modify fun s => { s with builtins := (key, n) :: s.builtins,
-                                 globals := { s.globals with builtins := (key, n) :: s.globals.builtins,
-                                                             assumed := if trusted then s.globals.assumed
-                                                                        else (key, n) :: s.globals.assumed } }
+                                 globals := { g with assumed := if trusted then s.globals.assumed
+                                                                else (key, n) :: s.globals.assumed } }
         unless trusted do
           report .warning cmd.info s!"builtin {key} := {n} is not checked: it is an axiom of every declaration that depends on {n} (see `#print axioms`)"
+  | "command.lintSet" =>
+    -- (P1) the header of a package lint set: `lint-set "scry" "wiz-lint/1" [decl, spans]`
+    let name := ((cmd.getArg 1).getStr?).getD ""
+    let abi := ((cmd.getArg 2).getStr?).getD ""
+    let mut caps : List Lint.Capability := []
+    for stx in ((cmd.getArg 3).getArg 1).args do
+      match stx.getId? with
+      | none => pure ()
+      | some n =>
+        match Lint.Capability.ofKey? n with
+        | some c => caps := c :: caps
+        | none => report .error stx.info s!"unknown lint capability '{n}'"
+    modify fun s => { s with lintSetDecl := { s.lintSetDecl with name, abi, capabilities := caps.reverse } }
+  | "command.lint" =>
+    -- (P1) one rule of a package lint set:
+    -- `lint W501 "no-raw-path" api warning declaration [decl, spans] noRawPath`
+    let code := ((cmd.getArg 1).getId?).getD "_"
+    let name := ((cmd.getArg 2).getStr?).getD ""
+    let catText := ((cmd.getArg 3).getId?).getD "_"
+    let sevText := ((cmd.getArg 4).getId?).getD "_"
+    let scopeText := ((cmd.getArg 5).getId?).getD "_"
+    let category ← match Lint.Category.ofKey? catText with
+      | some c => pure c
+      | none => report .error cmd.info s!"unknown lint category '{catText}'"; pure .api
+    let defaultSeverity ← match Lint.Severity.ofKey? sevText with
+      | some s => pure s
+      | none => report .error cmd.info s!"unknown lint severity '{sevText}'"; pure .warning
+    let scope ← match Lint.Scope.ofKey? scopeText with
+      | some sc => pure sc
+      | none => report .error cmd.info s!"unknown lint scope '{scopeText}'"; pure .declaration
+    let mut caps : List Lint.Capability := []
+    for stx in ((cmd.getArg 6).getArg 1).args do
+      match stx.getId? with
+      | none => pure ()
+      | some n =>
+        match Lint.Capability.ofKey? n with
+        | some c => caps := c :: caps
+        | none => report .error stx.info s!"unknown lint capability '{n}'"
+    -- the runner must be declared before the `lint` command (the loader looks it up in
+    -- this module's globals; a later definition would not be found)
+    let runnerStx := cmd.getArg 7
+    let runnerName := (runnerStx.getId?).getD "_"
+    let runner := (s.globals.resolveName runnerName).toOption.getD runnerName
+    if s.globals.find? runner |>.isNone then
+      report .error runnerStx.info s!"the lint rule {code} names '{runnerName}', which is not declared above it"
+    let rule : LintRuleDecl := { code, name, category, defaultSeverity, scope,
+                                 requires := caps.reverse, runner }
+    modify fun s => { s with lintSetDecl := { s.lintSetDecl with rules := s.lintSetDecl.rules.push rule } }
   | "command.printAxioms" =>
-    let n := ((cmd.getArg 2).getId?).getD "_"
-    if !s.globals.contains n then reportC (cmd.getArg 2).info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
-    else match s.globals.axiomsOf n with
-      | [] => report .info cmd.info s!"'{n}' does not depend on any axioms"
-      | as =>
-        -- (a native implementation is trusted to agree with its definition; proofs
-        -- never run it, compiled code does)
-        let note := if as.any (·.startsWith "native ") then
-          "\n(native: an implementation that compiled code runs, trusted to agree with its definition)" else ""
-        -- (27a) a `native_refl` axiom
-        let note := note ++ if as.any (·.endsWith ".native✝") then
-          "\n(.native✝: a closed proposition decided by running it (native_refl, --trust-native, sat_decide_native): trusted are erasure, the interpreter and the native implementations listed)" else ""
-        let note := note ++ if as.any (fun a => (a.splitOn ".smt✝").length > 1) then
-          "\n(.smt✝N⟨solver⟩: a goal closed by an SMT solver (the smt tactic, --trust-smt): trusted are the solver named in the axiom, Wiz's translation to SMT-LIB (Wiz/Smt/Translate.lean) and the answer cache)" else ""
-        report .info cmd.info s!"'{n}' depends on axioms: [{", ".intercalate as}]{note}"
+    let nStx := cmd.getArg 2
+    match s.globals.resolveName ((nStx.getId?).getD "_") with
+    | .error e => reportC nStx.info e ErrorCode.ambiguousName
+    | .ok n =>
+      if !s.globals.contains n then reportC nStx.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
+      else match s.globals.axiomsOf n with
+        | [] => report .info cmd.info s!"'{n}' does not depend on any axioms"
+        | as =>
+          -- (a native implementation is trusted to agree with its definition; proofs
+          -- never run it, compiled code does)
+          let note := if as.any (·.startsWith "native ") then
+            "\n(native: an implementation that compiled code runs, trusted to agree with its definition)" else ""
+          -- (27a) a `native_refl` axiom
+          let note := note ++ if as.any (·.endsWith ".native✝") then
+            "\n(.native✝: a closed proposition decided by running it (native_refl, --trust-native, sat_decide_native): trusted are erasure, the interpreter and the native implementations listed)" else ""
+          let note := note ++ if as.any (fun a => (a.splitOn ".smt✝").length > 1) then
+            "\n(.smt✝N⟨solver⟩: a goal closed by an SMT solver (the smt tactic, --trust-smt): trusted are the solver named in the axiom, Wiz's translation to SMT-LIB (Wiz/Smt/Translate.lean) and the answer cache)" else ""
+          report .info cmd.info s!"'{n}' depends on axioms: [{", ".intercalate as}]{note}"
   | "command.foreignType" =>
     -- an opaque C pointer type; values are released with the finalizer
     let name := ((cmd.getArg 1).getId?).getD "_"
@@ -2602,7 +3095,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     -- (9i) `(c := "T")`: `T *` in an imported header is this type
     let cty := if (cmd.getArg 3).isNone then [] else [(s!"ctype:{(((cmd.getArg 3).getArg 3).getStr?).getD ""}", name)]
     match addDeclSorted s.globals { name, type := .sort 1, value := none } with
-    | .ok g => modify fun s => { s with globals := { g with builtins := cty ++ g.builtins }, builtins := cty ++ s.builtins,
+    | .ok g => modify fun s => { s with globals := g.setBuiltins (cty ++ g.builtins), builtins := cty ++ s.builtins,
                                         foreignTypes := (name, fin) :: s.foreignTypes }
     | .error e => reportKernel cmd.info (name) e
   | "command.importC" =>
@@ -2704,7 +3197,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         match addDeclSorted st.globals { name := n, type := .sort 1, value := none } with
         | .ok g =>
           let key := s!"ctype:{sp}"
-          modify fun s => { s with globals := { g with builtins := (key, n) :: g.builtins }, builtins := (key, n) :: s.builtins,
+          modify fun s => { s with globals := g.addBuiltin key n, builtins := (key, n) :: s.builtins,
                                    foreignTypes := (n, "") :: s.foreignTypes }
           return some n
         | .error _ => return none
@@ -2776,7 +3269,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         let key : Name := s!"extern:{f.name}:{String.join (ks.toList.map (·.1.toKey))}:{rk.toKey}:{if isPure then "pure" else "io"}:{header}:{fin}"
         match addDeclSorted st.globals { name, type := ty, value := none } with
         | .ok g => modify fun s => { s with builtins := (key, name) :: s.builtins,
-                                            globals := { g with builtins := (key, name) :: g.builtins } }
+                                            globals := g.addBuiltin key name }
         | .error e => reportKernel cmd.info (name) e
   | "command.glue" =>
     -- a foreign function defined by checked C code
@@ -2834,7 +3327,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             match addDeclSorted s.globals { name, type := ty, value := none } with
             | .ok g =>
               modify fun s => { s with builtins := (key, name) :: s.builtins,
-                                       globals := { g with builtins := (key, name) :: g.builtins },
+                                       globals := g.addBuiltin key name,
                                        cCode := s.cCode.push code,
                                        cFuncs := (cname, pairs.map (gty ·.2), gty rk) :: s.cFuncs }
             | .error e => reportKernel cmd.info (name) e
@@ -2890,7 +3383,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           let k : RVal.FKind := .struct ctype header kinds
           let code := if header == "" then C.structDefinition ctype kinds else s!"#include <{header}>"
           modify fun s => { s with builtins := (s!"cstruct:{k.toKey}", name) :: s.builtins,
-                                   globals := { s.globals with builtins := (s!"cstruct:{k.toKey}", name) :: s.globals.builtins },
+                                   globals := s.globals.addBuiltin (s!"cstruct:{k.toKey}") name,
                                    cCode := if s.cCode.contains code then s.cCode else s.cCode.push code }
   | "command.linkC" =>
     -- (9f) an unchecked C source file, compiled and linked with the program
@@ -2982,7 +3475,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           let key : Name := s!"extern:{cname}:{String.join (ks.map (·.toKey))}:{rk.toKey}:{if io then "io" else "pure"}:{header}:{finOf res}"
           match addDeclSorted s.globals { name, type := ty, value := none } with
           | .ok g => modify fun s => { s with builtins := (key, name) :: s.builtins,
-                                              globals := { g with builtins := (key, name) :: g.builtins } }
+                                              globals := g.addBuiltin key name }
           | .error e => reportKernel cmd.info (name) e
         | _, _ =>
           let msg := "a foreign function's arguments and result must be Nat, UInt64, Float64, String, Bool, Unit, a c_struct, a Wiz data type or a function of those (a callback; the result may be in IO)"
@@ -2991,7 +3484,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     -- (9g) a C symbol for a Wiz function: the inverse of `extern`
     let cname := ((cmd.getArg 1).getStr?).getD "_"
     let fStx := cmd.getArg 2
-    let f := (fStx.getId?).getD "_"
+    let f0 := (fStx.getId?).getD "_"
+    let f := (s.globals.resolveName f0).toOption.getD f0
     match s.globals.find? f with
     | none => reportC fStx.info s!"unknown declaration '{f}'" ErrorCode.unknownDeclaration
     | some d =>
@@ -3036,8 +3530,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       remakeMetaCode
   | "command.appUnexpander" =>
     -- (11r) `app_unexpander c | `(term| $_ $x …) => `(term| …)`: printing notation for `c`
-    let c := ((cmd.getArg 1).getId?).getD "_"
-    let c := if s.globals.contains c then c else s.globals.resolve c
+    let c0 := ((cmd.getArg 1).getId?).getD "_"
+    let c := (s.globals.resolveName c0).toOption.getD c0
     let mut entries := #[]
     for alt in (cmd.getArg 2).args do
       let lhs := (alt.getArg 1).args[0]?.getD .missing
@@ -3060,8 +3554,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     modify fun s => CommandState.refreshPP { s with ppUser := entries.toList ++ s.ppUser }
   | "command.attrUnexpander" =>
     -- (11r) `attribute [app_unexpander c] f` with `f : Unexpander` (a `Macro`)
-    let c := ((cmd.getArg 3).getId?).getD "_"
-    let c := if s.globals.contains c then c else s.globals.resolve c
+    let c0 := ((cmd.getArg 3).getId?).getD "_"
+    let c := (s.globals.resolveName c0).toOption.getD c0
     let f := ((cmd.getArg 5).getId?).getD "_"
     let ok := runElab s.globals do
       let (_, ty) ← Elab.infer {} (.node cmd.info "term.ident" #[cmd.getArg 5])
@@ -3075,19 +3569,142 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         return
       modify fun s => CommandState.refreshPP { s with ppUser := { head := c, arity := 0, how := .fn f } :: s.ppUser }
   | "command.setOption" =>
-    -- (11r) `set_option pp.notation false` (`pp.all true`: the same)
-    let opt := ((cmd.getArg 1).getId?).getD ""
-    let v : Option Bool := match cmd.getArg 2 with
-      | .ident _ "true" => some true
-      | .ident _ "false" => some false
+    -- (11r, TT-04) every option is looked up in the registry (`optDecls`) and parsed by
+    -- its declared type; `pp.notation`/`pp.all` keep their effect on the pretty printer
+    let optStx := cmd.getArg 1
+    let opt := (optStx.getId?).getD ""
+    let valueOf (kind : OptKind) (stx : Syntax) : Except String OptValue :=
+      match kind with
+      | .boolean => match stx with
+        | .ident _ "true" => .ok (.bool true)
+        | .ident _ "false" => .ok (.bool false)
+        | _ => .error kind.expects
+      | .natural => match stx.getNat? with
+        | some n => .ok (.nat n)
+        | none => .error kind.expects
+      | .string => match stx.getStr? with
+        | some s => .ok (.str s)
+        | none => .error kind.expects
+      | .name => match stx.getId? with
+        | some n => .ok (.name n)
+        | none => .error kind.expects
+    match s.optDecl? opt with
+    | none =>
+      report .error optStx.info
+        s!"unknown option '{opt}' (registered: {", ".intercalate (s.optDecls.map (·.name))})"
+    | some d =>
+      match valueOf d.kind (cmd.getArg 2) with
+      | .error e => report .error (cmd.getArg 2).info s!"option '{opt}' {e}"
+      | .ok v =>
+        match d.validate v with
+        | .error e => report .error (cmd.getArg 2).info s!"option '{opt}' {e}"
+        | .ok () => modify fun s => s.setOptValue d v
+  | "command.registerAttribute" =>
+    -- (TT-04) a user attribute: a no-op with a flag payload. Its applications are data
+    -- in the state, so `local` can drop them with the module.
+    let nameStx := cmd.getArg 1
+    let n := (nameStx.getId?).getD "_"
+    if n == "_" || n.isEmpty then
+      report .error nameStx.info "register_attribute needs a name"
+    else if let some d := s.attrDecl? n then
+      report .error nameStx.info s!"attribute '{d.name}' is already registered"
+    else
+      modify fun s => { s with attrDecls := { name := n, payload := .flag, action := .noop } :: s.attrDecls }
+  | "command.registerOption" =>
+    -- (TT-04) a user option: typed (Bool/Nat/String/Name) and a no-op unless it is one
+    -- of the printing options above.
+    let nameStx := cmd.getArg 1
+    let n := (nameStx.getId?).getD "_"
+    let kindStx := cmd.getArg 3
+    let kindName := (kindStx.getId?).getD ""
+    let kind? : Option OptKind := match kindName with
+      | "Bool" => some .boolean
+      | "Nat" => some .natural
+      | "String" => some .string
+      | "Name" => some .name
       | _ => none
-    let set (b : Bool) : StateM (CommandState R) Unit :=
-      modify fun s => { s with globals := { s.globals with pp := { s.globals.pp with useNotation := b } } }
-    match opt, v with
-    | "pp.notation", some b => set b
-    | "pp.all", some b => set !b
-    | "pp.notation", none | "pp.all", none => report .error (cmd.getArg 2).info "expected `true` or `false`"
-    | o, _ => report .error (cmd.getArg 1).info s!"unknown option {o} (there are pp.notation and pp.all)"
+    match kind? with
+    | none => report .error kindStx.info s!"unknown option type '{kindName}' (use Bool, Nat, String or Name)"
+    | some kind =>
+      let valueOf (stx : Syntax) : Except String OptValue :=
+        match kind with
+        | .boolean => match stx with
+          | .ident _ "true" => .ok (.bool true)
+          | .ident _ "false" => .ok (.bool false)
+          | _ => .error kind.expects
+        | .natural => match stx.getNat? with
+          | some m => .ok (.nat m)
+          | none => .error kind.expects
+        | .string => match stx.getStr? with
+          | some str => .ok (.str str)
+          | none => .error kind.expects
+        | .name => match stx.getId? with
+          | some name => .ok (.name name)
+          | none => .error kind.expects
+      match valueOf (cmd.getArg 5) with
+      | .error e => report .error (cmd.getArg 5).info s!"option '{n}' {e}"
+      | .ok v =>
+        if n == "_" || n.isEmpty then report .error nameStx.info "register_option needs a name"
+        else if let some d := s.optDecl? n then
+          report .error nameStx.info s!"option '{d.name}' is already registered"
+        else modify fun s => { s with optDecls := { name := n, kind, default := v } :: s.optDecls }
+  | "command.attr" =>
+    -- (TT-04) `attribute [foo args] x`: the registry says what `foo` takes and does
+    let aStx := cmd.getArg 2
+    let a := (aStx.getId?).getD "_"
+    let targetStx := cmd.getArg 5
+    let args := (cmd.getArg 3).args
+    let argText (x : Syntax) : String := match x with
+      | .ident _ n => n
+      | .atom _ v => v
+      | .node _ _ #[a] => match a.getStr? with
+        | some s => s
+        | none => (a.getNat?.map toString).getD (toString (repr x))
+      | _ => toString (repr x)
+    match s.attrDecl? a with
+    | none =>
+      report .error aStx.info
+        s!"unknown attribute '{a}' (registered: {", ".intercalate (s.attrDecls.map (·.name))})"
+    | some d =>
+      let parsed : Except String (Array Syntax) := match d.payload with
+        | .flag => if args.isEmpty then .ok #[] else .error s!"attribute '[{d.name}]' {d.payload.expects}"
+        | .name =>
+          if args.size == 1 && args[0]!.getId?.isSome then .ok args
+          else .error s!"attribute '[{d.name}]' {d.payload.expects}"
+        | .nameOptName =>
+          if args.size ≤ 2 && args.all (fun x => x.getId?.isSome) then .ok args
+          else .error s!"attribute '[{d.name}]' {d.payload.expects}"
+        | .nameOptNat =>
+          if args.isEmpty then .ok #[] else
+          if args.size == 1 && args[0]!.getNat?.isSome then .ok args
+          else .error s!"attribute '[{d.name}]' {d.payload.expects}"
+      match parsed with
+      | .error e => report .error cmd.info e
+      | .ok args =>
+        match d.action with
+        | .noop =>
+          let f := s.globals.resolve ((targetStx.getId?).getD "_")
+          match s.globals.find? f with
+          | none => reportC targetStx.info s!"unknown declaration '{f}'" ErrorCode.unknownDeclaration
+          | some _ =>
+            modify fun s => { s with attrUses := (d.name, f, args.map argText) :: s.attrUses }
+        | .inline =>
+          -- `attribute [inline] f` (22i): compiled code substitutes `f`'s body where `f`
+          -- is applied to all its arguments. Registered as the builtin key `inline`; the
+          -- kernel doesn't see it.
+          let f := s.globals.resolve ((targetStx.getId?).getD "_")
+          match s.globals.find? f with
+          | none => reportC targetStx.info s!"unknown declaration '{f}'" ErrorCode.unknownDeclaration
+          | some decl =>
+            if decl.value.isNone then report .error targetStx.info s!"{f} has no definition to inline"
+            else if s.builtins.any (fun (k, x) => x == f && !k.startsWith RVal.exportPrefix) then
+              report .error targetStx.info s!"{f} is a builtin, foreign or inline function already"
+            else
+              modify fun s => { s with builtins := s.builtins ++ [(inlineKey, f)],
+                                       globals := s.globals.addBuiltinBack inlineKey f }
+        | _ =>
+          report .error cmd.info s!"attribute '[{d.name}]' has no generic form"
+
   | "command.attrTactic" =>
     let k := ((cmd.getArg 3).getId?).getD "_"
     let f := ((cmd.getArg 5).getId?).getD "_"
@@ -3108,7 +3725,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let prio := if (cmd.getArg 3).isNone then 1000 else
       (((if (cmd.getArg 3).isOfKind "null" then (cmd.getArg 3).getArg 0 else cmd.getArg 3).getNat?).getD 1000)
     let nStx := cmd.getArg 5
-    let n := s.globals.resolve ((nStx.getId?).getD "_")
+    let n := (s.globals.resolveName ((nStx.getId?).getD "_")).toOption.getD ((nStx.getId?).getD "_")
     match s.globals.find? n with
     | none => reportC nStx.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
     | some d =>
@@ -3124,7 +3741,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .eq _ lhs rhs =>
           if conditional then
             reportC nStx.info s!"'{n}' is a conditional simp lemma (it has a premise before the equation); dischargers are S3, so it cannot be registered yet" ErrorCode.simpLemmaConditional
-          else if s.simpLemmas.any (·.name == n) then
+          else if s.simpLemmas.any fun e => !e.hint && e.name == n then
             report .warning nStx.info s!"duplicate `[simp]` registration for '{n}': it is already in the simp set (kept once, at its first priority)"
           else do
             if lhs == rhs then
@@ -3134,6 +3751,29 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             modify fun s => { s with simpLemmas := { name := n, priority := prio, rtl := false } :: s.simpLemmas }
         | _ =>
           reportC nStx.info s!"'{n}' is not an equation: a simp lemma must have the form `∀ x₁ … xₙ, lhs = rhs`" ErrorCode.simpLemmaNotEquation
+  | "command.attrHint" | "command.attrHintKind" =>
+    -- (P0) `attribute [hint] f`, `[hint 500] f`, `[hint intro] f`: a theorem that
+    -- `auto` may apply. It shares the registration array with `[simp]` but not the set.
+    let kindRule := cmd.isOfKind "command.attrHintKind"
+    let prio := if kindRule then 1000 else
+      if (cmd.getArg 3).isNone then 1000 else
+      (((if (cmd.getArg 3).isOfKind "null" then (cmd.getArg 3).getArg 0 else cmd.getArg 3).getNat?).getD 1000)
+    let kind := if kindRule then ((cmd.getArg 3).getId?).getD "apply" else "apply"
+    if !["apply", "intro", "elim"].contains kind then
+      reportC (cmd.getArg 3).info s!"'{kind}' is not a hint kind: use `apply`, `intro` or `elim`" ErrorCode.unknownDeclaration
+    let nStx := cmd.getArg 5
+    let n := (s.globals.resolveName ((nStx.getId?).getD "_")).toOption.getD ((nStx.getId?).getD "_")
+    match s.globals.find? n with
+    | none => reportC nStx.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
+    | some d =>
+      if (ctorInfo? s.globals n).isSome then
+        reportC nStx.info s!"'{n}' is a constructor, not a theorem: a hint must have a proof" ErrorCode.simpLemmaNotEquation
+      else if d.value.isNone && d.witness.isNone then
+        reportC nStx.info s!"'{n}' has no definition: a hint must be a theorem, not an axiom" ErrorCode.simpLemmaNotEquation
+      else if s.simpLemmas.any fun e => e.hint && e.name == n then
+        report .warning nStx.info s!"duplicate `[hint]` registration for '{n}': it is already in the hint set (kept once, at its first priority)"
+      else
+        modify fun s => { s with simpLemmas := { name := n, priority := prio, rtl := false, hint := true, kind := kind } :: s.simpLemmas }
   | "command.attrImplementedBy" =>
     -- `attribute [implemented_by g] f`: compiled code runs `g` wherever it would run `f`
     -- (erasure takes `g`'s code for `f`); the kernel and proofs keep `f`'s definition. So
@@ -3205,7 +3845,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             let (_, getArity) := target g 0 (eval g [] dg.type) 1000
             let key := ReprInfo.key T { mkImpl := impl, getImpl := get, tag, nfields, r, mkArity, p, getArity }
             modify fun s => { s with builtins := (key, f) :: s.builtins,
-                                     globals := { s.globals with builtins := (key, f) :: s.globals.builtins } }
+                                     globals := s.globals.addBuiltin key f }
       else if s.builtins.any (fun (k, x) => x == f && k != inlineKey && !k.startsWith RVal.exportPrefix) then
         report .error fStx.info s!"{f} is a builtin or foreign function: it already has an implementation"
       else if f == impl then report .error (cmd.getArg 3).info s!"{f} can't be implemented by itself"
@@ -3230,21 +3870,6 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           match setImpl s.globals f (.const impl us) with
           | .ok g' => modify fun s => { s with globals := g' }
           | .error e => report .error (cmd.getArg 3).info s!"kernel rejected {impl} as the implementation of {f}: {e}"
-  | "command.attrInline" =>
-    -- `attribute [inline] f` (22i): compiled code substitutes `f`'s body where `f` is
-    -- applied to all its arguments, so a lambda argument is applied directly (no
-    -- closure). Registered as the builtin key `inline`; the kernel doesn't see it.
-    let fStx := cmd.getArg 4
-    let f := (fStx.getId?).getD "_"
-    match s.globals.find? f with
-    | none => reportC fStx.info s!"unknown declaration '{f}'" ErrorCode.unknownDeclaration
-    | some d =>
-      if d.value.isNone then report .error fStx.info s!"{f} has no definition to inline"
-      else if s.builtins.any (fun (k, x) => x == f && !k.startsWith RVal.exportPrefix) then
-        report .error fStx.info s!"{f} is a builtin, foreign or inline function already"
-      else
-        modify fun s => { s with builtins := s.builtins ++ [(inlineKey, f)],
-                                 globals := { s.globals with builtins := s.globals.builtins ++ [(inlineKey, f)] } }
   | "command.attrDefaultInstance" =>
     -- (7f) `attribute [default_instance p] i`: when instance problems are stuck, the
     -- instance `i` is tried on those of its class, highest `p` (default 1000) first
@@ -3252,14 +3877,14 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let prio := if (cmd.getArg 3).isNone then 1000 else
       (((if (cmd.getArg 3).isOfKind "null" then (cmd.getArg 3).getArg 0 else cmd.getArg 3).getNat?).getD 1000)
     let iStx := cmd.getArg 5
-    let i := s.globals.resolve ((iStx.getId?).getD "_")
+    let i := (s.globals.resolveName ((iStx.getId?).getD "_")).toOption.getD ((iStx.getId?).getD "_")
     match s.instances.find? fun j => j.name == i && !j.isDefault with
     | none => report .error iStx.info s!"{i} is not an instance"
     | some j => modify fun s => { s with instances := s.instances.push { j with priority := prio, isDefault := true } }
   | "command.attrBinop" =>
     -- (7f) `attribute [binop] C.f`: numeral operands of `C.f` take the type of the others
     let fStx := cmd.getArg 4
-    let f := s.globals.resolve ((fStx.getId?).getD "_")
+    let f := (s.globals.resolveName ((fStx.getId?).getD "_")).toOption.getD ((fStx.getId?).getD "_")
     match s.classes.find? fun c => c.fields.any fun x => c.name ++ "." ++ x == f with
     | none => report .error fStx.info s!"{f} is not a method of a class"
     | some c => modify fun s => { s with classes := s.classes.map fun c' => if c'.name == c.name then { c' with binop := true } else c' }
@@ -3278,16 +3903,20 @@ a proposition is not data (proofs are erased and all its proofs are definitional
   | "command.deriving" =>
     -- `deriving instance C₁, C₂ for T₁, T₂`
     let ids (stx : Syntax) := stx.args.toList.filter (·.getId?.isSome)
-    for T in ids (cmd.getArg 4) do
-      for C in ids (cmd.getArg 2) do
-        derive (C.getId?.getD "_") (s.globals.resolve (T.getId?.getD "_")) C.info
+    for TStx in ids (cmd.getArg 4) do
+      for CStx in ids (cmd.getArg 2) do
+        let T := (s.globals.resolveName (TStx.getId?.getD "_")).toOption.getD (TStx.getId?.getD "_")
+        let C := (s.globals.resolveName (CStx.getId?.getD "_")).toOption.getD (CStx.getId?.getD "_")
+        derive C T CStx.info
   | "command.erase" =>
-    let n := ((cmd.getArg 1).getId?).getD "_"
-    match s.globals.find? n with
-    | none => reportC cmd.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
-    | some d => match eraseDecl s.globals d with
-      | .ok e => report .info cmd.info s!"{n} := {e}"
-      | .error err => report .error cmd.info s!"cannot erase {n}: {err}"
+    let nStx := cmd.getArg 1
+    match s.globals.resolveName ((nStx.getId?).getD "_") with
+    | .error e => reportC nStx.info e ErrorCode.ambiguousName
+    | .ok n => match s.globals.find? n with
+      | none => reportC cmd.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
+      | some d => match eraseDecl s.globals d with
+        | .ok e => report .info cmd.info s!"{n} := {e}"
+        | .error err => report .error cmd.info s!"cannot erase {n}: {err}"
   | "command.eval" =>
     -- elaborate, erase, run, and read the result back using its type
     let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
@@ -3331,8 +3960,9 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           -- the interpreter can't fail: running a stub would print a wrong value
           report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
         | .ok (ty, e, code, []) =>
-          let v := run code [] e
-          report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
+          match run code [] e with
+          | .stuck m => report .error cmd.info s!"cannot run this: {m}"
+          | v => report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
         | .error err => report .error cmd.info s!"cannot run this: {err}"
       let hintOf (ty : VTy R) : Option Name := match whnf ty with
         | .mu _ _ _ _ _ (some (T, _, _)) _ => some T
@@ -3397,9 +4027,12 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .ok (_, _, _, (n, err) :: _) =>
           report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
         | .ok (_, e, code, []) =>
-          match (run code [] e).toString? with
-          | some text => report .info cmd.info text
-          | none => report .error cmd.info "#plot: the value is not a string (expected a Plot.Chart)"
+          match run code [] e with
+          | .stuck m => report .error cmd.info s!"#plot: {m}"
+          | v =>
+            match v.toString? with
+            | some text => report .info cmd.info text
+            | none => report .error cmd.info "#plot: the value is not a string (expected a Plot.Chart)"
         | .error err => report .error cmd.info s!"cannot run this: {err}"
   | "command.run" =>
     -- like `#eval`, but through the IR, with reference counting, on a checked heap
@@ -3425,17 +4058,20 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       | .ok (ty, v) => report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
       | .error err => report .error cmd.info s!"#run: {err}"
   | "command.ir" =>
-    let n := ((cmd.getArg 1).getId?).getD "_"
-    let result : Except String (Array IR.Decl) := do
-      let code ← (compileReachable s.globals s.builtins [n]).mapError toString
-      IR.lowerProgram code (.global n)
-    match result with
-    | .ok decls =>
-      -- (not the owned wrappers for closures, stage 8e)
-      let mine := (IR.optimizeProgram decls).filter fun d =>
-        d.name == n || (d.name.startsWith (n ++ ".") && !d.name.endsWith "._owned")
-      report .info cmd.info ("\n".intercalate (mine.toList.map (·.toString)))
-    | .error err => report .error cmd.info s!"#ir: {err}"
+    let nStx := cmd.getArg 1
+    match s.globals.resolveName ((nStx.getId?).getD "_") with
+    | .error e => reportC nStx.info e ErrorCode.ambiguousName
+    | .ok n =>
+      let result : Except String (Array IR.Decl) := do
+        let code ← (compileReachable s.globals s.builtins [n]).mapError toString
+        IR.lowerProgram code (.global n)
+      match result with
+      | .ok decls =>
+        -- (not the owned wrappers for closures, stage 8e)
+        let mine := (IR.optimizeProgram decls).filter fun d =>
+          d.name == n || (d.name.startsWith (n ++ ".") && !d.name.endsWith "._owned")
+        report .info cmd.info ("\n".intercalate (mine.toList.map (·.toString)))
+      | .error err => report .error cmd.info s!"#ir: {err}"
   | "command.syntax" | "command.declareSyntaxCat" =>
     match updateTables s.tables cmd with
     | .ok tables =>

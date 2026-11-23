@@ -1,3 +1,4 @@
+namespace __root__
 -- The self-hosted checker's entry point (stage 23e). The checker is the language
 -- (`Lex`, `Parse`, `Kernel`, `CParse`, `CGlue`, `Frontend`) and the tables
 -- (`selfhost/Tables.wiz`, generated); `moduleMain` reads `input.wiz`, resolves the
@@ -8,3 +9,4 @@
 -- it last. It replaces the `def main := moduleMain cats tokens` string that the Lean
 -- side used to write. The compiler's entry point is `selfhost/Main.wiz`.
 def main : IO Unit := moduleMain cats tokens
+end

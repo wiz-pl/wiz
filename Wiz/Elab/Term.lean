@@ -574,6 +574,26 @@ def ctorNames (g : Globals R) (T : Name) : List Name :=
     | some v => ((strip descD.type v).descTag?.map (·.1)).getD []
     | none => []
 
+/-- (D6) The source names of the constructors of the inductive type (or structure) whose
+kernel name is `T` (`T.c`), in declaration order: the candidates `constructor` tries.
+`none` if `T` is not an inductive type; `some []` for an inductive with no
+constructors. A private type's kernel name is turned back into its source name
+(`Globals.privateBase`), as `privBase` does in `selfhost/Frontend.wiz`. -/
+def indCtorNames? (g : Globals R) (T : Name) : Option (List Name) := do
+  let base := Globals.privateBase T
+  if g.contains (T ++ ".desc") then
+    pure ((ctorNames g T).map (ctorConst base))
+  else
+    -- a structure has no description: its value is `λ Δ. Σ …`, its only constructor
+    -- `T.mk`
+    let d ← g.find? T
+    let rec strip : Term R → Term R
+      | .lam _ b => strip b
+      | t => t
+    match strip (d.value.getD .tt) with
+    | .sigma .. | .unit _ => if g.contains (T ++ ".mk") then pure [base ++ ".mk"] else none
+    | _ => none
+
 /-- A `mutual` block's constructor `n` (`Ev.s`, `ctorConst`): its family `F`, the data
 type whose constructor it is (the head of its result type), if `n` is one of `F`'s
 qualified tags. -/
@@ -611,18 +631,21 @@ def dotCtor? (g : Globals R) (tys : Array (VTy R)) (T c : Name) (expected : VTy 
     | _ => none
 
 partial def patView (g : Globals R) (stx : Syntax) : Except String PatView :=
-  let ctorOf (n : Name) : Option (Name × Name) :=
-    -- (13b) this module's private type's constructor, under its kernel name
-    let n := g.resolve n
-    match (n.splitOn ".").reverse with
-    | c :: T@(_ :: _) =>
-      let T := ".".intercalate T.reverse
-      if g.contains (T ++ ".desc") && g.contains n then some (T, c)
-      -- (13h) a structure's constructor
-      else if c == "mk" && g.contains n && g.contains T then some (T, c)
-      -- a `mutual` block's constructor `Ev.s`: the family, and the tag (the name itself)
-      else (familyCtor? g n).map (·, n)
-    | _ => none
+  let ctorOf (n : Name) : Except String (Option (Name × Name)) := do
+    -- (13t) the name the current namespace and opens give it; (13b) this module's
+    -- private type's constructor, under its kernel name
+    let n ← g.resolveName n
+    let ofName : Option (Name × Name) :=
+      match (n.splitOn ".").reverse with
+      | c :: T@(_ :: _) =>
+        let T := ".".intercalate T.reverse
+        if g.contains (T ++ ".desc") && g.contains n then some (T, c)
+        -- (13h) a structure's constructor
+        else if c == "mk" && g.contains n && g.contains T then some (T, c)
+        -- a `mutual` block's constructor `Ev.s`: the family, and the tag (the name itself)
+        else (familyCtor? g n).map (·, n)
+      | _ => none
+    pure ofName
   match stx.kind with
   | "term.paren" => patView g (stx.getArg 1)
   | "term.tuple" =>
@@ -650,8 +673,9 @@ partial def patView (g : Globals R) (stx : Syntax) : Except String PatView :=
   | "term.ident" =>
     let n := (stx.getArg 0).getId?.getD "_"
     match ctorOf n with
-    | some (T, c) => pure (.ctor (some T) c [])
-    | none => pure (.var n)
+    | .error e => .error e
+    | .ok (some (T, c)) => pure (.ctor (some T) c [])
+    | .ok none => pure (.var n)
   | "term.app" =>
     let h := stx.getArg 0
     let args := (stx.getArg 1).args.toList
@@ -660,11 +684,13 @@ partial def patView (g : Globals R) (stx : Syntax) : Except String PatView :=
     | "term.ident" =>
       let f := (h.getArg 0).getId?.getD "_"
       match ctorOf f with
-      | some (T, c) => pure (.ctor (some T) c args)
-      | none =>
+      | .error e => .error e
+      | .ok (some (T, c)) => pure (.ctor (some T) c args)
+      | .ok none =>
         -- (13q) `p + k`, as `+` expands (`Add.add p k`, or `HAdd.hAdd p k`), with a numeral `k`
         -- (`HAdd.hAdd` too: `+` of the heterogeneous classes)
-        match g.resolve f == "Add.add" || g.resolve f == "HAdd.hAdd", args with
+        let resolved := (g.resolveName f).toOption
+        match resolved == some "Add.add" || resolved == some "HAdd.hAdd", args with
         | true, [p, k] => match (if k.isOfKind "term.num" then (k.getArg 0).getNat? else none) with
           | some 0 => patView g p
           | some n => pure (.plusK p n)
@@ -1897,8 +1923,17 @@ partial def inferData? (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Option (Term
     return some (.ind l (q I) (q D) v P' m' (q i) x' prop, vApp g (vApp g vP i) (← evalIn ctx x'))
   | "out", #[x] =>
     let (x', xty) ← infer ctx x
-    let .nu l I D i _ _ ← force xty | throwAt ctx.info s!"out expects a coinductive value, got {← showVal ctx xty}"
-    return some (.out x', vInterp g l I D (nuFamily l I D) i)
+    let .nu l I D i s _ ← force xty | throwAt ctx.info s!"out expects a coinductive value, got {← showVal ctx xty}"
+    -- (HDL 34c.1) `out`'s payload has the recursive fields at the **predecessor** size,
+    -- as in the kernel's `inferCore` rule (`Wiz/Core/Check.lean`) and `Mark`/`Erase`:
+    -- `out x : Desc.interp D (ν^{s'}) i` for `x : ν^{↑s} D i`, `s' = sizePred? s`
+    -- (`∞ = ↑∞` for observation purposes). Typing the payload at `ν^∞` instead made
+    -- `let p := out a` — one observation per cycle, shared — carry a size the kernel's
+    -- sized `cocon` check rejects ("expected … ν (Signal.desc d A) … inferred … ν^j …").
+    -- Only `↑s` and `∞` can be observed, as in the kernel.
+    let some s' := sizePred? s
+      | throwAt ctx.info s!"only a value of size ↑s or ∞ can be observed, not {← showVal ctx s}"
+    return some (.out x', vInterp g l I D (nuFamilyAt l I D s') i)
   | _, _ => return none
 
 /-- Check `(a, b, c)` against a (right-nested) Σ. -/
@@ -3021,6 +3056,15 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
   let sized := !(xsz matches .szInf)
   if sized && useRec then
     throwAt ctx.info "structural recursion on a sized argument: give the definition a sized signature instead" ErrorCode.notStructural
+  -- If the goal does not mention the scrutinee, its indices or the reverted variables,
+  -- the branch goal is the goal itself. Keep that value (an equation as written) rather
+  -- than reading the motive's instantiated codomain back: evaluating an equation there
+  -- would compute it (`f2 n = isZero (succ n)` to `True`) and a nested named match would
+  -- lose the side it must abstract. If the goal does mention them, the instantiated
+  -- motive is what refines it (a branch may then get the equation's computed Σ).
+  let goalTm := q goal
+  let inGoal (l : Lvl) : Bool := goalTm.hasVar (ctx.lvl - l - 1)
+  let stuckGoal := !(inGoal x || ξLvls.any inGoal || rs.any inGoal)
   -- G := Π rs. goal
   let w : Term R := .qlit QuantitySyntax.explicitDefault
   let mut G := q goal
@@ -3088,12 +3132,10 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
       let eqTm : Term R := .eq ((q I).lift (nΞ + 1)) lhs ((q ξi).lift (nΞ + 1))
       let body : Term R := .pi "e" .default (.qlit 0) eqTm (G.lift (nΞ + 2)) ⟨0, vG.getD .hole⟩
       pure ((List.range nΞ).foldr (fun k acc => .lam s!"i{k}" acc) (.lam "x" body))
-  -- a type still to be found (an inferred `match`) is taken to be in `Type`
-  let unknown := match whnf Gv with
-    | .neutral (.mvar _) _ => true
-    | _ => false
-  let some v := vG.orElse fun _ => if unknown then some (.succ .zero) else none
-    | throwAt ctx.info "could not determine the universe of the match's type"
+  -- a type still to be found (an inferred `match`) is taken to be in `Type`. A named
+  -- match wraps the goal in the equation's binders, so the metavariable is not at the
+  -- head of `Gv`; a missing sort is the inferred case either way.
+  let v := vG.getD (.succ .zero)
   let elimName := T ++ (if linear then ".casesOn1" else if additive then ".casesOnA" else if sized then ".scasesOn" else if useRec then ".rec" else ".casesOn") ++
     (if nondep then "N" else "")
   let some ed := g.find? elimName | throwAt ctx.info s!"{elimName} is missing"
@@ -3281,7 +3323,8 @@ data), so its eliminator can only target Prop"
         let dropped (pos : Nat) : List Nat := rsAll.zipIdx.filterMap fun (l, i) =>
           if rs.contains l then none else some (origCol pos (k + 1 + i))
         let rc' := if useRec then rc'.map (fun r => { r with dropCols := dropped r.pos }) else rc'
-        let inner ← compileMatch ctx' (vars.take k ++ fieldLvls'.toList ++ restCols ++ ihCols) cls2 mt rc' false
+        let inner ← compileMatch ctx' (vars.take k ++ fieldLvls'.toList ++ restCols ++ ihCols) cls2
+          (if stuckGoal then goal else mt) rc' false
         let body0 := (rs.map nameOf).foldr .lam inner
         match solution with
         | none => pure body0
@@ -3571,6 +3614,20 @@ partial def matchMux? (ctx : LocalCtx R) (stx : Syntax) (alts : Array Syntax) (s
   let shareApp := hdlApp atInfo (hdlIdent atInfo "Hw.share") [scrut, hdlFun atInfo x body]
   return some (← check ctx shareApp expected)
 
+/-- Evaluate a type for checking a term, but leave an equation at the head stuck, as
+written, rather than letting it compute: a `match` checked against it abstracts the
+equation's sides in its branches, while a computed `True` (or Σ) no longer shows them.
+(`f2 n = isZero (Nat.succ n)` computes to `True`, but a split on `isZero (Nat.succ n)`
+inside the body must still refine the goal's right side.) The kernel still sees the
+computed type. -/
+partial def evalExpected (ctx : LocalCtx R) (ty : Term R) : ElabM R (VTy R) := do
+  match ty with
+  | .eq A a b =>
+    pure (.neutral (.eq (← evalIn ctx A) (← evalIn ctx a) (← evalIn ctx b)) #[])
+  | .eqTy A B =>
+    pure (.neutral (.eqTy (← evalIn ctx A) (← evalIn ctx B)) #[])
+  | _ => evalIn ctx ty
+
 /-- Elaborate `match e₁, …, eₙ with | p₁, …, pₙ => rhs …` against `expected`. -/
 partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM R (Term R) := do
   let g ← getGlobals
@@ -3642,8 +3699,13 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
     binders := binders.push ("x✝", quote g ctx.lvl ty)
   -- abstract the scrutinees, last first
   -- (each abstraction adds a binder: the later scrutinee terms are lifted over it)
+  -- The goal is quoted from value form, so abstract the scrutinee read back the same
+  -- way: the elaborated term may spell a constructor differently (`Nat.succ n` as a
+  -- constant) from its read-back, and then the occurrence would be missed.
   let mut absGoal := goalTm
-  for t in ts, k in [0:ts.size] do absGoal := abstractOutsideHoles absGoal (t.lift k)
+  for t in ts, k in [0:ts.size] do
+    let tv ← evalIn ctx t
+    absGoal := abstractOutsideHoles absGoal ((quote g ctx.lvl tv).lift k)
   let _ := goalTm
   let mut lvls : List Lvl := []
   -- a scrutinee's type mentions the earlier scrutinees (`match e, h with` for
@@ -3701,7 +3763,7 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
   -- is lifted over them
   goalTm := if eqCount == 0 then absGoal else absGoal.lift eqCount
   let allLinear := linearScruts ++ (List.replicate eqCount false).toArray
-  let goal ← evalIn ctx' goalTm
+  let goal ← evalExpected ctx' goalTm
   if let some x := lvls.head? then recordMatch stx.info alts clauses0 ctx'.types[ctx'.lvl - x - 1]! ctx'.types.reverse.toArray
   let body ← compileMatch ctx' lvls clauses goal none true
   let lam := (binders.toList.map (·.1)).foldr .lam body
@@ -3760,8 +3822,12 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
         return (.var ix, ty)
     -- a macro-scoped name that isn't a local refers to the global of its base name
     let x := stripScope x
-    -- (13b) this module's private declaration of that name, if any
-    let x := (← getGlobals).resolve x
+    -- (13t) this namespace's, this module's, and the open namespaces' declaration of the
+    -- name (an ambiguity is an error naming both); (13b) a private one of this module
+    -- resolves to its kernel name
+    let x ← match (← getGlobals).resolveName x with
+      | .ok x => pure x
+      | .error e => throwAt ctx.info e ErrorCode.ambiguousName
     match (← getGlobals).find? x with
     | some d =>
       -- (13b) a private name of another module
@@ -4095,6 +4161,9 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
   let unifyGoal (gl : Goal R) (t : Term R) : ElabM R Unit := do
     unify gl.ctx.lvl (← evalIn gl.ctx gl.tm) (← evalIn gl.ctx t)
   --<sol
+  match v with
+  | .stuck m => throwAt info m
+  | _ => pure ()
   let tag := (v.tag?).getD 1000
   if tag == TacTag.done then return st
   if tag == TacTag.result then throwAt info "a tactic may not return syntax"
@@ -4111,6 +4180,10 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
       | some gl => gl.isOpen
       | none => pure false
     return ← runTac code info { st with «open» := opens } (apply code (fld 0) (encodeList (opens.map encodeNat)))
+  if tag == TacTag.getOpen then
+    -- (P0) the raw open list: the main goal a tactic has just solved is still first, so
+    -- `replaceMainGoal` knows which goal it replaces and keeps the next ones
+    return ← runTac code info st (apply code (fld 0) (encodeList (st.open.map encodeNat)))
   if tag == TacTag.setGoals then
     let some gs := decodeList (fld 0) | throwAt info "tactic: malformed goal list"
     return ← runTac code info { st with «open» := ← gs.mapM num } (fld 1)
@@ -4124,6 +4197,12 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
   if tag == TacTag.ctorInfo then
     let ans := match ctorInfo? g (← str (fld 0)) with
       | some (T, nParams, nFields) => mkCon 1 [encodePair (encodeString T) (encodePair (.nat nParams) (.nat nFields))]
+      | none => mkCon 0 []
+    return ← runTac code info st (apply code (fld 1) ans)
+  if tag == TacTag.ctorNames then
+    -- (D6) `constructor`: the goal type's constructors, in declaration order
+    let ans := match indCtorNames? g (← str (fld 0)) with
+      | some ns => mkCon 1 [encodeList (ns.map encodeString)]
       | none => mkCon 0 []
     return ← runTac code info st (apply code (fld 1) ans)
   if tag == TacTag.isDefinition then
@@ -4342,7 +4421,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let hty ← match (← get).kernelInfer (gl.kernelCtx g) h with
       | .ok ty => pure ty
       | .error e =>
-        match (← get).kernelInfer { gl.kernelCtx g with types := (← zonkedTypes gl.ctx).toList.reverse } h with
+        match (← get).kernelInfer { gl.kernelCtx g with types := (← zonkedTypes gl.ctx) } h with
         | .ok ty => pure ty
         | .error _ => throwAt info s!"rewrite: {e}" ErrorCode.tacticFailed
     let (A, a, b) ← match ← force hty with
@@ -4365,58 +4444,42 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let (st, id) := addGoal st { ctx := gl.ctx, ty, tm := m }
     return ← runTac code info st (apply code (fld 3) (.nat id))
   if tag == TacTag.rewriteAt then
-    -- (6h) match a rule's `∀` telescope and rewrite an occurrence of its left side
+    -- (6h) match a rule's `∀` telescope and rewrite an occurrence of its left side;
+    -- (P0 congruence) the walk descends through λs and applications, so the rewrite
+    -- also fires under a binder when the replacement may mention the bound variable.
     let h ← zonk lvl (← reify st.handles (fld 1) lvl)
     let rtl := decodeBool (fld 2) == some true
-    let all := decodeBool (fld 3) == some true
+    let _all := decodeBool (fld 3) == some true
     let ans (r : RVal) := apply code (fld 4) r
-    -- (the rule's type as written when its head is a constant: its equation may compute)
-    let (body, happ, pairs) ← match ← ruleType? gl.ctx g h with
-      | some p => pure p
-      | none => do
-        let hty ← match (← get).kernelInfer (gl.kernelCtx g) h with
-          | .ok ty => pure ty
-          | .error e =>
-            match (← get).kernelInfer { gl.kernelCtx g with types := (← zonkedTypes gl.ctx).toList.reverse } h with
-            | .ok ty => pure ty
-            | .error _ => throwAt info s!"simp: {e}" ErrorCode.tacticFailed
-        let htyT ← zonk lvl (quote g lvl hty)
-        let (b, ms) ← stripRule gl.ctx 64 htyT
-        pure (b, ms.foldl (fun f m => .app f m) h, [])
-    let .eq A lhs rhs := body | return ← runTac code info st (ans (mkCon 2 [encodeString "not an equation"]))
-    -- the universe levels of its constants (fresh after reflection), from the arguments' types
-    let happ ← if happ.hasLevelMVar then do
-        let _ ← (RCtx.ofLocal gl.ctx).typeOfUnifying? happ
-        zonk lvl happ
-      else pure happ
     let goalT ← zonk lvl (quote g lvl gl.ty)
-    -- (`← h` matches the equation's right side and puts the left one back)
-    let pat := if rtl then rhs else lhs
-    match ← matchRule gl g A pat lhs rhs happ pairs with
-    | none => return ← runTac code info st (ans (mkCon 0 []))
-    | some (A', a', b', app, cand) => do
-      let repl := if rtl then a' else b'
-      -- abstract the subterm the goal really has (the rule's side may only match it up
-      -- to conversion: `List.append x []` is written `x ++ []` in the lemma)
-      let (abstr, (found, _)) :=
-        (abstractOccAt cand goalT (if all then none else some 0)).run (false, 0)
-      if !found then return ← runTac code info st (ans (mkCon 0 []))
-      let newT := abstr.instantiateAt 0 repl
-      -- a rule that rewrites a term to itself is not a step: report no match, so a set
-      -- with a degenerate rule (a left side convertible with its right side) terminates
-      if newT == goalT then return ← runTac code info st (ans (mkCon 0 []))
-      -- for `← h` the abstraction puts back the *replacement*, as `rewrite` does
-      let Ga := abstr.instantiateAt 0 (if rtl then repl else cand)
-      -- `P x := G[x] = G[a]` (or `G[a] = G[x]`, right to left), as `rewrite`
-      let P : Term R := .lam "x" (.lam "_"
-        (if rtl then .eqTy (Ga.lift 2) (abstr.lift 1) else .eqTy (abstr.lift 1) (Ga.lift 2)))
-      let pf : Term R := .transp A' a' P (.reflTy Ga) b' app
-      let newTy ← evalIn gl.ctx newT
-      let m ← freshMeta gl.ctx "goal" newTy
-      unifyGoal gl (.cast newT goalT pf m)
-      let (st, id) := addGoal st { ctx := gl.ctx, ty := newTy, tm := m }
-      let (r, st) ← refl st gl newT
-      return ← runTac code info st (ans (mkCon 1 [.nat id, r]))
+    match ← prepareIn g gl.ctx h with
+    | none => return ← runTac code info st (ans (mkCon 2 [encodeString "not an equation"]))
+    | some _ =>
+      match ← rewriteDeep gl g h rtl with
+      | none => return ← runTac code info st (ans (mkCon 0 []))
+      | some (A', a', b', app, cand) => do
+        let repl := if rtl then a' else b'
+        -- abstract the subterm the goal really has (the rule's side may only match it up
+        -- to conversion: `List.append x []` is written `x ++ []` in the lemma)
+        let (abstr, (found, _)) :=
+          (abstractOccAt cand goalT (if _all then none else some 0)).run (false, 0)
+        if !found then return ← runTac code info st (ans (mkCon 0 []))
+        let newT := abstr.instantiateAt 0 repl
+        -- a rule that rewrites a term to itself is not a step: report no match, so a set
+        -- with a degenerate rule (a left side convertible with its right side) terminates
+        if newT == goalT then return ← runTac code info st (ans (mkCon 0 []))
+        -- for `← h` the abstraction puts back the *replacement*, as `rewrite` does
+        let Ga := abstr.instantiateAt 0 (if rtl then repl else cand)
+        -- `P x := G[x] = G[a]` (or `G[a] = G[x]`, right to left), as `rewrite`
+        let P : Term R := .lam "x" (.lam "_"
+          (if rtl then .eqTy (Ga.lift 2) (abstr.lift 1) else .eqTy (abstr.lift 1) (Ga.lift 2)))
+        let pf : Term R := .transp A' a' P (.reflTy Ga) b' app
+        let newTy ← evalIn gl.ctx newT
+        let m ← freshMeta gl.ctx "goal" newTy
+        unifyGoal gl (.cast newT goalT pf m)
+        let (st, id) := addGoal st { ctx := gl.ctx, ty := newTy, tm := m }
+        let (r, st) ← refl st gl newT
+        return ← runTac code info st (ans (mkCon 1 [.nat id, r]))
   if tag == TacTag.getSimpLemmas then
     -- (6h S2) the default set, in the order the Wiz driver tries it: priority (higher
     -- first), then registration order (oldest first). Each lemma is the reflected
@@ -4426,10 +4489,63 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let mut st := st
     let mut ls : Array RVal := #[]
     for e in entries do
-      let (r, st') ← refl st gl (.const e.name [])
-      st := st'
-      ls := ls.push (encodePair (encodeString e.name) r)
+      if !e.hint then
+        let (r, st') ← refl st gl (.const e.name [])
+        st := st'
+        ls := ls.push (encodePair (encodeString e.name) r)
     return ← runTac code info st (apply code (fld 1) (encodeList ls.toList))
+  if tag == TacTag.getHints then
+    -- (P0) the `[hint]` database, in the order `auto` tries it: priority (higher first),
+    -- then registration order (oldest first). The Wiz side owns kind policy and search.
+    let entries := (← get).simpLemmas.reverse.mergeSort
+      (fun a b => decide (a.priority ≥ b.priority))
+    let mut st := st
+    let mut ls : Array RVal := #[]
+    for e in entries do
+      if e.hint then
+        let (r, st') ← refl st gl (.const e.name [])
+        st := st'
+        ls := ls.push (encodePair (encodeString e.name)
+          (encodePair (encodeString e.kind) r))
+    return ← runTac code info st (apply code (fld 1) (encodeList ls.toList))
+  if tag == TacTag.byCases then
+    -- (6j) `fun _ => G` at `Bool.casesOn`, with a branch hypothesis `e = false`/`e = true`
+    let eT ← zonk lvl (← reify st.handles (fld 1) lvl)
+    let tyT ← zonk lvl (← reify st.handles (fld 2) lvl)
+    let hint ← str (fld 3)
+    let boolT : Term R := .const "Bool" []
+    let w : Term R := .qlit QuantitySyntax.explicitDefault
+    let goalT ← zonk lvl (quote g lvl gl.ty)
+    let isBool ← try
+      unify lvl (← evalIn gl.ctx tyT) (← evalIn gl.ctx boolT)
+      pure true
+    catch _ => pure false
+    unless isBool do
+      throwAt info "by_cases: expected a Bool expression" ErrorCode.tacticFailed
+    let hf := introName gl.ctx.names hint "h" true false
+    let ht := introName gl.ctx.names hint "h" true false
+    let tyF ← evalIn gl.ctx (.eq boolT eT (.const "Bool.false" []))
+    let ctxF := gl.ctx.bind hf tyF
+    let mF ← freshMeta ctxF "by_cases" (← evalIn ctxF (goalT.lift 1))
+    let tyT ← evalIn gl.ctx (.eq boolT eT (.const "Bool.true" []))
+    let ctxT := gl.ctx.bind ht tyT
+    let mT ← freshMeta ctxT "by_cases" (← evalIn ctxT (goalT.lift 1))
+    -- `fun (b : Bool) => (e = b) → G`
+    let motive : Term R := .lam "b" (.pi "h" .default w
+      (.eq boolT (eT.lift 1) (.var 0)) (goalT.lift 2) .hole)
+    let some d := g.find? "Bool.casesOn"
+      | throwAt info "by_cases: Bool.casesOn is not in scope" ErrorCode.tacticFailed
+    let us ← d.levelParams.mapM fun _ => pure Level.zero
+    -- `Bool.casesOn motive (fun h => mF) (fun h => mT) e (refl e) : G`
+    let proof : Term R :=
+      .app (.app (.app (.app (.app (.const "Bool.casesOn" us) motive) (.lam hf mF))
+        (.lam ht mT)) eT) (.refl boolT eT)
+    let tyT' ← evalIn ctxT (goalT.lift 1)
+    let tyF' ← evalIn ctxF (goalT.lift 1)
+    unifyGoal gl proof
+    let (st, idT) := addGoal st { ctx := ctxT, ty := tyT', tm := mT }
+    let (st, idF) := addGoal st { ctx := ctxF, ty := tyF', tm := mF }
+    return ← runTac code info st (apply code (fld 4) (encodeList [.nat idT, .nat idF]))
   if tag == TacTag.exact then
     let stx ← stxOf (fld 1)
     let t ← check (gl.ctx.withInfo stx) stx gl.ty
@@ -4524,7 +4640,7 @@ partial def elabBy (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM 
     unless t.mvars.isEmpty do throwAt ctx.info "assign: the assigned term still has holes at the end of the tactic block" ErrorCode.tacticFailed
     -- (the context's types with their holes solved: they may have been holes when the
     -- goal was made, and the kernel takes a hole as rigid)
-    let kctx := { gl.kernelCtx (← getGlobals) with types := (← zonkedTypes gl.ctx).toList.reverse }
+    let kctx := { gl.kernelCtx (← getGlobals) with types := (← zonkedTypes gl.ctx) }
     match (← get).kernelInfer kctx t with
     | .ok ty => unifyAt gl.ctx stx gl.ty ty
     | .error e => throwAt ctx.info s!"assign: {e}" ErrorCode.tacticFailed

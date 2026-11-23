@@ -11,10 +11,24 @@ binder lifting. What has to be checked is (a) every level side condition survive
 (`Lvl.inst_equiv`, `inst_neverZero`, `inst_isZero`, and closed levels' `toNat?`), and (b)
 the formers commute, which `DescCommute.lean` and the first block below provide.
 
+**Caveat (landing review, 2026-11-20).** The hypothesis `Lvl.Good us` is unsatisfiable for
+every finite `us`: past the end of the list `us.getD i zero` is `zero`, and
+`Lvl.not_good` proves `¬ Good us`. So the three theorems that take it — `Tprog_instL`,
+`TprogUniform_instL` and `DescEq_instL` — are **vacuously true** as stated: they say
+nothing about an instantiation a caller can write (`[]`, `[1]`, …). What is proved here is
+the induction *schema* (`Tprog_instLClosed`, `*_instLClosed`): every rule is closed under
+`Jdg.instL` for a hypothesis that is currently stronger than necessary. To get a usable
+O6, `InstLs` has to carry a bound on the levels occurring in the judgment (only the
+parameters a term actually mentions need a never-zero image), not `∀ i` over the whole
+list; that is a change to the statement and to every `fromIHi` use below, not a gap in
+the case analysis. Until then O6 is **open**; only the substitution lemmas
+(`Tprog_subst`, `DescEq_subst`) are non-vacuous.
+
 The last section is the recommended first lemma, `DescEq_subst`: description equality is
-stable under term substitution *and* level instantiation, including the `arg` cast case and
-the `q ≡ q'` / `l ≡ l'` / `k ≡ l+1` side conditions. It is a corollary of `Tprog_subst`
-and `Tprog_instL`, applied to the judgment `Γ ⊢ D ≡ D' ∶ Desc_l I`.
+stable under term substitution, including the `arg` cast case and the `q ≡ q'` side
+condition. It is a corollary of `Tprog_subst`, applied to the judgment
+`Γ ⊢ D ≡ D' ∶ Desc_l I`, and is non-vacuous. `DescEq_instL` (the level form) inherits the
+`Good` caveat above and proves nothing about a concrete instantiation.
 -/
 
 namespace WizMeta

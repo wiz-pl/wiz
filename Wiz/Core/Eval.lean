@@ -1,5 +1,6 @@
 import Wiz.Core.Value
 import Wiz.Core.Templates
+import Wiz.Core.Stats
 
 /-!
 # Evaluation, quotation, normalisation
@@ -48,7 +49,8 @@ def qtyApart (a b : Val R) : Bool :=
 
 /-- Unfold glued values (`Val.unfold`) until the head is not a definition: do this before
 matching on a value's shape. -/
-partial def whnf : Val R → Val R
+partial def whnf (v : Val R) : Val R :=
+  Stats.countedVal Stats.cells.whnf <| match v with
   | .unfold _ _ _ v => whnf v.get
   | .lazyInd _ _ _ _ _ _ _ _ _ _ v => whnf v.get
   | v => v
@@ -139,7 +141,9 @@ def natNative? : Name → Array Nat → Option Nat
 `Term.natOp` on its arguments, so it computes natively when they are literals. -/
 def vBuiltin? (g : Globals R) (n : Name) : Option (Val R) := do
   -- (its `nat.` key: other registrations on `n`, such as `inline`, don't hide it)
-  let (k, _) ← g.builtins.find? fun (k, m) => m == n && k.startsWith "nat."
+  let k ← match g.natBuiltinByName[n]? with
+    | some k => some k
+    | none => (g.builtins.find? fun (k, m) => m == n && k.startsWith "nat.").map (·.1)
   if k == "nat.zero" then some (.natLit 0)
   else if natOpArity k == 1 then some (.lam "a" (.mk [] (.natOp k #[.var 0])))
   else some (.lam "a" (.mk [] (.lam "b" (.natOp k #[.var 1, .var 0]))))
@@ -334,10 +338,10 @@ partial def eval (g : Globals R) (env : Env R) : Term R → Val R
   -- (the checker rejects a variable out of scope before anything evaluates it; if one
   -- gets here it is a stuck unknown, not a panic's default value, `Sort 0`)
   | .var ix => env[ix]?.getD (.neutral (.global "out of scope✝" []) #[])
-  | .const n us => if let some v := vBuiltin? g n then v else match g.find? n with
+  | .const n us => Stats.countedVal Stats.cells.evalConst <| if let some v := vBuiltin? g n then v else match g.find? n with
     | some { value := some v, levelParams, inline, .. } =>
       if inline || g.eager then eval g [] (g.instValue n v levelParams us)
-      else .unfold n us #[] (memoThunk fun _ => eval g [] (g.instValue n v levelParams us))
+      else .unfold n us #[] (memoThunk fun _ => Stats.closedEval Stats.cells.closedEval Stats.cells.closedMiss n us (eval g [] (g.instValue n v levelParams us)))
     | _ => .neutral (.global n us) #[]
   | .natLit n => .natLit n
   | .natOp op args => vNatOp g op (args.map (eval g env))
@@ -505,7 +509,7 @@ partial def vApp (g : Globals R) : Val R → Val R → Val R
 /-- **Exercise 1.2b.** Instantiate a closure with a value for its bound variable. -/
 partial def Closure.inst (g : Globals R) : Closure R → Val R → Val R
   --<sol
-  | .mk env body, a => match g.budget with
+  | .mk env body, a => Stats.countedVal Stats.cells.inst <| match g.budget with
     | none => eval g (a :: env) body
     -- (P2, outside the kernel) reading a proof back, within its step budget
     | some b => if b.tick then eval g (a :: env) body else outOfSteps
@@ -515,7 +519,7 @@ partial def Closure.inst (g : Globals R) : Closure R → Val R → Val R
 
 /-- Instantiate a closure over two binders (`a` first, then `b`). -/
 partial def Closure.inst2 (g : Globals R) : Closure R → Val R → Val R → Val R
-  | .mk env body, a, b => match g.budget with
+  | .mk env body, a, b => Stats.countedVal Stats.cells.inst <| match g.budget with
     | none => eval g (b :: a :: env) body
     | some bud => if bud.tick then eval g (b :: a :: env) body else outOfSteps
 
@@ -611,7 +615,7 @@ the constructors' definitions (not their `vBuiltin?` values). Other values are
 unchanged. -/
 partial def vNatView (g : Globals R) : Val R → Val R
   | .natLit n =>
-    let ctor (k : Name) : Val R := match (g.builtins.lookup k).bind g.find? with
+    let ctor (k : Name) : Val R := match (g.builtinOf? k).bind g.find? with
       | some { value := some v, .. } => eval g [] v
       | _ => panic! s!"numerals need `builtin {k}`"
     if n == 0 then ctor "nat.zero" else vApp g (ctor "nat.succ") (.natLit (n - 1))
@@ -669,7 +673,7 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
   let lits : Option (Array Nat) := args.foldlM (init := #[]) fun acc a => match whnf a with
     | .natLit n => some (acc.push n)
     | _ => none
-  let d : Val R := match (g.builtins.lookup op).bind g.find? with
+  let d : Val R := match (g.builtinOf? op).bind g.find? with
     | some { value := some v, .. } => eval g [] v
     | _ => panic! s!"no definition for builtin {op}"
   -- not computed natively: the definition, kept glued under its name (`Nat.pred n`, not
@@ -691,7 +695,7 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
           | _ => false
         firstStuck && (match whnfNumeral g y with | .natLit (_ + 1) => true | _ => false)
       | _ => false
-    match g.builtins.lookup op with
+    match g.builtinOf? op with
     | some n =>
       if stuckSub then .neutral (.global n []) (args.map .app)
       else if op == "nat.succ" then args.foldl (vApp g) d
@@ -705,7 +709,7 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
       -- applications compares their arguments (`convGlued`) and never asks; `Nat.mul 0 _`
       -- or `Nat.add 0 _` short-circuit before it (`natFast?`). Before this, evaluating the
       -- argument at all was a process abort, needed or not.
-      match g.builtins.lookup op with
+      match g.builtinOf? op with
       | some n => .unfold n [] (args.map .app) (memoThunk fun _ =>
           match natNative? op ns with
           | some r => .natLit r

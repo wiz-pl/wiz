@@ -3,7 +3,9 @@ import Wiz.Compiler.C
 import Wiz.Compiler.LLVM
 import Wiz.Compiler.Wasm
 import Wiz.Compiler.WasmValidate
+import Wiz.Compiler.Js
 import Wiz.Compiler.Lower
+import Wiz.Module
 import Wiz.Toolchain
 
 /-!
@@ -25,6 +27,68 @@ variable {R : Type} [QRig R] [DecidableEq R] [ToString R] [QuantitySyntax R]
 definitions. -/
 def exports (s : CommandState R) : List (RVal.ExternSig × Name) :=
   s.builtins.reverse.filterMap fun (k, f) => (RVal.ExternSig.ofExportKey? k).map (·, f)
+
+/-- The foreign-function keys a program's IR calls, in first-use order. The keys are the
+same `extern:` keys the C and LLVM backends see (erasure left one `prim` per call). -/
+partial def externKeysOf (decls : Array IR.Decl) : Array Name :=
+  let rec body : IR.Body → Array Name → Array Name
+    | .vdecl _ (.prim (.extern key) _) b, acc =>
+      body b (if acc.contains key then acc else acc.push key)
+    | .vdecl _ _ b, acc | .dup _ b, acc | .drop _ b, acc => body b acc
+    | .case _ alts, acc => alts.foldl (fun acc a => body a acc) acc
+    | .jdecl _ _ jb k, acc => body k (body jb acc)
+    | _, acc => acc
+  decls.foldl (fun acc d => body d.body acc) #[]
+
+/-- Where a declaration is, for a build-time error: `lib/M.wiz:line:col` for a toolchain
+library module (the caller's `trustedModule` is the library), `M` otherwise, and the byte
+offset when `Build` has no text for the module (the main file: its text is the caller's).
+`SourceInfo.start` is the command's first character, so an extern's position is its
+`extern` keyword. -/
+def declPosition (s : CommandState R) (n : Name) : String :=
+  match s.declSites.get? n with
+  | none => toString n
+  | some (info, mod) =>
+    let path := if mod.isEmpty then "this file"
+      else if s.trustedModule mod then "lib/" ++ ".".intercalate (mod.splitOn ".") ++ ".wiz"
+      else mod
+    match (if mod.isEmpty then none else s.loader mod) with
+    | some src =>
+      let (l, c) := lineCol src info.start
+      s!"{path}:{l + 1}:{c + 1}"
+    | none => s!"{path} (byte {info.start})"
+
+/-- The Wasm implementations of a program's reachable externs: `extern:` key → the
+in-module runtime function, selected from the shared registry `impls` (default
+`IR.externImpls`) by the **declaration's Wiz name** and the `wasm` target. The key is the
+same one the C and LLVM backends use; the row is the target's implementation.
+
+A reachable extern with no `wasm` row is a positioned `no-target-implementation` error
+before any code is generated, naming the declaration and the targets that do implement it
+(`c` is implicit in `extern`). This is a property of the program (what it reaches), not of
+`Wasm.program`, so an unused extern is never an error. -/
+def selectWasmExterns (s : CommandState R) (decls : Array IR.Decl)
+    (impls : List IR.ExternImpl := IR.externImpls) : Except String (Std.HashMap Name String) := do
+  let mut out : Std.HashMap Name String := {}
+  for key in externKeysOf decls do
+    match RVal.ExternSig.ofKey? key with
+    | none => throw s!"the program calls `{key}`, a primitive key that is not a foreign function"
+    | some sig =>
+      let names := s.builtins.filter fun (k, _) => k == key
+      let hit := names.findSome? fun (_, n) => (IR.externImplIn impls .wasm n).map fun row => (n, row)
+      match hit with
+      | some (_, row) => out := out.insert key row.symbol
+      | none =>
+        let decl := match names with
+          | (_, n) :: _ => n
+          | [] => sig.cname
+        -- order-preserving dedupe (the list is tiny, but `eraseDups` is O(n²) and an
+        -- append-in-loop is rejected by the complexity rule; `Array.push` is not)
+        let all := ["c"] ++ (impls.filter (·.decl == decl)).map (·.backend.name)
+        let others := (all.foldl (fun (acc : Std.HashSet String × Array String) b =>
+          if acc.1.contains b then acc else (acc.1.insert b, acc.2.push b)) ({}, #[])).2.toList
+        throw s!"{declPosition s decl}: error: no-target-implementation: `{decl}` has no `wasm` implementation (implemented by: {", ".intercalate others})"
+  pure out
 
 /-- The optimised IR of a program computing the global `n`, and `n`'s type, with the
 exported functions. A library (`lib`) has only the exports. -/
@@ -97,8 +161,8 @@ def compileC (tc : Toolchain) (src : String) (exe : System.FilePath) (link : Lin
   -- (9f) the `link_c` files are compiled with the program, with the same flags
   -- (9g: a library is an object file, linked by the C program that uses it, which
   -- also brings the `link_c` files and libraries)
-  let args := if lib then #["-O2", "-w", "-c", "-o", exe.toString, cFile.toString] ++ tc.cflags.toArray ++ map else
-    #["-O2", "-w", "-o", exe.toString, cFile.toString] ++ link.sources ++ tc.cflags.toArray ++ map ++
+  let args := if lib then #["-O2", "-w", "-ffp-contract=off", "-c", "-o", exe.toString, cFile.toString] ++ tc.cflags.toArray ++ map else
+    #["-O2", "-w", "-ffp-contract=off", "-o", exe.toString, cFile.toString] ++ link.sources ++ tc.cflags.toArray ++ map ++
     tc.gmp.toArray ++ tc.ldflags.toArray ++ tc.libs.toArray ++ link.libFlags
   try
     let out ← IO.Process.output { cmd := cc, args }
@@ -111,6 +175,44 @@ def runCC (cmd : String) (args : Array String) : IO (Except String Unit) := do
     let out ← IO.Process.output { cmd, args }
     pure (if out.exitCode == 0 then .ok () else .error s!"{cmd} failed:\n{out.stderr}")
   catch e => pure (.error s!"{cmd}: {e}")
+
+/-- (F36) The inputs of one split unit's object file (`splitObjectKey` hashes them all). -/
+structure SplitObject where
+  /-- the C compiler -/
+  cc : String
+  /-- every flag `cc` gets for this unit: `-O2 -w -ffp-contract=off -c`, `-DWIZ_API=` for the support unit,
+  `--cflags`, and the `-ffile-prefix-map`s that name the build directory (which `-g`
+  records in the object) -/
+  flags : Array String
+  /-- the include-path variables `cc` reads (`CPATH`, `C_INCLUDE_PATH`, …): they change
+  what an `#include` finds, so they change the object -/
+  env : Array (String × Option String) := #[]
+  /-- the unit's own C text -/
+  text : String
+  /-- the generated header (`wiz_split.h`); a part's text only includes it, so the
+  declarations it compiles against are an input of the part's object, not of its text -/
+  header : String
+  deriving Repr, Inhabited
+
+/-- (F36) The environment variables a C compiler takes include paths from. They are not
+read through a flag, and they change what `#include` finds, so the split object key names
+them too. -/
+def includeEnv : IO (Array (String × Option String)) := do
+  let cpath ← IO.getEnv "CPATH"
+  let cinclude ← IO.getEnv "C_INCLUDE_PATH"
+  let cplus ← IO.getEnv "CPLUS_INCLUDE_PATH"
+  let objc ← IO.getEnv "OBJC_INCLUDE_PATH"
+  pure #[("CPATH", cpath), ("C_INCLUDE_PATH", cinclude), ("CPLUS_INCLUDE_PATH", cplus),
+    ("OBJC_INCLUDE_PATH", objc)]
+
+/-- (F36) The key of one split unit's object: a SHA-256 of every input, so a collision
+cannot reuse an unrelated object (the old key was a 64-bit `mixHash` of the text and a
+re-spelling of the flags, which left the header, the `-ffile-prefix-map`s and the
+compiler's include environment out). -/
+def splitObjectKey (i : SplitObject) : String :=
+  Smt.Sha256.hexFramed "wiz-build/split-object-v2"
+    ([i.cc, "\n".intercalate i.flags.toList, i.text, i.header] ++
+      i.env.toList.map fun (k, v) => k ++ "=" ++ v.getD "")
 
 /-- Compile the C of a program. One translation unit by default; with `--split N` a
 support unit (`-DWIZ_API=`: the runtime and glue are exported) and `N` units of generated
@@ -130,22 +232,29 @@ def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : S
   let headerText := C.splitHeader decls exports
   IO.FS.writeFile (dir / header) headerText
   let parts := C.splitParts decls n
-  -- (deterministic inputs; a part whose text and flags are unchanged reuses its object)
+  -- (deterministic inputs; a part whose inputs are unchanged reuses its object)
   let inputs : Array (String × String × Bool) :=
     #[("support", C.splitSupport decls io extra unbox exports noMain, true)] ++
     parts.zipIdx.map fun (p : String × Nat) => (s!"part{p.2}", C.splitPartText header p.1, false)
   let cc := tc.cc
   let cflags := tc.cflags.toArray
   let map ← pathMapFlags tc.cflags dir
-  let keyOf (text : String) (api : Bool) : String :=
-    toString (mixHash (hash text) (hash s!"{cc} {" ".intercalate tc.cflags} -O2 -w {api}"))
+  let env ← includeEnv
+  -- (F36) the key names the *actual* flags `cc -c` is given for the unit (plus its
+  -- include environment), not a re-spelling of some of them
+  let flagsOf (api : Bool) : Array String :=
+    #["-O2", "-w", "-ffp-contract=off", "-c"] ++ (if api then #["-DWIZ_API="] else #[]) ++ cflags ++ map
+  let keyOf (text header : String) (api : Bool) : String :=
+    splitObjectKey { cc, flags := flagsOf api, env, text, header }
   let ccOne (file obj : String) (api : Bool) : IO (Except String Unit) :=
-    runCC cc (#["-O2", "-w", "-c", "-o", (dir / obj).toString, (dir / file).toString] ++
+    runCC cc (#["-O2", "-w", "-ffp-contract=off", "-c", "-o", (dir / obj).toString, (dir / file).toString] ++
       (if api then #["-DWIZ_API="] else #[]) ++ cflags ++ map)
   let err ← IO.mkRef (none : Option String)
   let mut todo : Array (String × Bool × String) := #[]
   for (name, text, api) in inputs do
-    let stamp := keyOf text api
+    -- (F36) the support unit does not include `wiz_split.h`; a part's object is compiled
+    -- against it, so the header is part of a part's key
+    let stamp := keyOf text (if api then "" else headerText) api
     let hit ← if (← (dir / (name ++ ".stamp")).pathExists) && (← (dir / (name ++ ".o")).pathExists) then
         pure ((← IO.FS.readFile (dir / (name ++ ".stamp"))).trimAscii.toString == stamp)
       else pure false
@@ -165,7 +274,7 @@ def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : S
   for t in tasks do collect t
   if let some e ← err.get then return .error e
   let objs := inputs.map fun (name, _, _) => (dir / (name ++ ".o")).toString
-  let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w"] ++ link.sources ++ cflags
+  let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w", "-ffp-contract=off"] ++ link.sources ++ cflags
   runCC cc (#["-o", out.toString] ++ objs ++ srcArgs ++ tc.gmp.toArray ++ tc.ldflags.toArray ++
     tc.libs.toArray ++ link.libFlags)
 
@@ -187,14 +296,14 @@ def compileLLVM (tc : Toolchain) (ll : String) (exe : System.FilePath) (glue : S
     catch e => pure (.error s!"{cmd}: {e}")
   let rtObj := exe.withFileName "wiz_runtime.o"
   let mainObj := if lib then exe.withFileName ((exe.fileStem.getD "wiz") ++ "_module.o") else exe.withExtension "o"
-  if let .error e ← step cc (#["-O2", "-w", "-c", "-DWIZ_API=", "-o", rtObj.toString, rtFile.toString] ++ cflags ++ map) then
+  if let .error e ← step cc (#["-O2", "-w", "-ffp-contract=off", "-c", "-DWIZ_API=", "-o", rtObj.toString, rtFile.toString] ++ cflags ++ map) then
     return .error e
   if let .error e ← step llc #["-O2", "-filetype=obj", "-relocation-model=pic", "-o", mainObj.toString, llFile.toString] then
     return .error e
   -- (9g: a library is the two objects as one, `-r`)
   if lib then return ← step cc #["-r", "-o", exe.toString, mainObj.toString, rtObj.toString]
   -- (9f) the `link_c` files are compiled by the linking step, with the C flags
-  let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w"] ++ link.sources ++ cflags
+  let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w", "-ffp-contract=off"] ++ link.sources ++ cflags
   step cc (#["-o", exe.toString, mainObj.toString, rtObj.toString] ++ srcArgs ++ tc.gmp.toArray ++
     tc.ldflags.toArray ++ tc.libs.toArray ++ link.libFlags)
 
@@ -203,8 +312,9 @@ def compileLLVM (tc : Toolchain) (ll : String) (exe : System.FilePath) (glue : S
 and type-checked by `WasmValidate.validate` before they are written, so an encoder bug
 (or an instruction outside the supported subset) is a compile error, not a module that
 an engine rejects later. -/
-def compileWasm (decls : Array IR.Decl) (io : Bool) (out : System.FilePath) : IO (Except String Unit) := do
-  match Wasm.program decls io with
+def compileWasm (decls : Array IR.Decl) (io : Bool) (out : System.FilePath)
+    (externs : Std.HashMap Name String := {}) : IO (Except String Unit) := do
+  match Wasm.program decls io externs with
   | .error e => pure (.error e)
   | .ok bytes =>
     match WasmValidate.validate bytes with
@@ -233,7 +343,10 @@ def build (tc : Toolchain) (s : CommandState R) (n : Name) (out : System.FilePat
     let ex := (exports s).map (·.1)
     let unbox := s.globals.unboxStructs
     if lib then IO.FS.writeFile (out.withExtension "h") (C.exportHeader ex)
-    let r ← if wasm then compileWasm decls io out
+    let r ← if wasm then
+        match selectWasmExterns s decls with
+        | .error e => pure (.error e)
+        | .ok externs => compileWasm decls io out externs
       else if llvm then
         compileLLVM tc (LLVM.program decls io bare) out
           (extraC s ++ "\n" ++ C.glue (C.externs decls) (extraC s) unbox ++ "\n" ++ C.exportWrappers ex true) (linkOf s) lib
@@ -249,7 +362,9 @@ where
   ws (cs : List Char) : List Char := cs.dropWhile (·.isWhitespace)
   num (cs : List Char) : Option (Nat × List Char) :=
     let ds := cs.takeWhile Char.isDigit
-    if ds.isEmpty then none else some (String.mk ds |>.toNat!, cs.drop ds.length)
+    match ds with
+    | [] => none
+    | _ => (String.ofList ds).toNat?.map fun n => (n, cs.drop ds.length)
   go (cs : List Char) : Option (RVal × List Char) := do
     match ws cs with
     | '(' :: rest =>
@@ -303,16 +418,19 @@ end RunError
 
 /-- Is this build failure a missing C toolchain? The message names the compiler (or `llc`)
 as a program that could not be started ("could not execute external process 'cc'", or
-`cc: no such file…`), or the compiler cannot find `gmp.h`. A compiler that ran and
-rejected the program does not count — and neither does a message that merely mentions a
-missing file (such as a `link_c` source in the test): that is a failing build, not a
-missing toolchain. -/
+`cc: no such file…`), the compiler cannot find `gmp.h`, or the linker cannot find the
+toolchain's `-lgmp`/`-lgc` library. A compiler that ran and rejected the program does
+not count — and neither does a message that merely mentions a missing file (such as a
+`link_c` source in the test): that is a failing build, not a missing toolchain. -/
 def missingToolchain (tc : Toolchain) (msg : String) : Bool :=
   let lower := msg.toLower
   let names (p : String) : Bool :=
     p != "" && ((msg.splitOn s!"could not execute external process '{p}'").length > 1 ||
       (msg.startsWith (p ++ ":") && (lower.splitOn "no such file").length > 1))
-  (msg.splitOn "gmp.h").length > 1 || [tc.cc, tc.llc].any names
+  (msg.splitOn "gmp.h").length > 1 ||
+  (lower.splitOn "cannot find -lgmp").length > 1 ||
+  (lower.splitOn "cannot find -lgc").length > 1 ||
+  [tc.cc, tc.llc].any names
 
 /-- Build and run the global `n` (through C, or LLVM); returns its result, read back
 with its type. With `timeout`, the program is stopped after that many seconds (by
@@ -338,6 +456,64 @@ def runGlobal (tc : Toolchain) (s : CommandState R) (n : Name) (dir : System.Fil
       | none => pure (.error (.readback s!"could not read the result: {out.stdout}"))
       | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
 
+/-- (8f, F12) The JS host of a Wasm module: beside the toolchain's library, so
+`share/wiz/web` in a Nix package or release tarball and `web` in a checkout (as `webDir`
+does for the infoview), else `./web/wasm-host.mjs` for a checkout run from its root. -/
+def wasmHostPath : IO System.FilePath := do
+  let base := (← Module.toolchainLib).parent.getD "."
+  let installed := base / "web" / "wasm-host.mjs"
+  if ← installed.pathExists then return installed
+  pure ("web" / "wasm-host.mjs")
+
+/-- The JavaScript runtime the `--target js` modules paste in (`web/wiz-js-runtime.mjs`):
+beside the toolchain's library in an installation, `web/` in a checkout. -/
+def jsRuntimePath : IO System.FilePath := do
+  let base := (← Module.toolchainLib).parent.getD "."
+  let installed := base / "web" / "wiz-js-runtime.mjs"
+  if ← installed.pathExists then return installed
+  pure ("web" / "wiz-js-runtime.mjs")
+
+/-- Build `main` as a self-contained ES module. `OUT` ends in `.mjs` or `.js`, or the
+extension is chosen (`.mjs`). The IR is the C/LLVM/Wasm IR; the representation and the
+supported subset are in `Wiz/Compiler/Js.lean` and `wiz-notes/js-target.md`. -/
+def buildJs (s : CommandState R) (n : Name) (out : System.FilePath) : IO (Except String (Term R)) := do
+  match irProgram s n with
+  | .error e => pure (.error e)
+  | .ok (decls, ty) =>
+    let runtimePath ← jsRuntimePath
+    unless ← runtimePath.pathExists do
+      return .error s!"the JS runtime is missing: no {runtimePath} (a toolchain ships it in share/wiz/web; a checkout has web/wiz-js-runtime.mjs)"
+    let runtime ← IO.FS.readFile runtimePath
+    match Js.program runtime decls (isIO ty) with
+    | .error e => pure (.error e)
+    | .ok text =>
+      let outPath : System.FilePath :=
+        if out.toString.endsWith ".mjs" || out.toString.endsWith ".js" then out
+        else out.withExtension "mjs"
+      IO.FS.writeFile outPath text
+      pure (.ok ty)
+
+/-- Build `main` with the JS backend and run it under Node, reading the printed result
+back with `main`'s type (as `runGlobal` does for C); an `IO` program's standard output is
+the result, since it prints for itself. -/
+def runJsGlobal (s : CommandState R) (n : Name) (dir : System.FilePath) :
+    IO (Except String String) := do
+  let file := dir / "wiz_main.mjs"
+  match ← buildJs s n file with
+  | .error e => pure (.error e)
+  | .ok ty =>
+    let out ← try
+      -- (under `lake env`, Lean's LD_LIBRARY_PATH breaks Node's own library lookup)
+      IO.Process.output
+        { cmd := "node", args := #[file.toString], env := #[("LD_LIBRARY_PATH", none)] }
+    catch e => return .error s!"node: {e}"
+    if out.exitCode != 0 then
+      return .error s!"the JS program failed ({out.exitCode}): {out.stderr.take 1500}"
+    if isIO ty then return .ok out.stdout
+    match parseValue out.stdout with
+    | none => pure (.error s!"could not read the result: {out.stdout}")
+    | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
+
 /-- (8f) Build `main` as a WebAssembly module and run it under Node with the JS host
 (`web/wasm-host.mjs`), reading the printed result back with `main`'s type. -/
 def runWasmGlobal (s : CommandState R) (n : Name) (dir : System.FilePath) : IO (Except String String) := do
@@ -345,34 +521,72 @@ def runWasmGlobal (s : CommandState R) (n : Name) (dir : System.FilePath) : IO (
   | .error e => pure (.error e)
   | .ok (decls, ty) =>
     let wasmFile := dir / "wiz_main.wasm"
-    match ← compileWasm decls (isIO ty) wasmFile with
+    match selectWasmExterns s decls with
     | .error e => pure (.error e)
-    | .ok () =>
-      let host : System.FilePath := "web" / "wasm-host.mjs"
-      unless ← host.pathExists do
-        return .error "web/wasm-host.mjs is missing (run from the Wiz checkout)"
-      let out ← try
-        -- (under `lake env`, Lean's LD_LIBRARY_PATH breaks Node's own library lookup)
-        IO.Process.output
-          { cmd := "node", args := #[host.toString, wasmFile.toString], env := #[("LD_LIBRARY_PATH", none)] }
-      catch e => return .error s!"node: {e}"
-      if out.exitCode != 0 then
-        return .error s!"the Wasm program failed ({out.exitCode}): {out.stderr.take 1000}"
-      match parseValue out.stdout with
-      | none => pure (.error s!"could not read the result: {out.stdout}")
-      | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
+    | .ok externs =>
+      match ← compileWasm decls (isIO ty) wasmFile externs with
+      | .error e => pure (.error e)
+      | .ok () =>
+        let host ← wasmHostPath
+        unless ← host.pathExists do
+          return .error s!"the Wasm host is missing: no {host} (a toolchain ships it in share/wiz/web; a checkout has web/wasm-host.mjs)"
+        let out ← try
+          -- (under `lake env`, Lean's LD_LIBRARY_PATH breaks Node's own library lookup)
+          IO.Process.output
+            { cmd := "node", args := #[host.toString, wasmFile.toString], env := #[("LD_LIBRARY_PATH", none)] }
+        catch e => return .error s!"node: {e}"
+        if out.exitCode != 0 then
+          return .error s!"the Wasm program failed ({out.exitCode}): {out.stderr.take 1000}"
+        match parseValue out.stdout with
+        | none => pure (.error s!"could not read the result: {out.stdout}")
+        | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
+
+/-- (F09) A header name that may be written into `#include <…>`. A name with `"`, `<`,
+`>`, a backslash, whitespace or a newline would leave the directive (a newline starts
+another one) or close the bracket, so a string in the source could inject preprocessor
+directives — and their output is the C text spliced into the program. Paths (`stdio.h`,
+`sys/types.h`, `/tmp/x.h`) are names; only the characters are checked. -/
+def validHeaderName (h : String) : Bool :=
+  !h.isEmpty && h.toList.all fun c =>
+    c.isAlphanum || c == '_' || c == '.' || c == '/' || c == '-' || c == '+'
+
+/-- (F09) The error for a header name that is not a header name. The offending text is
+not quoted back: it may hold a newline and a preprocessor directive, which would then be
+a directive in a log as well. -/
+def badHeaderName : String :=
+  "import_c: not a valid C header name (letters, digits and `_ . / + -` only; a newline, " ++
+  "quote, angle bracket or backslash would inject a preprocessor directive)"
+
+/-- (F09) The error for a header the C compiler could not preprocess. -/
+def preprocessFailed (cc h : String) (exitCode : UInt32) (stderr : String) : String :=
+  s!"import_c {h}: {cc} -E failed ({exitCode}): {stderr.trimAscii}"
 
 /-- Preprocess the headers a file imports (`import_c "h"`), since the frontend is pure. -/
 def preprocessHeaders (tc : Toolchain) (input : String) : IO (Std.HashMap String String) := do
   let mut m : Std.HashMap String String := {}
-  for part in (input.splitOn "import_c \"").drop 1 do
-    let h := (part.splitOn "\"").headD ""
+  -- `Module.headersOf` is the one scan: it skips `--` comment lines. A second copy here
+  -- re-introduced the bug F09 fixed -- a comment that documents `import_c "..."` was read
+  -- as a directive, and its ellipsis rejected as a header name. That is what failed the
+  -- playground build: the engine concatenates `selfhost/Frontend.wiz`, whose comment
+  -- names the syntax.
+  for h in Module.headersOf input do
     if h.isEmpty || m.contains h then continue
+    -- (F09) only a plausible header name reaches `cc`: a newline or `>` in it would
+    -- splice another preprocessor directive into the generated `#include`
+    unless validHeaderName h do throw (IO.userError badHeaderName)
     let cc := tc.cc
     let dir ← IO.FS.createTempDir
-    IO.FS.writeFile (dir / "h.c") s!"#include <{h}>\n"
-    let out ← IO.Process.output { cmd := cc, args := #["-E", "-P", (dir / "h.c").toString] ++ tc.cflags.toArray }
-    if out.exitCode == 0 then m := m.insert h out.stdout
+    -- (F11) one scratch directory per header, removed whatever `cc` does
+    try
+      IO.FS.writeFile (dir / "h.c") s!"#include <{h}>\n"
+      let out ← IO.Process.output { cmd := cc, args := #["-E", "-P", (dir / "h.c").toString] ++ tc.cflags.toArray }
+      -- (F09) a header that cannot be preprocessed is an error: skipping it would let a
+      -- check pass with types that nothing read (and hide a broken `--cflags`)
+      if out.exitCode != 0 then
+        throw (IO.userError (preprocessFailed cc h out.exitCode out.stderr))
+      m := m.insert h out.stdout
+    finally
+      try IO.FS.removeDirAll dir catch _ => pure ()
   pure m
 
 

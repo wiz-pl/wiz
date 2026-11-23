@@ -24,8 +24,9 @@ type contains neither the linear argument nor its type — "consumed but not con
 The call runs once, so the cursor is threaded exactly once; copying a `Nat`, a `Bool`, a
 pair of ω types or an `Option Nat` copies no cursor. A result type that *does* contain
 the linear parameter, such as `Cursor a × Nat`, stays rejected: copying it would copy the
-cursor. (`Cursor.lengthSucc`, `Cursor.lengthAdd` and `Cursor.lengthPair` below are
-accepted; `Tests/Groups/Language.lean` pins the rejected cases.)
+cursor. (`Cursor.lengthSucc`, `Cursor.lengthAdd`, `Cursor.pairCount` and
+`Cursor.wrap` below are accepted; `Tests/Groups/Language.lean` pins the rejected
+cases.)
 
 Writing the counter as an accumulator (`Cursor.count`) or tail-recursively
 (`Cursor.consume`) is still the cheaper shape, but it is no longer required.
@@ -57,12 +58,25 @@ partial def Cursor.lengthAdd {a : Type} (1 c : Cursor a) : Nat :=
   | .done => 0
   | .more _ c' => 1 + Cursor.lengthAdd c'
 
-/-- A pair's first component is ω: the recursive result `(Nat × Nat) × Nat` contains no
-cursor, so it may be copied. -/
-partial def Cursor.lengthPair {a : Type} (1 c : Cursor a) : (Nat × Nat) × Nat :=
+/-- A pair of ω types: the recursive call is bound at ω by `let`, and its components
+are read from the pair. -/
+partial def Cursor.pairCount {a : Type} (1 c : Cursor a) : Nat × Nat :=
   match Cursor.next c with
-  | .done => ((0, 0), 0)
-  | .more _ c' => (Cursor.lengthPair c', 0)
+  | .done => (0, 0)
+  | .more _ c' =>
+    let r := Cursor.pairCount c';
+    (r.1 + 1, r.2)
+
+/-- A constructor field at ω is the same shape as a pair component; `Wrap` is recursive,
+so the call's result type really can be the field's type. -/
+inductive Wrap where
+  | base
+  | next (w : Wrap)
+
+partial def Cursor.wrap {a : Type} (1 c : Cursor a) : Wrap :=
+  match Cursor.next c with
+  | .done => Wrap.base
+  | .more _ c' => Wrap.next (Cursor.wrap c')
 
 /-- A loop with an early exit: the `then` branch recurses; the `else` branch closes the
 continuation. Both branches consume `c'` once (a branch that dropped it would join to ω
@@ -91,4 +105,4 @@ end
 #eval Cursor.altA (Cursor.fromList (List.cons 1 (List.cons 2 (List.cons 3 List.nil))))
 #eval Cursor.lengthSucc (Cursor.fromList (List.cons 1 (List.cons 2 (List.cons 3 List.nil))))
 #eval Cursor.lengthAdd (Cursor.fromList (List.cons 1 (List.cons 2 List.nil)))
-#eval (Cursor.lengthPair (Cursor.fromList (List.cons 1 List.nil))).1.1
+#eval (Cursor.pairCount (Cursor.fromList (List.cons 1 (List.cons 2 List.nil)))).1

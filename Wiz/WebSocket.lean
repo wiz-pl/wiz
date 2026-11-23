@@ -9,8 +9,12 @@ The protocol is small enough to write here, over the blocking handles of
   random `Sec-WebSocket-Key`; the server answers `101 Switching Protocols` with
   `Sec-WebSocket-Accept: base64(SHA-1(key ++ GUID))` (so a server that doesn't speak
   WebSockets can't be mistaken for one). Before that the server checks the `Origin`
-  header: a page on any web site can open a WebSocket to `127.0.0.1`, so only local
-  pages (and clients that send no `Origin`, which browsers always do) are let in.
+  header: a page on any web site can open a WebSocket to `127.0.0.1`, so only pages
+  served from this machine (`http(s)://localhost:…`, `http(s)://127.0.0.1:…`,
+  `http(s)://[::1]:…`), an editor webview (`vscode-webview://…`) and clients that send
+  no `Origin` at all (local programs; browsers always send one) are let in. An opaque
+  origin, which browsers send as `Origin: null` for a sandboxed iframe or a
+  `data:`/`file:` page, is refused: it is not a page on this machine.
 * **The token** (#430). The `Origin` check stops web pages, not local programs (they
   simply leave the header out), so the upgrade must also carry the server's token: as
   `?token=…` in the request target (what a browser can send) or as
@@ -108,11 +112,14 @@ def readHead (r : IO.FS.Stream) : IO (Option (String × List (String × String))
     | [] => pure ()
   pure none
 
-/-- Origins let in: pages on this machine (`http://localhost:…`, `http://127.0.0.1:…`,
-`http://[::1]:…`, and `https` alike), local files (browsers say `null`), and editor
-webviews (`vscode-webview://…`). -/
+/-- Origins let in: pages served from this machine (`http://localhost:…`,
+`http://127.0.0.1:…`, `http://[::1]:…`, and `https` alike) and editor webviews
+(`vscode-webview://…`). `null` is **refused**: browsers use it for an opaque origin (a
+sandboxed iframe, a `data:` or a `file:` page), which any web site can create on its own,
+so accepting it would defeat the check. A client that sends no `Origin` at all is not
+filtered here (a local program; the token, #430, is what guards those). -/
 def localOrigin (origin : String) : Bool :=
-  origin == "null" || origin.startsWith "vscode-webview://" ||
+  origin.startsWith "vscode-webview://" ||
   ["http://", "https://"].any fun scheme =>
     origin.startsWith scheme &&
       let host := (origin.drop scheme.length).toString

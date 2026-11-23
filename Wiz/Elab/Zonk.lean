@@ -31,7 +31,7 @@ subterm (under binders at `l + 1`) and instantiating level metas in `sort` and
 `const` (`instLevel`). Unsolved metas stay. -/
 partial def zonk (l : Lvl) (t : Term R) : ElabM R (Term R) := do
   --<sol
-  let (h, args) := Term.spine t
+  let (h, args) := Stats.countedSpine Stats.cells.zonk (Term.spine t)
   match h with
   | .mvar m =>
     match (← lookupMeta m).solution with
@@ -50,7 +50,7 @@ partial def zonk (l : Lvl) (t : Term R) : ElabM R (Term R) := do
     -- at `Nat`: kernel terms, native arithmetic, `rfl` and erasure see what they always did
     if let [A, .natLit n, i] := args then
       if i.mvars.isEmpty then
-        if let some N := (← getGlobals).builtins.lookup "nat" then
+        if let some N := (← getGlobals).builtinOf? "nat" then
           let g ← getGlobals
           let env : Env R := ((List.range l).map fun i => Val.var i).reverse
           let isNat := match A with

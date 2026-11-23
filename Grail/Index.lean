@@ -1,4 +1,5 @@
 import Grail.Config
+import Wiz.Smt.Sha256
 
 /-!
 # The package index (stage 23m, prototype)
@@ -209,6 +210,9 @@ structure IxVersion where
   tree : String := ""
   /-- (R36) SHA-256 of the package's declared `Package.command` set; optional -/
   commands : String := ""
+  /-- (P0) the release commit in `repo`; the source identity behind the archive. A tag
+  is only a hint at update time: the commit is what the signed entry binds. -/
+  commit : String := ""
   /-- why it is yanked; `""` when it isn't -/
   yanked : String := ""
   deriving Repr, Inhabited, BEq
@@ -261,6 +265,7 @@ def versionNode (v : IxVersion) : Sx :=
       ++ (match v.size with | some n => [node "size" [nat n]] | none => [])
       ++ (if v.tree.isEmpty then [] else [node "tree" [str v.tree]])
       ++ (if v.commands.isEmpty then [] else [node "commands" [str v.commands]])
+      ++ (if v.commit.isEmpty then [] else [node "commit" [str v.commit]])
       ++ (if v.toolchain.isEmpty then [] else [node "toolchain" [str v.toolchain]])
       ++ (if v.modules.isEmpty then [] else [node "modules" (v.modules.map str)])
       ++ (v.prefixes.map fun p => node "prefix" [str p])
@@ -269,6 +274,17 @@ def versionNode (v : IxVersion) : Sx :=
   node "version" (str (Version.render v.version) :: fields)
 
 def renderVersion (v : IxVersion) : String := (versionNode v).render
+
+/-- The **entry digest**: SHA-256 over the canonical version node, which is exactly what
+the signed snapshot binds. It covers the archive hash, `size`, `tree`, `commands`,
+`commit`, the toolchain range, module claims and dependency edges — everything a
+`sha256`-only comparison missed. `Index.versionNode` never renders `(yanked …)`, which
+lives at package level and is signed separately by the snapshot (`SnapshotEntry.yanked`).
+
+The construction is deliberately the same bytes the index file uses for its `(version …)`
+node after parsing, so a hand-edited field changes the digest even when the formatting
+does not. -/
+def entryDigest (v : IxVersion) : String := Wiz.Smt.Sha256.hex (versionNode v).render
 
 def IxPackage.render (p : IxPackage) : String :=
   let fields : List Sx :=
@@ -315,6 +331,7 @@ def decodeVersion (x : Sx) : Except String IxVersion := do
       out := { out with size := s.toNat? }
     | .l #[.a "tree", .a s] => out := { out with tree := s }
     | .l #[.a "commands", .a s] => out := { out with commands := s }
+    | .l #[.a "commit", .a s] => out := { out with commit := s }
     | .l #[.a "toolchain", .a s] => out := { out with toolchain := s }
     | .l ys =>
       match ys.toList with
@@ -387,6 +404,7 @@ structure Resolved where
   size : Option Nat := none
   tree : String := ""
   commands : String := ""
+  commit : String := ""
   deps : List Req := []
   deriving Repr, Inhabited
 
@@ -414,6 +432,11 @@ def pick (p : IxPackage) (asks : List Ask) (toolchain : String) : Except String 
   match (p.versions.filter ok).getLast? with
   | some v => pure v
   | none =>
+    -- an exact requirement on a yanked version gets the reason, not a generic conflict
+    if let some y := p.versions.find? fun v =>
+        !v.yanked.isEmpty && want.any fun r => r.any fun c =>
+          c.op == .eq && c.v == v.version && Requirement.satisfies [c] v.version then
+      throw s!"{p.name} {Version.render y.version} is yanked ({y.yanked}); choose another version"
     let asked := " ".intercalate (reqs.map fun (r, who) => s!"{Requirement.render r} (from {who})")
     let avail := " ".intercalate (p.versions.map fun v =>
       Version.render v.version ++ (if v.yanked.isEmpty then "" else " (yanked)"))
@@ -486,7 +509,7 @@ def resolve (index : Std.HashMap String IxPackage) (roots : List Req) (toolchain
   pure (chosen.map fun (name, v) => {
     name := name, version := v.version, source := v.source, sha256 := v.sha256,
     toolchain := v.toolchain, size := v.size, tree := v.tree, commands := v.commands,
-    deps := v.deps })
+    commit := v.commit, deps := v.deps })
 
 end Resolve
 

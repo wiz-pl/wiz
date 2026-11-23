@@ -1,0 +1,4 @@
+import Prelude
+import LintPlain
+
+def onlyBuiltins : Nat := 1

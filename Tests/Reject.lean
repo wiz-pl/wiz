@@ -102,7 +102,7 @@ return stdout and stderr, so a case can pin the rendered message too. `none` (th
 should return) when there is no `wiz` binary to run. -/
 def cliRun (args : List String) (path : System.FilePath) (wantReject : Bool) : IO (Option String) := do
   let some wiz ← wizBinary | do
-    skip "no wiz binary"
+    skipMissing "no wiz binary"
     return none
   let out ← IO.Process.output { cmd := wiz.toString, args := (["check"] ++ args ++ [path.toString]).toArray }
   let output := out.stdout ++ out.stderr
@@ -122,7 +122,7 @@ themselves, so `--cache` only affects the default run.) -/
 def cliCheckWith (args : List String) (src : String) (extra : List (Name × String))
     (wantReject : Bool) : IO (Option String) := do
   let some _ ← wizBinary | do
-    skip "no wiz binary"
+    skipMissing "no wiz binary"
     return none
   let dir ← IO.FS.createTempDir
   IO.FS.writeFile (dir / "main.wiz") src

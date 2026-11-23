@@ -94,6 +94,12 @@ def lspStrs (j : Lean.Json) (path : List String) : List String :=
   | some (.arr xs) => xs.toList.map (fun x => match x with | .str s => s | _ => "")
   | _ => []
 
+/-- The array at `path`, as a list. -/
+def lspArr (j : Lean.Json) (path : List String) : List Lean.Json :=
+  match jpath j path with
+  | some (.arr xs) => xs.toList
+  | _ => []
+
 /-- A request. -/
 def lspReq (id : Nat) (method : String) (params : Lean.Json := Lean.Json.mkObj []) : Lean.Json :=
   Lean.Json.mkObj [("jsonrpc", "2.0"), ("id", Lean.Json.num id), ("method", method), ("params", params)]
@@ -167,23 +173,33 @@ def selfhostLspGroup : Group where
         checkEq "wiz" (lspStr diag ["params", "diagnostics", "0", "source"])
         checkEq "unknown-identifier" (lspStr diag ["params", "diagnostics", "0", "code"])
         checkEq "unknown identifier nope" (lspStr diag ["params", "diagnostics", "0", "message"])
-        -- the third line of the document, 0-based (import, def one, def two)
+        -- the third line of the document, 0-based (import, def one, def two); D6 puts the
+        -- diagnostic on the failing term (`nope`), which the host and `check` report as
+        -- 3:18 (1-based), i.e. character 17 here
         checkEq 2 (lspNat diag ["params", "diagnostics", "0", "range", "start", "line"])
-        checkEq 0 (lspNat diag ["params", "diagnostics", "0", "range", "start", "character"])
+        checkEq 17 (lspNat diag ["params", "diagnostics", "0", "range", "start", "character"])
         -- wiz/elaborated: the session the client asked for
         let elabMsg ← lspAt msgs 2
         checkEq "wiz/elaborated" (lspStr elabMsg ["method"])
         checkEq 1 (lspNat elabMsg ["params", "session"])
         checkEq 1 (lspNat elabMsg ["params", "version"])
-        -- hover: null (the shim answers null too)
+        -- hover: null, or the declaration's signature when the check recorded one (the
+        -- declaration in this document fails to check), never an error
         let hover ← lspAt msgs 3
-        check ((jpath hover ["result"]) == some .null) "hover is null"
+        check (match jpath hover ["result"] with
+          | some .null => true
+          | some (.obj _) => true
+          | _ => false) "hover is null or a Hover"
         -- the plain infoview query: null (no info tree)
         let goal ← lspAt msgs 4
         check ((jpath goal ["result"]) == some .null) "the plain goal is null"
-        -- an unimplemented method: MethodNotFound, as the shim answers the interactive ones
+        -- definition: null or the declaration's Location, as the host answers (the
+        -- interactive infoview methods are the ones that are MethodNotFound)
         let defn ← lspAt msgs 5
-        checkEq (-32601) ((jpath defn ["error", "code"]).bind (·.getInt?.toOption) |>.getD 0)
+        check (match jpath defn ["result"] with
+          | some .null => true
+          | some (.obj _) => true
+          | _ => false) "definition is null or a Location"
         -- didChange: the fixed document has no diagnostics, and a new session
         let fixed ← lspAt msgs 6
         checkEq "textDocument/publishDiagnostics" (lspStr fixed ["method"])
@@ -295,7 +311,144 @@ def selfhostLspGroup : Group where
         checkEq 19 (lspNat (← lspAt got 6) ["result", "range", "start", "character"])
         -- inside the `by` body the expected type is the body's (`n : Nat ⊢ Nat`)
         checkEq "n : Nat\n⊢ Nat" (lspStr (← lspAt got 7) ["result", "goal"])
-        checkEq 1 (lspNat (← lspAt got 7) ["result", "range", "start", "line"]) }
+        checkEq 1 (lspNat (← lspAt got 7) ["result", "range", "start", "line"]) },
+    { name := "lsp: hover, definition and completion answer in the host's shapes", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let doc := "import Prelude\ndef one : Nat := 1\ndef label : String := \"x\"\ndef two : Nat := one\ndef three : Nat := lab\n"
+        let uri := "file:///tmp/selfhost-nav.wiz"
+        let nav (i : Nat) (method : String) (line char : Nat) : Lean.Json :=
+          lspReq i method (Lean.Json.mkObj [
+            ("textDocument", Lean.Json.mkObj [("uri", uri)]),
+            ("position", Lean.Json.mkObj [("line", Lean.Json.num line),
+              ("character", Lean.Json.num char)])])
+        let msgs :=
+          [ lspReq 1 "initialize",
+            lspNote "textDocument/didOpen" (Lean.Json.mkObj [("textDocument", lspTextDoc uri doc 1)]),
+            -- the declaration's own name, a use of it, and `lab` before `label`: the
+            -- host omits an item whose label is exactly the typed prefix, and ranks a
+            -- declaration whose result type matches the caret's expected type under a
+            -- `2` sort key (so the `String` declaration `label` in a `Nat` hole keeps
+            -- the `3` the declaration index can promise)
+            nav 10 "textDocument/hover" 1 6,
+            nav 11 "textDocument/definition" 3 17,
+            nav 12 "textDocument/completion" 4 22,
+            lspNote "exit" (Lean.Json.mkObj []) ]
+        let dir ← IO.FS.createTempDir
+        let (code, out, err) ← selfhostLspSession exe dir #[] msgs
+        check (code == 0) s!"the server exited {code}, stderr:\n{err}"
+        checkEq "" err
+        let got ← lspMessages out
+        checkEq 5 got.length
+        -- initialize advertises the three providers, with the host's fields
+        let init ← lspAt got 0
+        checkEq "utf-16" (lspStr init ["result", "capabilities", "positionEncoding"])
+        check ((jpath init ["result", "capabilities", "hoverProvider"]) == some (.bool true))
+          "hoverProvider"
+        check ((jpath init ["result", "capabilities", "definitionProvider"]) == some (.bool true))
+          "definitionProvider"
+        checkEq ["."] (lspStrs init ["result", "capabilities", "completionProvider", "triggerCharacters"])
+        -- the host, for the same document and positions
+        let prelude ← IO.FS.readFile "lib/Prelude.wiz"
+        let srv : LSP.Server :=
+          { libs := ({} : Std.HashMap String (String × String)).insert "Prelude" ("lib/Prelude.wiz", prelude),
+            trusted := ["Prelude"] }
+        let (srv, _) ← LSP.handle srv (lspReq 100 "initialize")
+        let (srv, _) ← LSP.handle srv (lspNote "textDocument/didOpen"
+          (Lean.Json.mkObj [("textDocument", lspTextDoc uri doc 1)]))
+        let (srv, hoverOut) ← LSP.handle srv (nav 10 "textDocument/hover" 1 6)
+        let (srv, defOut) ← LSP.handle srv (nav 11 "textDocument/definition" 3 17)
+        let (_, compOut) ← LSP.handle srv (nav 12 "textDocument/completion" 4 22)
+        let hostOf (outs : Array Lean.Json) (i : Nat) : Lean.Json :=
+          match outs.toList.find? (fun m =>
+              (jpath m ["id"] |>.bind (·.getNat?.toOption)) == some i) with
+          | some m => (jpath m ["result"]).getD .null
+          | none => .null
+        -- hover: the declaration's signature, as Markdown (the host's `{contents}` only)
+        let selfHover := (jpath (← lspAt got 2) ["result"]).getD .null
+        let hostHover := hostOf hoverOut 10
+        checkEq (lspStr hostHover ["contents", "kind"]) (lspStr selfHover ["contents", "kind"])
+        checkEq (lspStr hostHover ["contents", "value"]) (lspStr selfHover ["contents", "value"])
+        checkEq "```wiz\none : Nat\n```"
+          (lspStr selfHover ["contents", "value"])
+        -- definition: the declaration's `Location`. The host's declaration range is the
+        -- whole command (its own tests pin the line only); the selfhost and the shim
+        -- point at the name token, so the lines and the uri are compared and the
+        -- name-token columns are pinned here.
+        let selfDef := (jpath (← lspAt got 3) ["result"]).getD .null
+        let hostDef := hostOf defOut 11
+        checkEq (lspStr hostDef ["uri"]) (lspStr selfDef ["uri"])
+        for k in ["start", "end"] do
+          checkEq (lspNat hostDef ["range", k, "line"]) (lspNat selfDef ["range", k, "line"])
+        checkEq 1 (lspNat selfDef ["range", "start", "line"])
+        checkEq 4 (lspNat selfDef ["range", "start", "character"])
+        checkEq 7 (lspNat selfDef ["range", "end", "character"])
+        -- completion: every item the index answers, field by field against the host's
+        let selfComp := (jpath (← lspAt got 4) ["result"]).getD .null
+        let hostComp := hostOf compOut 12
+        check (jpath selfComp ["isIncomplete"] == some (.bool false)) "isIncomplete is false"
+        let items := lspArr selfComp ["items"]
+        checkEq ["label"] (items.map (fun it => lspStr it ["label"]))
+        let hostItems := lspArr hostComp ["items"]
+        for it in items do
+          let label := lspStr it ["label"]
+          match hostItems.find? (fun h => lspStr h ["label"] == label) with
+          | none => throw (IO.userError s!"the host has no completion item {label}")
+          | some h =>
+            checkEq (lspNat h ["kind"]) (lspNat it ["kind"])
+            checkEq (lspStr h ["sortText"]) (lspStr it ["sortText"])
+            checkEq (lspStr h ["filterText"]) (lspStr it ["filterText"])
+            checkEq (lspStr h ["detail"]) (lspStr it ["detail"])
+            checkEq (lspStr h ["textEdit", "newText"]) (lspStr it ["textEdit", "newText"])
+            for k in ["start", "end"] do
+              checkEq (lspNat h ["textEdit", "range", k, "line"])
+                (lspNat it ["textEdit", "range", k, "line"])
+              checkEq (lspNat h ["textEdit", "range", k, "character"])
+                (lspNat it ["textEdit", "range", k, "character"]) },
+    { name := "lsp: UTF-16 positions count an astral character as two", run := fun _ =>
+        withSelfhostCli fun exe => do
+        -- U+1F600 is 4 UTF-8 bytes, 1 code point, and 2 UTF-16 code units: every column
+        -- after it on its line is one more than the frontend's code-point column.
+        let doc := "import Prelude\ndef s : String := \"😀\"\ndef t : String := String.append \"😀\" s\ndef u : String := String.append \"😀\" nope\n"
+        let uri := "file:///tmp/selfhost-utf16.wiz"
+        let nav (i : Nat) (method : String) (line char : Nat) : Lean.Json :=
+          lspReq i method (Lean.Json.mkObj [
+            ("textDocument", Lean.Json.mkObj [("uri", uri)]),
+            ("position", Lean.Json.mkObj [("line", Lean.Json.num line),
+              ("character", Lean.Json.num char)])])
+        let msgs :=
+          [ lspReq 1 "initialize",
+            lspNote "textDocument/didOpen" (Lean.Json.mkObj [("textDocument", lspTextDoc uri doc 1)]),
+            -- line 2 is `def t : String := String.append "😀" s`: `s` is code point 36,
+            -- UTF-16 unit 37; the caret after it is UTF-16 38
+            nav 10 "textDocument/hover" 2 37,
+            nav 11 "textDocument/definition" 2 37,
+            nav 12 "textDocument/completion" 2 38,
+            lspNote "exit" (Lean.Json.mkObj []) ]
+        let dir ← IO.FS.createTempDir
+        let (code, out, err) ← selfhostLspSession exe dir #[] msgs
+        checkEq 0 code
+        checkEq "" err
+        let got ← lspMessages out
+        checkEq 5 got.length
+        -- line 3 is `def u : String := String.append "😀" nope`: `nope` is code point 36,
+        -- UTF-16 37; the line is 40 code points, 41 UTF-16 units
+        let diag ← lspAt got 1
+        checkEq "unknown-identifier" (lspStr diag ["params", "diagnostics", "0", "code"])
+        checkEq 3 (lspNat diag ["params", "diagnostics", "0", "range", "start", "line"])
+        checkEq 37 (lspNat diag ["params", "diagnostics", "0", "range", "start", "character"])
+        checkEq 41 (lspNat diag ["params", "diagnostics", "0", "range", "end", "character"])
+        -- a position after the astral character must resolve to the code point it names
+        checkEq "```wiz\ns : String\n```"
+          (lspStr (← lspAt got 2) ["result", "contents", "value"])
+        let defn ← lspAt got 3
+        checkEq uri (lspStr defn ["result", "uri"])
+        checkEq 1 (lspNat defn ["result", "range", "start", "line"])
+        checkEq 4 (lspNat defn ["result", "range", "start", "character"])
+        -- and the completion prefix's range is in UTF-16 too: 37..38, not 36..37
+        let comp ← lspAt got 4
+        checkEq ["s"] ((lspArr comp ["result", "items"]).map (fun it => lspStr it ["label"]))
+        checkEq 37 (lspNat comp ["result", "items", "0", "textEdit", "range", "start", "character"])
+        checkEq 38 (lspNat comp ["result", "items", "0", "textEdit", "range", "end", "character"]) }
   ]
 
 builtin_initialize registerGroup selfhostLspGroup

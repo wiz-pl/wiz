@@ -1,5 +1,6 @@
 -- test: run
 import Scry.Cli
+import Scry.NativeLink
 -- `scry egraph --rewrite` end to end: the read-only saturation report, then the checked
 -- extraction back to Wil. `2 + 3` becomes the constant 5, `a * 1` and `a + 0` become
 -- copies of the register holding 5, and the outer `b + c` folds to 10. The Datalog facts

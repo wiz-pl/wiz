@@ -1,0 +1,145 @@
+import Json
+import Text
+import Web.Hover
+import Web.Source.Model
+import Web.Source.Span
+
+/-!
+# Web.Source.Static
+
+The decoders from a static bundle's JSON to the reader's model. They are pure: the host
+(`web/source-static.js`) does the fetching, this module does the checking, and the same
+functions decode the first `"bundle"` effect and every `"answer"` effect, so a page in
+the browser and the Node acceptance test cannot disagree about a field.
+
+Two schemas are read here:
+
+* `scry.source.bundle-ui/1` — the host's one-time payload: `mode`, `tool`, and the three
+  tables the reader needs (`files` with their `text`, `findings`, `facts`). It is
+  assembled from `data/files.json`, `data/findings.json` and `data/f/<id>.json`.
+* `scry.source.answer/1` — one answer to a `hover` or `info` request (the shape is in
+  `Web.Source.Model`).
+
+A missing or wrong field decodes to a sane empty value, never to an error page; the
+caller can tell a failed decode by `Option.none` and say "no answer".
+-/
+
+/-- The host's one-time payload, decoded. -/
+structure Source.Bundle where
+  mode : String
+  tool : String
+  files : List Source.File
+  findings : List Source.Finding
+  facts : List Source.FactRow
+
+-- ## Small readers
+
+/-- A `{"start", "stop"}` object, or `none`. -/
+def Source.Static.decodeSpan (j : Json) : Option Source.Span :=
+  match Json.get j "start", Json.get j "stop" with
+  | .some a, .some b => match Json.asNat a, Json.asNat b with
+    | .some start, .some stop => .some (Source.Span.make start stop)
+    | _, _ => .none
+  | _, _ => .none
+
+/-- The `[key, value]` pairs of an array, dropping malformed entries. -/
+partial def Source.Static.pairsOf : List Json → List (String × String)
+  | .nil => []
+  | .cons p rest =>
+    match Json.asList p with
+    | .cons k (.cons v _) => match Json.asString k, Json.asString v with
+      | .some key, .some value => List.cons (key, value) (Source.Static.pairsOf rest)
+      | _, _ => Source.Static.pairsOf rest
+    | _ => Source.Static.pairsOf rest
+
+/-- A columns array of `[key, value]` pairs; anything else is no columns. -/
+def Source.Static.decodeColumns (j : Json) : List (String × String) :=
+  Source.Static.pairsOf (Json.asList j)
+
+/-- One file object. `text` is required; a file without it is skipped by the caller. -/
+def Source.Static.decodeFile (j : Json) : Option Source.File :=
+  let id := Json.getStr j "id";
+  match String.isEmpty id with
+  | .true => .none
+  | .false => .some (Source.File.mk id (Json.getStr j "path")
+      (Json.getStr j "language") (Json.getStr j "text") (Json.getNat j "lines"))
+
+/-- One fact row object. -/
+def Source.Static.decodeFact (j : Json) : Option Source.FactRow :=
+  match Source.Static.decodeSpan (match Json.get j "span" with
+    | .some s => s
+    | .none => Json.mkNull) with
+  | .none => .none
+  | .some span => .some (Source.FactRow.mk (Json.getStr j "kind") (Json.getStr j "node")
+      (Json.getStr j "fileId") span
+      (Source.Static.decodeColumns (match Json.get j "columns" with
+        | .some c => c
+        | .none => Json.mkNull)))
+
+/-- One finding object. -/
+def Source.Static.decodeFinding (j : Json) : Option Source.Finding :=
+  let id := Json.getStr j "id";
+  match String.isEmpty id with
+  | .true => .none
+  | .false =>
+    let span := match Source.Static.decodeSpan (match Json.get j "span" with
+      | .some s => s
+      | .none => Json.mkNull) with
+      | .some s => s
+      | .none => Source.Span.at 0;
+    let checked : Bool := match Json.get j "checked" with
+      | .some (.bool b) => b
+      | _ => .false;
+    .some (Source.Finding.mk id (Json.getStr j "fileId") (Json.getStr j "path")
+      (Json.getStr j "rule") (Json.getStr j "severity") (Json.getStr j "message")
+      span (Json.getNat j "line") (Json.getNat j "column") checked
+      (Json.getStr j "claimId"))
+
+/-- One hover line object. -/
+def Source.Static.decodeLine (j : Json) : Hover.Line :=
+  let code : Bool := match Json.get j "code" with | .some (.bool b) => b | _ => .false;
+  let rule : Bool := match Json.get j "rule" with | .some (.bool b) => b | _ => .false;
+  let ellipsis : Bool := match Json.get j "ellipsis" with | .some (.bool b) => b | _ => .false;
+  Hover.Line.mk (Json.getStr j "text") code rule ellipsis []
+
+/-- The decoders on each element, dropping the failures. -/
+partial def Source.Static.mapSome {A : Type} (f : Json → Option A) : List Json → List A
+  | .nil => []
+  | .cons x rest => match f x with
+    | .some v => List.cons v (Source.Static.mapSome f rest)
+    | .none => Source.Static.mapSome f rest
+
+-- ## The bundle payload
+
+/-- Decode `scry.source.bundle-ui/1`. -/
+def Source.Static.decodeBundle (text : String) : Option Source.Bundle :=
+  match Json.parse text with
+  | .error _ => .none
+  | .ok j =>
+    let mode := match Json.getStr j "mode" with
+      | "" => "static"
+      | m => m;
+    .some (Source.Bundle.mk mode (Json.getStr j "tool")
+      (Source.Static.mapSome Source.Static.decodeFile (Json.getList j "files"))
+      (Source.Static.mapSome Source.Static.decodeFinding (Json.getList j "findings"))
+      (Source.Static.mapSome Source.Static.decodeFact (Json.getList j "facts")))
+
+-- ## The answer
+
+/-- Decode `scry.source.answer/1`. -/
+def Source.Static.decodeAnswer (text : String) : Option Source.Answer :=
+  match Json.parse text with
+  | .error _ => .none
+  | .ok j =>
+    let status := match Json.getStr j "status" with
+      | "" => "none"
+      | s => s;
+    let span := Source.Static.decodeSpan (match Json.get j "span" with
+      | .some s => s
+      | .none => Json.mkNull);
+    .some (Source.Answer.mk (Json.getStr j "request") status (Json.getStr j "fileId")
+      span (Json.getStr j "spanText") (Json.getStr j "title") (Json.getStr j "rule") (Json.getStr j "severity")
+      (Json.getStr j "findingId")
+      (List.map Source.Static.decodeLine (Json.getList j "lines"))
+      (Source.Static.mapSome Source.Static.decodeFact (Json.getList j "rows"))
+      (Source.Static.mapSome Source.Static.decodeFinding (Json.getList j "findings")))
