@@ -11,7 +11,7 @@
         "AGENTS.md",
         ".github/**"
       ],
-      "sha256": "78903821c764683ae5161fef830e42304fbdc54cd3030fdcc0d6a51f6b87bf7f"
+      "sha256": "4fe90af2a0f6e18b4ad1352a854b37cd78f5d3f083db82c4868021dc833a0251"
     },
     "lean": {
       "files": 165,
@@ -52,7 +52,7 @@
         "Tests/**",
         "web/**"
       ],
-      "sha256": "03517ef46948088572c9740210a3868dfe313bf705c341930cab138fd1e7792f"
+      "sha256": "84e6e9d14854c8e6af246bec4d0e613e3994e8ab1668972b3eaac4f51ec65346"
     },
     "wizlib": {
       "files": 110,

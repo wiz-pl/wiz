@@ -16,6 +16,17 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 
 ## [Unreleased]
 
+* nix: the Wasm fixtures, the merged web bundle, the docs site, the Pages artifact and
+  the binary release tarball are flake outputs (`.#wasm-fixtures`, `.#web-bundle`,
+  `.#docs-site`, `.#pages`, `.#release-bin`), each input-addressed by the sources it
+  reads (`passthru.subset`); the release tarball is the only leaf that depends on all.
+  Its `wiz`/`grail`/`tower` link every non-glibc library statically (GMP, libuv,
+  OpenSSL, libstdc++, libgcc), and one documented leaf step sets the conventional ELF
+  interpreter, removes the RUNPATH and scrubs store paths; its `doCheck` rebuilds the
+  archive and runs the binaries under `env -i` with only glibc. The CI jobs consume the
+  new outputs (`wiz-notes/nix-artifacts.md` is the handover note; `.github/workflows`
+  is unchanged here).
+
 * ci: a pull request's `build` job starts from a `.lake` a **cold** derivation saved
   (`flake.nix`'s `withLakeCache`, keyed by `flake.lock`, `lean-toolchain`, the
   architecture and the `lean`/`runtime` subset hashes), so Lake recompiles only the
