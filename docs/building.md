@@ -899,19 +899,24 @@ the commit in their source links, not a build time.
 is deliberately unlike a Nix package: the release has to leave the store, so that one
 step points each ELF interpreter at `/lib64/ld-linux-x86-64.so.2` (or the aarch64 path),
 removes the build RUNPATH, strips debug data and scrubs the remaining store-path strings
-(`scripts/scrub-store-paths.py`). The binaries are linked before that step with every
-non-glibc library static — GMP, libuv, OpenSSL, libstdc++ and libgcc — so the archive
-needs only glibc; `scripts/test-release-portability.sh` checks the NEEDED lists, the
-interpreter, the absence of `/nix/store`, and runs `wiz`, `grail` and `tower` under
-`env -i` with only a glibc output. **Do not copy the leaf scrub into an intermediate
+(`scripts/scrub-store-paths.py`). The binaries are linked before that step with GMP, libuv and OpenSSL static;
+libstdc++ and libgcc are bundled in `lib/` with a relative `$ORIGIN` RUNPATH
+(Lean's executable link does not take the static-runtime flags), so the archive
+needs only glibc; `scripts/test-release-portability.sh` checks the NEEDED lists,
+the interpreter, the absence of `/nix/store`, the glibc floor and runs `wiz`,
+`grail` and `tower` under `env -i` with only a glibc output. The Nix artifact is
+built against nixpkgs glibc 2.44 and requires glibc 2.43 (`free_sized`); this is
+not the 2.27-floor GitHub tarball, and the check fails above
+`--max-glibc 2.43`. **Do not copy the leaf scrub into an intermediate
 derivation**: a normal store path must keep its references, and only the tarball is
 allowed to break that rule.
 
 The linkage audit behind that: after the leaf step `readelf -d` names only
 `libc.so.6`, `libm.so.6`, `libdl.so.2`, `libpthread.so.0`, `librt.so.1` and the loader.
-GMP, libuv and OpenSSL are static archives in the link; libstdc++ and libgcc are the
-release compiler's explicit `-Wl,-Bstatic` tail (the wrapper removes the driver's
-dynamic `-lstdc++`/`-lgcc_s` and appends the archives after every object). Boehm GC,
+GMP, libuv and OpenSSL are static archives in the link. libstdc++ and libgcc are
+bundled as `lib/libstdc++.so.6` and `lib/libgcc_s.so.1` with a relative `$ORIGIN`
+RUNPATH; the release wrapper's `-Wl,-Bstatic` tail does not reach Lean's executable
+link, which is why the bundle is the effective guarantee. Boehm GC,
 zlib and ncurses are not linked by `wiz`, `grail` or `tower` at all: the GC is only in
 `gc-ldflags`, which a self-hosted program passes to its generated C, and neither zlib
 nor ncurses is an input. The bundled C toolchain (`scripts/bundle-cc.sh`, which this

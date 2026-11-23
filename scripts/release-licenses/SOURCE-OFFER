@@ -1,0 +1,24 @@
+Source offer for the bundled GCC runtime
+========================================
+
+The Nix release artifact ships GCC 16.2.0's runtime under the GNU GPL v3
+with the GCC Runtime Library Exception 3.1:
+
+  lib/libstdc++.so.6   shared, train11 layout
+  lib/libgcc_s.so.1    shared, train11 layout
+  wiz, grail           static libstdc++/libgcc in the Nix build
+
+The GitHub release.yml path links Lean's static libc++ instead; see NOTICE
+and LICENSES/lean4-third-party.
+
+Corresponding Source
+--------------------
+
+  GCC 16.2.0: https://ftp.gnu.org/gnu/gcc/gcc-16.2.0/gcc-16.2.0.tar.xz
+
+The exact nixpkgs revision is recorded in flake.lock. The Wiz packaging
+scripts (scripts/release-tarball.sh, scripts/scrub-store-paths.py) and the
+Wiz source are at https://github.com/wiz-pl/wiz.
+
+This file is the written offer for the runtime source. It ships as
+share/wiz/SOURCE-OFFER next to the licence texts.

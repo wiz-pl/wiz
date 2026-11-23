@@ -1078,7 +1078,7 @@ EOF
               cmp repro/a/out/$name.tar.gz.sha256 repro/b/out/$name.tar.gz.sha256
               cmp package/$name.tar.gz repro/a/out/$name.tar.gz
               sh ${./scripts}/test-release-portability.sh \
-                "package/$name.tar.gz" --glibc ${pkgs.glibc}
+                "package/$name.tar.gz" --glibc ${pkgs.glibc} --max-glibc 2.43
               runHook postCheck
             '';
             passthru.subset = "release leaf: lib/ + editors/ + scripts/release-licenses + LICENSE + COPYING.RUNTIME + web/wasm-host.mjs, composed with release-unwrapped + release-tower + wiz-web";

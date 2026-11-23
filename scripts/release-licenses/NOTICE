@@ -19,8 +19,13 @@ Linked into the binaries wiz and grail (built with Lean 4):
   LICENSES/lean4-LICENSE.
 * mimalloc (Lean's allocator): MIT. LICENSES/mimalloc-LICENSE.
 * libuv 1.x (Lean's event loop), statically: MIT. LICENSES/libuv-LICENSE.
-* libc++ and libc++abi (LLVM), statically: Apache License 2.0 with LLVM Exceptions.
-  LICENSES/lean4-third-party (the licences of what Lean's binary releases bundle).
+* libc++ and libc++abi (LLVM), statically in the GitHub/elan build: Apache License
+  2.0 with LLVM Exceptions. LICENSES/lean4-third-party (the licences of what Lean's
+  binary releases bundle).
+* libstdc++, libgcc and libgcc_eh (GCC 16.2.0), statically in the Nix build and, in
+  the Nix train11 tarball, as lib/libstdc++.so.6 and lib/libgcc_s.so.1: GNU GPL v3
+  or later with the GCC Runtime Library Exception 3.1. LICENSES/gcc-RLE-LICENSE.
+  Corresponding source: SOURCE-OFFER.
 * GNU MP (GMP) 6.3.0, statically: GNU LGPL v3 or later, or GNU GPL v2 or later.
   LICENSES/lean4-third-party (the LGPL v3) and LICENSE (the GPL v3, which the LGPL
   v3 adds to). Its source: https://gmplib.org/. Because wiz, grail and tower are
@@ -33,12 +38,15 @@ tower (built by grail from `tower/`, with the Wiz runtime) links GMP and glibc f
 list, not Lean's runtime.
 
 The bundled C toolchain (cc/, when present; docs/stages/26-tower.md, 26f): clang,
-ld.lld and compiler-rt (Apache 2.0 with LLVM Exceptions; their libraries: libc++,
-libunwind, zlib, libgcc_s and libatomic under the GCC Runtime Library Exception),
-glibc 2.27 headers and link libraries (LGPL v2.1+), Linux UAPI headers (GPL v2 with
-the Linux syscall note), GMP 6.3.0 (LGPL v3+ / GPL v2+) and the Boehm GC 8.2.8
-(MIT-style), and CaDiCaL (MIT; the SAT solver, from the Lean toolchain; its licence
-is in cc/LICENSES/lean4-LICENSES). See cc/LICENSES/ and cc/VERSIONS.
+ld.lld and compiler-rt (Apache 2.0 with LLVM Exceptions; their libraries: libc++ and
+libunwind under Apache 2.0 with LLVM Exceptions, zlib under the zlib licence,
+libgcc_s and libatomic under the GCC Runtime Library Exception 3.1), glibc 2.27
+headers and link libraries (LGPL v2.1+), Linux UAPI headers (GPL v2 with the Linux
+syscall note), GMP 6.3.0 (LGPL v3+ / GPL v2+) and the Boehm GC 8.2.8 (MIT-style),
+and CaDiCaL (MIT; the SAT solver, from the Lean toolchain; its licence is in
+cc/LICENSES/lean4-LICENSES). See cc/LICENSES/ and cc/VERSIONS. The GCC RLE text is
+LICENSES/gcc-RLE-LICENSE and the runtime source offer is SOURCE-OFFER; zlib's text is
+LICENSES/zlib-LICENSE.
 
 Programs you build with this toolchain
 ======================================

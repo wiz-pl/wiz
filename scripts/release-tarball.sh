@@ -108,6 +108,10 @@ copy_rev scripts/release-licenses/NOTICE "$top/share/wiz/NOTICE"
 if [ ! -f "$top/share/wiz/NOTICE" ] && [ -f "$lic/NOTICE" ]; then
   cp "$lic/NOTICE" "$top/share/wiz/NOTICE"
 fi
+copy_rev scripts/release-licenses/SOURCE-OFFER "$top/share/wiz/SOURCE-OFFER"
+if [ ! -f "$top/share/wiz/SOURCE-OFFER" ] && [ -f "$lic/SOURCE-OFFER" ]; then
+  cp "$lic/SOURCE-OFFER" "$top/share/wiz/SOURCE-OFFER"
+fi
 if [ "$have_git" = yes ]; then
   for f in $(gitc ls-tree --name-only "$rev" -- scripts/release-licenses/ |
                sed 's|.*/||' | grep -- '-LICENSE$' || true); do

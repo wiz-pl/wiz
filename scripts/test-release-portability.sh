@@ -1,8 +1,8 @@
 #!/bin/sh
 # Does a release tarball run on a machine with only glibc?
 #
-#   scripts/test-release-portability.sh TARBALL [--glibc DIR] [--interp PATH]
-#   scripts/test-release-portability.sh --dir DIR [--glibc DIR] [--interp PATH]
+#   scripts/test-release-portability.sh TARBALL [--glibc DIR] [--interp PATH] [--max-glibc VER]
+#   scripts/test-release-portability.sh --dir DIR [--glibc DIR] [--interp PATH] [--max-glibc VER]
 #
 # TARBALL is `wiz-<arch>-linux.tar.gz` (what scripts/release-tarball.sh writes; its
 # `.sha256` is checked when present). `--dir` tests an extracted tree instead.
@@ -37,10 +37,12 @@ tarball=
 dir=
 glibc=
 interp=
+max_glibc=
 while [ $# -gt 0 ]; do
   case $1 in
     --glibc) shift; glibc=${1:?--glibc needs a directory} ;;
     --interp) shift; interp=${1:?--interp needs a path} ;;
+    --max-glibc) shift; max_glibc=${1:?--max-glibc needs a version} ;;
     --dir) shift; dir=${1:?--dir needs a directory} ;;
     -h|--help) usage ;;
     -*) echo "test-release-portability: unknown option $1" >&2; usage ;;
@@ -162,9 +164,29 @@ for f in bin/tower share/wiz/.lake/build/bin/wiz share/wiz/.lake/build/bin/grail
     fail "$f interpreter is '$got', expected '$expected_interp'"
   glibc_max=$(readelf --version-info "$file" 2>/dev/null |
     grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)
-  echo "ok: $f: $(printf '%s' "$needed" | tr '\n' ' '), interpreter $got, $(du -h "$file" | cut -f1)"
+  if [ -n "$max_glibc" ] && [ -n "$glibc_max" ]; then
+    glibc_ver=${glibc_max#GLIBC_}
+    highest=$(printf '%s\n%s\n' "$glibc_ver" "$max_glibc" | sort -V | tail -1)
+    [ "$highest" = "$max_glibc" ] ||
+      fail "$f requires $glibc_max, above --max-glibc $max_glibc"
+  fi
+  echo "ok: $f: $(printf '%s' "$needed" | tr '\n' ' '), interpreter $got, glibc $glibc_max, $(du -h "$file" | cut -f1)"
 done
 [ "$n" -ge 3 ] || fail "found only $n ELF commands"
+
+# The bundled runtime must not raise the floor above the declared maximum either.
+if [ "$bundled" = yes ] && [ -n "$max_glibc" ]; then
+  for lib in "$root/lib/libstdc++.so.6" "$root/lib/libgcc_s.so.1"; do
+    [ -f "$lib" ] || continue
+    lib_max=$(readelf --version-info "$lib" 2>/dev/null |
+      grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)
+    [ -n "$lib_max" ] || continue
+    lib_ver=${lib_max#GLIBC_}
+    highest=$(printf '%s\n%s\n' "$lib_ver" "$max_glibc" | sort -V | tail -1)
+    [ "$highest" = "$max_glibc" ] ||
+      fail "$lib requires $lib_max, above --max-glibc $max_glibc"
+  done
+fi
 
 # --- run them with only glibc --------------------------------------------------------
 if [ -n "$glibc" ]; then
