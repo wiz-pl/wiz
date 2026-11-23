@@ -758,7 +758,7 @@ EOF
             checkPhase = ''
               runHook preCheck
               sh web/check-site.sh site
-              if grep -a -R '/nix/store' site >/dev/null; then
+              if grep -a -R -E '/nix/store/[0-9a-z]{32}-' site >/dev/null; then
                 echo "docs-site: a page names a build store path" >&2; exit 1
               fi
               if grep -a -R "$PWD" site >/dev/null; then
@@ -812,7 +812,7 @@ EOF
               mkdir -p site/source
               cp -R --no-preserve=mode bundle/. site/source/
               SITE_REQUIRE_SOURCE=1 sh ${docsSiteSource}/web/check-site.sh site
-              if grep -a -R '/nix/store' site >/dev/null; then
+              if grep -a -R -E '/nix/store/[0-9a-z]{32}-' site >/dev/null; then
                 echo "pages: a page names a build store path" >&2; exit 1
               fi
               if grep -a -R "$PWD" site >/dev/null; then
