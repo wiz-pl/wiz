@@ -1,0 +1,14 @@
+import Prelude
+
+-- A list whose type records its length; the length is erased at run time.
+inductive Vec (A : Type) : Nat → Type where
+  | nil : Vec A .zero
+  | cons {0 n : Nat} (x : A) (xs : Vec A n) : Vec A (.succ n)
+
+-- No `nil` case: a `Vec A (.succ n)` has at least one element.
+def Vec.head {A : Type} {0 n : Nat} : Vec A (.succ n) → A
+  | .cons x _ => x
+
+def two : Vec Nat 2 := .cons 1 (.cons 2 .nil)
+
+def first : Nat := Vec.head two
