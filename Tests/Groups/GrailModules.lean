@@ -306,7 +306,7 @@ def modulesGroup : Group where
           check (!(← (ro / entry.fileName).pathExists)) s!"also written to the read-only cache: {entry.fileName}" },
     { name := "the command line: a warm and an empty read-only cache plus a write cache match --no-cache", run := fun _ => do
         let wiz := ((← IO.appPath).parent.getD ".") / "wiz"
-        unless ← wiz.pathExists do skip "no wiz binary"; return
+        unless ← wiz.pathExists do skipMissing "no wiz binary"; return
         let dir ← mkTree [("main.wiz", "import M\ndef n : Nat := two + 3\n#eval n\n"),
                           ("M.wiz", "import Prelude\ndef two : Nat := 2\n")]
         let ro := dir / "ro"

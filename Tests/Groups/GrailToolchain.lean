@@ -42,11 +42,18 @@ def toolchainGroup : Group where
   exercise := "Stage 23a"
   parallel := true
   cases := [
-    { name := "wiz, grail and the test driver read no environment variables", run := fun _ => do
+    { name := "wiz and grail read no environment variables; the test driver reads only WIZ_ALLOW_MISSING_DEPS", run := fun _ => do
         let files := (← leanFiles "Wiz") ++ (← leanFiles "Grail") ++ #[System.FilePath.mk "Main.lean", "Tests/Main.lean"]
         for f in files do
           let text ← IO.FS.readFile f
-          check ((text.splitOn "getEnv \"WIZ").length == 1) s!"{f} reads a WIZ_ variable" },
+          -- the driver's one explicit environment hook: the shard driver's equivalent of
+          -- `--allow-missing-deps` (Tests.skipMissing). Any other WIZ_ variable in these
+          -- files would change behaviour behind the command line's back.
+          let allow := (text.splitOn "getEnv \"WIZ_ALLOW_MISSING_DEPS\"").length - 1
+          let others := (text.splitOn "getEnv \"WIZ").length - 1 - allow
+          let want := if f.toString == "Tests/Main.lean" then 1 else 0
+          check (others == 0) s!"{f} reads a WIZ_ variable other than WIZ_ALLOW_MISSING_DEPS"
+          check (allow == want) s!"{f}: {allow} WIZ_ALLOW_MISSING_DEPS read(s), expected {want}" },
     { name := "wiz: an unknown flag or command is an error (exit 2), the usage alone is not", run := fun _ => do
         let wiz := ".lake/build/bin/wiz"
         let run (args : Array String) := IO.Process.output { cmd := wiz, args }

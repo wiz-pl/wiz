@@ -123,10 +123,10 @@ toolchain's `gcCflags`/`gcLdflags`), run it, and hand its output to `k`. -/
 def selfhostRunWith (file : String) (k : String → IO Unit) (flags : Array String := #[])
     (progArgs : Array String := #[]) (opt : String := "-O2") (smallStack : Bool := false) : IO Unit := do
   let tc ← toolchain
-  if tc.gcCflags.isEmpty then skip "no garbage collector, --gc-cflags"; return
+  if tc.gcCflags.isEmpty then skipMissing "no garbage collector, --gc-cflags"; return
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     IO.FS.writeFile (dir / "input.wiz") file
@@ -182,7 +182,7 @@ def selfhostC (file : String) (flags : Array String := #[]) : IO (Option String)
   match ← selfhostCompiler with
   | .error e =>
     if (e.splitOn "gmp.h").length > 1 then
-      skip "no toolchain"
+      skipMissing "no toolchain"
       return none
     else throw (IO.userError e)
   | .ok exe =>
@@ -202,7 +202,7 @@ def selfhostModuleC (files : List (String × String)) (args : Array String := #[
   match ← selfhostCompiler with
   | .error e =>
     if (e.splitOn "gmp.h").length > 1 then
-      skip "no toolchain"
+      skipMissing "no toolchain"
       return none
     else throw (IO.userError e)
   | .ok exe =>
@@ -221,7 +221,7 @@ error, and no C (15g). -/
 def selfhostCompileFails (file : String) (errors : String) : IO Unit := do
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     IO.FS.writeFile (dir / "input.wiz") file
@@ -235,7 +235,7 @@ command's `file:line:col`, and prints no C. -/
 def selfhostCheckFails (file expected : String) : IO Unit := do
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     IO.FS.writeFile (dir / "input.wiz") file
@@ -745,11 +745,11 @@ def selfhostLinkRun (files : List (String × String)) (expected : String) (flags
     (fails : Option String := none) (failCode : UInt32 := 3) : IO Unit := do
   let tc ← toolchain
   if tc.gcCflags.isEmpty then
-    skip "no garbage collector (--gc-cflags)"
+    skipMissing "no garbage collector (--gc-cflags)"
     return
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then IO.println "    (skipped: no toolchain)" else throw (IO.userError e)
+    if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     for (p, text) in files do
@@ -1031,10 +1031,10 @@ def reprDecls : List (String × Bool) := [
 and the handle functions. -/
 def selfhostLibRun (src csrc expected : String) (flags : Array String := #[]) : IO Unit := do
   let tc ← toolchain
-  if tc.gcCflags.isEmpty then skip "no garbage collector, --gc-cflags"; return
+  if tc.gcCflags.isEmpty then skipMissing "no garbage collector, --gc-cflags"; return
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     IO.FS.writeFile (dir / "input.wiz") src
@@ -1887,7 +1887,7 @@ D6.) -/
 def selfhostLevelErrors (decls : List (String × String)) : IO Unit := do
   let loader ← preludeLoader
   match ← selfhostCompiler with
-  | .error e => if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+  | .error e => if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     for (d, phrase) in decls do
       let src := "import Prelude\n" ++ d
@@ -2084,7 +2084,7 @@ finish. The program is not run. -/
 def selfhostClosedScrutBounded (secs : Nat) : IO Unit := do
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     IO.FS.writeFile (dir / "input.wiz") (closedScrutProgram 40)
@@ -3645,7 +3645,7 @@ def selfHostGroup : Group where
           ("inductive Bad.{u} : Type u where\n  | mk (a : Type u)\n", false)] },
     { name := "U2: an undeclared universe in a data type is a positioned error (U2/A15)", run := fun _ => do
         match ← selfhostCompiler with
-        | .error e => if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+        | .error e => if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
         | .ok exe =>
           let dir ← IO.FS.createTempDir
           IO.FS.writeFile (dir / "bad.wiz") "import Prelude\ninductive Bad : Type u where\n  | mk\n"

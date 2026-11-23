@@ -16,7 +16,7 @@ def grailSelfhostGroup : Group where
         let target := Grail.Target.selfhost "selfhost-checker" "checker"
         let r ← runner dir tc { name := "wiz", targets := [target], settings := [] } 4 log
         if !(← r.build [target] [target]) then
-          if ((← log.get).splitOn "gmp.h").length > 1 then skip "no toolchain"; return
+          if ((← log.get).splitOn "gmp.h").length > 1 then skipMissing "no toolchain"; return
           throw (IO.userError (← log.get))
         let mine := dir / ".grail" / "bin" / "selfhost-checker"
         let .ok theirs ← Tests.Elab.selfhostChecker | throw (IO.userError "the tests' checker failed")

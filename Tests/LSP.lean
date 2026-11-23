@@ -1506,7 +1506,7 @@ def nvimGroup : Group where
     -- a test result). Both fail this case; the `harness:` lines say which happened.
     { name := "wiz.nvim: abbreviations, and the infoview against wiz lsp (editors/nvim/tests/run.sh)", run := fun _ => do
         let out ← IO.Process.output { cmd := "sh", args := #["editors/nvim/tests/run.sh"] }
-        if out.stdout.startsWith "skipped" then skip ((out.stdout.replace "skipped: " "").trimAscii.toString)
+        if out.stdout.startsWith "skipped" then skipMissing ((out.stdout.replace "skipped: " "").trimAscii.toString)
         else unless out.exitCode == 0 do
           throw (IO.userError s!"editors/nvim/tests/run.sh failed:\n{out.stdout}{out.stderr}") },
     -- The harness's own reporting: fixture output, so it needs neither nvim nor a build.

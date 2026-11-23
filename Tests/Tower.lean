@@ -284,9 +284,11 @@ def cases (impl : IO Impl) : List Case := [
         -- tower probes `lake` in the directory it clones into (no `lean-toolchain` of
         -- ours): without an elan default toolchain that probe fails, so the install and
         -- the nightly auto-install after it cannot run. The Nix CI has none (only this
-        -- checkout's toolchain: docs/ci-runner.md), so skip rather than fail.
+        -- checkout's toolchain: docs/ci-runner.md), so this is `Tests.skipMissing`: a
+        -- failure by default, a reported skip in the `library` shard, whose
+        -- "allow-missing-deps" entry and allow-list entry name exactly this case.
         unless ← lakeForSource? do
-          skip "no source toolchain: `lake` has no toolchain outside a checkout (elan has no default)"
+          skipMissing "no source toolchain: `lake` has no toolchain outside a checkout (elan has no default)"
           return
         let (bare, work) ← upstream
         let e ← mkEnv (← impl)
@@ -635,7 +637,7 @@ def cases (impl : IO Impl) : List Case := [
         let m ← towerFails e ["toolchain", "install", s!"main@{(c3.take 8)}"]
         checkHas m "no snapshot"; checkHas m "keep/demo" },
     { name := "from Nix: a flake's package, linked as a GC root", run := fun _ => do
-        unless ← have? "nix" do skip "no nix"; return
+        unless ← have? "nix" do skipMissing "no nix"; return
         let (bare, _) ← upstream
         let flake ← mkTree [
           ("flake.nix", "{ outputs = { self }: let p = builtins.path { path = ./tc; name = \"fake-wiz\"; }; in\n" ++

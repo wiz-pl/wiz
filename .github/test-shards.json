@@ -69,6 +69,7 @@
     "name": "library",
     "split": 8,
     "jobs": 4,
+    "allow-missing-deps": true,
     "select": [
       "=bus-crc",
       "=bus-law",
