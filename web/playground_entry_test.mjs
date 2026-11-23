@@ -27,6 +27,7 @@ const ok = (cond, what, detail = "") => {
 
 const entry = readFileSync(new URL("./playground.js", import.meta.url), "utf-8");
 const mount = readFileSync(new URL("./framework/mount.js", import.meta.url), "utf-8");
+const profile = readFileSync(new URL("./framework/profile.js", import.meta.url), "utf-8");
 const html = readFileSync(new URL("./playground.html", import.meta.url), "utf-8");
 
 // ## The entry point is the mount contract
@@ -77,9 +78,14 @@ const mountExports = [...mount.matchAll(/^export (?:async )?function (\w+)/gm)].
 ok(mountExports.length === 1 && mountExports[0] === "mount",
   "mount.js exports exactly one function", mountExports.join(","));
 
-// ## The runtime's ABI is the documented three exports, plus the page's effect hooks
-for (const name of ["_wiz_loom_init", "_wiz_loom_html", "_wiz_loom_step"]) {
-  ok(mount.includes(name), `mount expects ${name}`);
+// ## The runtime's ABI is the documented three exports, plus the page's effect hooks.
+// The check itself lives in the profile seam (`web/framework/profile.js`), which `mount`
+// asks before it touches a node; a `--target js` module has the same three names without
+// the leading underscore, so the requirement is the bare name.
+ok(/from "\.\/profile\.js"/.test(mount),
+  "mount asks the profile seam for the runtime's ABI and kind");
+for (const name of ["wiz_loom_init", "wiz_loom_html", "wiz_loom_step"]) {
+  ok(profile.includes('"' + name + '"'), "the profile requires " + name);
 }
 
 console.log(failed === 0 ? "playground entry: all checks passed" : `playground entry: ${failed} failure(s)`);
