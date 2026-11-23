@@ -1,6 +1,7 @@
 import Sys
 import Json
 import Text
+import Functor
 import Scry.Workflow
 /-!
 # Scry.Repro: a deterministic reproducer for one finding
@@ -17,8 +18,29 @@ A reproducer is **selected or generated**, never invented from the finding text:
 The module tries the requested sanitizer, falls back to an uninstrumented build if the
 compiler rejects it, records **both** attempts, and never turns a compile failure into a
 clean result. It stores the exact compile/run commands, the input and harness hashes, the
-exit status, the captured stdout/stderr, and the first sanitizer lines. That record is
-`dynamic.json`; the root bundle keeps it separate from `static.json`.
+exit status, the captured stdout/stderr, and the first sanitizer lines.
+
+## Two records, one writer
+
+A dynamic run is **two records**:
+
+* `repro.json` — the *recipe*: compiler, sanitizer, harness, input, timeout, env, plan,
+  and (when a probe was requested) its descriptor. This is what `verify` re-runs.
+* `dynamic.json` — the *evidence*: what happened, including the env actually used, the
+  plan marker, `run.markerObserved`, and the probe outcome.
+
+They are written by one function, `Scry.wfWriteRecordPair`, through temp files and a
+rename; the evidence carries the recipe's digest. `Scry.wfRequirePair` (used by `verify`)
+refuses a torn or disagreeing pair loudly: one record without the other, a stale digest,
+a different env or plan, or a marker the recipe cannot carry.
+
+## A silent sensor is a skip
+
+When the recipe claims a probe (`--probe`), the event stream is the evidence. A probe
+that emitted no event has `heartbeat=false`: the record is `status: "skipped"` with
+reason `probe-no-heartbeat`, and `run.markerObserved` stays false even if the program
+printed the marker on stdout. A silent sensor is not evidence that the sink was not
+reached, so it can never be rendered as a clean run.
 -/
 
 structure Scry.ReproResult where
@@ -31,11 +53,37 @@ structure Scry.ReproResult where
   exitKind : String
   exitCode : Nat
   signal : Nat
-  /-- The plan's marker was seen in the run's output (the PoC reached the sink). -/
+  /-- The plan's marker was seen in the run's output (the PoC reached the sink), or in
+  the probe events when the run claimed a probe. -/
   markerObserved : Bool
   json : Json
   logText : String
   trace : List String
+
+/-- A probe descriptor plus the events a host trace already recorded. This module owns
+the **record** half of the event ABI: it does not attach to a kernel. `--probe-events`
+is the JSON Lines file a `host trace` adapter produces. -/
+structure Scry.ReproProbe where
+  /-- The `wiz-probe/1` descriptor path, recorded in the recipe. -/
+  path : String
+  descriptorText : String
+  /-- `scry-probe-event/1` JSON Lines; empty when no trace was recorded. -/
+  eventsText : String
+
+/-- What a run's sensor evidence says. `claimed` is true when the recipe named a probe;
+`heartbeat` is true only when the probe emitted at least one event. -/
+structure Scry.ProbeOutcome where
+  claimed : Bool
+  heartbeat : Bool
+  events : List Json
+  lost : Nat
+  markerObserved : Bool
+
+/-- The two records of one dynamic run, as a reader sees them. -/
+structure Scry.ReproRecordPair where
+  recipeText : String
+  recipe : Json
+  evidence : Json
 
 structure Scry.ReproConfig where
   /-- The C compiler (looked up in PATH). -/
@@ -90,6 +138,18 @@ def Scry.wfShWords (xs : List String) : String :=
 
 def Scry.wfListJson (xs : List String) : Json :=
   Json.mkArr (List.map Json.mkStr xs)
+
+/-- `[{"name":…,"value":…}]`, the one shape both records use for the environment. -/
+def Scry.wfEnvPairsJson (env : List (String × String)) : Json :=
+  Json.mkArr (List.map (fun kv => Json.mkObj
+    [("name", Json.mkStr kv.1), ("value", Json.mkStr kv.2)]) env)
+
+def Scry.wfJsonBool (j : Json) (k : String) : Bool :=
+  match Json.get j k with
+  | .some (.bool b) => b
+  | _ => .false
+
+def Scry.wfJsonEq (a b : Json) : Bool := String.eq (Json.render a) (Json.render b)
 
 def Scry.wfExitJson (st : ExitStatus) : Json :=
   match st with
@@ -146,6 +206,173 @@ partial def Scry.wfEnsureDir (p : String) : EIO Unit :=
 def Scry.wfReadOr (p fallback : String) : EIO String := do
   t ← Scry.wfReadIf p;
   EIO.pure (match t with | .some s => s | .none => fallback)
+
+-- ## Sensor evidence and the skip rule
+--
+-- A probe event carries the bytes the kernel saw (`argv`, `data`, `filename`). The
+-- authoritative marker match is over those bytes, not over a host-provided boolean, so
+-- a buggy host cannot mint a marker. A run that *claims* a probe but produced no event
+-- has a silent sensor: that is `skipped`, never a clean run.
+
+/-- Valid JSON objects in a JSON Lines file; a malformed line is not an event. -/
+def Scry.wfProbeEventsOfLines : List String → List Json
+  | .nil => .nil
+  | .cons l rest => match Json.parse (String.trim l) with
+    | .ok j => List.cons j (Scry.wfProbeEventsOfLines rest)
+    | .error _ => Scry.wfProbeEventsOfLines rest
+
+/-- An object is an event only if it names the ABI (or at least an event kind); a stray
+JSON line must not mint a heartbeat. -/
+def Scry.wfProbeEventValid (j : Json) : Bool :=
+  match Json.get j "schema" with
+  | .some (.str s) => String.eq s "scry-probe-event/1"
+  | _ => match Json.get j "kind" with
+    | .some (.str k) => Bool.not (String.eq k "")
+    | _ => .false
+
+def Scry.wfProbeEventsOf (text : String) : List Json :=
+  List.filter Scry.wfProbeEventValid
+    (Scry.wfProbeEventsOfLines
+      (List.filter (fun l => Bool.not (String.isEmpty (String.trim l))) (String.splitOn text "\n")))
+
+/-- The strings a probe event carries; a marker match must come from one of these. -/
+def Scry.wfProbeEventTexts (j : Json) : List String :=
+  List.append
+    (List.map (fun x => match x with | .str s => s | _ => "") (Json.getList j "argv"))
+    (List.append
+      (List.map (fun x => match x with | .str s => s | _ => "") (Json.getList j "envp"))
+      [Json.getStr j "data", Json.getStr j "filename", Json.getStr j "comm"])
+
+def Scry.wfProbeEventHasMarker (marker : String) (j : Json) : Bool :=
+  Bool.and (Bool.not (String.eq marker ""))
+    (List.any (fun s => String.contains s marker) (Scry.wfProbeEventTexts j))
+
+def Scry.wfProbeLost (events : List Json) : Nat :=
+  List.foldl (fun n j => Nat.add n (Json.getNat j "lost")) 0 events
+
+/-- The record's sensor outcome. With no probe this keeps the old stdout marker rule;
+with a probe, only the event bytes count, and no event at all is not a clean run. -/
+def Scry.wfProbeOutcome (probe : Option Scry.ReproProbe) (plan : Option Scry.WfPlan)
+    (runText : String) : Scry.ProbeOutcome :=
+  let marker := match plan with | .some p => p.marker | .none => "";
+  match probe with
+  | .none =>
+    let observed := match plan with
+      | .some p => Bool.and (Bool.not (String.eq p.marker "")) (String.contains runText p.marker)
+      | .none => (.false : Bool);
+    Scry.ProbeOutcome.mk .false .false .nil 0 observed
+  | .some p =>
+    let events := Scry.wfProbeEventsOf p.eventsText;
+    let heartbeat := Nat.lt 0 (List.length events);
+    let observed := Bool.and heartbeat (List.any (Scry.wfProbeEventHasMarker marker) events);
+    Scry.ProbeOutcome.mk .true heartbeat events (Scry.wfProbeLost events) observed
+
+def Scry.wfSkipReason (o : Scry.ProbeOutcome) : String :=
+  match o.claimed, o.heartbeat with
+  | .true, .false => "probe-no-heartbeat"
+  | _, _ => ""
+
+def Scry.wfSkipMessage : String :=
+  "probe-no-heartbeat: the run claimed a probe but the probe emitted no event (heartbeat=false); a silent sensor is a skip, not evidence that the sink was not reached"
+
+/-- `ran` means the requested observation happened (or no probe was requested);
+`compile-failed` means it could not start; `skipped` means the sensor was silent. -/
+def Scry.wfRunStatus (compileOk : Bool) (o : Scry.ProbeOutcome) : String :=
+  match compileOk with
+  | .false => "compile-failed"
+  | .true => match o.claimed, o.heartbeat with
+    | .true, .false => "skipped"
+    | _, _ => "ran"
+
+-- ## The pair
+
+def Scry.wfRecipePairJson (pairId : String) : Json :=
+  Json.mkObj
+    [ ("schema", Json.mkStr "scry-workflow-pair/1")
+    , ("role", Json.mkStr "recipe")
+    , ("evidence", Json.mkStr "dynamic.json")
+    , ("id", Json.mkStr pairId) ]
+
+def Scry.wfEvidencePairJson (pairId recipeDigest : String) : Json :=
+  Json.mkObj
+    [ ("schema", Json.mkStr "scry-workflow-pair/1")
+    , ("role", Json.mkStr "evidence")
+    , ("recipe", Json.mkStr "repro.json")
+    , ("id", Json.mkStr pairId)
+    , ("recipeDigest", Json.mkStr recipeDigest) ]
+
+/-- An identity both records carry. It is a content id, not a signature; `verify` also
+checks the two records' facts, so a hand-written pair is not trusted. -/
+def Scry.wfRunPairId (tag derived marker inputText : String)
+    (env : List (String × String)) (runCmd : List String) (runText : String) : String :=
+  let envText := String.intercalate ";" (List.map (fun kv => String.append kv.1
+    (String.append "=" kv.2)) env);
+  Scry.wfHex (Scry.wfFnv (String.intercalate "\n"
+    [ tag, derived, marker, inputText, envText
+    , String.intercalate " " runCmd, runText ]))
+
+def Scry.wfProbeJson (probe : Option Scry.ReproProbe) (o : Scry.ProbeOutcome)
+    (status : String) : Json :=
+  match probe with
+  | .none => Json.mkNull
+  | .some p =>
+    let desc := match Json.parse p.descriptorText with
+      | .ok j => j
+      | .error _ => Json.mkObj [("schema", Json.mkStr "wiz-probe/1")];
+    let schema := match Json.getStr desc "schema" with
+      | "" => "wiz-probe/1"
+      | s => s;
+    Json.mkObj
+      [ ("schema", Json.mkStr schema)
+      , ("descriptor", Json.mkStr p.path)
+      , ("attach", Json.mkStr (Json.getStr desc "attach"))
+      , ("object_sha256", Json.mkStr (Json.getStr desc "object_sha256"))
+      , ("kernel", Json.mkStr (Json.getStr desc "kernel"))
+      , ("events", Json.ofNat (List.length o.events))
+      , ("lost", Json.ofNat o.lost)
+      , ("heartbeat", Json.mkBool o.heartbeat)
+      , ("reason", Json.mkStr (match String.eq status "skipped" with
+          | .true => Scry.wfSkipReason o
+          | .false => "")) ]
+
+/-- The recipe (`repro.json`): everything `verify` needs to re-run the same run, plus the
+pair id that ties it to the evidence. -/
+def Scry.wfReproConfigJson (cfg : Scry.ReproConfig) (probe : Option String)
+    (pairId : String) : Json :=
+  Json.mkObj
+    [ ("schema", Json.mkStr "scry-workflow-repro/2")
+    , ("cc", Json.mkStr cfg.cc)
+    , ("sanitize", Json.mkStr cfg.sanitize)
+    , ("harness", Scry.wfOptStrJson cfg.harness)
+    , ("input", Scry.wfOptStrJson cfg.input)
+    , ("generatedInput", Json.mkStr cfg.generatedInput)
+    , ("timeoutSecs", Json.ofNat cfg.timeoutSecs)
+    , ("env", Scry.wfEnvPairsJson cfg.env)
+    , ("witness", Scry.wfOptStrJson cfg.witness)
+    , ("witnessStatus", Json.mkStr cfg.witnessStatus)
+    , ("witnessAuthority", Json.mkStr cfg.witnessAuthority)
+    , ("plan", match cfg.plan with | .some p => Scry.wfPlanJson p | .none => Json.mkNull)
+    , ("harnessSource", Json.mkStr cfg.harnessSource)
+    , ("derivedFrom", Json.mkStr cfg.derivedFrom)
+    , ("probe", Scry.wfOptStrJson probe)
+    , ("pair", Scry.wfRecipePairJson pairId) ]
+
+/-- The one write path for a dynamic run: `repro.json` (the recipe) and `dynamic.json`
+(the evidence) are written together. Each goes through a temp file and a rename, and the
+evidence carries the recipe's digest; `verify` refuses a pair that does not agree. A
+process that dies between the two renames leaves a torn pair, which is an error, never a
+clean run. -/
+def Scry.wfWriteRecordPair (outDir logText scriptText recipeText evidenceText : String) :
+    EIO Unit := do
+  a ← Scry.wfEnsureDir outDir;
+  b ← Scry.wfWrite (Path.join outDir "run.log") logText;
+  c ← Scry.wfWrite (Path.join outDir "repro.sh") scriptText;
+  let recipePath := Path.join outDir "repro.json";
+  let evidencePath := Path.join outDir "dynamic.json";
+  d ← Scry.wfWrite (String.append recipePath ".tmp") recipeText;
+  e ← Scry.wfWrite (String.append evidencePath ".tmp") evidenceText;
+  f ← FS.rename (String.append recipePath ".tmp") recipePath;
+  FS.rename (String.append evidencePath ".tmp") evidencePath
 
 def Scry.wfOrDefault (o : Option String) (d : String) : String :=
   match o with | .some p => p | .none => d
@@ -287,14 +514,8 @@ def Scry.wfCompileRun (cfg : Scry.ReproConfig) (source bin harnessPath inputText
   r ← Scry.wfExecute cfg c.compileOk harnessPath bin inputText;
   EIO.pure (Scry.CompileRunResult.mk c r)
 
-def Scry.wfWriteReproArtifacts (outDir logText reproText : String) (dynamic : Json) : EIO Unit := do
-  a ← Scry.wfWrite (Path.join outDir "run.log") logText;
-  b ← Scry.wfWrite (Path.join outDir "repro.sh") reproText;
-  c ← Scry.wfWrite (Path.join outDir "dynamic.json") (String.append (Json.render dynamic) "\n");
-  EIO.pure ()
-
-def Scry.reproRunC (cfg : Scry.ReproConfig) (source outDir : String) (tag : String) :
-    EIO Scry.ReproResult :=
+def Scry.reproRunC (cfg : Scry.ReproConfig) (probe : Option Scry.ReproProbe)
+    (source outDir : String) (tag : String) : EIO Scry.ReproResult :=
   EIO.bind (Scry.wfPrepareRepro cfg outDir) (fun p0 =>
     let prepared := p0;
     let bin := Path.join outDir "repro-bin";
@@ -313,33 +534,56 @@ def Scry.reproRunC (cfg : Scry.ReproConfig) (source outDir : String) (tag : Stri
       let timeoutUsed := run.timeoutUsed;
       let logText := String.append "--- stdout ---\n" (String.append runOut.stdout
         (String.append "\n--- stderr ---\n" runOut.stderr));
-      let interesting := Scry.wfInteresting 12 (String.append runOut.stdout runOut.stderr);
+      let runText := String.append runOut.stdout runOut.stderr;
+      let interesting := Scry.wfInteresting 12 runText;
       let sanitizerHit := Bool.or (String.contains runOut.stderr "AddressSanitizer")
         (Bool.or (String.contains runOut.stderr "UndefinedBehaviorSanitizer")
           (String.contains runOut.stderr "runtime error:"));
       let crashed := match runOut.status with
         | .signaled _ => .true
         | .exited c => Nat.lt 0 c;
-      let traceKind := match sanitizerHit with
-        | .true => "sanitizer"
-        | .false => match crashed with
-          | .true => "exit-or-signal"
-          | .false => "none";
-      let markerObserved := match cfg.plan with
-        | .some p => Bool.and (Bool.not (String.eq p.marker ""))
-            (String.contains (String.append runOut.stdout runOut.stderr) p.marker)
-        | .none => (.false : Bool);
+      let outcome := Scry.wfProbeOutcome probe cfg.plan runText;
+      let runStatus := Scry.wfRunStatus comp.compileOk outcome;
+      let skipReason := match String.eq runStatus "skipped" with
+        | .true => Scry.wfSkipReason outcome
+        | .false => "";
+      let skipMessage := match String.eq skipReason "" with
+        | .true => ""
+        | .false => Scry.wfSkipMessage;
+      let traceKind := match outcome.claimed, outcome.heartbeat with
+        | .true, .true => "ebpf"
+        | .true, .false => "probe-silent"
+        | _, _ => match sanitizerHit with
+          | .true => "sanitizer"
+          | .false => match crashed with
+            | .true => "exit-or-signal"
+            | .false => "none";
+      let markerObserved := outcome.markerObserved;
+      let markerValue := match cfg.plan with | .some p => p.marker | .none => "";
+      let inputValue := match cfg.plan with | .some p => p.inputText | .none => "";
       let markerText := match cfg.plan with
         | .some p => Json.mkStr p.marker
         | .none => Json.mkStr "";
       let planJson := match cfg.plan with
         | .some p => Scry.wfPlanJson p
         | .none => Json.mkNull;
+      let probePath := match probe with
+        | .some p => .some p.path
+        | .none => (.none : Option String);
+      let pairId := Scry.wfRunPairId tag cfg.derivedFrom markerValue inputValue
+        cfg.env runCmd runText;
+      let recipe := Scry.wfReproConfigJson cfg probePath pairId;
+      let recipeText := String.append (Json.render recipe) "\n";
+      let recipeDigest := Scry.wfHex (Scry.wfFnv recipeText);
       let dynamic := Json.mkObj
-        [ ("schema", Json.mkStr "scry-workflow-dynamic/1")
+        [ ("schema", Json.mkStr "scry-workflow-dynamic/2")
         , ("evidenceKind", Json.mkStr "dynamic")
+        , ("source", Json.mkStr "sanitizer")
         , ("tag", Json.mkStr tag)
-        , ("status", Json.mkStr (match comp.compileOk with | .true => "ran" | .false => "compile-failed"))
+        , ("status", Json.mkStr runStatus)
+        , ("reason", Json.mkStr skipReason)
+        , ("message", Json.mkStr skipMessage)
+        , ("env", Scry.wfEnvPairsJson cfg.env)
         , ("sanitizer", Json.mkObj
             [ ("requested", Json.mkStr comp.requested)
             , ("used", Json.mkStr comp.used)
@@ -355,6 +599,7 @@ def Scry.reproRunC (cfg : Scry.ReproConfig) (source outDir : String) (tag : Stri
                 , Scry.wfAttemptJson "none" comp.opt2 ]) ])
         , ("derivedFrom", Json.mkStr cfg.derivedFrom)
         , ("plan", planJson)
+        , ("probe", Scry.wfProbeJson probe outcome runStatus)
         , ("harness", Json.mkObj
             [ ("path", Json.mkStr harnessPath)
             , ("hash", Json.mkStr harnessHash)
@@ -372,17 +617,20 @@ def Scry.reproRunC (cfg : Scry.ReproConfig) (source outDir : String) (tag : Stri
             , ("marker", markerText)
             , ("markerObserved", Json.mkBool markerObserved)
             , ("traceKind", Json.mkStr traceKind)
+            , ("events", Json.mkArr outcome.events)
             , ("trace", Scry.wfListJson interesting)
             , ("log", Json.mkStr (Path.join outDir "run.log")) ])
+        , ("pair", Scry.wfEvidencePairJson pairId recipeDigest)
         , ("limits", Json.mkArr (List.map Json.mkStr
             [ "A run is evidence that this harness reached this exit status; it is not a proof of exploitability."
             , "ASAN/UBSAN report memory/UB only; a control-flow bug such as command injection can run clean under them."
-            , "The compiler, sanitizer runtime and environment are recorded, not pinned or reproduced." ])) ];
-      let reproText := Scry.wfReproScript cfg.cc comp.compileCmd
+            , "The compiler, sanitizer runtime and environment are recorded, not pinned or reproduced."
+            , "A probe run with no event is skipped, not clean: a silent sensor is not evidence of absence." ])) ];
+      let scriptText := Scry.wfReproScript cfg.cc comp.compileCmd
         (List.append [String.append (Nat.repr cfg.timeoutSecs) "s"] ["sh", harnessPath, bin]) inputPath;
-      EIO.bind (Scry.wfWriteReproArtifacts outDir logText reproText dynamic) (fun _ =>
-        EIO.pure (Scry.ReproResult.mk
-          (match comp.compileOk with | .true => "ran" | .false => "compile-failed")
+      let evidenceText := String.append (Json.render dynamic) "\n";
+      EIO.bind (Scry.wfWriteRecordPair outDir logText scriptText recipeText evidenceText) (fun _ =>
+        EIO.pure (Scry.ReproResult.mk runStatus
           comp.used comp.compileOk comp.compileOk crashed sanitizerHit
           (match runOut.status with | .exited c => "exited" | .signaled _ => "signaled")
           (match runOut.status with | .exited c => c | .signaled _ => 0)
@@ -403,8 +651,8 @@ def Scry.reproDotnetVersion : EIO String := do
     | .some x => Scry.wfFirstLine x.stdout
     | .none => "")
 
-def Scry.reproRunDotnet (cfg : Scry.ReproConfig) (source outDir : String) (tag : String) :
-    EIO Scry.ReproResult := do
+def Scry.reproRunDotnet (cfg : Scry.ReproConfig) (probe : Option Scry.ReproProbe)
+    (source outDir : String) (tag : String) : EIO Scry.ReproResult := do
   stepd ← Scry.wfEnsureDir outDir;
   prepared ← Scry.wfPrepareRepro cfg outDir;
   let harnessPath := prepared.1;
@@ -429,20 +677,46 @@ def Scry.reproRunDotnet (cfg : Scry.ReproConfig) (source outDir : String) (tag :
   let crashed := match runOut.status with
     | .signaled _ => .true
     | .exited c => Nat.lt 0 c;
-  let markerObserved := match cfg.plan with
-    | .some p => Bool.and (Bool.not (String.eq p.marker "")) (String.contains combined p.marker)
-    | .none => (.false : Bool);
+  let outcome := Scry.wfProbeOutcome probe cfg.plan combined;
+  let runStatus := Scry.wfRunStatus compileOk outcome;
+  let skipReason := match String.eq runStatus "skipped" with
+    | .true => Scry.wfSkipReason outcome
+    | .false => "";
+  let skipMessage := match String.eq skipReason "" with
+    | .true => ""
+    | .false => Scry.wfSkipMessage;
+  let markerObserved := outcome.markerObserved;
   let planJson := match cfg.plan with
     | .some p => Scry.wfPlanJson p
     | .none => Json.mkNull;
+  let markerValue := match cfg.plan with | .some p => p.marker | .none => "";
+  let inputValue := match cfg.plan with | .some p => p.inputText | .none => "";
   let markerText := match cfg.plan with
     | .some p => Json.mkStr p.marker
     | .none => Json.mkStr "";
+  let probePath := match probe with
+    | .some p => .some p.path
+    | .none => (.none : Option String);
+  let pairId := Scry.wfRunPairId tag cfg.derivedFrom markerValue inputValue
+    cfg.env timedArgs combined;
+  let recipe := Scry.wfReproConfigJson cfg probePath pairId;
+  let recipeText := String.append (Json.render recipe) "\n";
+  let recipeDigest := Scry.wfHex (Scry.wfFnv recipeText);
+  let traceKind := match outcome.claimed, outcome.heartbeat with
+    | .true, .true => "ebpf"
+    | .true, .false => "probe-silent"
+    | _, _ => match markerObserved with
+      | .true => "marker" | .false => (match crashed with
+        | .true => "exit-or-signal" | .false => "none");
   let dynamic := Json.mkObj
-    [ ("schema", Json.mkStr "scry-workflow-dynamic/1")
+    [ ("schema", Json.mkStr "scry-workflow-dynamic/2")
     , ("evidenceKind", Json.mkStr "dynamic")
+    , ("source", Json.mkStr "sanitizer")
     , ("tag", Json.mkStr tag)
-    , ("status", Json.mkStr (match compileOk with | .true => "ran" | .false => "compile-failed"))
+    , ("status", Json.mkStr runStatus)
+    , ("reason", Json.mkStr skipReason)
+    , ("message", Json.mkStr skipMessage)
+    , ("env", Scry.wfEnvPairsJson cfg.env)
     , ("sanitizer", Json.mkObj
         [ ("requested", Json.mkStr cfg.sanitize)
         , ("used", Json.mkStr "none")
@@ -456,6 +730,7 @@ def Scry.reproRunDotnet (cfg : Scry.ReproConfig) (source outDir : String) (tag :
         , ("attempts", Json.mkArr .nil) ])
     , ("derivedFrom", Json.mkStr cfg.derivedFrom)
     , ("plan", planJson)
+    , ("probe", Scry.wfProbeJson probe outcome runStatus)
     , ("harness", Json.mkObj
         [ ("path", Json.mkStr harnessPath)
         , ("hash", Json.mkStr harnessHash)
@@ -472,35 +747,180 @@ def Scry.reproRunDotnet (cfg : Scry.ReproConfig) (source outDir : String) (tag :
         , ("crashed", Json.mkBool crashed)
         , ("marker", markerText)
         , ("markerObserved", Json.mkBool markerObserved)
-        , ("traceKind", Json.mkStr (match markerObserved with
-            | .true => "marker" | .false => (match crashed with
-              | .true => "exit-or-signal" | .false => "none")))
+        , ("traceKind", Json.mkStr traceKind)
+        , ("events", Json.mkArr outcome.events)
         , ("trace", Scry.wfListJson (Scry.wfInteresting 12 combined))
         , ("log", Json.mkStr (Path.join outDir "run.log")) ])
+    , ("pair", Scry.wfEvidencePairJson pairId recipeDigest)
     , ("limits", Json.mkArr (List.map Json.mkStr
         [ "dotnet runs the source as a file-based app; there is no sanitizer or coverage."
         , "A run is evidence that this input reached this exit status, not a proof of exploitability."
-        , "The SDK version and environment are recorded, not pinned." ])) ];
-  let reproText := String.append "#!/bin/sh\nset -eu\n"
+        , "The SDK version and environment are recorded, not pinned."
+        , "A probe run with no event is skipped, not clean: a silent sensor is not evidence of absence." ])) ];
+  let scriptText := String.append "#!/bin/sh\nset -eu\n"
     (String.append (Scry.wfShWords (List.cons "timeout" (List.append timedArgs .nil)))
       (String.append " < " (String.append (Scry.wfShQuote inputPath) "\n")));
-  a ← Scry.wfWrite (Path.join outDir "run.log") (String.append "--- stdout ---\n"
-    (String.append runOut.stdout (String.append "\n--- stderr ---\n" runOut.stderr)));
-  b ← Scry.wfWrite (Path.join outDir "repro.sh") reproText;
-  c ← Scry.wfWrite (Path.join outDir "dynamic.json") (String.append (Json.render dynamic) "\n");
-  EIO.pure (Scry.ReproResult.mk
-    (match compileOk with | .true => "ran" | .false => "compile-failed")
+  let logText := String.append "--- stdout ---\n" (String.append runOut.stdout
+    (String.append "\n--- stderr ---\n" runOut.stderr));
+  let evidenceText := String.append (Json.render dynamic) "\n";
+  stepr ← Scry.wfWriteRecordPair outDir logText scriptText recipeText evidenceText;
+  EIO.pure (Scry.ReproResult.mk runStatus
     "none" compileOk compileOk crashed .false
     (match runOut.status with | .exited _ => "exited" | .signaled _ => "signaled")
     (match runOut.status with | .exited c => c | .signaled _ => 0)
     (match runOut.status with | .exited _ => 0 | .signaled s => s)
-    markerObserved dynamic
-    (String.append "--- stdout ---\n" (String.append runOut.stdout
-      (String.append "\n--- stderr ---\n" runOut.stderr)))
-    (Scry.wfInteresting 12 combined))
+    markerObserved dynamic logText (Scry.wfInteresting 12 combined))
+
+def Scry.reproRunWith (cfg : Scry.ReproConfig) (probe : Option Scry.ReproProbe)
+    (source outDir : String) (tag : String) : EIO Scry.ReproResult :=
+  match String.endsWith source ".cs" with
+  | .true => Scry.reproRunDotnet cfg probe source outDir tag
+  | .false => Scry.reproRunC cfg probe source outDir tag
 
 def Scry.reproRun (cfg : Scry.ReproConfig) (source outDir : String) (tag : String) :
     EIO Scry.ReproResult :=
-  match String.endsWith source ".cs" with
-  | .true => Scry.reproRunDotnet cfg source outDir tag
-  | .false => Scry.reproRunC cfg source outDir tag
+  Scry.reproRunWith cfg .none source outDir tag
+
+-- ## Reading the pair back
+--
+-- `verify` re-runs the recipe; it must not accept evidence that the recipe cannot
+-- reproduce. The checks are deliberately loud: a missing half is a torn write, and a
+-- stale digest means one record was updated without the other.
+
+def Scry.wfPairField (j : Json) (k : String) : String :=
+  match Json.getPath j ["pair", k] with
+  | .some (.str s) => s
+  | _ => ""
+
+/-- Check that `repro.json` and `dynamic.json` are one run: same pair id, the evidence's
+recipe digest matches the recipe text, and the facts `verify` relies on agree. It also
+enforces the skip rule: a probe with `heartbeat=false` must say `skipped` and must not
+claim a marker. -/
+def Scry.wfCheckPair (recipeText : String) (recipe evidence : Json) :
+    Except String Unit := do
+  let rs := Json.getStr recipe "schema";
+  let es := Json.getStr evidence "schema";
+  step1 ← match Bool.not (String.eq rs "scry-workflow-repro/2") with
+    | .true => .error ("recipe schema is \"" ++ rs
+      ++ "\", not scry-workflow-repro/2; re-run scry findings repro to write the pair")
+    | .false => .ok ();
+  step2 ← match Bool.not (String.eq es "scry-workflow-dynamic/2") with
+    | .true => .error ("evidence schema is \"" ++ es
+      ++ "\", not scry-workflow-dynamic/2; re-run scry findings repro to write the pair")
+    | .false => .ok ();
+  let rid := Scry.wfPairField recipe "id";
+  let eid := Scry.wfPairField evidence "id";
+  step3 ← match Bool.or (String.eq rid "") (Bool.not (String.eq rid eid)) with
+    | .true => .error ("the pair ids disagree (recipe \"" ++ rid ++ "\", evidence \""
+      ++ eid ++ "\"); the two records were not written together")
+    | .false => .ok ();
+  let digest := Scry.wfPairField evidence "recipeDigest";
+  let actual := Scry.wfHex (Scry.wfFnv recipeText);
+  step4 ← match Bool.not (String.eq digest actual) with
+    | .true => .error ("dynamic.json was written for a different repro.json (recipe digest "
+      ++ digest ++ ", actual " ++ actual
+      ++ "); a one-record write is not a record pair")
+    | .false => .ok ();
+  let re := Json.getList recipe "env";
+  let ee := Json.getList evidence "env";
+  step5 ← match Bool.not (Scry.wfJsonEq (Json.mkArr re) (Json.mkArr ee)) with
+    | .true => .error "the recipe's env and the evidence's env disagree; verify would re-run with a different environment than the one recorded"
+    | .false => .ok ();
+  let rp := match Json.get recipe "plan" with | .some x => x | .none => Json.mkNull;
+  let ep := match Json.get evidence "plan" with | .some x => x | .none => Json.mkNull;
+  step6 ← match Bool.not (Scry.wfJsonEq rp ep) with
+    | .true => .error "the recipe's plan and the evidence's plan disagree; verify would re-run a different plan than the one recorded"
+    | .false => .ok ();
+  step7 ← match Bool.not (String.eq (Json.getStr recipe "derivedFrom")
+      (Json.getStr evidence "derivedFrom")) with
+    | .true => .error "the recipe and the evidence disagree about derivedFrom"
+    | .false => .ok ();
+  let rprobe := Json.getStr recipe "probe";
+  let eprobe := match Json.get evidence "probe" with
+    | .some x => x
+    | .none => Json.mkNull;
+  let claimed := Bool.not (Json.isNull eprobe);
+  let probeProblem : Option String := match String.isEmpty rprobe, claimed with
+    | .true, .true => .some "the evidence claims a probe but the recipe names none"
+    | .false, .false => .some "the recipe names a probe but the evidence has none"
+    | .false, .true => match String.eq (Json.getStr eprobe "descriptor") rprobe with
+      | .true => .none
+      | .false => .some "the recipe's probe and the evidence's probe disagree"
+    | .true, .false => .none;
+  step8 ← match probeProblem with
+    | .some m => .error m
+    | .none => .ok ();
+  let status := Json.getStr evidence "status";
+  let run := match Json.get evidence "run" with | .some x => x | .none => Json.mkNull;
+  let markerObserved := Scry.wfJsonBool run "markerObserved";
+  let heartbeat := Scry.wfJsonBool eprobe "heartbeat";
+  step9 ← match Bool.and claimed (Bool.not heartbeat) with
+    | .true => match String.eq status "compile-failed" with
+      | .true => .ok ()
+      | .false => match String.eq status "skipped" with
+        | .false => .error ("the probe has heartbeat=false but status is \"" ++ status
+          ++ "\"; a silent sensor is a skip, not a clean run")
+        | .true => match markerObserved with
+          | .true => .error "the probe has heartbeat=false but run.markerObserved is true; a marker needs a heartbeat"
+          | .false => .ok ()
+    | .false => .ok ();
+  step10 ← match Bool.and (Bool.not claimed) (String.eq status "skipped") with
+    | .true => .error "status is skipped but the run claims no probe"
+    | .false => .ok ();
+  match markerObserved with
+  | .false => .ok ()
+  | .true => do
+    let marker := Json.getStr ep "marker";
+    let inputText := Json.getStr ep "inputText";
+    let channel := Json.getStr ep "channel";
+    step11 ← match Bool.or (String.eq marker "") (String.eq inputText "") with
+      | .true => .error "run.markerObserved is true but the plan has no marker or input text"
+      | .false => .ok ();
+    let carried : Bool := match channel with
+      | "env" => List.any (fun e => Bool.and
+          (String.eq (Json.getStr e "name") (Json.getStr ep "envName"))
+          (String.contains (Json.getStr e "value") marker)) ee
+      | "argv" => List.any (fun e => Bool.and
+          (String.eq (Json.getStr e "name") "SCRY_POC_ARGS")
+          (String.contains (Json.getStr e "value") marker)) ee
+      | "stdin" => match Json.getPath evidence ["input", "bytes"] with
+        | .some v => match Json.asNat v with
+          | .some n => Nat.lt 0 n
+          | .none => .false
+        | .none => .false
+      | _ => .false;
+    match carried with
+    | .true => .ok ()
+    | .false => .error ("run.markerObserved is true but the recipe's env/input does not carry the marker \""
+      ++ marker ++ "\" (channel " ++ channel
+      ++ "); the evidence claims a marker the recipe cannot reproduce")
+
+/-- Read both records, or neither. One present without the other is a torn write: an
+error, never "no dynamic evidence". -/
+def Scry.wfCheckRecordTextPair (recipeText evidenceText : Option String) :
+    Except String (Option Scry.ReproRecordPair) :=
+  match recipeText, evidenceText with
+  | .none, .none => .ok .none
+  | .some _, .none => .error "torn dynamic record: repro.json exists but dynamic.json does not; the recipe and the evidence are written together, so re-run scry findings repro"
+  | .none, .some _ => .error "torn dynamic record: dynamic.json exists but repro.json does not; the evidence has no recipe to re-run, so re-run scry findings repro"
+  | .some r, .some e => match Json.parse r, Json.parse e with
+    | .ok rj, .ok ej => .ok (.some (Scry.ReproRecordPair.mk r rj ej))
+    | .error x, _ => .error (String.append "repro.json is not JSON: " x)
+    | _, .error x => .error (String.append "dynamic.json is not JSON: " x)
+
+def Scry.wfReadRecordPair (dir : String) : EIO (Option Scry.ReproRecordPair) := do
+  rt ← Scry.wfReadIf (Path.join dir "repro.json");
+  et ← Scry.wfReadIf (Path.join dir "dynamic.json");
+  match Scry.wfCheckRecordTextPair rt et with
+  | .ok x => EIO.pure x
+  | .error e => EIO.fail (String.append e (String.append " (in " (String.append dir ")")))
+
+/-- `wfReadRecordPair`, plus the pair check. `verify` uses this so a disagreeing pair is
+a loud failure instead of a re-run with the wrong environment or marker. -/
+def Scry.wfRequirePair (dir : String) : EIO (Option Scry.ReproRecordPair) := do
+  p ← Scry.wfReadRecordPair dir;
+  match p with
+  | .none => EIO.pure .none
+  | .some x => match Scry.wfCheckPair x.recipeText x.recipe x.evidence with
+    | .error e => EIO.fail ("inconsistent dynamic records in " ++ dir ++ ": " ++ e)
+    | .ok _ => EIO.pure (.some x)
