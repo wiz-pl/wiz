@@ -2038,10 +2038,11 @@ instead of one `rw` per step.
 `lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`): list models with laws, run
 natively in compiled code, updated in place when unique. `lib/WordMap.wiz`
 (`U64Map V`) and `lib/Intern.wiz` (`InternTable`, ids as `U32`) use the persistent map
-as the model (`PMap U64 V` and `PMap String U32`) and a native hash table in compiled
-code, so `insert`, `find` and `erase` (and `intern`) are O(log n) in the kernel,
-`#eval` and `#run`, and the natives `empty`/`insert`/`erase`/`find`/`size`/`ofList`/
-`toList` (and `intern`/`lookup`/`find` for a table) are the compiled representation.
+as the model (`PMap U64 V`, and `PMap String U32` with `PMap Nat String` for a table's
+ids and strings) and a native hash table in compiled code, so `insert`, `find` and
+`erase` (and `intern`/`lookup`) are O(log n) in the kernel, `#eval` and `#run`, and the
+natives `empty`/`insert`/`erase`/`find`/`size`/`ofList`/`toList` (and
+`intern`/`lookup`/`find` for a table) are the compiled representation.
 See `docs/stages/29-natives.md`.
 
 ## Persistent data structures: maps and sets

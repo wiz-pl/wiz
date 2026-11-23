@@ -1,6 +1,6 @@
 import Intern
 -- Interned strings (lib/Intern.wiz): ids by first occurrence, lookups, the same under
--- the interpreter (the model: `PMap String U32`) and compiled (the natives: a hash
+-- the interpreter (the model: a `PMap` each way) and compiled (the natives: a hash
 -- index). Group `natives`.
 
 def next (x : Nat) : Nat := Nat.mod (x * 1103515245 + 12345) 2147483648

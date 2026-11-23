@@ -90,8 +90,9 @@ It is not a global pool: a global pool can't have a model in pure Wiz, since its
 would depend on the history of the whole program. Keep one table per program or per
 analysis, threaded through like a `StrMap`.
 
-* **The model** is `mk (strs : List String)`, the strings by id, all distinct (a
-  module invariant).
+* **The model** is two `PMap`s, from a string to its `U32` id and from the id back to
+  the string, updated together; `intern`, `find` and `lookup` are tree searches
+  (O(log n)), and `toList` is one in-order walk (O(n)).
 * **Compiled** (`wiz_itab`): the `String` values by id, kept as they are, so `lookup`
   copies nothing, plus a hash index from a string to its id + 1. Strings are hashed
   (FNV-1a) and compared by code point, walking the `String.mk (List Char)` cells.

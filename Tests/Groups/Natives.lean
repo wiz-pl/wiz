@@ -63,6 +63,53 @@ def main : IO Unit := IO.bind (MVar.new (A := Nat)) (fun r =>
       IO.println (Nat.toString (x + 1000000 * total (U32Array.push a (U32.ofNat 1)) (U64Map.insert m (U64.ofNat 1) 0)))))))
 "
 
+/-- The models at a size that exercises the indexed representation: every id's string
+(`lookup`), `size`/`toList`, `ofList`/`findD` and `replicate`. The `rfl` definitions
+also pin the model's computation in the kernel (the table de-duplicates, an id finds its
+string, a map's entry finds its value, a pushed array's last element is the pushed one). -/
+def modelIndexSrc : String := r#"import Intern
+import WordMap
+import WordArray
+def strsFrom (k n : Nat) : List String :=
+  match n with
+  | .zero => .nil
+  | .succ m => .cons (String.append "s" (Nat.repr k)) (strsFrom (Nat.succ k) m)
+def entriesFrom (k n : Nat) : List (U64 × Nat) :=
+  match n with
+  | .zero => .nil
+  | .succ m => .cons (U64.ofNat k, k) (entriesFrom (Nat.succ k) m)
+def internAll : InternTable → List String → InternTable
+  | t, .nil => t
+  | t, .cons s rest => internAll (InternTable.intern t s).1 rest
+def lookupOk : Nat → InternTable → Nat
+  | .zero, _ => 0
+  | .succ k, t => match String.eq (InternTable.lookup t (U32.ofNat k)) (String.append "s" (Nat.repr k)) with
+    | .true => Nat.succ (lookupOk k t)
+    | .false => lookupOk k t
+def headOk : List String → Nat
+  | .nil => 0
+  | .cons s _ => match String.eq s "s0" with
+    | .true => 1
+    | .false => 0
+def main : Nat :=
+  let l := strsFrom 0 400;
+  let t := internAll (InternTable.ofList l) l;
+  let m := U64Map.ofList (entriesFrom 0 400);
+  let a8 := U8Array.replicate 4000 (U8.ofNat 7);
+  let a32 := U32Array.replicate 4000 (U32.ofNat 9);
+  let a64 := U64Array.replicate 4000 (U64.ofNat 11);
+  lookupOk 400 t + 2 * InternTable.size t + 4 * U8Array.size a8
+    + 8 * U64Map.size m + 16 * U64Map.findD m (U64.ofNat 399) 0
+    + 32 * (U8Array.get a8 3999).toNat + 64 * (U32Array.get a32 3999).toNat
+    + 128 * (U64Array.get a64 3999).toNat
+    + 256 * headOk (InternTable.toList t)
+def dedup : InternTable.size (InternTable.ofList ["a", "b", "a"]) = 2 := rfl
+def lookupLaw : InternTable.lookup (InternTable.ofList ["a", "b"]) (U32.ofNat 1) = "b" := rfl
+def mapLaw : U64Map.findD (U64Map.ofList [(U64.ofNat 1, 10), (U64.ofNat 2, 20)]) (U64.ofNat 2) 0 = 20 := rfl
+def arrLaw : (U8Array.get (U8Array.replicate 5 (U8.ofNat 1)) 4).toNat = 1 := rfl
+#eval main
+"#
+
 def nativesGroup : Group where
   name := "natives"
   exercise := "S0: lib/WordArray.wiz, lib/WordMap.wiz, lib/Intern.wiz (docs/stages/29-natives.md)"
@@ -75,6 +122,8 @@ def nativesGroup : Group where
         nativesSame "wordmap" "6735556925" },
     { name := "intern tables: the model and the natives agree", run := fun _ =>
         nativesSame "intern" "3120451233" },
+    { name := "the models are indexed: every id's string, size/toList, ofList/findD, replicate (#eval and rfl)", run := fun _ =>
+        okLibs modelIndexSrc ["29248"] },
     { name := "compiled code calls the natives: no list in the IR", run := fun _ => do
         let src := "import WordArray\nimport WordMap\nimport Intern\n" ++
           "def f (a : U32Array) (i : Nat) : U32Array := U32Array.push (U32Array.set a i (U32Array.get a 0)) (U32.ofNat 3)\n" ++

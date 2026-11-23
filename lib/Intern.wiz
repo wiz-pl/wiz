@@ -12,12 +12,15 @@ interned, and ids are handed out in order, 0, 1, 2, … A table is a functional 
 updated in place when it is unique (as `StrMap`); keep one per program or per
 analysis, and key `U64Map`s (lib/WordMap.wiz) or index `U32Array`s by the ids.
 
-The model. A table is a map from a string to its id, `mk (ids : PMap String U32)`: ids
-are `0, 1, 2, …`, handed out in order, and the module keeps them distinct and contiguous
-(the constructor is private). `intern` is a `PMap` lookup and insert, so it is O(log n)
-comparisons in the kernel, under `#eval` and under `#run`, not a scan of all the strings.
-`toList` and `lookup` read the same map by id (through `PMap Nat String`). The kernel
-computes with the definitions, and `#eval`/`#run` run them.
+The model. A table keeps the map from a string to its id and the map from an id back to
+its string, `mk (ids : PMap String U32) (byId : PMap Nat String)`: ids are
+`0, 1, 2, …`, handed out in order, and the module keeps them distinct and contiguous
+(the constructor is private). `intern` is a `PMap` lookup and two `PMap` inserts, so it
+is O(log n) comparisons in the kernel, under `#eval` and under `#run`, not a scan of all
+the strings; `find` and `lookup` are one tree search, and `toList`/`size` read the
+id-to-string tree (as compiled code reads the native list). The two maps are updated
+together, so either can be read on its own. The kernel computes with the definitions,
+and `#eval`/`#run` run them.
 
 Compiled code runs natives instead (`runtime/`, `wiz_itab_*`): the strings by
 id (each `String` value kept as it is, so `lookup` copies nothing) and a hash index
@@ -32,35 +35,36 @@ them, marked `native`, 22f). They abort when memory runs out or a table would ho
 2^32 - 1 strings (the model's ids wrap around there). The tests (group `natives`)
 run the same programs under the interpreter and compiled, C and LLVM.
 
-the map from a string to its id, in first-occurrence order
+the two maps of a table, in first-occurrence order
 -/
 
--- the strings by first occurrence, each with the next id (so duplicates keep the id of
--- their first occurrence, as the C `of_list` does)
-private def InternTable.addStrs : PMap String U32 → List String → PMap String U32
-  | m, .nil => m
-  | m, .cons s rest => match PMap.find m s with
-    | .some _ => InternTable.addStrs m rest
-    | .none => InternTable.addStrs (PMap.insert m s (U32.ofNat (PMap.size m))) rest
+-- the two maps of a list of strings, each with the next id (so duplicates keep the id of
+-- their first occurrence, as the C `of_list` does); the maps gain their entries together
+private def InternTable.addStrs : PMap String U32 → PMap Nat String → List String →
+    PMap String U32 × PMap Nat String
+  | m, byId, .nil => (m, byId)
+  | m, byId, .cons s rest => match PMap.find m s with
+    | .some _ => InternTable.addStrs m byId rest
+    | .none =>
+      let i := PMap.size m;
+      InternTable.addStrs (PMap.insert m s (U32.ofNat i)) (PMap.insert byId i s) rest
 
 sealed inductive InternTable where
-  | private mk (ids : PMap String U32)
+  | private mk (ids : PMap String U32) (byId : PMap Nat String)
 
 -- the map from a string to its id
 private def InternTable.ids : InternTable → PMap String U32
-  | .mk m => m
--- the map of a list of strings, indexed from 0
-private def InternTable.ofStrs (strs : List String) : PMap String U32 :=
-  InternTable.addStrs PMap.empty strs
--- the ids of a map, as a map from the id to the string
-private def InternTable.byId (m : PMap String U32) : PMap Nat String :=
-  PMap.foldl (fun acc s id => PMap.insert acc id.toNat s) PMap.empty m
--- the strings of a map, by id
-private def InternTable.strsOf (m : PMap String U32) : List String :=
-  List.map (fun e => e.2) (PMap.toList (InternTable.byId m))
+  | .mk m _ => m
+-- the map from an id to its string
+private def InternTable.byIdOf : InternTable → PMap Nat String
+  | .mk _ t => t
+-- the table of a list of strings, built in one pass over the list
+private def InternTable.ofStrs (strs : List String) : InternTable :=
+  let p := InternTable.addStrs PMap.empty PMap.empty strs;
+  .mk p.1 p.2
 
 -- the table of a list of strings: ids in list order, 0, 1, 2, …
-def InternTable.ofList (strs : List String) : InternTable := .mk (InternTable.ofStrs strs)
+def InternTable.ofList (strs : List String) : InternTable := InternTable.ofStrs strs
 def InternTable.empty : InternTable := InternTable.ofList .nil
 -- `s`'s id, if it has one
 def InternTable.find (t : InternTable) (s : String) : Option U32 := PMap.find t.ids s
@@ -70,18 +74,23 @@ def InternTable.intern (t : InternTable) (s : String) : InternTable × U32 :=
   | .some i => (t, i)
   | .none =>
     let i := U32.ofNat (PMap.size t.ids);
-    (.mk (PMap.insert t.ids s i), i)
--- the string with id `i`, or ""
+    (.mk (PMap.insert t.ids s i) (PMap.insert t.byIdOf i.toNat s), i)
+-- the string with id `i` in a list of (string, id) pairs, or "" (the list baseline the
+-- model used before it kept the id-to-string map)
 def InternTable.lookupL : List (String × U32) → Nat → String
   | .nil, _ => ""
   | .cons e rest, i => match Nat.beq e.2.toNat i with
     | .true => e.1
     | .false => InternTable.lookupL rest i
 -- the strings, by id (compiled code calls `toListNative`, the C list directly)
-def InternTable.toList (t : InternTable) : List String := InternTable.strsOf t.ids
+def InternTable.toList (t : InternTable) : List String :=
+  List.map (fun e => e.2) (PMap.toList t.byIdOf)
+-- (on `toList`, not on `ids`: compiled code has the native list and no model field)
 def InternTable.size (t : InternTable) : Nat := List.length (InternTable.toList t)
 def InternTable.lookup (t : InternTable) (i : U32) : String :=
-  InternTable.lookupL (PMap.toList t.ids) i.toNat
+  match PMap.find t.byIdOf i.toNat with
+  | .some s => s
+  | .none => ""
 -- (Wiz functions over the operations above)
 -- the ids of a list of strings, interning each
 def InternTable.internAll : InternTable → List String → InternTable × List U32

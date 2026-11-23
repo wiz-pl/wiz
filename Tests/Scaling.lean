@@ -834,6 +834,59 @@ def recordEqEta : String :=
   "def tSlow (xs : Trace (Bool × Bits8)) (t : Nat) :\n" ++
   "    Mealy.stateAt spec s0 xs (Nat.succ t) = (spec (Mealy.stateAt spec s0 xs t) (xs t)).1 := rfl\n"
 
+/-! ### The library models (lib/Intern.wiz, lib/WordMap.wiz, lib/WordArray.wiz, lib/Json.wiz)
+
+`InternTable` was a list scanned per `intern`, `U64Map` a sorted list, and the word
+arrays' `push` an append, so all three models were Θ(n²) under `#eval`/the kernel (4 000
+interns measured 54 s). They are `PMap`s and conses now; these two programs run in a
+child process so that a regression is a timeout or a crash, not a hung suite. -/
+
+/-- The models at 8 000 entries each: interning, `U64Map.ofList`, `replicate` of the
+three word arrays, and two `find`s. -/
+def modelScaleSrc : String := r#"import Intern
+import WordMap
+import WordArray
+def strsGo (k n : Nat) (acc : List String) : List String :=
+  match n with
+  | .zero => List.reverse acc
+  | .succ m => strsGo (Nat.succ k) m (.cons (String.append "s" (Nat.repr k)) acc)
+def entriesGo (k n : Nat) (acc : List (U64 × Nat)) : List (U64 × Nat) :=
+  match n with
+  | .zero => List.reverse acc
+  | .succ m => entriesGo (Nat.succ k) m (.cons (U64.ofNat k, k) acc)
+def internAll (t : InternTable) (l : List String) : InternTable :=
+  List.foldl (fun t s => (InternTable.intern t s).1) t l
+def lookupId (t : InternTable) (i : Nat) : Nat :=
+  match InternTable.find t (String.append "s" (Nat.repr i)) with
+  | .none => 1000000
+  | .some v => v.toNat
+def main : Nat :=
+  let l := strsGo 0 8000 .nil;
+  let t := internAll InternTable.empty l;
+  let m := U64Map.ofList (entriesGo 0 8000 .nil);
+  let a8 := U8Array.replicate 8000 (U8.ofNat 7);
+  let a32 := U32Array.replicate 8000 (U32.ofNat 9);
+  let a64 := U64Array.replicate 8000 (U64.ofNat 11);
+  InternTable.size t + U64Map.size m + U8Array.size a8 + U32Array.size a32
+    + U64Array.size a64 + U64Map.findD m (U64.ofNat 7999) 0
+    + lookupId t 4000 + lookupId t 7999
+#eval main
+"#
+
+/-- A document nested 60 000 deep: the parser must return (its depth error, asserted in
+the `json` group) rather than exhaust the stack. A child process, so a regression crashes
+or times out here instead of taking the suite with it. -/
+def jsonDeepSrc : String := r#"import Json
+partial def rep (n : Nat) (s : String) : String :=
+  match n with
+  | .zero => ""
+  | .succ k => String.append s (rep k s)
+def nest (n : Nat) : String := String.append (rep n "[") (rep n "]")
+#eval match Json.parse (nest 60000) with
+  | .ok _ => 0
+  | .error _ => 1
+"#
+
 def group : Group where
   name := "scaling"
   exercise := "super-linear time and memory"
@@ -1065,7 +1118,18 @@ def group : Group where
         let loader ← Tests.Elab.preludeLoader
         let st := runFrontend (R := ZeroOneMany)
           "import Prelude\ndef w (h : Nat → Nat × Nat) (k : Nat × Nat → Type) (x : k (h 0)) : k (h 1) := x\n" { loader }
-        check (st.messages.any (·.severity == .error)) "two different stuck pairs were taken as equal" }]
+        check (st.messages.any (·.severity == .error)) "two different stuck pairs were taken as equal" },
+    -- (F20) InternTable scanned its list per `intern` (and appended), U64Map was a sorted
+    -- list, and the word arrays appended per `push`: 4 000 interns took 54 s and
+    -- `replicate 8000` 10 s. The models are PMaps and conses now (lib/Intern.wiz,
+    -- lib/WordMap.wiz, lib/WordArray.wiz); 8 000 of each is well under a second.
+    { name := "the library models: 8000 interns, 8000 map entries and three 8000-element replicates (were quadratic)", run := fun _ =>
+        checksLibsWithin 120 modelScaleSrc },
+    -- (F08) the recursive-descent parser had no depth budget: `[[[…` recursed until the
+    -- stack was gone. lib/Json.wiz spends one unit per array/object (limit 512); this is
+    -- in a child process so a regression crashes it rather than the suite.
+    { name := "a 60000-deep JSON document is refused within 60 s (was a stack overflow)", run := fun _ =>
+        checksLibsWithin 60 jsonDeepSrc }]
 
 /-- The Desc sweep: the direct induction hypotheses are the template's on every description
 of `lib/` (once with every module imported, once per alternative backend loaded on its

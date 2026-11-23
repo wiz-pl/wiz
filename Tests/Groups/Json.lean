@@ -58,19 +58,33 @@ partial def rep (n : Nat) (s : String) : String :=
   | .zero => ""
   | .succ k => String.append s (rep k s)
 def nest (n : Nat) : String := String.append (rep n "[") (rep n "]")
+def nestObj (n : Nat) : String :=
+  String.append (rep n "{\"a\":") (String.append "null" (rep n "}"))
 #eval match Json.parse (nest 60000) with
   | .ok _ => "parsed"
   | .error e => e
 #eval match Json.parse (nest 512) with
   | .ok _ => "512 deep ok"
   | .error e => e
+#eval match Json.parse (nest 513) with
+  | .ok _ => "parsed"
+  | .error e => e
 #eval match Json.parse (nest 3) with
   | .ok j => Json.render j
+  | .error e => e
+#eval match Json.parse (nestObj 512) with
+  | .ok _ => "512 objects ok"
+  | .error e => e
+#eval match Json.parse (nestObj 600) with
+  | .ok _ => "parsed"
   | .error e => e
 "#
         okLibs src [r#""nesting too deep (limit 512) at offset 512""#,
      r#""512 deep ok""#,
-     r#""[[[]]]""#] }
+     r#""nesting too deep (limit 512) at offset 512""#,
+     r#""[[[]]]""#,
+     r#""512 objects ok""#,
+     r#""nesting too deep (limit 512) at offset 2560""#] }
   ]
 
 builtin_initialize registerGroup jsonGroup
