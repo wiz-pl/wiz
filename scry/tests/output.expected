@@ -1,0 +1,35 @@
+id is the one semanticId: ok
+id has the f_ prefix: ok
+json row carries the same id: ok
+json row carries the namespaced rule id: ok
+sarif fingerprint carries the same id: ok
+sarif result carries the namespaced rule id: ok
+no baselineState without a baseline: ok
+id ignores the sink point and line: ok
+id changes with the file: ok
+baseline json says new: ok
+baseline sarif says new: ok
+same id with and without baseline: ok
+json rendering is byte-stable: ok
+sarif log is byte-stable: ok
+baseline: bare array: ok
+baseline: ids object: ok
+baseline: previous json report: ok
+baseline: SARIF log: ok
+baseline: unknown shape is an error: ok
+budget: N is a total cap: ok
+budget: SCOPE=N is a severity cap: ok
+budget: a bad scope is an error: ok
+budget: total exceeded: ok
+budget: total message names the count: ok
+budget: one error is within error=1: ok
+budget: error=0 fails with the count: ok
+budget: JSON carries limit, count and the verdict: ok
+warning id is boundaryId: ok
+warning json id matches: ok
+warning sarif fingerprint matches: ok
+report schema: ok
+report counts one finding: ok
+report array has the row: ok
+report warnings has the warning: ok
+report budget is reported: ok

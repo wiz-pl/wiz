@@ -106,6 +106,7 @@ grouped as the CLI groups them, are:
 | `findings triage` | `ID --state new\|triaged\|confirmed\|false-positive\|fixed` + `--reason TEXT`, `--by NAME`, `--db FILE` |
 | `findings repro` | `ID` + `--db FILE`, `--artifacts DIR`, `--cc CMD`, `--sanitize address\|undefined\|both\|none` (`both`), `--input FILE`, `--harness FILE`, `--env K=V` (repeatable), `--witness FILE`, `--timeout SECS` (10), `--json` |
 | `findings verify` | `ID` + `--db FILE`, `--json` |
+| `findings emit` | `FILE.c\|DIR` + `--json OUT`, `--sarif OUT`, `--baseline FILE`, `--update-baseline FILE`, `--budget N\|SCOPE=N` (repeatable), `--fail-on-finding`, `--rules FILE`, `--allow-errors`, `--timeout SECS`, `--max-nodes N`, `--max-rounds N` |
 | `fuzz-span` | `FILE` + `--offset N`, `--json`, `--out FILE` |
 | `egraph` | `FILE.c` + `--fuel N` (8), `--rewrite`, `--json`, `--sarif OUT`, `--fail-on-rewrite` |
 | `prover` | `FILE FUNCTION` + `--cover`, `--cut`, `--dump`, `--rows p:v,…`, `--guards p,…`, `--entry`, `--classify`, `--pack FILE`, `--json`, `--sarif OUT` |
@@ -250,6 +251,33 @@ external/Wiz caller supplies them. `main`, `static` functions, internally called
 functions and callbacks keep the ordinary parameter summary, so the policy does not
 turn every helper into a source. `tests/fixtures/taint-entry-*.c` and the
 `tests/fixtures/taint-exec-*.c` pair are the positive/negative controls.
+
+## `scry findings emit`: one per-finding output pipeline
+
+`scry findings emit` writes the machine-readable side of one run: the same
+`Scry.analyzeFile` pipeline `taint`/`report`/`web` use, rendered as both JSON
+(`scry-findings/1`) and SARIF 2.1.0 from `Scry.Sarif`'s one writer. A finding's id is
+`Scry.semanticId` (`f_<16 hex>`), the same `partialFingerprints.scry/v1` value the HTML
+report and the web bundle's `data/findings.json` carry; there is no second derivation.
+
+```sh
+# one run, both formats: the ids in the JSON rows and the SARIF results are equal
+grail run scry -- findings emit FILE.c --json out.json --sarif out.sarif
+
+# bootstrap a baseline, then gate only new findings (exit 1 names each new id)
+grail run scry -- findings emit DIR --json before.json --update-baseline known.json
+grail run scry -- findings emit DIR --json after.json --baseline known.json
+
+# cap the number of new findings (N, or error=N / warning=N / note=N)
+grail run scry -- findings emit DIR --json out.json --budget 0
+```
+
+`--baseline` accepts its own `scry-baseline/1` document, a previous `--json` report or a
+SARIF log, and suppresses the ids it names; a new finding is named on stderr and exits 1.
+`--budget` counts the post-baseline findings and fails with the count in its message;
+`--fail-on-finding` is the no-baseline gate. Outputs are written before a gate is
+decided, and ordering is by id, so a rerun is byte-identical. Human diagnostics go to
+stderr; `--json -` keeps stdout a clean JSON pipe.
 
 ## Points-to and memory
 
