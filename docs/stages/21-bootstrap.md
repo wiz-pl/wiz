@@ -1602,12 +1602,18 @@ lib/Prelude.wiz`).
 def preludeText : String := "inductive Nat where\n…"
 ```
 
-a single-line Wiz string literal (352 lines, about 16 KB when decoded;
+a single-line Wiz string literal (463 lines, about 20 KB when decoded;
 `scripts/check-prelude-drift.py --dump-embedded` prints it). It is hand-written from
 stage 19a, not generated. The self-hosted module loader substitutes it for every
 `import Prelude` (`Frontend.wiz:9210`) and canonicalises `IO`, `Std` and `Sys` to it
 (`Frontend.wiz:8963`–`8967`); the comment at `Frontend.wiz:8889` is explicit: "the
-self-hosted prelude is what this frontend can check, not `lib/Prelude.wiz`".
+self-hosted prelude is what this frontend can check, not `lib/Prelude.wiz`". It also
+carries the reflection slice its own deriver runner names (`BinderKind`, `ParamView`,
+`FieldView`, `CtorView`, `IndView`, `Tac`, `TacticM`, `MacroM`, `Deriver` and
+`Syntax.mkNode`), because `selfhost/Frontend.wiz` uses them: without them the
+self-hosted compiler cannot read its own frontend. The rest of the host prelude's
+metaprogramming layer (`Expr`, `SatAnswer`, the tactic and macro registries, the
+`Syntax` builders) is still not carried.
 
 **The page's copy is the embedded one.** `web/build-playground.sh` concatenates
 `frontendFiles` from `Wiz/Selfhost.lean:123` (which includes `Frontend.wiz`) into the
@@ -1651,12 +1657,14 @@ The two are a subset and a superset at once.
   model, its arithmetic is monomorphic (`infixl " + " => Nat.add`), where the host has
   `HAdd`/`Add` and instances.
 
-The checker reports 71 runtime declarations in `lib/Prelude.wiz`, 40 of them embedded,
-23 classes, and 8 reviewed gaps. `preludeText` has 162 names: 147 are also declared
-under `lib/`, 15 are reviewed embedded-only names (the `Bytes` model's helpers, `Prod`
-and its projections, `String.data`, `Nat.blt`). 87 names are *promoted*: the page
-offers them with `import Prelude`, while the host declares them in `lib/IO.wiz` (66),
-`lib/Std.wiz` (17), `lib/Sys.wiz` (2) or `lib/Text.wiz` (2, the two above).
+The checker reports 72 runtime declarations in `lib/Prelude.wiz`, 40 of them embedded,
+23 classes, and 9 other reviewed gaps. `preludeText` has 213 names: 192 are also
+declared under `lib/`, 21 are reviewed embedded-only names (the `Bytes` model's
+helpers, `Prod` and its projections, `String.data`, `Nat.blt`). 87 names are
+*promoted*: the page offers them with `import Prelude`, while the host declares them in
+`lib/IO.wiz` (66), `lib/Std.wiz` (17), `lib/Sys.wiz` (2) or `lib/Text.wiz` (2, the two
+above). The reflection slice above is `lib/Prelude.wiz` surface, so it is part of the
+192; the drift check's coverage rule deliberately stops at the runtime marker.
 
 ### The check
 
