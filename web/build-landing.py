@@ -22,6 +22,8 @@ import json
 import os
 import sys
 
+from landing_highlight import highlight
+
 # The template's two insertion points (one line each, so a stale build leaves a
 # recognisable marker rather than a half page).
 CAROUSEL = "<!--wiz-carousel-->"
@@ -107,7 +109,7 @@ def carousel(root, snippets):
 </article>""".format(
                 pid=esc(panel_id), name=esc(name), active=" data-active" if first else "",
                 title=esc(s["title"]), lede=esc(s["lede"]), file=esc(s["file"]),
-                href=esc(playground_href(root, code)), code=esc(code)))
+                href=esc(playground_href(root, code)), code=highlight(code)))
     return (
         '<div class="carousel" id="carousel" role="region" '
         'aria-roledescription="carousel" aria-label="Wiz code snippets">\n'
