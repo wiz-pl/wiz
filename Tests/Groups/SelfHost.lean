@@ -3430,16 +3430,23 @@ def selfHostGroup : Group where
            ("def bad (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => (bad n).tail\n", false),
            ("def bad : Nat := cocon (0, ())\n", false),
            ("def good (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => good (n + 1)\n", true)] },
-    { name := "A19: surface sizes (∞, ↑, Size<, `T ^ s`) are accepted by the self-hosted frontend (selfhost-only: the Lean frontend does not implement them yet)", run := fun _ => do
-        let src := "import Prelude\n" ++
-          "def szInf : Size := ∞\ndef szSuc (s : Size) : Size := ↑s\n" ++
-          "def szLt (s : Size< ∞) : Size< ∞ := s\n" ++
-          "inductive N2 where\n  | z\ncoinductive S2 where\n  | h : N2\n" ++
-          "def nSized : Type := N2 ^ ∞\ndef sSized : Type := S2 ^ ∞\n"
-        let some out ← selfhostOutput src | return
-        let bad := (out.splitOn "\n").filter fun l => l.startsWith "error" || l.startsWith "parse error"
-        unless bad.isEmpty do
-          throw (IO.userError s!"the self-hosted frontend rejects surface sizes:\n{"\n".intercalate bad}\n{out}") },
+    { name := "A19: surface sizes (∞, ↑, Size<, `T^s`) are accepted and printed by the self-hosted frontend", run := fun _ =>
+        -- (the source is the host's surface: `T^s` has no space before `^` (with one it
+        -- parses as `HPow`'s exponent, and `∞` is not a `Nat`), and a `coinductive`'s
+        -- observations are declared like a structure's fields, without `|`. The pinned
+        -- lines are what the checker prints — a `def`'s name and type, an inductive's
+        -- name and sort — so a compiler that echoes `input.wiz` cannot pass this case
+        -- (the `selfhost-host` stub meta-case relies on that). This pins the surface's
+        -- printing, not the size theory: `Size` and `∞` are the kernel's size terms, and
+        -- `N2^∞`/`S2^∞` are its `μ`/`ν` at a size.)
+        selfhostCheckFile
+          ("import Prelude\n" ++
+           "def szInf : Size := ∞\ndef szSuc (s : Size) : Size := ↑s\n" ++
+           "def szLt (s : Size< ∞) : Size< ∞ := s\n" ++
+           "inductive N2 where\n  | z\ncoinductive S2 where\n  h : N2\n" ++
+           "def nSized : Type := N2^∞\ndef sSized : Type := S2^∞\n")
+          ("szInf : Size\nszSuc : (x0 : Size) → Size\n" ++
+           "szLt : (x0 : Size<(∞)) → Size<(∞)\nN2 : U0\nS2 : U0\nnSized : U0\nsSized : U0\n") },
     -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
     { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
         selfhostCheckModules
