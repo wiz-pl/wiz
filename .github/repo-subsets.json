@@ -52,7 +52,7 @@
         "Tests/**",
         "web/**"
       ],
-      "sha256": "dea45d4bb41f6d32c207383831753cdd39a369e003ca2134a453248019671e13"
+      "sha256": "3657288781409dea2cee4c2250893ba9d67bc4b075fb96ecb8e315c5d3e8f000"
     },
     "wizlib": {
       "files": 110,
