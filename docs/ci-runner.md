@@ -49,9 +49,9 @@ self-hosted runner executes that pull request's code on the machine. So:
 | `tests` | tests (the shard matrix) | `shards` is not empty |
 | `wasm modules` | web (the Wasm page modules) | `web` |
 | `web` | web (browser-free tests) | `web` |
-| `docs` | docs (the published site) | a push |
-| `deploy docs to Pages` | docs | a push |
-| `packages` | packages (`scry/`, `hdl/`, `tower/`) | `subset_packages` |
+| `docs`, `docs check` | docs (the published site, and its check) | `code` && `web`, on every event but the schedule |
+| `deploy docs to Pages` | docs | a push to `master`, after `docs` and `docs check` pass |
+| `packages` | packages (`scry/`, `hdl/`, `tower/`) | `subset_packages`; a matrix of `scry`, `hdl`, `tower` and `smoke` |
 | `runtime` | runtime (`runtime/`, `c/`) | `subset_runtime` |
 | `CI result` | all | every run but the weekly schedule |
 | `bootstrap fixpoint` | none (schedule/dispatch) | the schedule or the `fixpoint` input |
@@ -254,8 +254,9 @@ big one, with smaller `--cpus`/`--memory`) to take several heavy shards at once.
 ## Caches
 
 Each job starts with an empty container. The Nix store comes from the image and from
-Cachix: the `lean` job's `nix build .#wiz .#tests` store paths are published and the
-shards substitute them. The Wiz build caches (`~/.cache/wiz`, `.grail`,
+Cachix: the `lean` job's `nix build .#wiz .#tests` store paths, and its
+`.#selfhost-compiler`/`.#selfhost-checker`, are published and the shards substitute
+them. The Wiz build caches (`~/.cache/wiz`, `.grail`,
 `/tmp/wiz-selfhost-*`) and the per-subset workspace caches below still come from the
 GitHub Actions cache, as on GitHub's runners, but the **trusted** elaboration layer is
 not one of them: every shard also reads the packaged `$wiz/share/wiz/cache` (a Nix
@@ -287,7 +288,6 @@ restores its own subset's previous entry and recompiles what changed.
 | `lean` | `.subset-cache/lean` | `subset-v1-lean-<os>-<arch>-<toolchain12>-<lean12>` |
 | `lean` | `.lake/docs-examples` | `subset-v1-lean-<os>-<arch>-<toolchain12>-docs-examples-<lean12>` |
 | `docs examples` | `.lake/docs-examples` | `subset-v1-docs-<os>-<arch>-<toolchain12>-examples-<docs12>` |
-| `docs` | `.wiz-doc-cache/ro` | `subset-v1-docs-<os>-<arch>-<toolchain12>-site-<docs12>` |
 | `packages` | `scry/.grail` | `subset-v1-packages-<os>-<arch>-<toolchain12>-<compiler-key>-<packages12>` |
 | `tests` | `~/.cache/wiz`, `.grail`, `/tmp/wiz-selfhost-*` | `subset-v1-tests-wizlib-<os>-<arch>-<toolchain12>-[pr-<N>-]<shard>-<compiler-key>-<selfhost/lib hash>-<tests12>-<wizlib12>-<wiz tree hash>` |
 | `trust ledger` | `.lake/trust-cache` | `subset-v1-wizlib-<os>-<arch>-<toolchain12>-[pr-<N>-]<driver sha>-<wizlib12>` |
@@ -318,9 +318,9 @@ untrusted.**
   (`cachix use badlydrawnwizards`).
 * A pull request publishes only to the PR cache `wiz-pl` (repository variable
   `CACHIX_PR_NAME`), with the token in the secret `CACHIX_PR_AUTH_TOKEN`. A PR's test
-  shards, trust-ledger, web, wasm, lean and packages jobs add that cache as an extra
-  substituter for that job only, so its key is trusted in that job and nowhere else;
-  master and the docs job never add it as a substituter.
+  shards, trust-ledger, web, wasm, lean, packages and docs jobs add that cache as an
+  extra substituter for that job only, so its key is trusted in that job and nowhere
+  else; master never adds it as a substituter.
 * If `CACHIX_PR_AUTH_TOKEN` is unset, or the PR is from a fork, the PR pushes nothing:
   the step prints "the store paths are not published" and continues, and the shards
   build the paths. Nothing falls back to `CACHIX_AUTH_TOKEN`.

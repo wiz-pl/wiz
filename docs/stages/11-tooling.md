@@ -653,15 +653,16 @@ package's `lib` targets with its module roots (dependencies included), into
   a development one: loopback, `GET`, no caching. Search stays static; code actions need
   an editor's cursor and are not live here. See `docs/building.md`, "Live
   documentation".
-* **CI** builds the library's documentation on `master` and publishes it: the `docs` job
-  runs `wiz doc --lib` on a push (never a pull request), with source links to the
-  commit and the Wasm module, into `doc-site/docs`, assembles the landing page at the
-  site root and the static playground (11ab) under `doc-site/playground`
-  (`web/build-site.sh`), checks the tree (`web/check-site.sh`), and uploads it as the
-  artifact `wiz-docs` (3 days, for debugging); `deploy-docs` deploys that artifact to
-  GitHub Pages. The URLs are `/` (the landing page), `/docs/` (the docs pages:
+* **CI** builds the library's documentation and publishes it: the `docs` job runs
+  `nix build .#pages` on a pull request and a push alike. `.#docs-lib` renders the API
+  pages from `lib/` (source links to the commit and the Wasm module), and `.#pages` adds
+  the landing page at the site root, the static playground (11ab) under `playground/`
+  and the source reader under `source/`; the job uploads the result as the artifact
+  `wiz-docs` (3 days, for debugging). `docs check` re-checks that artifact, and
+  `deploy-docs` deploys it to GitHub Pages from `master`. The URLs are `/` (the landing
+  page), `/docs/` (the docs pages:
   `index.html`, `api.html`, `api.json`, `A.B.html`, `A.B.json`, `search.js` and the Wasm
-  files) and `/playground/`; every link is relative.
+  files), `/playground/` and `/source/` (the reader); every link is relative.
   A repository has one Pages site and each deployment replaces the whole tree, so a
   future performance site shares this deployment under `/perf/` rather than deploying
   separately. `docs/building.md`, "Documentation site", has the URL layout, the
