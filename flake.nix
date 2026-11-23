@@ -1045,25 +1045,30 @@ EOF
                 sh ${./scripts}/release-tarball.sh \
                   "package/wiz-${releaseArch}-linux.tar.gz" bin "${revision}" "" \
                   ${wiz-web} ${releaseSrc} "$PWD/release-libs"
+              # GPLv3 Corresponding Source for the bundled GCC runtime: the
+              # upstream tarball, the nixpkgs patches and expression, and the
+              # revision, beside the tarball in the same Nix output.
+              mkdir -p gcc-source
+              cp ${pkgs.gcc.cc.src} gcc-source/
+              for p in ${lib.concatStringsSep " " pkgs.gcc.cc.patches}; do
+                cp "$p" gcc-source/
+              done
+              cp -R ${nixpkgs}/pkgs/development/compilers/gcc gcc-source/nixpkgs-gcc
+              echo ${nixpkgs.rev} > gcc-source/NIXPKGS_REVISION
+              tar --sort=name --mtime=@${epoch} --owner=0 --group=0 \
+                --numeric-owner -cf - -C gcc-source . | gzip -n \
+                > package/gcc-16.2.0-nixpkgs-source.tar.gz
+              ( cd package && sha256sum gcc-16.2.0-nixpkgs-source.tar.gz \
+                  > gcc-16.2.0-nixpkgs-source.tar.gz.sha256 )
               runHook postBuild
             '';
             installPhase = ''
               runHook preInstall
               mkdir -p $out
               cp package/wiz-${releaseArch}-linux.tar.gz \
-                 package/wiz-${releaseArch}-linux.tar.gz.sha256 $out/
-              # GPLv3 Corresponding Source for the bundled GCC runtime: the
-              # upstream tarball and the patches nixpkgs applies, beside the
-              # tarball in the same Nix output so they travel together.
-              mkdir -p gcc-source
-              cp ${pkgs.gcc.cc.src} gcc-source/
-              for p in ${lib.concatStringsSep " " pkgs.gcc.cc.patches}; do
-                cp "$p" gcc-source/
-              done
-              echo ${nixpkgs.rev} > gcc-source/NIXPKGS_REVISION
-              tar --sort=name --mtime=@${epoch} --owner=0 --group=0 \
-                --numeric-owner -czf $out/gcc-16.2.0-nixpkgs-source.tar.gz \
-                -C gcc-source .
+                 package/wiz-${releaseArch}-linux.tar.gz.sha256 \
+                 package/gcc-16.2.0-nixpkgs-source.tar.gz \
+                 package/gcc-16.2.0-nixpkgs-source.tar.gz.sha256 $out/
               runHook postInstall
             '';
             doCheck = true;
@@ -1089,6 +1094,21 @@ EOF
               cmp repro/a/out/$name.tar.gz repro/b/out/$name.tar.gz
               cmp repro/a/out/$name.tar.gz.sha256 repro/b/out/$name.tar.gz.sha256
               cmp package/$name.tar.gz repro/a/out/$name.tar.gz
+              # The source archive is part of the release: build it again and
+              # compare, with the same deterministic tar/gzip -n inputs.
+              mkdir -p repro/gcc-source
+              cp ${pkgs.gcc.cc.src} repro/gcc-source/
+              for p in ${lib.concatStringsSep " " pkgs.gcc.cc.patches}; do
+                cp "$p" repro/gcc-source/
+              done
+              cp -R ${nixpkgs}/pkgs/development/compilers/gcc repro/gcc-source/nixpkgs-gcc
+              echo ${nixpkgs.rev} > repro/gcc-source/NIXPKGS_REVISION
+              tar --sort=name --mtime=@${epoch} --owner=0 --group=0 \
+                --numeric-owner -cf - -C repro/gcc-source . | gzip -n \
+                > repro/gcc-source.tar.gz
+              cmp package/gcc-16.2.0-nixpkgs-source.tar.gz repro/gcc-source.tar.gz
+              [ "$(cut -d' ' -f1 package/gcc-16.2.0-nixpkgs-source.tar.gz.sha256)" = \
+                "$(cd repro && sha256sum gcc-source.tar.gz | cut -d' ' -f1)" ]
               sh ${./scripts}/test-release-portability.sh \
                 "package/$name.tar.gz" --glibc ${pkgs.glibc} --max-glibc 2.43
               runHook postCheck

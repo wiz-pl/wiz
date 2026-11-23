@@ -311,6 +311,11 @@ jobs:
           # licences are read from the commit, not from the working tree
           .release-tools/scripts/release-tarball.sh dist/wiz-x86_64-linux.tar.gz \
             .lake/build/bin "$(git rev-parse HEAD)" "$cc" "$web" "$GITHUB_WORKSPACE"
+          # The GitHub artifact's cc/ ships Lean's toolchain libgcc_s/libatomic;
+          # attach the matching Lean source for the GCC RLE offer.
+          lean_version=$(sed 's|.*:||' lean-toolchain)
+          curl -L --fail -o "dist/lean4-${lean_version}-source.tar.gz" \
+            "https://github.com/leanprover/lean4/archive/refs/tags/${lean_version}.tar.gz"
           ls -l dist
       - name: The binary tarball is reproducible (two roots, different environments)
         # The same commit, packaged twice in two independent roots with a different

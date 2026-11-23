@@ -17,8 +17,10 @@ Exact source coordinates:
 
 `gcc.cc.src` is only the upstream tarball; the six patches are applied
 separately and are in the nixpkgs tree above (and in the archive beside this
-file). The Nix output is therefore the complete Corresponding Source under
-GPLv3 section 6(d), at no charge from the same place.
+file, with the nixpkgs gcc expression). The Nix output also carries
+`gcc-16.2.0-nixpkgs-source.tar.gz.sha256`, so the source and the tarball are
+tied together. The Nix output is therefore the complete Corresponding Source
+under GPLv3 section 6(d), at no charge from the same place.
 
 The GitHub `release.yml` artifact is a different binary: its wiz/grail link
 Lean's static libc++ (Apache-2.0 WITH LLVM-exception), while its bundled
@@ -26,8 +28,14 @@ Lean's static libc++ (Apache-2.0 WITH LLVM-exception), while its bundled
 and libz.so.1 under the zlib licence. Their sources:
 
   Lean 4.35.0: https://github.com/leanprover/lean4/releases/tag/v4.35.0
-  GCC runtime: the GCC source above
+  cc/ libgcc_s and libatomic: the GCC build bundled with Lean 4.35.0
+    (`lean --print-prefix`/lib), not the nixpkgs 16.2.0 build above. The
+    Lean 4.35.0 source asset is attached to the same release; its toolchain
+    sources carry the exact GCC source and patches.
   zlib: https://zlib.net/
+
+The GitHub tarball's cc/ source is therefore the attached Lean 4.35.0
+source, not the nixpkgs archive (which belongs to the Nix artifact).
 
 The Wiz packaging scripts (scripts/release-tarball.sh,
 scripts/scrub-store-paths.py) and the Wiz source are at
