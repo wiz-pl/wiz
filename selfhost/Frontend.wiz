@@ -415,7 +415,12 @@ def elab : Scope → Syntax → Elab
                         | e => e
                       -- (Σ types are elaborated by `inferType`; this scope-level path is
                       -- used for the simple type annotations in the C header parser)
-                      | .false => .err ("unsupported syntax " +++ kindOf s)
+                      | .false => match strEq (kindOf s) "term.enum" with
+                        -- (22i) `Enum [a, b]`: the kernel keeps the length only (tags are
+                        -- compared by length); a *value* of it still needs `'a`, which the
+                        -- self-hosted frontend does not elaborate yet
+                        | .true => .ok (.enum (List.length (kids s)))
+                        | .false => .err ("unsupported syntax " +++ kindOf s)
   --|ex
   --| | _, _ => .err "not implemented"
   --sol>
@@ -4722,7 +4727,10 @@ def inferT2 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
               | .mk mt es1 => .ok mt (.vsort (.lnum 1)) es1
             | .false => match strEq k "term.namedArg" with
               | .true => .err "a named argument `(x := e)` is only allowed as an argument of an application"
-              | .false => .err (String.append "unsupported syntax " k)
+              | .false => match strEq k "term.enum" with
+                -- (22i) `Enum [a, b] : Sort 1`; the kernel keeps the length only
+                | .true => .ok (.enum (List.length (kids s))) (.vsort (.lnum 1)) es
+                | .false => .err (String.append "unsupported syntax " k)
 -- `(x y : A) × B`
 def depSigmas (gs : Globals) (es : ES) (cx : Cx) (q : Q) (xs : List String) (aStx body : Syntax) : TE := match xs with
   | .nil => inferType gs es cx body

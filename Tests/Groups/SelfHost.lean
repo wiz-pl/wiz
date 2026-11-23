@@ -752,6 +752,19 @@ def unboxStructFiles : List (String × String) :=
 
 def unboxStructExpected : String := "42\n7\n42\n93\n"
 
+/-- (22i) The hazard the marker shape alone does not exclude: a *field* whose type is
+`(0 _ : Enum [x]) → Unit` (convertible to the structure marker) sits in a non-tail
+position. A rule that unboxes a pair as soon as its second component's type is a tail
+would unbox the `(tag, fields)` pair itself and drop the fields; the rule must also see
+that the pair's rest is `Unit` (the index proof), not another field. -/
+def unboxMarkerFieldFiles : List (String × String) :=
+  [("main.wiz", "import IO\n" ++
+      "structure S where\n  f : (0 _ : Enum [x]) → Unit\n  n : Nat\n" ++
+      "def main : IO Unit := do\n  let s : S := S.mk (fun _ => ()) 12;\n" ++
+      "  IO.println (Nat.toString s.n)\n")]
+
+def unboxMarkerFieldExpected : String := "12\n"
+
 /-- (stage 21r) The checks of `c_struct`, both frontends alike. -/
 def structDecls : List (String × Bool) := [
   ("c_struct S3 where\n  x : Nat\n  y : Bool\ndef s3 : S3 := S3.mk 1 .true\ndef s3x : Nat := s3.x\n" ++
@@ -2013,6 +2026,10 @@ def selfHostGroup : Group where
     { name := "c_struct with --unbox-structs: the last field is unboxed, and C reads it back (22i)", run := fun _ => do
         selfhostLinkRun unboxStructFiles unboxStructExpected (flags := #["--unbox-structs"])
         selfhostLinkRun unboxStructFiles unboxStructExpected (flags := #["--rc", "--unbox-structs"]) },
+    { name := "a marker-shaped field type is not a structure tail: --unbox-structs leaves the fields (22i)", run := fun _ => do
+        selfhostLinkRun unboxMarkerFieldFiles unboxMarkerFieldExpected
+        selfhostLinkRun unboxMarkerFieldFiles unboxMarkerFieldExpected (flags := #["--unbox-structs"])
+        selfhostLinkRun unboxMarkerFieldFiles unboxMarkerFieldExpected (flags := #["--rc", "--unbox-structs"]) },
     { name := "a Wiz library (--lib, --no-main, --header) used by a C program, with the handle functions (21s)", run := fun _ => do
         libRunC libSrc libMain libExpected
         selfhostLibRun libSrc libMain libExpected (flags := #["--lib"])
