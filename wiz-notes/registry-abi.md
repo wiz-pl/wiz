@@ -170,7 +170,7 @@ structure Entry where
 
 | kind | name shape | stable key examples | `payload` today | executed by |
 |---|---|---|---|---|
-| deriver | class name, absolute; no `Derive.` stripping | `deriver/BEq` | `.wizRule "Derive.deriveBEq"` | host `runDeriver`; selfhost refuses |
+| deriver | class name, absolute; no `Derive.` stripping | `deriver/BEq` | `.wizRule "deriveBEq"` | host `runDeriver`; selfhost refuses |
 | tactic | syntax kind | `tactic/tactic.exact` | `.wizRule "Tactic.exact"` | host `runTac`; selfhost refuses |
 | macro | syntax kind | `macro/term.listLit` | `.wizRule "ListLit.expand"` | host `runProcMacro`; selfhost refuses |
 | lint set | set name | `lint-set/scry` | `.data` + `schema "wiz-lint/1"` | host `callRunner`; selfhost no |
@@ -693,8 +693,11 @@ for FeEval" must not be read as "a Wiz backend is around the corner".
 
 `term-elab/K` with `Syntax → TacticM Unit`, dispatched in `check` after `expand?` and
 before the built-in kinds (item ②). The registry can declare it now, with a capability
-`term` and the same `Expr` limits; the dispatcher is the work. It is listed here so the
-`Kind` enum does not need a breaking change later.
+`term` and the same `Expr` limits; the dispatcher is the work. Its dispatch order
+(`stage`/priority) is kind-specific, like a backend's phases, and stays in a
+`Wiz/Ext/TermElab` side record keyed by `term-elab/K`; the generic `Entry` does not grow
+a field every kind would ignore. It is listed here so the `Kind` enum does not need a
+breaking change later.
 
 ---
 
@@ -929,7 +932,8 @@ were re-read at those lines, not copied from `extensibility.md` (whose tree was
   tactic.exact]` appears at `:1009` only as code, `:969` is a documentation example).
 
 **Executed.** The build and test results will be filled here from the heavy job. The
-commands are `heavy --rsync --timeout 3600 -- lake build wiz tests` and
+commands are `heavy --rsync --timeout 3600 -- lake build wiz tests` (job 5131, batch,
+queued at the time this file was written behind the batch queue) and
 `heavy --sshfs -- timeout 600 lake test -- '=ext'` (the test runs after the build, one
 heavy job at a time). What I did **not** run: the full suite, `=backend`, `=js`, `=bpf`,
 `=wasm`, `=selfhost`, `=selfhost-cli-diff`, `=wiz-lint`, `grail test`, any measurement.
