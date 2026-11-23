@@ -309,13 +309,17 @@ not a merge gate:
 
 | when | job | what | cost (estimate) |
 |---|---|---|---|
-| after each CI run of a master push (`workflow_run`, so the Lean host is already in Cachix; a run cancelled by a newer push is skipped) | `release` | `nix build .#wizc-release .#wizc .#wizc-seed`: seed, static `wizc`, the fixpoint `cmp`, the tarball; then `scripts/check-wizc-release.sh` runs the packed `wizc` on a frozen fixture (and requires a one-byte variant to disagree) and checks `scripts/wizc-seed.json`; sha256 and MANIFEST in the job summary; the paths pushed to Cachix; the tarball as artifact `wizc-release-SHA` (14 days) | a substitution when `selfhost/`, the Lean host and nixpkgs are unchanged; else about 15 min, about 3 GB |
-| nightly 05:17 UTC on master, and from "Run workflow" | `chain` | `scripts/chain-step-check.sh` in self mode; then in cross mode with `--pred` the newest earlier `wizc-nightly` artifact of master (skipped on the first night or when it is of the same commit); this night's tarball kept as `wizc-nightly` (90 days) and its fixed-output path `wizc-SYSTEM-COMMIT.tar.gz` pushed to Cachix, so `fetchToolchain` finds it by `(commit, hash)` | about 30 min per mode, about 3 GB |
+| after each CI run of a master push that concluded `success` (`workflow_run`, so the Lean host is already in Cachix; a run cancelled by a newer push is skipped, a failed run releases nothing) | `release` | `nix build .#wizc-release .#wizc .#wizc-seed`: seed, static `wizc`, the fixpoint `cmp`, the tarball; then `scripts/check-wizc-release.sh` runs the packed `wizc` on a frozen fixture (and requires a one-byte variant to disagree) and checks `scripts/wizc-seed.json`; sha256 and MANIFEST in the job summary; the paths pushed to Cachix; the tarball as artifact `wizc-release-SHA` (14 days) | a substitution when `selfhost/`, the Lean host and nixpkgs are unchanged; else about 15 min, about 3 GB |
+| nightly 05:17 UTC on master, and from "Run workflow" | `chain` | `scripts/chain-step-check.sh` in self mode; then in cross mode with `--pred` the newest earlier `wizc-nightly` artifact of master (skipped on the first night or when it is of the same commit); this night's tarball kept as `wizc-nightly` (90 days) and, when the step check PASSed, its fixed-output path `wizc-SYSTEM-COMMIT.tar.gz` pushed to Cachix, so `fetchToolchain` finds it by `(commit, hash)` | about 30 min per mode, about 3 GB |
 
 Nothing generated is committed. A `DIFFER` fails the `chain` job and blocks declaring a
 root at that commit (requirement 8); a failed behavioural gate or seed pin fails the
-`release` job, so that release is not pushed to Cachix. The three-stage collector
-fixpoint stays in `fixpoint.yml` (nightly, self-hosted runner, 7 GiB).
+`release` job, so that release is not pushed to Cachix. Every Cachix push is gated and
+nothing else is: the `release` job needs the triggering CI run's conclusion to be
+`success`, the `chain` job needs `chain-step-check: PASS` (self mode, and cross mode when
+it ran) with no `DIFFER`. The builds and the artifact uploads are ungated, so a failing
+round is still downloadable and inspectable. The three-stage collector fixpoint stays in
+`fixpoint.yml` (nightly, self-hosted runner, 7 GiB).
 
 ## The flake interface
 

@@ -16,6 +16,16 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 
 ## [Unreleased]
 
+* ci: `bootstrap-chain.yml` publishes only what passed. The `release` job now runs only
+  for a CI run that concluded `success` (the `workflow_run` gate excluded `cancelled`
+  and `skipped` only, so a failed run released and pushed its paths); its Cachix push
+  restates the condition. The `chain` job's push needs a new `Chain verdict` step to
+  report `pass=yes`, which requires `chain-step-check: PASS` in self mode and in cross
+  mode when it ran, with no `DIFFER`; a night with no earlier release still publishes.
+  The builds and the artifact uploads stay ungated, so a failing round is still
+  downloadable. `nix/bootstrap-chain.nix`'s "nothing in CI builds these" header was
+  stale: they are built, and no commit pins them.
+
 * nix: the Wasm fixtures, the merged web bundle, the docs site, the Pages artifact and
   the binary release tarball are flake outputs (`.#wasm-fixtures`, `.#web-bundle`,
   `.#docs-site`, `.#pages`, `.#release-bin`), each input-addressed by the sources it

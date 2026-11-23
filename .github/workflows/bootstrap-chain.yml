@@ -7,14 +7,20 @@
 #            CI (workflow_run) so the Lean host is already in Cachix: unchanged
 #            `selfhost/`, Lean host and nixpkgs make it a substitution (seconds), a change
 #            costs about 15 min and 3 GB. A CI run cancelled by a newer push is skipped
-#            (the newer run's release covers it); a failed CI run still gets its release.
+#            (the newer run's release covers it). Only a CI run that concluded `success`
+#            releases: a failed run is built and kept as an artifact, never published.
 #   chain    nightly on master: scripts/chain-step-check.sh in self mode (the release
 #            fetched by hash rebuilds itself), then in cross mode from the previous
 #            night's release (two different compilers must give one tarball: the chain's
 #            diverse check). Each night's tarball is kept as the workflow artifact
-#            `wizc-nightly` and its fixed-output store path is pushed to Cachix, so the
-#            next night fetches it by (commit, hash); it is never committed. About 1 h,
-#            3 GB.
+#            `wizc-nightly` and, when the step check PASSed, its fixed-output store path
+#            is pushed to Cachix, so the next night fetches it by (commit, hash); it is
+#            never committed. About 1 h, 3 GB.
+#
+# Nothing is published from a run that did not pass: every Cachix push is gated (the
+# release on the triggering CI run's conclusion, the chain on `chain-step-check: PASS`
+# with no DIFFER). The builds and the artifact uploads stay ungated, so a failing round
+# is still inspectable.
 #
 # A DIFFER fails this workflow, which blocks declaring a chain root
 # (docs/bootstrap-chain.md, "The root", requirement 8) but not merges: it is not part
@@ -54,13 +60,13 @@ jobs:
   release:
     name: wizc release
     # only CI runs of pushes to this repository's master: trusted code, so the push token
-    # may be used
+    # may be used. `success` only: a failed CI run's release must not reach the cache,
+    # and a cancelled or skipped one is covered by the newer push's run.
     if: >-
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
-      github.event.workflow_run.conclusion != 'cancelled' &&
-      github.event.workflow_run.conclusion != 'skipped'
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -105,6 +111,9 @@ jobs:
             --tarball "$rel/wizc-$sys.tar.gz" --seed "$seed" --out .scratch/accept-wizc \
             2>&1 | tee accept-wizc.log
       - name: Publish to Cachix
+        # the job above runs only for a CI run that concluded `success`; the condition is
+        # restated at the push so it is visible here and cannot drift from the job's
+        if: github.event.workflow_run.conclusion == 'success'
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
@@ -197,10 +206,32 @@ jobs:
         run: |
           scripts/chain-step-check.sh --out .scratch/cross \
             --pred "$PRED" --pred-tarball "prev/wizc-$SYS.tar.gz" 2>&1 | tee cross.log
+      - name: Chain verdict
+        # The publish gate. Self mode must have PASSed, and cross mode too when it ran
+        # (it is skipped when no earlier release exists or it is of this commit, which is
+        # not a failure). A log without the script's final PASS line, or any DIFFER, is
+        # not a PASS: a half-built or differing release is not published.
+        id: verdict
+        if: always() && steps.self.outputs.commit != ''
+        run: |
+          pass=yes
+          if ! grep -qx 'chain-step-check: PASS' self.log; then
+            pass=no
+            echo "::error title=chain gate::self mode did not PASS; nothing is published"
+          fi
+          if [ -e cross.log ] && ! grep -qx 'chain-step-check: PASS' cross.log; then
+            pass=no
+            echo "::error title=chain gate::cross mode did not PASS; nothing is published"
+          fi
+          if grep -q '^DIFFER' self.log cross.log 2>/dev/null; then
+            pass=no
+            echo "::error title=chain gate::a chain comparison differs; nothing is published"
+          fi
+          echo "pass=$pass" >> "$GITHUB_OUTPUT"
       - name: Publish to Cachix
         # this night's release and its fixed-output path (what the next night's
         # fetchToolchain asks for), the Lean host's seed, and the step's intermediates
-        if: always() && hashFiles('nightly/commit') != ''
+        if: always() && steps.verdict.outputs.pass == 'yes' && hashFiles('nightly/commit') != ''
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
           SYS: ${{ steps.self.outputs.system }}
