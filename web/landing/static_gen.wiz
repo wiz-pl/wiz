@@ -1,0 +1,26 @@
+-- The landing page's static-complete quantity section: the Loom app's first paint and
+-- the normalised tree hash the runtime exports as `wiz_loom_ssr_hash`.
+--
+-- `web/build-landing.sh` runs this and passes the JSON to `web/build-landing.py`, which
+-- fills the island in `web/landing/index.html`. With JavaScript off the whole app is
+-- the page (all three panels, no select); with it on, the runtime adopts this tree (the
+-- hash matches) instead of replacing it.
+--
+--   wiz run -I <repo>/lib web/landing/static_gen.wiz
+import IO
+import Json
+import Web.Landing
+import Web.Loom
+
+def s0 : Landing.State := Landing.initial
+def rendered : Loom.Rendered Landing.Msg := Loom.LiveApp.render Landing.app s0
+
+def fields : List (String × Json) :=
+  [ Json.field "html" (Json.mkStr rendered.html)
+  , Json.field "hash" (Json.mkStr (Loom.LiveApp.ssrHash Landing.app s0))
+  , Json.field "nodes"
+      (Json.ofNat (Loom.nodeCount (Loom.RNode.ofList (Loom.RNode.siblings rendered.tree))))
+  ]
+
+def main : IO Unit := do
+  IO.println (Json.render (Json.mkObj fields))

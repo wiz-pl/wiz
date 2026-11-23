@@ -131,9 +131,17 @@ def main(argv):
                     errors.append(f"{rel}: {url} does not resolve ({target})")
                     continue
                 if frag and target.endswith(".html"):
-                    if urllib.parse.unquote(frag) not in page_ids(target):
+                    fragment = urllib.parse.unquote(frag)
+                    # A fragment with `=` or `/` is an application route, not an
+                    # anchor: `playground/#code=<base64url>` carries a program (the
+                    # playground reads it with Web.Draft), and `#/s/<name>` on the
+                    # landing page is a carousel deep link. Only a plain anchor is
+                    # checked against the target page's ids.
+                    if "=" in fragment or "/" in fragment:
+                        continue
+                    if fragment not in page_ids(target):
                         errors.append(
-                            f"{rel}: {url}: no id '{urllib.parse.unquote(frag)}' "
+                            f"{rel}: {url}: no id '{fragment}' "
                             f"on {target}"
                         )
 

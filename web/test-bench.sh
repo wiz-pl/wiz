@@ -46,13 +46,19 @@ cat > "$WEB/landing/index.html" <<'PAGE'
 <link rel="stylesheet" href="landing.css"></head><body>
 <main id="main">
 <div class="carousel" id="carousel" role="region" aria-label="Wiz code snippets">
+<div class="carousel-tabs" role="tablist" aria-label="Snippets">
 <a class="tab" role="tab" href="#/s/quantities" aria-controls="/s/quantities" aria-selected="true">Quantities</a>
 <article class="slide" id="/s/quantities" role="tabpanel" tabindex="0" data-active>
 <h2>Quantities</h2><pre tabindex="0"><code class="language-wiz">def identity {0 A : Type} (1 x : A) : A := x</code></pre>
 </article></div>
-<div id="quantity-app" data-wiz-island="loom/1" data-wiz-ssr="t1-00000000-0-0"><div class="q-app q0"></div></div>
+<div id="quantity-app" data-wiz-island="loom/1" data-wiz-ssr="t1-00000000-0-0"><div class="q-app q0" id="quantity-widget"><select id="q-select"></select><section class="q-panel"></section><section class="q-panel"></section><section class="q-panel"></section></div></div>
 </main></body></html>
 PAGE
+for f in app.js wiz-landing-ui.mjs wiz-landing-ui.wasm framework/mount.js \
+         framework/driver.js framework/runtime.js framework/adopt.js; do
+  mkdir -p "$WEB/landing/$(dirname "$f")"
+  : > "$WEB/landing/$f"
+done
 
 sh "$ROOT/web/build-site.sh" "$SITE" "$WEB" >/dev/null
 sh "$ROOT/web/check-site.sh" "$SITE"

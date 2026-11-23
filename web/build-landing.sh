@@ -16,10 +16,12 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT_DIR=
 ISLAND=
 FROM=
+NO_ISLAND=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --island) ISLAND=$2; shift 2 ;;
     --from) FROM=$2; shift 2 ;;
+    --no-island) NO_ISLAND=1; shift ;;
     *) OUT_DIR=$1; shift ;;
   esac
 done
@@ -31,11 +33,13 @@ if [ -n "$FROM" ]; then
   echo "copied $OUT/index.html from $FROM"
   exit 0
 fi
-if [ -z "$ISLAND" ]; then
+if [ "$NO_ISLAND" = 0 ] && [ -z "$ISLAND" ]; then
   WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
   if [ -x "$WIZ" ] && [ -f "$ROOT/web/landing/static_gen.wiz" ]; then
     TMP=$(mktemp)
     trap 'rm -f "$TMP"' EXIT
+    # `wiz run` compiles with cc: in CI this is the docs job's toolchain, locally use
+    # heavy or pass --island. A failure is not swallowed (a static page would hide it).
     "$WIZ" run -I "$ROOT/lib" "$ROOT/web/landing/static_gen.wiz" > "$TMP"
     ISLAND=$TMP
   else
