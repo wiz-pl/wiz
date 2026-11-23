@@ -424,6 +424,12 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
       let dflt := if bi == .implicit then QuantitySyntax.implicitDefault else QuantitySyntax.explicitDefault
       pure (txt (if r == dflt then "" else QuantitySyntax.display r ++ " "))
     | q => do pure (cat [txt "%", ← sub 1024 q, txt " "])
+  -- (B1) the spelling of a kernel former: what `builtin unit := …` (etc.) registered,
+  -- else the old spelling
+  let spelling (k : Name) (dflt : Name) : Name :=
+    match env with
+    | some g => (g.builtins.lookup k).getD dflt
+    | none => dflt
   -- notation (11r)
   if let some g := env then
     if !noUnexp && g.pp.active && (t matches .app .. || t matches .const ..) then
@@ -441,9 +447,9 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
   | .var ix => pure (txt (names[ix]?.getD s!"#{ix}"))
   | .const n _ => pure (txt (Globals.privateBase n))
   | .mvar m => pure (txt s!"?m{m}")
-  | .qty => pure (txt "Qty")
-  | .size => pure (txt "Size")
-  | .sizeLt s => pure (paren (prec > 1022) (cat [txt "Size< ", ← sub 1024 s]))
+  | .qty => pure (txt (spelling "qty" "Qty"))
+  | .size => pure (txt (spelling "size" "Size"))
+  | .sizeLt s => pure (paren (prec > 1022) (cat [txt s!"{spelling "size" "Size"}< ", ← sub 1024 s]))
   | .szInf => pure (txt "∞")
   | .szSuc s => pure (cat [txt "↑", ← sub 1024 s])
   | .sfix _ _ _ _ P f s i x => app (txt "sfix") [P, f, s, i, x]
@@ -501,13 +507,13 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
       ← go env (y' :: x' :: names) (none :: none :: tys) 0 b]))
   | .unit l => pure (txt (match l.toNat? with
     | some 0 => "True"
-    | some 1 => "Unit"
-    | _ => s!"Unit.\{{l}}"))
+    | some 1 => spelling "unit" "Unit"
+    | _ => s!"{spelling "unit" "Unit"}.\{{l}}"))
   | .tt => pure (txt "()")
   | .empty l => pure (txt (match l.toNat? with
     | some 0 => "False"
-    | some 1 => "Empty"
-    | _ => s!"Empty.\{{l}}"))
+    | some 1 => spelling "empty" "Empty"
+    | _ => s!"{spelling "empty" "Empty"}.\{{l}}"))
   | .absurd _ u => pure (paren (prec > 1022) (cat [txt "absurd ", ← sub 1023 u]))
   | .letUnit u b => pure (paren (prec > 0) (cat [txt "let () := ", ← sub 0 u, txt "; ", ← sub 0 b]))
   | .eq _ a b | .eqTy a b => pure (paren (prec > 50) (cat [← sub 51 a, txt " = ", ← sub 51 b]))

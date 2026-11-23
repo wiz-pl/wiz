@@ -27,6 +27,18 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   new outputs (`wiz-notes/nix-artifacts.md` is the handover note; `.github/workflows`
   is unchanged here).
 
+* extensibility (B1): `attribute [term_elab kind] f` registers a Wiz term elaborator
+  (`TermElab := Syntax → TacticM Unit`, `lib/Prelude.wiz`) for a term syntax kind; it runs
+  in the elaborator's interpreter with one goal (the expected type, or a fresh type
+  metavariable in `infer`) and builds the term with the existing `TacticM`/`Expr`
+  requests. An unknown kind is refused (`unknown-syntax`), and the registration is not
+  `local` (like `[tactic]`). The data-primitive spellings are now data:
+  `builtin unit|empty|qty|size` rename the kernel formers (the old names are fallbacks),
+  and a string literal is `builtin string`'s `mk` applied to a list of `builtin char` in
+  `builtin list` (`String.mk (List Char)` by default), so a library with its own
+  `MyChar`/`List`/`String` can define its literal encoding; a mismatch is reported at the
+  literal, not left to the kernel (`tests =elab`, `=reject`).
+
 * ci: a pull request's `build` job starts from a `.lake` a **cold** derivation saved
   (`flake.nix`'s `withLakeCache`, keyed by `flake.lock`, `lean-toolchain`, the
   architecture and the `lean`/`runtime` subset hashes), so Lake recompiles only the

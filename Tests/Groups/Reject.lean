@@ -291,6 +291,17 @@ def group : Group where
     rejected "builtin: nat.add with the wrong arity"
       ("inductive N where\n  | z\ndef K (a : N) : N := a\nbuiltin nat := N\nbuiltin nat.add := K\n")
       none "builtin nat.add := K" "must take 2 arguments",
+    rejected "term_elab: an unknown syntax kind is refused"
+      (prelude ++ "def f (stx : Syntax) : TacticM Unit := fun k => Tac.done\n" ++
+       "attribute [term_elab term.nope] f\n")
+      (some "unknown-syntax") "term.nope" "unknown syntax kind" (cli := true),
+    rejected "term_elab: a declaration that is not a TermElab is refused"
+      (prelude ++ "syntax \"τ\" : term\nattribute [term_elab term.τ] Nat.zero\n")
+      (some "type-mismatch") "attribute [term_elab term.τ] Nat.zero" "is not a term elaborator",
+    rejected "term_elab: a local registration is refused (the effect outlives its module)"
+      (prelude ++ "syntax \"τ\" : term\ndef f (stx : Syntax) : TacticM Unit := fun k => Tac.done\n" ++
+       "local attribute [term_elab term.τ] f\n")
+      none "attribute [term_elab term.τ] f" "only a no-op attribute can be `local`",
 
     -- deriving
     rejected "deriving: no deriver for the class"
