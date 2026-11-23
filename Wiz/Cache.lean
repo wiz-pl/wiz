@@ -1390,6 +1390,10 @@ def ManifestStore.isRead (m : ManifestStore) (dir : System.FilePath) : Bool :=
 def ManifestStore.isUnsigned (m : ManifestStore) (dir : System.FilePath) : Bool :=
   m.unsignedReads.any (·.toString == dir.toString)
 
+/-- May `dir` be served? The write layer always; a read-only layer only if it opted in. -/
+def ManifestStore.trusted (m : ManifestStore) (dir : System.FilePath) : Bool :=
+  !m.isRead dir || m.isUnsigned dir
+
 /-- A layer's generation expiry (Unix seconds, `0` for none), read once. -/
 def ManifestStore.expiryOf (m : ManifestStore) (dir : System.FilePath) : IO Nat := do
   let key := dir.toString
@@ -1962,7 +1966,12 @@ def Store.layeredCore (write : Option System.FilePath) (reads : List System.File
       | none => pure ()
     seen := fun k => do
       if (← seenInMemory.get).contains (Key.id k) then return true
-      for dir in dirs do
+      -- (only layers that may be served: a refused read-only layer's marker says nothing
+      -- this process may rely on — C1)
+      let usable := match manifests with
+        | some ms => dirs.filter ms.trusted
+        | none => dirs        -- `--cache-verify off`: the explicit unverified mode
+      for dir in usable do
         if ← (dir / s!"{markerName k}.wizm").pathExists then return true
       pure false
     markSeen := fun k m => match write with

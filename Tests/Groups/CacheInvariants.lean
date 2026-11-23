@@ -19,7 +19,7 @@ elaboration cache's containment boundary (commit `bd6a330df`):
 * region repair converges (K1): after a tamper, a further run hits, and two writes of one
   artifact give one SHA-256 (T4/T4b);
 * poison is global per key (I12 option a, T11);
-* per-layer `--cache-ro-unsigned` is the pending task 11 contract (T12, skipped until K3).
+* per-layer `--cache-ro-unsigned` (T12) and refused-marker filtering (T13).
 
 The cases are independent of `=toolchain`/`=modules`; those groups keep their own
 end-to-end coverage. This group is the spec's executable form.
@@ -675,13 +675,13 @@ def cacheInvariantsGroup : Group where
           (verify := .warn) (rig := rig) (unsignedReads := [ro])
         checkEq expected (s.messages.toList.map (·.render src))
         checkEq before (← snapshot ro) },
-    /- K3 pending (task 11): the opt-in must cover only the layer before it. -/
-    { name := "per-layer --cache-ro-unsigned: a later layer is still refused (pending task 11)", run := fun _ => do
-        let dir ← mkTree [("A.wiz", "import Prelude\ndef a : Nat := 1\n"),
-                          ("B.wiz", "import Prelude\ndef b : Nat := 2\n"),
-                          ("mainA.wiz", "import A\n#eval a\n"),
-                          ("mainB.wiz", "import B\n#eval b\n"),
-                          ("main.wiz", "import A\nimport B\n#eval a + b\n")]
+    /- K3 (task 11): the opt-in covers only the layer before it. -/
+    { name := "per-layer --cache-ro-unsigned: a later layer is refused", run := fun _ => do
+        let dir ← mkTree [("A.wiz", "axiom a : Prop\n"),
+                          ("B.wiz", "axiom b : Prop\n"),
+                          ("mainA.wiz", "import A\n"),
+                          ("mainB.wiz", "import B\n"),
+                          ("main.wiz", "import A\nimport B\n")]
         let wiz ← invWiz
         let roA ← IO.FS.createTempDir
         let roB ← IO.FS.createTempDir
@@ -703,20 +703,35 @@ def cacheInvariantsGroup : Group where
                     "--cache-ro", roA.toString, "--cache-ro-unsigned",
                     "--cache-ro", roB.toString, "--region-cache", "--region-stats"] }
         checkEq 0 out.exitCode
-        checkEq "main.wiz:3:1: info: 3\n" out.stdout
+        checkEq "" out.stdout
         let warnedB := (out.stderr.splitOn "refusing an unauthenticated layer").length > 1 &&
                        (out.stderr.splitOn roB.toString).length > 1
-        if warnedB then
-          let some hits := invStat out.stderr "region cache: " "modules from a region"
-            | throw (IO.userError s!"no region stats line: {out.stderr}")
-          check (hits == 2) s!"expected roA's A+Prelude only, got {hits}: {out.stderr}"
-          let some without := invStat out.stderr "region cache: " "without"
-            | throw (IO.userError s!"no region stats line: {out.stderr}")
-          check (without > 0) s!"roB's module was served: {out.stderr}"
-        else
-          skip "pending task 11: --cache-ro-unsigned is global; roB was served unsigned"
+        check warnedB s!"roB not refused: {out.stderr}"
+        let some hits := invStat out.stderr "region cache: " "modules from a region"
+          | throw (IO.userError s!"no region stats line: {out.stderr}")
+        let expect := (← regionFiles roA).size
+        check (hits == expect) s!"expected roA's regions only ({expect}), got {hits}: {out.stderr}"
+        let some without := invStat out.stderr "region cache: " "without"
+          | throw (IO.userError s!"no region stats line: {out.stderr}")
+        check (without > 0) s!"roB's module was served: {out.stderr}"
         checkEq beforeA (← snapshot roA)
-        checkEq beforeB (← snapshot roB) }
+        checkEq beforeB (← snapshot roB) },
+    { name := "a refused read-only layer's marker is not seen (K4)", run := fun _ => do
+        let ro ← IO.FS.createTempDir
+        let binary : UInt64 := 4242
+        let k : Cache.Key := { fast := 7, strong := String.ofList (List.replicate 64 'a') }
+        IO.FS.writeFile (ro / s!"{mixHash binary k.fast}-{k.strong}.wizm") "M"
+        let store ← Cache.Store.layered (R := ZeroOneMany) none [ro] binary .warn "" none []
+        check (!(← store.seen k)) "a refused layer's marker was seen"
+        let storeU ← Cache.Store.layered (R := ZeroOneMany) none [ro] binary .warn "" none [ro]
+        check (← storeU.seen k) "the opted-in layer's marker was not seen"
+        let storeOff ← Cache.Store.layered (R := ZeroOneMany) none [ro] binary .off "" none []
+        check (← storeOff.seen k) "off did not read the marker"
+        let opts : Cache.RegionOptions := { rig := "zero-one-many" }
+        let storeR ← Cache.Store.layeredRegion (R := ZeroOneMany) none [ro] binary opts .warn
+          "zero-one-many" none []
+        check (!(← storeR.seen k)) "layeredRegion's refused marker was seen" }
+
   ]
 
 builtin_initialize registerGroup cacheInvariantsGroup
