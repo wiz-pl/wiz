@@ -158,7 +158,7 @@ structure Entry where
   name : String
   aliases : List String := []        -- names share one namespace per kind
   provider : String := "wiz-lang"  -- the core table, or the package
-  set : String := ""               -- the enablement set; empty for core
+  set : String := ""               -- the enablement set; empty for core/already enabled
   schema : String := ""            -- the document the payload consumes
   abi : String := ""               -- the interface the payload was written against
   caps : List Cap := []
@@ -230,7 +230,7 @@ resolve(table, kind, name, needs):
      else if core is some => core
      else if pkg is some  => pkg
      else                 => unknown-<kind> (+ choices)
-  4. unless entry.set is enabled               => <kind>-not-enabled
+  4. unless entry.set.isEmpty or entry.set is enabled => <kind>-not-enabled
   5. unless entry.abi is readable              => unsupported-<kind>
   6. unless needs ⊆ entry.caps                 => <kind>-capability
   7. unless payload is available here          => entry-unsupported / <kind>-not-installed
@@ -255,6 +255,10 @@ Notes on each step:
 * **No default.** `resolve` returns `Except Refusal Entry`. `buildCmd`, `runCmd` and the
   REPL take the resolved entry (or its payload tag), never a bare `String` with an
   `else` branch. A `String` is only the spelling at the CLI boundary.
+* **A list is the prototype's index, not the key.** The table is a `List` so resolution
+  order and duplicate detection are obvious; a production table may add a `HashMap`
+  index for lint-rule lookup. The key remains `(kind, name)`, and the resolver's result
+  must not depend on the index.
 * **Nothing runs before 9.** Unknown, duplicate, disabled, wrong ABI, missing capability
   and missing tool are all refusals with no artifact written. That is the fail-closed
   property; it is testable without running a backend.
@@ -298,7 +302,7 @@ outside the ledger's walk, so its capabilities are **advisory** until there is a
   "wiz-lang"`; a package entry is `.wizRule`, `.data` or `.process` (`.unsupported` is
   allowed anywhere). A package cannot register host code in the compiler process. This
   is the registry-level version of `Module.fromFirstRoot`/`trustedModule`
-  (`Wiz/Module.lean:189-195`, `Wiz/Elab/Command.lean:150-152`).
+  (`Wiz/Module.lean:202`, `Wiz/Elab/Command.lean:228,2941`).
 * **Duplicate `(kind, name)`** — refused wherever it is detected: at registration for a
   Wiz entry (the attribute command), at table construction for core, at resolution for
   package tables. The message names both providers. No "latest wins" by accident.
@@ -466,9 +470,9 @@ lam x body | app f a | lit n | opaque id`. The host reflects with `reflect`
   (`:155-160`);
 * every other kernel form is `opaque id`: an index into a 256-entry handle table, tagged
   with the number of variables in scope (`internHandle`, `:132-141`). Two reflections of
-  the same term at the same depth get the same handle; a handle may be passed back to
-  `reify`, lifted by `depth - d` or strengthened, and using it outside its binders fails
-  (`:183-203`). A handle is never inspectable.
+  the same term at the same depth get the same handle while it is still in that table;
+  a handle may be passed back to `reify`, lifted by `depth - d` or strengthened, and
+  using it outside its binders fails (`:183-203`). A handle is never inspectable.
 * Constructor applications are recovered only where the **type** is known:
   `reflectT` follows the types down (`:210-224,370`), so a `con` at a known nominal type
   is its constructor applied to parameters and fields; where the type is not known it
@@ -672,6 +676,12 @@ pure-list + `ofEntries` shape, because a pure `Except` table is testable and can
 at startup. A `.process` adapter has a `schema` document (`c-text/1`, `bpf-core/1`) and a
 command; its capabilities are advisory until a sandbox exists (`targets-ext.md` §6).
 
+Backend-only fields (`artifacts`, `tools`, `runtime`, `phases` in `targets-ext.md` §2)
+do not go into the generic `Entry`: they live in a `Wiz/Backend/Entry` extension or a
+side table keyed by `target/NAME`. Putting them in the one record would make every
+deriver pay for a target's tool list, and would re-open the per-kind branch the model
+exists to remove.
+
 A **Wiz backend** is not in this item. The host's IR is a Lean inductive with
 `toString` only (`Wiz/Compiler/IR.lean:243,276,292`); there is no parser, JSON or version,
 and `inductive Backend` is `c | llvm | wasm` (`:43-47`). A Wiz function cannot consume
@@ -873,9 +883,9 @@ they are this design's teeth):
   directory.
 * `Wiz.lean`: one import line.
 * `Main.lean:924`: `targets := Wiz.Ext.backendNames`; `:945-966`: `takeTarget` calls
-  `Wiz.Ext.resolveBackend` and throws the refusal message. This makes `--target` the
-  first user of the registry for **validation**; the build/run/REPL dispatch is still the
-  string code and is Step 2. The prototype therefore does **not** yet pass the
+  `Wiz.Ext.resolveBackend` and returns the entry's **canonical** name, so an alias cannot
+  reach the string dispatch under a different spelling; the build/run/REPL dispatch is
+  still the string code and is Step 2. The prototype therefore does **not** yet pass the
   fail-closed-dispatch acceptance (a sixth entry is accepted by `takeTarget` and would
   fall through to C); the note says so instead of claiming otherwise.
 * `.github/test-shards.json`: `"=ext"` added to the shard that already selects `=args`

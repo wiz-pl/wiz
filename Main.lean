@@ -947,29 +947,32 @@ def takeTarget : List String → Except String (Option String × List String)
   | [] => pure (none, [])
   | "--target" :: [] => throw "--target needs c, llvm, wasm, bpf or js"
   | "--target" :: t :: rest => do
-    match Wiz.Ext.resolveBackend t with
-    | .error r => throw r.message
-    | .ok _ => pure ()
+    let e ← match Wiz.Ext.resolveBackend t with
+      | .error r => throw r.message
+      | .ok e => pure e
+    let name := e.name
     let (other, rest) ← takeTarget rest
     match other with
-    | some u => if u != t then throw s!"two targets: {t} and {u}" else pure (some t, rest)
-    | none => pure (some t, rest)
+    | some u => if u != name then throw s!"two targets: {name} and {u}" else pure (some name, rest)
+    | none => pure (some name, rest)
   | "--llvm" :: rest => do
-    match Wiz.Ext.resolveBackend "llvm" with
-    | .error r => throw r.message
-    | .ok _ => pure ()
+    let e ← match Wiz.Ext.resolveBackend "llvm" with
+      | .error r => throw r.message
+      | .ok e => pure e
+    let name := e.name
     let (other, rest) ← takeTarget rest
     match other with
-    | some u => if u != "llvm" then throw s!"two targets: llvm and {u}" else pure (some "llvm", rest)
-    | none => pure (some "llvm", rest)
+    | some u => if u != name then throw s!"two targets: {name} and {u}" else pure (some name, rest)
+    | none => pure (some name, rest)
   | "--wasm" :: rest => do
-    match Wiz.Ext.resolveBackend "wasm" with
-    | .error r => throw r.message
-    | .ok _ => pure ()
+    let e ← match Wiz.Ext.resolveBackend "wasm" with
+      | .error r => throw r.message
+      | .ok e => pure e
+    let name := e.name
     let (other, rest) ← takeTarget rest
     match other with
-    | some u => if u != "wasm" then throw s!"two targets: wasm and {u}" else pure (some "wasm", rest)
-    | none => pure (some "wasm", rest)
+    | some u => if u != name then throw s!"two targets: {name} and {u}" else pure (some name, rest)
+    | none => pure (some name, rest)
   | a :: rest => do
     let (t, rest) ← takeTarget rest
     pure (t, a :: rest)

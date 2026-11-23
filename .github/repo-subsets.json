@@ -27,7 +27,7 @@
         "lake-manifest.json",
         "lean-toolchain"
       ],
-      "sha256": "2a668340e4c942dbb0c852f87e0c5e9fc67ec9dadfaf81b1354fe384251895dd"
+      "sha256": "b0e0af9755e8e29d5ec626f95f8dff5403c2fd0d64f815c0d3f8a1374f8670f2"
     },
     "packages": {
       "files": 916,
