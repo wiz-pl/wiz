@@ -34,7 +34,14 @@ with its level parameters instantiated, or (stage 4c) the type of a stuck
 observational construct. -/
 def headType (g : Globals R) (tys : Array (VTy R)) : Head R → Option (VTy R)
   | .local x => tys[x]?
-  | .global n us => (g.find? n).map fun d => eval g [] (d.type.instLevels d.levelParams us)
+  | .global n us => (g.find? n).map fun d =>
+    -- (conv-perf) the declaration's type evaluated at `us`, shared across every
+    -- comparison (`Globals.tyCache`); a neutral's head type is re-derived on every
+    -- `inferNe`/`typeSort?`/`convNe` otherwise
+    let _ := Stats.bump Stats.cells.headTypeGlobal
+    match g.cachedTy? n us with
+    | some ty => Stats.counted Stats.cells.headTypeCached ty
+    | none => eval g [] (d.type.instLevels d.levelParams us)
   | .mvar _ => none
   | .eq .. | .eqTy .. => some (.sort 0)
   | .cast _ B _ _ => some B
@@ -52,6 +59,53 @@ quantity to put on the binders: the kernel uses the rig's default, and conversio
 
 private def tv (i : Nat) : Term R := .var i
 private def tapps (f : Term R) (as : List (Term R)) : Term R := as.foldl .app f
+
+/-! ### The skeleton memo
+
+The templates below are Π chains whose *structure* is a function of the levels, the
+proposition flag and the binder quantity; the values (`I`, `D`, `P`, `S`, the size, the
+quantity of `scase`) are looked up in the environment by `eval`. So the **term** is built
+once per key and re-used, while the value is evaluated per call — the part that can be
+shared without a value-keyed cache (`wiz-notes/conv-unifier-cost.md` §4.2, row 6). -/
+
+/-- `kind` numbers the builders (each has its own Π chain). -/
+abbrev delimRetK := 1
+abbrev delimArgK := 2
+abbrev delimRecK := 3
+abbrev delimHrecK := 4
+abbrev indMotiveK := 5
+abbrev indMethodK := 6
+abbrev coitStepK := 7
+abbrev sfixFunK := 8
+abbrev scaseMethodK := 9
+abbrev scofixFunK := 10
+
+unsafe def skelGetImpl {R : Type} [DecidableEq R]
+    (store : IO.Ref (Std.HashMap SkelKey (List (R × Term R))))
+    (kind : Nat) (l v : Level) (prop : Bool) (w : R) (build : Unit → Term R) : Term R :=
+  unsafeBaseIO do
+    let k : SkelKey := (kind, l, v, prop)
+    let m ← store.get
+    let bump (c : Stats.Cell) : Unit := Stats.bump c
+    match m[k]? with
+    | some es =>
+      match es.find? (fun (w', _) => decide (w' = w)) with
+      | some (_, t) => bump Stats.cells.skelCached; pure t
+      | none =>
+        let t := build ()
+        bump Stats.cells.skelBuild
+        store.set (m.insert k ((w, t) :: es))
+        pure t
+    | none =>
+      let t := build ()
+      bump Stats.cells.skelBuild
+      store.set (m.insert k [(w, t)])
+      pure t
+
+@[implemented_by skelGetImpl]
+opaque skelGet {R : Type} [DecidableEq R]
+    (store : IO.Ref (Std.HashMap SkelKey (List (R × Term R))))
+    (kind : Nat) (l v : Level) (prop : Bool) (w : R) (build : Unit → Term R) : Term R
 
 /-- A template `Π` with its component sorts (mandatory sorts): `spi q x (a, i) (b, j)` is
 `(q x : a) → b` for `a : Sort i`, `b : Sort j`, together with its sort `imax i j`. Every
@@ -71,35 +125,37 @@ def delimMethodTys (g : Globals R) (l v : Level) (I P : Val R) (w : R) : VTy R �
   let env := [P, I]
   let l1 : Level := .succ l
   let l2 : Level := .succ l1
+  let skel (k : Nat) (m : Unit → Term R) : VTy R := eval g env (skelGet g.skel k l v false w m)
   -- i0 P1 I2
-  let mret := pi "i" (tv 1, l1) (.app (tv 1) (.dret (tv 0)), v)
-  -- q0 P1 I2 ; S0 q1 P2 I3 ; E0 S1 q2 P3 I4 ; ih0 E1 S2 q3 P4 I5
-  let marg := pi "q" (.qty, 1) (pi "S" (.sort l1, l2) (pi "E" (pi "s" (tv 0, l1) (.desc l (tv 4), l2))
-    (pi "ih" (pi "s" (tv 1, l1) (.app (tv 4) (.app (tv 1) (tv 0)), v)) (.app (tv 4) (.darg (tv 3) (tv 2) (tv 1)), v))))
-  -- q0 P1 I2 ; j0 q1 P2 I3 ; E0 j1 q2 P3 I4 ; ih0 E1 j2 q3 P4 I5
-  let mrec := pi "q" (.qty, 1) (pi "j" (tv 2, l1) (pi "E" (.desc l (tv 3), l2)
-    (pi "ih" (.app (tv 3) (tv 0), v) (.app (tv 4) (.drec (tv 3) (tv 2) (tv 1)), v))))
-  -- q0 P1 I2 ; H0 q1 P2 I3 ; j0 H1 q2 P3 I4 ; E0 j1 H2 q3 P4 I5 ; ih0 E1 j2 H3 q4 P5 I6
-  let mhrec := pi "q" (.qty, 1) (pi "H" (.sort l1, l2) (pi "j" (pi "h" (tv 0, l1) (tv 4, l1)) (pi "E" (.desc l (tv 4), l2)
-    (pi "ih" (.app (tv 4) (tv 0), v) (.app (tv 5) (.dhrec (tv 4) (tv 3) (tv 2) (tv 1)), v)))))
-  (eval g env mret.1, eval g env marg.1, eval g env mrec.1, eval g env mhrec.1)
+  (skel delimRetK fun _ => (pi "i" (tv 1, l1) (.app (tv 1) (.dret (tv 0)), v)).1,
+   -- q0 P1 I2 ; S0 q1 P2 I3 ; E0 S1 q2 P3 I4 ; ih0 E1 S2 q3 P4 I5
+   skel delimArgK fun _ => (pi "q" (.qty, 1) (pi "S" (.sort l1, l2) (pi "E" (pi "s" (tv 0, l1) (.desc l (tv 4), l2))
+     (pi "ih" (pi "s" (tv 1, l1) (.app (tv 4) (.app (tv 1) (tv 0)), v)) (.app (tv 4) (.darg (tv 3) (tv 2) (tv 1)), v)))).1,
+   -- q0 P1 I2 ; j0 q1 P2 I3 ; E0 j1 q2 P3 I4 ; ih0 E1 j2 q3 P4 I5
+   skel delimRecK fun _ => (pi "q" (.qty, 1) (pi "j" (tv 2, l1) (pi "E" (.desc l (tv 3), l2)
+     (pi "ih" (.app (tv 3) (tv 0), v) (.app (tv 4) (.drec (tv 3) (tv 2) (tv 1)), v)))).1,
+   -- q0 P1 I2 ; H0 q1 P2 I3 ; j0 H1 q2 P3 I4 ; E0 j1 H2 q3 P4 I5 ; ih0 E1 j2 H3 q4 P5 I6
+   skel delimHrecK fun _ => (pi "q" (.qty, 1) (pi "H" (.sort l1, l2) (pi "j" (pi "h" (tv 0, l1) (tv 4, l1)) (pi "E" (.desc l (tv 4), l2)
+     (pi "ih" (.app (tv 4) (tv 0), v) (.app (tv 5) (.dhrec (tv 4) (tv 3) (tv 2) (tv 1)), v))))).1)
 
 /-- `P : (i : I) → μ D i → Sort v` -/
 def indMotiveTy (g : Globals R) (l v : Level) (I D : Val R) (w : R) (prop : Bool := false) : VTy R :=
   let l1 : Level := .succ l
   let lμ : Level := if prop then .zero else l1
-  eval g [D, I] (spi w "i" (tv 1, l1) (spi w "_" (.mu l (tv 2) (tv 1) (tv 0) .szInf none prop, lμ) (.sort v, .succ v))).1
+  eval g [D, I] (skelGet g.skel indMotiveK l v prop w fun _ =>
+    (spi w "i" (tv 1, l1) (spi w "_" (.mu l (tv 2) (tv 1) (tv 0) .szInf none prop, lμ) (.sort v, .succ v))).1)
 
 /-- `m : (0 i : I) → (xs : ⟦D⟧ (μ D) i) → (ih : All D (μ D) P i xs) → P i (con xs)` -/
 def indMethodTy (g : Globals R) (l v : Level) (I D P : Val R) (w : R) (prop : Bool := false) : VTy R :=
   let l1 : Level := .succ l
-  -- i0 P1 D2 I3 ; xs0 i1 P2 D3 I4 ; ih0 xs1 i2 P3 D4 I5
-  let X₁ : Term R := .lam "j" (.mu l (tv 4) (tv 3) (tv 0) .szInf none prop)
-  let X₂ : Term R := .lam "j" (.mu l (tv 5) (tv 4) (tv 0) .szInf none prop)
-  eval g [P, D, I] (spi 0 "i" (tv 2, l1)
-    (spi w "xs" (Templates.interpApp l prop (tv 3) (tv 2) X₁ (tv 0), l1)
-      (spi w "ih" (tapps (Templates.allTm l v prop) [tv 4, tv 3, X₂, tv 2, tv 1, tv 0], .max l1 v)
-        (tapps (tv 3) [tv 2, .con (tv 1)], v)))).1
+  eval g [P, D, I] (skelGet g.skel indMethodK l v prop w fun _ =>
+    -- i0 P1 D2 I3 ; xs0 i1 P2 D3 I4 ; ih0 xs1 i2 P3 D4 I5
+    let X₁ : Term R := .lam "j" (.mu l (tv 4) (tv 3) (tv 0) .szInf none prop)
+    let X₂ : Term R := .lam "j" (.mu l (tv 5) (tv 4) (tv 0) .szInf none prop)
+    (spi 0 "i" (tv 2, l1)
+      (spi w "xs" (Templates.interpApp l prop (tv 3) (tv 2) X₁ (tv 0), l1)
+        (spi w "ih" (tapps (Templates.allTm l v prop) [tv 4, tv 3, X₂, tv 2, tv 1, tv 0], .max l1 v)
+          (tapps (tv 3) [tv 2, .con (tv 1)], v)))).1)
 
 /-- `S : I → Type l` -/
 def coitStateTy (l : Level) (I : Val R) (w : R) : VTy R :=
@@ -109,8 +165,9 @@ def coitStateTy (l : Level) (I : Val R) (w : R) : VTy R :=
 def coitStepTy (g : Globals R) (l : Level) (I D S : Val R) (w : R) : VTy R :=
   let l1 : Level := .succ l
   -- i0 S1 D2 I3 ; s0 i1 S2 D3 I4
-  eval g [S, D, I] (spi w "i" (tv 2, l1)
-    (spi w "s" (.app (tv 1) (tv 0), l1) (Templates.interpApp l false (tv 4) (tv 3) (tv 2) (tv 1), l1))).1
+  eval g [S, D, I] (skelGet g.skel coitStepK l .zero false w fun _ =>
+    (spi w "i" (tv 2, l1)
+      (spi w "s" (.app (tv 1) (tv 0), l1) (Templates.interpApp l false (tv 4) (tv 3) (tv 2) (tv 1), l1))).1)
 
 /-! ### Sizes
 
@@ -170,20 +227,22 @@ def sfixFunTy (g : Globals R) (l v : Level) (I D P : Val R) (w : R) : VTy R :=
   let l1 : Level := .succ l
   -- s0 P1 D2 I3 ; j0 s1 P2 D3 I4 ; i0 j1 s2 P3 D4 I5 ; y0 i1 j2 s3 P4
   -- rec0 s1 P2 D3 I4 ; i0 rec1 s2 P3 D4 I5 ; x0 i1 rec2 s3 P4
-  eval g [P, D, I] (spi 0 "s" (.size, 1)
-    (pi "rec" (spi 0 "j" (.sizeLt (tv 0), 1)
-        (pi "i" (tv 4, l1) (pi "y" (.mu l (tv 5) (tv 4) (tv 0) (tv 1) none false, l1) (tapps (tv 4) [tv 1, tv 0], v))))
-      (pi "i" (tv 4, l1) (pi "x" (.mu l (tv 5) (tv 4) (tv 0) (tv 2) none false, l1) (tapps (tv 4) [tv 1, tv 0], v))))).1
+  eval g [P, D, I] (skelGet g.skel sfixFunK l v false w fun _ =>
+    (spi 0 "s" (.size, 1)
+      (pi "rec" (spi 0 "j" (.sizeLt (tv 0), 1)
+          (pi "i" (tv 4, l1) (pi "y" (.mu l (tv 5) (tv 4) (tv 0) (tv 1) none false, l1) (tapps (tv 4) [tv 1, tv 0], v))))
+        (pi "i" (tv 4, l1) (pi "x" (.mu l (tv 5) (tv 4) (tv 0) (tv 2) none false, l1) (tapps (tv 4) [tv 1, tv 0], v))))).1)
 
 /-- `m : (0 j : Size< s) → (0 i : I) → (q xs : ⟦D⟧ (μ^j D) i) → P i (con xs)`: the method
 of `scase` at quantity `q` (K1) receives the payload at `q`. -/
 def scaseMethodTy (g : Globals R) (l v : Level) (I D P s q : Val R) : VTy R :=
   let l1 : Level := .succ l
   -- j0 s1 P2 D3 I4 q5 ; i0 j1 s2 P3 D4 I5 q6 ; xs0 i1 j2 s3 P4 D5 I6
-  eval g [s, P, D, I, q] (spi 0 "j" (.sizeLt (tv 0), 1) (spi 0 "i" (tv 4, l1)
-    ((.pi "xs" .default (tv 6)
-      (tapps (Templates.interpTm l) [tv 5, tv 4, .lam "j'" (.mu l (tv 6) (tv 5) (tv 0) (tv 2) none false), tv 0])
-      (tapps (tv 4) [tv 1, .con (tv 0)]) ⟨l1, v⟩), .imax l1 v))).1
+  eval g [s, P, D, I, q] (skelGet g.skel scaseMethodK l v false 0 fun _ =>
+    (spi 0 "j" (.sizeLt (tv 0), 1) (spi 0 "i" (tv 4, l1)
+      ((.pi "xs" .default (tv 6)
+        (tapps (Templates.interpTm l) [tv 5, tv 4, .lam "j'" (.mu l (tv 6) (tv 5) (tv 0) (tv 2) none false), tv 0])
+        (tapps (tv 4) [tv 1, .con (tv 0)]) ⟨l1, v⟩), .imax l1 v))).1)
 
 /-- `A : (j : Size) → (i : I) → Sort (l+1)`: the state family of a sized corecursion.
 Unlike `coitStateTy`, the state may depend on the size; the body of `scofix` is at
@@ -204,13 +263,14 @@ def scofixFunTy (g : Globals R) (l : Level) (I D A : Val R) (w : R) : VTy R :=
   let l1 : Level := .succ l
   -- j0 A1 D2 I3 ; i0 j1 A2 D3 I4 ; a0 i1 j2 A3 D4 I5
   -- rec0 j1 A2 D3 I4 ; i0 rec1 j2 A3 D4 I5 ; a0 i1 rec2 j3 A4 D5 I6
-  eval g [A, D, I] (pi "j" (.size, 1)
-    (pi "rec" (pi "i" (tv 3, l1)
-        (pi "a" (.app (.app (tv 2) (tv 1)) (tv 0), l1)
-          (.nu l (tv 5) (tv 4) (tv 1) (tv 2) none, l1)))
-      (pi "i" (tv 4, l1)
-        (pi "a" (.app (.app (tv 3) (.szSuc (tv 2))) (tv 0), l1)
-          (.nu l (tv 6) (tv 5) (tv 1) (.szSuc (tv 3)) none, l1))))).1
+  eval g [A, D, I] (skelGet g.skel scofixFunK l .zero false w fun _ =>
+    (pi "j" (.size, 1)
+      (pi "rec" (pi "i" (tv 3, l1)
+          (pi "a" (.app (.app (tv 2) (tv 1)) (tv 0), l1)
+            (.nu l (tv 5) (tv 4) (tv 1) (tv 2) none, l1)))
+        (pi "i" (tv 4, l1)
+          (pi "a" (.app (.app (tv 3) (.szSuc (tv 2))) (tv 0), l1)
+            (.nu l (tv 6) (tv 5) (tv 1) (.szSuc (tv 3)) none, l1))))).1)
 
 /-- (Mandatory sorts) Two sorts written on convertible types are equivalent. A hole (only
 in the elaborator, before its sorts pass) is compared with nothing. **Invariant**: no hole
@@ -224,7 +284,9 @@ def sameSorts (σ σ' : BinderSorts) : Bool := sameSort σ.dom σ'.dom && sameSo
 partial def inferNe (g : Globals R) (tys : Array (VTy R)) : Val R → Option (VTy R)
   | .unfold n us sp _ => inferNe g tys (.neutral (.global n us) sp)
   | .lazyInd _ _ _ _ _ _ _ _ _ _ v => inferNe g tys v.get
-  | .neutral h sp => do
+  | .neutral h sp =>
+    let _ := Stats.bump Stats.cells.inferNe
+    do
     -- (P2) a suspended proof has no type of its own; what follows its last `absurd` is
     -- typed by the motive (a neutral that is a *type* and starts at a proof has one)
     let (start, ty₀) ← match headType g tys h with
@@ -273,7 +335,9 @@ partial def typeSort? (g : Globals R) (tys : Array (VTy R)) : VTy R → Option L
   | .desc l _ => some (.succ (.succ l))
   | .mu _ _ _ _ _ _ true => some .zero
   | .mu l .. | .nu l .. => some (.succ l)
-  | v@(.neutral ..) => do
+  | v@(.neutral ..) =>
+    let _ := Stats.bump Stats.cells.typeSortCall
+    do
     match whnf (← inferNe g tys v) with
     | .sort l => some l
     | _ => none
@@ -285,8 +349,9 @@ def componentSorts? (g : Globals R) (tys : Array (VTy R)) (A : VTy R) (B : Closu
 
 /-- Is this type a proposition? Then all its inhabitants are equal. -/
 def isProp (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) : Bool :=
+  let _ := Stats.bump Stats.cells.isPropCall
   match typeSort? g tys ty with
-  | some l => l.equiv 0
+  | some l => if l.equiv 0 then Stats.counted Stats.cells.isPropTrue true else false
   | none => false
 
 /-- (P2) Is the neutral `h · sp[0..k)` a proof of `False`? Either it starts at a proof
@@ -317,8 +382,14 @@ mutual
 `true`. Then **regularity**: a stuck `cast A B e t` with an empty spine and
 `convTy A B` is replaced by `t` (on either side) before comparing. -/
 partial def conv (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) (a b : Val R) : Bool :=
-  -- (P2, `lazyProofs`) proof irrelevance first, so that a glued proof is never unfolded
-  if g.lazyProofs && isProp g tys ty then true else
+  let _ := Stats.bump Stats.cells.conv
+  -- (P2, `lazyProofs`) proof irrelevance first, so that a glued proof is never unfolded.
+  -- (conv-perf) The answer is computed here, once, and reused below: `typeSort?` cannot
+  -- change under `whnf` (it forces `unfold`/`lazyInd` itself, and a stuck cast's sort is
+  -- its type's), so the second `isProp` of the same type was a duplicate. With
+  -- `--eager-proofs` there is nothing to decide early, and the test stays where it was.
+  let isP := g.lazyProofs && isProp g tys ty
+  if isP then true else
   -- a `Nat` operation with a zero argument that makes the other one irrelevant
   -- (`Nat.mul 0 x`, `Nat.add 0 x`, …): reduce it *before* `convGlued` descends into `x`
   -- (a stuck application, perhaps the comparison being decided).
@@ -336,7 +407,7 @@ partial def conv (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) (a b : Val R
   -- (given) Q4: η at `ULift A` (a lifted proposition has one inhabitant)
   if let .ulift _ l A := ty then l.equiv 0 || conv g tys A (vDown a) (vDown b) else
   --<sol
-  if isProp g tys ty then true else
+  if isP || (!g.lazyProofs && isProp g tys ty) then true else
   -- regularity (InReg_conv): a stuck cast between convertible types is its argument
   let a := unCast g tys a
   let b := unCast g tys b
@@ -417,6 +488,7 @@ partial def conv (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) (a b : Val R
 **Exercise 4.6b** (stage 4b): `sigma`/`sigma` like `pi`; `unit`/`unit` and
 `empty`/`empty` by `Level.equiv`. -/
 partial def convTy (g : Globals R) (tys : Array (VTy R)) (a b : VTy R) : Bool :=
+  let _ := Stats.bump Stats.cells.convTy
   if let some r := convGlued g tys a b then r || convTy g tys (whnf a) (whnf b) else
   let a := whnf a
   let b := whnf b
@@ -535,6 +607,7 @@ casted terms; two proof heads (`refl`, `reflTy`, `transp`) are always equal.
   motive instantiated with `(x, y)`. The result type is the motive at the neutral.
 * `absurd m`: motives `convTy`; the result type is `m`. -/
 partial def convNe (g : Globals R) (tys : Array (VTy R)) (a b : Val R) : Option (VTy R) := do
+  let _ := Stats.bump Stats.cells.convNe
   --<sol
   let .neutral h sp := a | none
   let .neutral h' sp' := b | none

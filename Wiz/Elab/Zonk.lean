@@ -13,14 +13,6 @@ namespace Wiz
 
 variable {R : Type} [QRig R] [DecidableEq R] [QuantitySyntax R]
 
-/-- The metavariables still occurring in a term. -/
-partial def Term.mvars (t : Term R) : Array Nat :=
-  (go t |>.run #[]).2
-where
-  go : Term R → StateM (Array Nat) Unit
-    | .mvar m => modify (·.push m)
-    | t => t.forChildren (fun _ => pure ()) (fun _ c => go c)
-
 /-- **Exercise 3.6.** Replace solved metas in `t`, a term in a context of `l` variables.
 
 Split `t` into a head and arguments. If the head is a *solved* meta, evaluate

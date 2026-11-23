@@ -341,7 +341,7 @@ def privacyCheck (g : Globals R) (d : Decl R) (kind : Globals R → Decl R → T
   | .ok _ => pure ()
   | .error e =>
     let hide (n : Name) : Globals R := match g.decls[n]? with
-      | some t => { g with decls := g.decls.insert n { t with value := none } }
+      | some t => { (g.dropCaches) with decls := g.decls.insert n { t with value := none } }
       | none => g
     let used := ops.filter fun n => match kind (hide n) d with
       | .ok _ => false
@@ -412,7 +412,7 @@ def renamePrivate (s : CommandState R) (added : Array Name) : CommandState R :=
   let instCache := added.foldl (fun c n => match decls[f n]? with
     | some d => { g with instCache := c.erase n }.cacheInst d
     | none => c.erase n) g.instCache
-  { s with globals := { g with decls, order, heights, instCache, assumed := rb g.assumed }.setBuiltins (rb g.builtins),
+  { s with globals := { (g.dropCaches) with decls, order, heights, instCache, assumed := rb g.assumed }.setBuiltins (rb g.builtins),
            builtins := rb s.builtins }
 
 /-- Metas are untyped, so `?A : Sort ?u` never learns `?u` from `?A := A`, and

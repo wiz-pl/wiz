@@ -90,7 +90,25 @@ def convGroup : Group where
     { name := "λx y. x ≢ λx y. y",
       run := fun _ => check (!isConv (arr () "A" aa) constR (lams ["x", "y"] "y")) "" },
     { name := "Π: (A : Type) → A ≢ (A : Type) → Type",
-      run := fun _ => check (!isConvTy (pi' "A" () ty "A") (pi' "A" () ty ty)) "" }
+      run := fun _ => check (!isConvTy (pi' "A" () ty "A") (pi' "A" () ty ty)) "" },
+    -- (conv-perf) The evaluator memoises one value per `(name, levels)`
+    -- (`Globals.valCache`), so the body of `use` is evaluated once however many times it
+    -- occurs, in one declaration and across declarations. What this case measures is the
+    -- *shape* of the growth — n → 2n at most 3× (the `checkScaling` claim of linear), not an
+    -- absolute time — so a change that makes repeated uses superlinear fails it.
+    { name := "n and 2n uses of a polymorphic definition scale linearly", run := fun _ => do
+        let source (n : Nat) : String :=
+          let lets := String.join ((List.range n).map fun i =>
+            s!"  let x{i} := use (Prop → Prop) (fun p => p)\n")
+          "def use.{u} {A : Sort u} (x : A) : A := x\n" ++
+          "def t : Prop → Prop :=\n" ++ lets ++ (if n == 0 then "  fun p => p\n" else "  x0\n")
+        let elab (n : Nat) : IO Unit := do
+          let s := runFrontend (R := ZeroOneMany) (source n)
+          let errs := s.messages.filter (·.severity == .error)
+          unless errs.isEmpty do
+            throw (IO.userError s!"unexpected errors at n = {n}: {"\n".intercalate (errs.toList.map (·.text))}")
+        let _ ← checkScaling "uses of a polymorphic definition" elab 2000 3
+        pure () }
   ]
 
 def structGroup : Group where

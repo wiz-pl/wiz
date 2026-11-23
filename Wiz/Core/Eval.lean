@@ -1,5 +1,6 @@
 import Wiz.Core.Value
 import Wiz.Core.Templates
+import Wiz.Core.Stats
 
 /-!
 # Evaluation, quotation, normalisation
@@ -339,7 +340,15 @@ partial def eval (g : Globals R) (env : Env R) : Term R → Val R
   | .const n us => if let some v := vBuiltin? g n then v else match g.find? n with
     | some { value := some v, levelParams, inline, .. } =>
       if inline || g.eager then eval g [] (g.instValue n v levelParams us)
-      else .unfold n us #[] (memoThunk fun _ => eval g [] (g.instValue n v levelParams us))
+      else
+        -- (conv-perf) the shared value of `(n, us)`, built by `withCachedValue`: every
+        -- occurrence and every declaration gets the same `.unfold` node, so its body is
+        -- evaluated once (`jit-nbe`: eval is 5–20× the `conv` call count)
+        let _ := Stats.bump Stats.cells.evalConst
+        let _ := Stats.noteUse n us
+        match g.cachedVal? n us with
+        | some val => Stats.counted Stats.cells.evalConstCached val
+        | none => .unfold n us #[] (memoThunk fun _ => eval g [] (g.instValue n v levelParams us))
     | _ => .neutral (.global n us) #[]
   | .natLit n => .natLit n
   | .natOp op args => vNatOp g op (args.map (eval g env))
@@ -1639,5 +1648,46 @@ end
 def nf (g : Globals R) (t : Term R) : Term R :=
   let g := { g with eager := true, quoteEqs := false }
   quote g 0 (eval g [] t)
+
+/-! ### The shared value of a declaration (conv-perf)
+
+`Globals.valCache`/`Globals.tyCache` hold one evaluated value (and one evaluated type) per
+declaration and level instantiation, shared by every occurrence and every declaration; the
+evaluator cannot insert them itself (`eval` is pure), so they are built here, right after a
+declaration is checked, from the `Globals` that already contains it. The tuples are the
+ones `Globals.instCache` covers (`Term.cacheInst`): `[]` for a monomorphic declaration, and
+every level parameter at `0`, `1` or `2` for a polymorphic one (the levels most uses take;
+another instantiation is evaluated per occurrence, as before).
+
+A thunk is built, not forced: a definition whose value is never compared costs nothing
+beyond the entry. The value thunk closes over the environment **without** its own entry
+(an entry cannot close over the record that holds it), so a recursive use of the
+definition builds its own thunk, exactly as every occurrence does today. -/
+
+/-- The level tuples a declaration's caches cover: `[]` for a monomorphic one, and every
+parameter at `0`, `1` or `2` for a polymorphic one (as `Globals.cacheInst`). -/
+def levelTuples (d : Decl R) : List (List Level) :=
+  if d.levelParams.isEmpty then [[]] else
+  [0, 1, 2].map fun k =>
+    d.levelParams.map fun _ => (List.range k).foldl (fun l _ => .succ l) .zero
+
+/-- Build the `valCache`/`tyCache` entries of `d`, which must already be in `g` (`insert`,
+then this; `Wiz.addDecl` does both). Nothing is built outside the evaluation flags the
+entries are read under (see `Globals.valCache`). -/
+def Globals.withCachedValue (g : Globals R) (d : Decl R) : Globals R :=
+  if g.eager || !g.lazyProofs || g.budget.isSome then g else
+  let uss := levelTuples d
+  let tyEnts := uss.map fun us =>
+    (us, memoThunk fun _ => eval g [] (d.type.instLevels d.levelParams us))
+  let g := { g with tyCache := g.tyCache.insert d.name tyEnts }
+  let valEnts := match d.value with
+    | some v => uss.map fun us =>
+        (us, memoThunk fun _ => eval g [] (g.instValue d.name v d.levelParams us))
+    | none => []
+  let g := if valEnts.isEmpty then { g with valCache := g.valCache.erase d.name }
+           else { g with valCache := g.valCache.insert d.name valEnts }
+  let _ := Stats.bumpN Stats.cells.tyCacheBuild tyEnts.length
+  let _ := Stats.bumpN Stats.cells.valCacheBuild valEnts.length
+  g
 
 end Wiz

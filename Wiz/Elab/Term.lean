@@ -329,7 +329,13 @@ def unifyAt0 (ctx : LocalCtx R) (stx : Syntax) (expected inferred : VTy R) : Ela
 (or got stuck) on the holes, and stays so after they are solved (`w ?n = 8`). Evaluate it
 again with the solutions (`none` if it mentions no solved hole). -/
 def reevalSolved? (ctx : LocalCtx R) (v : VTy R) : ElabM R (Option (VTy R)) := do
-  let t := quote (← getGlobals) ctx.lvl (← forceMeta v)
+  let v ← forceMeta v
+  -- (conv-perf) ask the value whether a **solved** meta is in it, instead of quoting it
+  -- only to read `t.mvars`: the common case (nothing changed) builds no term and runs no
+  -- `instSolved`
+  let _ := Stats.bump Stats.cells.reevalFast
+  if !(← v.hasSolvedMeta) then return none
+  let t := quote (← getGlobals) ctx.lvl v
   let ms := t.mvars
   if ms.isEmpty then return none
   let mut anySolved := false
@@ -1040,6 +1046,7 @@ solved: a binder's type may have been a hole when it was bound (`e : Ex P` with 
 implicit `A` solved later), and conversion and the kernel's inference take the types
 as they are (a hole is rigid there). -/
 def zonkedTypes (ctx : LocalCtx R) : ElabM R (Array (VTy R)) := do
+  let _ := Stats.bump Stats.cells.zonkedTypes
   let g ← getGlobals
   let mut tys : Array (VTy R) := #[]
   for v in ctx.types.reverse do
@@ -1047,6 +1054,16 @@ def zonkedTypes (ctx : LocalCtx R) : ElabM R (Array (VTy R)) := do
     let t ← zonk j (quote g j (← forceMeta v))
     tys := tys.push (eval g (ctx.env.drop (ctx.lvl - j)) t)
   pure tys
+
+/-- (conv-perf) `zonkedTypes ctx` for a `rfl`/goal: the array computed once (at the meta
+epoch it was computed at) is reused while no hole has been solved since, so a `rfl` over a
+nested `Σ`/`Π` no longer re-zonks the whole context at every node. -/
+abbrev ZonkedTypes (R : Type) := Option (Nat × Array (VTy R))
+
+def zonkedTypesAt (ctx : LocalCtx R) (zs? : ZonkedTypes R) : ElabM R (Array (VTy R)) := do
+  match zs? with
+  | some (e, zs) => if (← get).metaEpoch == e then pure zs else zonkedTypes ctx
+  | none => zonkedTypes ctx
 
 /-- (13b) The two sides of an equation that `rfl` is about to prove by `refl`/`reflTy`
 must be definitionally equal **in the elaborator's view** (`Globals.elabView`: a type
@@ -1057,7 +1074,8 @@ equation forges a `Token`. So the comparison is never left to the kernel: unify 
 may solve holes), and when unification fails, the type-directed conversion with the
 elaborator's globals (η for `Unit`; holes are rigid). `A?` is the type of the sides, or
 `none` for two types. -/
-def sameSides (ctx : LocalCtx R) (A? : Option (VTy R)) (a b : Val R) : ElabM R Unit := do
+def sameSides (ctx : LocalCtx R) (A? : Option (VTy R)) (a b : Val R)
+    (zs? : ZonkedTypes R := none) : ElabM R Unit := do
   let s ← get
   try unify ctx.lvl a b
   catch e =>
@@ -1071,7 +1089,7 @@ def sameSides (ctx : LocalCtx R) (A? : Option (VTy R)) (a b : Val R) : ElabM R U
     let b ← again b
     -- the types of the variables too: a binder's type may have been a hole when it was
     -- bound, and conversion (which infers the types of neutrals) takes holes as rigid
-    let tys ← zonkedTypes ctx
+    let tys ← zonkedTypesAt ctx zs?
     -- what the kernel does with `refl a`: its type `a = a` against `a = b`, both
     -- computed afresh (an equation at a Σ or Π computes by components, and then holds by
     -- η where the sides themselves are not compared by `conv`)
@@ -1091,9 +1109,10 @@ def refreshVal (ctx : LocalCtx R) (v : Val R) : ElabM R (Val R) := do
   evalIn ctx (← zonk ctx.lvl (quote (← getGlobals) ctx.lvl (← forceMeta v)))
 
 /-- `sameSides` as a test: no error, and the state (solved holes) restored on failure. -/
-def sidesOk (ctx : LocalCtx R) (A? : Option (VTy R)) (a b : Val R) : ElabM R Bool := do
+def sidesOk (ctx : LocalCtx R) (A? : Option (VTy R)) (a b : Val R)
+    (zs? : ZonkedTypes R := none) : ElabM R Bool := do
   let s ← get
-  try sameSides ctx A? a b; pure true
+  try sameSides ctx A? a b zs?; pure true
   catch _ => set s; pure false
 
 /-- `rfl` at an equation that has already computed: `succ a = succ b` at `Nat` is a Σ of
@@ -1101,14 +1120,15 @@ def sidesOk (ctx : LocalCtx R) (A? : Option (VTy R)) (a b : Val R) : ElabM R Boo
 `a = b` with `a ≡ b`, the proof is one `refl a` (`eqSigmaSides?`). Otherwise build it by the same shape
 (pairs, lambdas, `()`, and a case split for a Π over a tag type), with `refl` at the
 equations left; the kernel checks them. -/
-partial def rflProof (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Option (Term R)) := do
+partial def rflProof (ctx : LocalCtx R) (ty : VTy R) (zs? : ZonkedTypes R := none) :
+    ElabM R (Option (Term R)) := do
   let g ← getGlobals
   match ← force ty with
   | .neutral (.eq A a b) #[] =>
-    sameSides ctx (some A) a b
+    sameSides ctx (some A) a b zs?
     pure (some (.refl (quote g ctx.lvl A) (quote g ctx.lvl a)))
   | .neutral (.eqTy X Y) #[] =>
-    sameSides ctx none X Y
+    sameSides ctx none X Y zs?
     pure (some (.reflTy (quote g ctx.lvl X)))
   | .unit _ => pure (some .tt)
   | ty'@(.sigma _ _ A B _) =>
@@ -1118,11 +1138,15 @@ partial def rflProof (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Option (Term R))
       let T ← refreshVal ctx T
       let a ← refreshVal ctx a
       let b ← refreshVal ctx b
-      if convTy g (← zonkedTypes ctx) (vEq g T a b) (← refreshVal ctx ty') then
-        if ← sidesOk ctx (some T) a b then
+      -- (conv-perf) the zonked binder types, computed once for this goal and passed to the
+      -- recursive `rflProof`s (which are at the same context)
+      let zs ← zonkedTypesAt ctx zs?
+      let zs? := some ((← get).metaEpoch, zs)
+      if convTy g zs (vEq g T a b) (← refreshVal ctx ty') then
+        if ← sidesOk ctx (some T) a b zs? then
           return some (.refl (quote g ctx.lvl T) (quote g ctx.lvl a))
-    let some a ← rflProof ctx A | pure none
-    let some b ← rflProof ctx (← instM B (← evalIn ctx a)) | pure none
+    let some a ← rflProof ctx A zs? | pure none
+    let some b ← rflProof ctx (← instM B (← evalIn ctx a)) zs? | pure none
     pure (some (.pair a b))
   | .pi x _ _ A B _ =>
     let ctx' := ctx.bind x A

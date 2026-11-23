@@ -1767,7 +1767,7 @@ def addDecl (g : Globals R) (d : Decl R) : TCM (Globals R) := do
   if let some v := d.value then
     -- usage is the empty vector: a closed term has no locals to misuse
     let _ ← check ctx v (ctx.eval d.type)
-  let g' := g.insert d
+  let g' := (g.insert d).withCachedValue d
   if let some impl := d.impl then
     checkImpl g' d impl
     -- compiled equations derived from the value compute what it computes
@@ -1800,7 +1800,7 @@ def addPartialDecl (g : Globals R) (d : Decl R) : TCM (Globals R) := do
   checkHeader g d
   let ctx : Ctx R := { globals := g, erased := true, witness := true }
   let _ ← check ctx w (ctx.eval d.type)
-  pure (g.insert d)
+  pure ((g.insert d).withCachedValue d)
 
 /-- A partial definition's implementation, which may call `f` and the other definitions
 of its group: checked against the type and kept for the compiler. Only a partial

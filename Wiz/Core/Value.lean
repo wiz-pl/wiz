@@ -24,8 +24,6 @@ especially `01-eval-closures-debruijn` and `02-typecheck-closures-debruijn`.
 
 namespace Wiz
 
-abbrev Lvl := Nat
-
 /-! ### A memoising thunk
 
 Lean's `Thunk` is not memoising in this toolchain (`Thunk.get` is `fun x => x.fn ()`),
@@ -34,14 +32,16 @@ every `whnf`: conversion of a value behind a definition then re-evaluates the de
 at each step, exponentially on a machine's run (issue #256). `memoThunk` is a `Thunk`
 whose function remembers its first result.
 
-The cell is **owned by one thunk** and its function is the pure computation that the
-value denotes: a definition's value term evaluated at the captured levels and globals,
-in the empty environment, or a projection/application of one. Forcing the same thunk
-twice therefore gives the same result, and a cell is never keyed by a name or shared
-between declarations: the captured `Globals` is persistent (insertion keeps the old
-value), so a later declaration cannot change what an existing cell computes. This is
-the invariant that makes the `unsafe` implementation below unobservable; it is the same
-arrangement `Budget` uses for a counter behind a pure interface. -/
+The cell's function is the pure computation that the value denotes: a definition's value
+term evaluated at the captured levels and globals, in the empty environment, or a
+projection/application of one. Forcing the same thunk twice therefore gives the same
+result. A cell is owned by one `.unfold`/`.lazyInd` node; the value node itself may be
+shared between occurrences and declarations (`Globals.valCache`, one entry per
+`(name, levels)`), which is sound because `Globals` is persistent: insertion keeps the old
+value, and an entry is dropped when a change can change what it computes
+(`Globals.valCache`'s docstring). This is the invariant that makes the `unsafe`
+implementation below unobservable; it is the same arrangement `Budget` uses for a counter
+behind a pure interface. -/
 unsafe def memoThunkImpl {α : Type} [Inhabited α] (f : Unit → α) : Thunk α := unsafeBaseIO do
   let cell ← IO.mkRef (none : Option α)
   pure (Thunk.mk fun _ => unsafeBaseIO do
@@ -54,104 +54,6 @@ unsafe def memoThunkImpl {α : Type} [Inhabited α] (f : Unit → α) : Thunk α
 
 /-- A `Thunk` computed at most once. -/
 @[implemented_by memoThunkImpl] opaque memoThunk {α : Type} [Inhabited α] (f : Unit → α) : Thunk α
-
-mutual
-/-- What a neutral is stuck on. Besides variables, globals and metas, stage 4c adds
-stuck observational constructs: an equality or cast whose type is a neutral, and
-proofs (`refl`, `transp`), which never compute because proofs are irrelevant. -/
-inductive Head (R : Type) where
-  | local (lvl : Lvl)
-  | global (name : Name) (levels : List Level)
-  /-- an unsolved (as far as the kernel knows) metavariable -/
-  | mvar (id : Nat)
-  | eq (A a b : Val R)
-  | eqTy (A B : Val R)
-  | cast (A B e t : Val R)
-  | refl (A a : Val R)
-  | reflTy (X : Val R)
-  | transp (A a P p b e : Val R)
-  /-- (P2, `Globals.lazyProofs`) a **suspended proof**: the term `t` in `env`, never
-  evaluated by the kernel. It comes from a marked proof (`Term.prf`) or from a position
-  the syntax marks (`cast`'s equation, `transp`'s two proofs). Outside the kernel it is
-  evaluated to be read back (`quote`, unless `quoteErasesProofs`), within a step budget
-  (`Budget`). It carries no type: conversion never compares two proofs, and what follows
-  an `absurd` is typed by the motive. -/
-  | prf (env : List (Val R)) (t : Term R)
-
-inductive Val (R : Type) where
-  /-- `head` followed by the eliminations in `spine`, innermost first -/
-  | neutral (head : Head R) (spine : Array (Elim R))
-  | sort (level : Level)
-  | pi (x : Name) (bi : BinderInfo) (q : Val R) (dom : Val R) (cod : Closure R) (σ : BinderSorts)
-  | lam (x : Name) (body : Closure R)
-  | sigma (x : Name) (q : Val R) (fst : Val R) (snd : Closure R) (σ : BinderSorts)
-  | pair (a b : Val R)
-  | unit (level : Level)
-  | tt
-  | empty (level : Level)
-  | qty
-  | qlit (r : R)
-  | enum (labels : List Name)
-  | tag (labels : List Name) (i : Nat)
-  | desc (l : Level) (I : Val R)
-  | dret (i : Val R)
-  | darg (q S D : Val R)
-  | drec (q j D : Val R)
-  | dhrec (q H j D : Val R)
-  | mu (l : Level) (I D i : Val R) (sz : Val R) (hint : Option (Name × List Level × List (Val R)))
-      (prop : Bool)
-  | con (x : Val R)
-  | nu (l : Level) (I D i : Val R) (sz : Val R) (hint : Option (Name × List Level × List (Val R)))
-  | size
-  | szInf
-  | szSuc (s : Val R)
-  | sizeLt (s : Val R)
-  | cocon (x : Val R)
-  /-- a sized corecursive value, kept lazy until observed with `out` -/
-  | scofix (l : Level) (I D A f s i a : Val R)
-  /-- an unfolding, kept lazy until observed with `out` -/
-  | coit (l : Level) (I D S step i s : Val R)
-  /-- a numeral of the `builtin nat` type (see `Term.natLit`) -/
-  | natLit (n : Nat)
-  /-- `ULift.{l} A` (for `A : Sort k`) and its constructor (Q4) -/
-  | ulift (k l : Level) (A : Val R)
-  | up (a : Val R)
-  /-- **glued**: the global `name` applied to the eliminations `sp`, together with its
-  unfolding, computed only when needed (a `memoThunk` remembers it). Keeping the head
-  lets conversion compare `f a` with `f b` without unfolding `f`, keeps names in error
-  messages, and lets type classes see their class and the nominal heads. Use `whnf`
-  before matching on a value's shape. -/
-  | unfold (name : Name) (levels : List Level) (sp : Array (Elim R)) (val : Thunk (Val R))
-  /-- **glued** induction on a numeral, `ind l I D v P m i x`, computed only when needed:
-  the induction hypotheses of a numeral (so that `ind` on `1000000` doesn't compute a
-  million of them first), applied to the eliminations `sp` (applications and
-  projections, which stay lazy). `whnf` forces it; quoting keeps the folded form. -/
-  | lazyInd (l : Level) (I D : Val R) (v : Level) (P m i x : Val R) (prop : Bool) (sp : Array (Elim R))
-      (val : Thunk (Val R))
-
-/-- An elimination stuck on a neutral. -/
-inductive Elim (R : Type) where
-  | app (arg : Val R)
-  | fst
-  | snd
-  /-- `motive` is under one binder, `body` under two -/
-  | split (q : Val R) (z : Name) (motive : Closure R) (x y : Name) (body : Closure R)
-  | absurd (motive : Val R)
-  /-- the branches are evaluated in `env` only when the tag is known -/
-  | ecase (z : Name) (motive : Closure R) (env : List (Val R)) (branches : List (Term R))
-  | delim (v : Level) (P mret marg mrec mhrec : Val R)
-  | ind (l : Level) (I D : Val R) (v : Level) (P m i : Val R) (prop : Bool)
-  | sfix (l : Level) (I D : Val R) (v : Level) (P f s i : Val R)
-  | scase (l : Level) (q : Val R) (I D : Val R) (v : Level) (P m s i : Val R)
-  | out
-  /-- `down` (Q4) -/
-  | down
-
-/-- A body waiting for the values of its bound variables. `env` gives the values of
-the body's free variables, with the most recent binder at the head of the list. -/
-inductive Closure (R : Type) where
-  | mk (env : List (Val R)) (body : Term R)
-end
 
 abbrev Env (R : Type) := List (Val R)
 abbrev VTy (R : Type) := Val R

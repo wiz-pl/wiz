@@ -476,24 +476,31 @@ where
       pure (.var (k + (1 <<< 40) + j))
     | t => t.mapChildrenM pure (fun k' c => go (k + k') c)
 
-/-- The failure cache (see `ElabState.unifyFails`): two glued applications of the same
-definition `n` in a context of size `l`, quoted (`canonKey`), with solved metavariables
-replaced by their solutions, when neither mentions an unsolved one. -/
-def failKey? (l : Lvl) (n : Name) (t u : Val R) : ElabM R (Option (UInt64 × Term R × Term R)) := do
+/-- (conv-perf) A cheap pre-key of a failed glued comparison: the head and the two spine
+sizes. It is computed **before** quoting, so a comparison whose shape has no recorded
+failure pays no quote at all; when the bucket is non-empty, the full quoted key below still
+decides. The filter needs no precision for correctness (a miss only re-does the delta step
+that the entry would have short-circuited), and its bucket is only the head, so it has none
+of the deep equality of `lookupFail`. -/
+def failShallow (n : Name) (sp sp' : Array (Elim R)) : UInt64 :=
+  mixHash (sp.size, sp'.size) (hash n)
+
+/-- The full failure key: two glued applications of the same definition `n` in a context of
+size `l`, quoted (`canonKey`), with solved metavariables replaced by their solutions, when
+neither mentions an unsolved one. Built only when the shallow key says a comparison of this
+shape failed before, or to record a new failure. -/
+def failKey? (l : Lvl) (t u : Val R) : ElabM R (Option (Term R × Term R)) := do
   let g ← getGlobals
   let some qt ← (quote g l t).instSolved | return none
   let some qu ← (quote g l u).instSolved | return none
-  let (kt, ku) := canonKey l qt qu
-  pure (some (hash n, kt, ku))
+  pure (some (canonKey l qt qu))
 
-def lookupFail (key : UInt64 × Term R × Term R) : ElabM R (Option String) := do
-  let (h, qt, qu) := key
+def lookupFail (h : UInt64) (qt qu : Term R) : ElabM R (Option String) := do
   let some es := (← get).unifyFails[h]? | return none
   pure ((es.find? (fun (t', u', _) => t' == qt && u' == qu)).map (·.2.2))
 
-def recordFail (key : UInt64 × Term R × Term R) (msg : String) : ElabM R Unit :=
+def recordFail (h : UInt64) (qt qu : Term R) (msg : String) : ElabM R Unit :=
   modify fun s =>
-    let (h, qt, qu) := key
     -- (bounded: start afresh now and then)
     let (fails, count) := if s.unifyFailCount ≥ 4096 then ({}, 0) else (s.unifyFails, s.unifyFailCount)
     { s with unifyFails := fails.insert h ((qt, qu, msg) :: (fails.getD h [])), unifyFailCount := count + 1 }
@@ -534,7 +541,7 @@ partial def unifyLevel (a b : Level) : ElabM R Unit := do
   match a, b with
   | .mvar m, l | l, .mvar m =>
     if Level.occurs m l then throwAt {} s!"universe level mismatch: {a} vs {b}"
-    modify fun s => { s with levelMetas := s.levelMetas.set! m (some l) }
+    modify fun s => { s with levelMetas := s.levelMetas.set! m (some l), metaEpoch := s.metaEpoch + 1 }
   | .succ a', .succ b' => unifyLevel a' b'
   | _, _ => throwAt {} s!"universe level mismatch: {a} vs {b}"
   --|ex
@@ -542,10 +549,186 @@ partial def unifyLevel (a b : Level) : ElabM R Unit := do
   --sol>
 
 
+/-- Does the term mention a metavariable whose solution is known? -/
+def termHasSolvedMeta (t : Term R) : ElabM R Bool := do
+  for m in t.mvars do
+    if (← lookupMeta m).solution.isSome then return true
+  return false
+
+/-- (conv-perf) Does this value mention a metavariable that is **solved**? This is the
+question `quote` + `Term.mvars` + `lookupMeta` answers in `reevalSolved?`/`reevalStale?`,
+asked of the value directly: no term is built (and no `instSolved`/`zonk` runs when the
+answer is "no", the common case — the type did not change).
+
+It walks what `quote` would traverse — a closure's body (by its metavariables) and its
+environment, a neutral's head and spine, a term's metavariables — and does not force a
+`Thunk`: `quote` keeps `unfold`/`lazyInd` folded, so their bodies were never visible to the
+old test either. `true` means "maybe": a shape not walked is reported as `true`, so the
+caller's slow path is always safe and the answer is identical to the quoted one. -/
+mutual
+partial def Val.hasSolvedMeta : Val R → ElabM R Bool
+  | .neutral h sp => do
+    if ← Head.hasSolvedMeta h then return true
+    Elim.arrayHasSolvedMeta sp
+  | .sort _ | .unit _ | .empty _ | .tt | .qty | .qlit _ | .enum _ | .tag _ _ | .size
+  | .szInf | .natLit _ => return false
+  | .pi _ _ q dom cod _ => do
+    if ← Val.hasSolvedMeta q then return true
+    if ← Val.hasSolvedMeta dom then return true
+    Closure.hasSolvedMeta cod
+  | .lam _ b => Closure.hasSolvedMeta b
+  | .sigma _ q a b _ => do
+    if ← Val.hasSolvedMeta q then return true
+    if ← Val.hasSolvedMeta a then return true
+    Closure.hasSolvedMeta b
+  | .pair a b => do
+    if ← Val.hasSolvedMeta a then return true
+    Val.hasSolvedMeta b
+  | .desc _ I | .dret I | .con I | .cocon I | .szSuc I | .sizeLt I | .up I => Val.hasSolvedMeta I
+  | .darg q S D => do
+    if ← Val.hasSolvedMeta q then return true
+    if ← Val.hasSolvedMeta S then return true
+    Val.hasSolvedMeta D
+  | .drec q j D => do
+    if ← Val.hasSolvedMeta q then return true
+    if ← Val.hasSolvedMeta j then return true
+    Val.hasSolvedMeta D
+  | .dhrec q H j D => do
+    if ← Val.hasSolvedMeta q then return true
+    if ← Val.hasSolvedMeta H then return true
+    if ← Val.hasSolvedMeta j then return true
+    Val.hasSolvedMeta D
+  | .mu _ I D i s hint _ | .nu _ I D i s hint => do
+    if ← Val.hasSolvedMeta I then return true
+    if ← Val.hasSolvedMeta D then return true
+    if ← Val.hasSolvedMeta i then return true
+    if ← Val.hasSolvedMeta s then return true
+    match hint with
+    | some (_, _, args) => Elim.valsHaveSolvedMeta args
+    | none => return false
+  | .scofix _ I D A f s i a => do
+    if ← Val.hasSolvedMeta I then return true
+    if ← Val.hasSolvedMeta D then return true
+    if ← Val.hasSolvedMeta A then return true
+    if ← Val.hasSolvedMeta f then return true
+    if ← Val.hasSolvedMeta s then return true
+    if ← Val.hasSolvedMeta i then return true
+    Val.hasSolvedMeta a
+  | .coit _ I D S st i s => do
+    if ← Val.hasSolvedMeta I then return true
+    if ← Val.hasSolvedMeta D then return true
+    if ← Val.hasSolvedMeta S then return true
+    if ← Val.hasSolvedMeta st then return true
+    if ← Val.hasSolvedMeta i then return true
+    Val.hasSolvedMeta s
+  | .ulift _ _ A => Val.hasSolvedMeta A
+  -- (a thunk is not forced: `quote` keeps these folded)
+  | .unfold _ _ sp _ => Elim.arrayHasSolvedMeta sp
+  | .lazyInd _ I D _ P m i x _ sp _ => do
+    if ← Val.hasSolvedMeta I then return true
+    if ← Val.hasSolvedMeta D then return true
+    if ← Val.hasSolvedMeta P then return true
+    if ← Val.hasSolvedMeta m then return true
+    if ← Val.hasSolvedMeta i then return true
+    if ← Val.hasSolvedMeta x then return true
+    Elim.arrayHasSolvedMeta sp
+
+partial def Head.hasSolvedMeta : Head R → ElabM R Bool
+  | .local _ | .global .. => return false
+  | .mvar m => return (← lookupMeta m).solution.isSome
+  | .eq A a b => do
+    if ← Val.hasSolvedMeta A then return true
+    if ← Val.hasSolvedMeta a then return true
+    Val.hasSolvedMeta b
+  | .eqTy A B => do
+    if ← Val.hasSolvedMeta A then return true
+    Val.hasSolvedMeta B
+  | .cast A B e t => do
+    if ← Val.hasSolvedMeta A then return true
+    if ← Val.hasSolvedMeta B then return true
+    if ← Val.hasSolvedMeta e then return true
+    Val.hasSolvedMeta t
+  | .refl A a => do
+    if ← Val.hasSolvedMeta A then return true
+    Val.hasSolvedMeta a
+  | .reflTy X => Val.hasSolvedMeta X
+  | .transp A a P p b e => do
+    if ← Val.hasSolvedMeta A then return true
+    if ← Val.hasSolvedMeta a then return true
+    if ← Val.hasSolvedMeta P then return true
+    if ← Val.hasSolvedMeta p then return true
+    if ← Val.hasSolvedMeta b then return true
+    Val.hasSolvedMeta e
+  | .prf env t => do
+    if ← termHasSolvedMeta t then return true
+    Elim.valsHaveSolvedMeta env
+
+partial def Elim.hasSolvedMeta : Elim R → ElabM R Bool
+  | .app a => Val.hasSolvedMeta a
+  | .fst | .snd | .out | .down => return false
+  | .split q _ m _ _ body => do
+    if ← Val.hasSolvedMeta q then return true
+    if ← Closure.hasSolvedMeta m then return true
+    Closure.hasSolvedMeta body
+  | .absurd m => Val.hasSolvedMeta m
+  | .ecase _ m env bs => do
+    if ← Closure.hasSolvedMeta m then return true
+    if ← Elim.valsHaveSolvedMeta env then return true
+    for b in bs do
+      if ← termHasSolvedMeta b then return true
+    return false
+  | .delim _ P a b c h => do
+    if ← Val.hasSolvedMeta P then return true
+    if ← Val.hasSolvedMeta a then return true
+    if ← Val.hasSolvedMeta b then return true
+    if ← Val.hasSolvedMeta c then return true
+    Val.hasSolvedMeta h
+  | .ind _ I D _ P m i _ => do
+    if ← Val.hasSolvedMeta I then return true
+    if ← Val.hasSolvedMeta D then return true
+    if ← Val.hasSolvedMeta P then return true
+    if ← Val.hasSolvedMeta m then return true
+    Val.hasSolvedMeta i
+  | .sfix _ I D _ P f s i => do
+    if ← Val.hasSolvedMeta I then return true
+    if ← Val.hasSolvedMeta D then return true
+    if ← Val.hasSolvedMeta P then return true
+    if ← Val.hasSolvedMeta f then return true
+    if ← Val.hasSolvedMeta s then return true
+    Val.hasSolvedMeta i
+  | .scase _ q I D _ P m s i => do
+    if ← Val.hasSolvedMeta q then return true
+    if ← Val.hasSolvedMeta I then return true
+    if ← Val.hasSolvedMeta D then return true
+    if ← Val.hasSolvedMeta P then return true
+    if ← Val.hasSolvedMeta m then return true
+    if ← Val.hasSolvedMeta s then return true
+    Val.hasSolvedMeta i
+
+partial def Elim.arrayHasSolvedMeta (sp : Array (Elim R)) : ElabM R Bool := do
+  for e in sp do
+    if ← Elim.hasSolvedMeta e then return true
+  return false
+
+partial def Elim.valsHaveSolvedMeta (vs : List (Val R)) : ElabM R Bool := do
+  for v in vs do
+    if ← Val.hasSolvedMeta v then return true
+  return false
+
+partial def Closure.hasSolvedMeta : Closure R → ElabM R Bool
+  | .mk env body => do
+    if ← termHasSolvedMeta body then return true
+    Elim.valsHaveSolvedMeta env
+end
+
 /-- `v` evaluated again with the holes solved since (as `zonk` does, then `eval`): a
 cast computed while a hole in its types was unsolved is stuck, and may compute now, as
 the kernel will compute it. `none` if nothing changed. -/
 partial def reevalStale? (l : Lvl) (v : Val R) : ElabM R (Option (Val R)) := do
+  -- (conv-perf) nothing to re-evaluate unless a **solved** meta is in the value: the value
+  -- walk below answers that without quoting, which was the cost of asking
+  let _ := Stats.bump Stats.cells.reevalFast
+  if !(← v.hasSolvedMeta) then return none
   let g ← getGlobals
   let env : Env R := ((List.range l).map fun i => Val.var i).reverse
   let rec inst (k : Lvl) (t : Term R) : ElabM R (Term R) := do
@@ -722,7 +905,7 @@ def guessFailed (l : Lvl) (tys : Array (VTy R)) (inferred expected : VTy R)
     convTy g' tys (ev inferred) (ev expected)
   unless equalIn g.fullView do throw e
   let alone := g.hidden.fold (init := []) fun acc n d =>
-    if equalIn { g with decls := g.decls.insert n d, hidden := g.hidden.erase n } then n :: acc else acc
+    if equalIn { (g.dropCaches) with decls := g.decls.insert n d, hidden := g.hidden.erase n } then n :: acc else acc
   let used := if alone.isEmpty then g.hidden.toList.map (·.1) else alone
   let show1 (n : Name) : String := s!"{n} (module {(g.opaques[n]?).getD "?"})"
   let pretty (v : VTy R) : String := elideLong ((quote g l v).pretty names (some g))
@@ -944,10 +1127,23 @@ partial def unifyGlued (l : Lvl) (t u : Val R) : ElabM R Bool := do
     if same then
       if ← attempt (do for a in us, b in us' do unifyLevel a b
                        unifySpine l sp sp') then return true
-    -- (the same comparison, without metavariables, failed before: it fails again)
-    let key? ← if same then failKey? l n t u else pure none
-    if let some key := key? then
-      if let some msg ← lookupFail key then throwAt {} msg
+    -- (conv-perf) the same comparison, without metavariables, may have failed before. The
+    -- shallow key (head, spine sizes) is free; the quoted key is built only when a failure
+    -- of that shape is recorded, and then only once (the delta step below reuses it).
+    let mut key : Option (UInt64 × Term R × Term R) := none
+    if same then
+      let h := failShallow n sp sp'
+      let _ := Stats.bump Stats.cells.unifyFailShallow
+      if (← get).unifyFails.contains h then
+        match ← failKey? l t u with
+        | some (kt, ku) =>
+          let _ := Stats.bump Stats.cells.unifyFailFullKey
+          match ← lookupFail h kt ku with
+          | some msg =>
+            let _ := Stats.bump Stats.cells.unifyFailHit
+            throwAt {} msg
+          | none => key := some (h, kt, ku)
+        | none => pure ()
     -- lazy delta: unfold the later definition by one step (both, if they are the same),
     -- and compare again
     let g ← getGlobals
@@ -969,7 +1165,16 @@ partial def unifyGlued (l : Lvl) (t u : Val R) : ElabM R Bool := do
       -- doesn't check without it, and was slower.) A failure that met no metavariable is
       -- also remembered (`recordFail`).
       unless sawMeta do
-        if let some key := key? then recordFail key err.msg
+        let k ← match key with
+          | some k => pure (some k)
+          -- (nothing recorded at this shape: pay the quote once, to remember it)
+          | none =>
+            if same then
+              match ← failKey? l t u with
+              | some (kt, ku) => pure (some (failShallow n sp sp', kt, ku))
+              | none => pure none
+            else pure none
+        if let some (h, kt, ku) := k then recordFail h kt ku err.msg
       -- (with the state as it is now, which has what was learnt)
       throw { err with state? := some (← get) }
   | .neutral (.mvar m) sp, v@(.unfold ..) | v@(.unfold ..), .neutral (.mvar m) sp =>

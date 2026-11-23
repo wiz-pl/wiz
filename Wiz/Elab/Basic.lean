@@ -347,6 +347,10 @@ structure ElabState (R : Type) where
   while the globals stay as they are (the elaborator clears it when it changes them). -/
   unifyFails : Std.HashMap UInt64 (List (Term R × Term R × String)) := {}
   unifyFailCount : Nat := 0
+  /-- (conv-perf) bumped whenever a hole (term or level metavariable) is solved: a value
+  or a set of zonked binder types computed before that may be stale. `zonkedTypes`'s
+  memo (`sameSides`/`rflProof`) reuses its result only at the epoch it was computed. -/
+  metaEpoch : Nat := 0
   /-- (28) how tactics reach solvers (`--sat-solver`, …) -/
   smt : Smt.Config := {}
   /-- (28) the definition being elaborated, which names the axioms a tactic adds (`""`:
@@ -612,7 +616,8 @@ def lookupMeta (m : Nat) : ElabM R (MetaEntry R) := do
 
 def solveMeta (m : Nat) (v : Val R) : ElabM R Unit :=
   modify fun s =>
-    let s := { s with metas := s.metas.modify m ({ · with solution := some v }) }
+    let s := { s with metas := s.metas.modify m ({ · with solution := some v }),
+                      metaEpoch := s.metaEpoch + 1 }
     -- (7f) the instance problems waiting for this hole can be tried again
     match s.instWaiters[m]? with
     | some ps => { s with instWaiters := s.instWaiters.erase m, instReadyQ := s.instReadyQ ++ ps }

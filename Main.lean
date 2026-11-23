@@ -751,11 +751,15 @@ def readSourceDiag (path : String) : IO (Option String) := do
     pure none
 
 def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
+  let stats ← match ← IO.getEnv "WIZ_STATS" with
+    | some v => pure (v != "0" && v != "") | none => pure false
+  if stats then Wiz.Stats.start
   let some input ← readSourceDiag path | pure 1
   let s ← elaborate tc path input
   for m in s.messages do
     let line := s!"{path}:{m.render input}"
     if m.severity == .error then IO.eprintln line else IO.println line
+  if stats then Wiz.Stats.report
   if ← regionStatsOpt.get then
     let c ← regionStats.get
     IO.eprintln s!"region cache: {c.hits} modules from a region, {c.misses} without, {c.commands} commands"

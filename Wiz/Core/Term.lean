@@ -348,6 +348,14 @@ def forChildren {m : Type → Type} [Monad m] (fl : Level → m Unit) (f : Nat �
     (t : Term R) : m Unit := do
   let _ ← t.mapChildrenM (fun l => do fl l; pure l) (fun k c => do f k c; pure c)
 
+/-- The metavariables still occurring in a term. -/
+partial def mvars (t : Term R) : Array Nat :=
+  (go t |>.run #[]).2
+where
+  go : Term R → StateM (Array Nat) Unit
+    | .mvar m => modify (·.push m)
+    | t => t.forChildren (fun _ => pure ()) (fun _ c => go c)
+
 /-- Shift the free variables (indices `≥ cut`) up by `k`. -/
 partial def lift (k : Nat) (cut : Nat := 0) : Term R → Term R
   | .var i => if i ≥ cut then .var (i + k) else .var i
@@ -584,6 +592,148 @@ inductive InertReg where
   | conv
   deriving BEq, Repr, Inhabited
 
+/-! ### Values
+
+The semantic domain for normalisation by evaluation. The types live here, before `Globals`,
+so that the environment can hold the evaluated value of a definition (`Globals.valCache`,
+the performance memo of every occurrence of a global); the evaluator itself is
+`Wiz.Core.Eval`.
+
+Values are terms that have been evaluated as far as possible:
+
+* binders are represented by **closures** (an environment plus an unevaluated body), so
+  instantiating a binder is just "evaluate the body in an extended environment";
+* stuck computations are **neutrals**: a head (a local variable, an axiom or a
+  metavariable) followed by a **spine** of eliminations waiting on it, such as
+  applications `f a`, projections `p.1`, or a `let (x, y) := p; …` split.
+
+Local variables inside values use **de Bruijn levels** (counting from the *outside*:
+the first variable ever bound is level 0). Levels don't need shifting when you go under
+a binder, which is why NbE uses them for values while terms use indices.
+
+Converting level `x` to an index in a context of size `l`: `ix = l - x - 1`.
+
+Reference: András Kovács, *elaboration-zoo* (github.com/AndrasKovacs/elaboration-zoo),
+especially `01-eval-closures-debruijn` and `02-typecheck-closures-debruijn`. -/
+
+abbrev Lvl := Nat
+
+mutual
+/-- What a neutral is stuck on. Besides variables, globals and metas, stage 4c adds
+stuck observational constructs: an equality or cast whose type is a neutral, and
+proofs (`refl`, `transp`), which never compute because proofs are irrelevant. -/
+inductive Head (R : Type) where
+  | local (lvl : Lvl)
+  | global (name : Name) (levels : List Level)
+  /-- an unsolved (as far as the kernel knows) metavariable -/
+  | mvar (id : Nat)
+  | eq (A a b : Val R)
+  | eqTy (A B : Val R)
+  | cast (A B e t : Val R)
+  | refl (A a : Val R)
+  | reflTy (X : Val R)
+  | transp (A a P p b e : Val R)
+  /-- (P2, `Globals.lazyProofs`) a **suspended proof**: the term `t` in `env`, never
+  evaluated by the kernel. It comes from a marked proof (`Term.prf`) or from a position
+  the syntax marks (`cast`'s equation, `transp`'s two proofs). Outside the kernel it is
+  evaluated to be read back (`quote`, unless `quoteErasesProofs`), within a step budget
+  (`Budget`). It carries no type: conversion never compares two proofs, and what follows
+  an `absurd` is typed by the motive. -/
+  | prf (env : List (Val R)) (t : Term R)
+
+inductive Val (R : Type) where
+  /-- `head` followed by the eliminations in `spine`, innermost first -/
+  | neutral (head : Head R) (spine : Array (Elim R))
+  | sort (level : Level)
+  | pi (x : Name) (bi : BinderInfo) (q : Val R) (dom : Val R) (cod : Closure R) (σ : BinderSorts)
+  | lam (x : Name) (body : Closure R)
+  | sigma (x : Name) (q : Val R) (fst : Val R) (snd : Closure R) (σ : BinderSorts)
+  | pair (a b : Val R)
+  | unit (level : Level)
+  | tt
+  | empty (level : Level)
+  | qty
+  | qlit (r : R)
+  | enum (labels : List Name)
+  | tag (labels : List Name) (i : Nat)
+  | desc (l : Level) (I : Val R)
+  | dret (i : Val R)
+  | darg (q S D : Val R)
+  | drec (q j D : Val R)
+  | dhrec (q H j D : Val R)
+  | mu (l : Level) (I D i : Val R) (sz : Val R) (hint : Option (Name × List Level × List (Val R)))
+      (prop : Bool)
+  | con (x : Val R)
+  | nu (l : Level) (I D i : Val R) (sz : Val R) (hint : Option (Name × List Level × List (Val R)))
+  | size
+  | szInf
+  | szSuc (s : Val R)
+  | sizeLt (s : Val R)
+  | cocon (x : Val R)
+  /-- a sized corecursive value, kept lazy until observed with `out` -/
+  | scofix (l : Level) (I D A f s i a : Val R)
+  /-- an unfolding, kept lazy until observed with `out` -/
+  | coit (l : Level) (I D S step i s : Val R)
+  /-- a numeral of the `builtin nat` type (see `Term.natLit`) -/
+  | natLit (n : Nat)
+  /-- `ULift.{l} A` (for `A : Sort k`) and its constructor (Q4) -/
+  | ulift (k l : Level) (A : Val R)
+  | up (a : Val R)
+  /-- **glued**: the global `name` applied to the eliminations `sp`, together with its
+  unfolding, computed only when needed (a `memoThunk` remembers it). Keeping the head
+  lets conversion compare `f a` with `f b` without unfolding `f`, keeps names in error
+  messages, and lets type classes see their class and the nominal heads. Use `whnf`
+  before matching on a value's shape. -/
+  | unfold (name : Name) (levels : List Level) (sp : Array (Elim R)) (val : Thunk (Val R))
+  /-- **glued** induction on a numeral, `ind l I D v P m i x`, computed only when needed:
+  the induction hypotheses of a numeral (so that `ind` on `1000000` doesn't compute a
+  million of them first), applied to the eliminations `sp` (applications and
+  projections, which stay lazy). `whnf` forces it; quoting keeps the folded form. -/
+  | lazyInd (l : Level) (I D : Val R) (v : Level) (P m i x : Val R) (prop : Bool) (sp : Array (Elim R))
+      (val : Thunk (Val R))
+
+/-- An elimination stuck on a neutral. -/
+inductive Elim (R : Type) where
+  | app (arg : Val R)
+  | fst
+  | snd
+  /-- `motive` is under one binder, `body` under two -/
+  | split (q : Val R) (z : Name) (motive : Closure R) (x y : Name) (body : Closure R)
+  | absurd (motive : Val R)
+  /-- the branches are evaluated in `env` only when the tag is known -/
+  | ecase (z : Name) (motive : Closure R) (env : List (Val R)) (branches : List (Term R))
+  | delim (v : Level) (P mret marg mrec mhrec : Val R)
+  | ind (l : Level) (I D : Val R) (v : Level) (P m i : Val R) (prop : Bool)
+  | sfix (l : Level) (I D : Val R) (v : Level) (P f s i : Val R)
+  | scase (l : Level) (q : Val R) (I D : Val R) (v : Level) (P m s i : Val R)
+  | out
+  /-- `down` (Q4) -/
+  | down
+
+/-- A body waiting for the values of its bound variables. `env` gives the values of
+the body's free variables, with the most recent binder at the head of the list. -/
+inductive Closure (R : Type) where
+  | mk (env : List (Val R)) (body : Term R)
+end
+
+/-- The key of an eliminator skeleton (`Conv`'s `indMethodTy` and friends): the kind of
+skeleton, the description's level, the motive's level and the proposition flag. The quantity
+is not in the key (a rig element is not hashable): the entry keeps a `(R × Term R)` list for
+it. -/
+abbrev SkelKey := Nat × Level × Level × Bool
+
+/-- An empty skeleton memo (see `Globals.skel`). -/
+unsafe def skelFreshImpl {R : Type} : IO.Ref (Std.HashMap SkelKey (List (R × Term R))) :=
+  unsafeBaseIO do IO.mkRef {}
+
+/-- A fresh, empty memo for eliminator skeleton **terms** (`Globals.skel`). The key is the
+whole input of the template, so an entry can never go stale; the table holds no
+environment, no values and no `Globals`, and the function it memoises is pure. This is
+`memoThunk`'s arrangement (a mutable cell behind a pure interface), not a cache of
+conversion results. -/
+@[implemented_by skelFreshImpl] opaque skelFresh {R : Type} :
+    IO.Ref (Std.HashMap SkelKey (List (R × Term R)))
+
 /-- The global environment. `order` records insertion order so anything that walks
 the environment does so deterministically (never iterate the hash map directly). -/
 structure Globals (R : Type) where
@@ -686,6 +836,37 @@ structure Globals (R : Type) where
   (`Term.instLevels`). Built by `insert` from the value inserted with it; a pure function
   of that value, so it can't change what unfolding gives (`instValue`). -/
   instCache : Std.HashMap Name (List (List Level × Thunk (Term R))) := {}
+  /-- (conv-perf) the evaluated **value** of each definition, one per level
+  instantiation it is used at, shared by every occurrence and every declaration: `.const n
+  us` returns the same value node, so the body is evaluated once instead of once per
+  occurrence (`eval/def` was 5–20× the `conv` count). Unlike `instCache` (a *term* per
+  level tuple, built by `insert`), a value needs the evaluator, so the entries are built
+  where the declaration is checked (`Wiz.Core.Eval.Globals.withCachedValue`, from
+  `addDecl`), from the `Globals` that already contains the declaration: a recursive use
+  builds its own thunk, as every occurrence does today.
+
+  Soundness: the entries are pure functions of the declaration's value and of the
+  `Globals` they were built from, which is persistent. A declaration's body only mentions
+  names that were already declared when it was elaborated, so adding a *new* declaration
+  cannot change what a cached value computes. Every change that can — replacing a
+  declaration, registering a `builtin`, or the `elabView`/`fullView`/`hidden` views that
+  add or remove definitions — drops the caches. A value is only read under the evaluation
+  flags it was built with (`!g.eager`, `g.lazyProofs`, no `Budget`) and only for level
+  instantiations with no metavariable, so nothing derived from an unsolved meta or from a
+  proof read-back is cached (`wiz-notes/conv-unifier-cost.md` §3). -/
+  valCache : Std.HashMap Name (List (List Level × Thunk (Val R))) := {}
+  /-- (conv-perf) the evaluated **type** of each declaration, one per level instantiation
+  (`headType`'s `.global` case): conversion recomputes a neutral's head type on every
+  comparison (`inferNe`, `typeSort?`, `convNe`), and the declaration's type never changes
+  between declarations. Same keys, guards and invalidation as `valCache`. -/
+  tyCache : Std.HashMap Name (List (List Level × Thunk (Val R))) := {}
+  /-- (conv-perf) the memo of the eliminator **skeleton terms** (`Conv.indMethodTy` and the
+  other builders): the Π structure of a method type is a function of the levels, the
+  proposition flag and the quantity only — the type's indices, description and motive are
+  looked up in the environment — so it is built once per key and re-used, while `eval`
+  still substitutes the values. Entries are independent of the environment and never
+  invalidated (`skelFresh`). -/
+  skel : IO.Ref (Std.HashMap SkelKey (List (R × Term R))) := skelFresh
   /-- (11r) how terms print as notation: unexpanders and the grammar (`Syntax/PPTable.lean`).
   The kernel ignores this. -/
   pp : PPTable := {}
@@ -711,9 +892,16 @@ def builtinIndex (bs : List (Name × Name)) :
      if byName.contains n then byName else byName.insert n k,
      if k.startsWith "nat." && !natName.contains n then natName.insert n k else natName)
 
+/-- Drop the evaluated-value and evaluated-type caches. Every change to the environment
+that can change what a cached value computes goes through here: replacing a declaration,
+registering (or restoring) a `builtin`, and the views that add or remove definitions
+(`elabView`/`fullView`, `renamePrivate`, `privacyCheck`). -/
+def dropCaches (g : Globals R) : Globals R := { g with valCache := {}, tyCache := {} }
+
 /-- Replace the registrations, rebuilding their index. -/
 def setBuiltins (g : Globals R) (bs : List (Name × Name)) : Globals R :=
   let (byKey, byName, natName) := builtinIndex bs
+  let g := g.dropCaches
   { g with
     builtins := bs
     builtinByKey := byKey
@@ -722,6 +910,7 @@ def setBuiltins (g : Globals R) (bs : List (Name × Name)) : Globals R :=
 
 /-- Register `(key, n)` at the front (the newest registration wins). -/
 def addBuiltin (g : Globals R) (k n : Name) : Globals R :=
+  let g := g.dropCaches
   { g with
     builtins := ((k, n) :: g.builtins)
     builtinByKey := g.builtinByKey.insert k n
@@ -731,6 +920,7 @@ def addBuiltin (g : Globals R) (k n : Name) : Globals R :=
 
 /-- Register `(key, n)` at the back (the first registration of a key or name wins). -/
 def addBuiltinBack (g : Globals R) (k n : Name) : Globals R :=
+  let g := g.dropCaches
   { g with
     builtins := (g.builtins ++ [(k, n)])
     builtinByKey := (if g.builtinByKey.contains k then g.builtinByKey else g.builtinByKey.insert k n)
@@ -770,6 +960,8 @@ def height (g : Globals R) (n : Name) : Nat :=
 
 /-- Unchecked insertion. Use `Wiz.addDecl` to type check first. -/
 def insert (g : Globals R) (d : Decl R) : Globals R :=
+  -- (a replacement changes what an existing cached value computes: drop the caches)
+  let g := if g.decls.contains d.name then g.dropCaches else g
   { g with
     decls := g.decls.insert d.name d
     order := if g.decls.contains d.name then g.order else g.order.push d.name
@@ -790,13 +982,33 @@ def instValue (g : Globals R) (n : Name) (v : Term R) (ps : List Name) (us : Lis
   | some (_, t) => t.get
   | none => v.instLevels ps us
 
+/-- (conv-perf) The shared evaluated value of the global `n` at `us`, if one is cached
+(`Globals.valCache`). Read only under the flags the entries are built with: a value
+computed with proofs suspended or eagerly is not the value another view asks for, a
+`Budget` read-back must tick (no proof escapes it through a cache), and a level
+instantiation that still mentions a metavariable is not stable (its value would change
+when the meta is solved). -/
+def cachedVal? (g : Globals R) (n : Name) (us : List Level) : Option (Val R) :=
+  if g.eager || !g.lazyProofs || g.budget.isSome || us.any (·.hasMVar) then none else
+  match g.valCache[n]? with
+  | some es => (es.find? (·.1 == us)).map fun (_, t) => t.get
+  | none => none
+
+/-- (conv-perf) The shared evaluated **type** of the declaration `n` at `us`
+(`Globals.tyCache`, `headType`'s `.global` case). Same flags as `cachedVal?`. -/
+def cachedTy? (g : Globals R) (n : Name) (us : List Level) : Option (Val R) :=
+  if g.eager || !g.lazyProofs || g.budget.isSome || us.any (·.hasMVar) then none else
+  match g.tyCache[n]? with
+  | some es => (es.find? (·.1 == us)).map fun (_, t) => t.get
+  | none => none
+
 /-- (13b) The environment as the elaborator sees it in `g.module`: a structure whose
 constructor is private to another module has no definition (it doesn't unfold), so
 values of it can't be built from a tuple or a look-alike structure; its fields are read
 through its projection functions. The kernel still checks against `g` itself. -/
 def elabView (g : Globals R) : Globals R :=
   if g.opaques.isEmpty then g else
-  g.opaques.fold (init := g) fun g' n m =>
+  g.opaques.fold (init := g.dropCaches) fun g' n m =>
     if m == g.module then g' else
     match g'.decls[n]? with
     | some d => { g' with decls := g'.decls.insert n { d with value := none }, hidden := g'.hidden.insert n d }
@@ -805,7 +1017,7 @@ def elabView (g : Globals R) : Globals R :=
 /-- (13b) The environment with the definitions `elabView` hid put back. -/
 def fullView (g : Globals R) : Globals R :=
   if g.hidden.isEmpty then g else
-  { g with decls := g.hidden.fold (fun m n d => m.insert n d) g.decls, hidden := {} }
+  { g.dropCaches with decls := g.hidden.fold (fun m n d => m.insert n d) g.decls, hidden := {} }
 
 /-- (13b) Is `T` opaque here (a structure, inductive or coinductive type with private
 constructors, fields or observations, of another module)? Its module, if so. -/
