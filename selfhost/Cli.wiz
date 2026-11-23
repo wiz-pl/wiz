@@ -1176,10 +1176,10 @@ def listHas (s : String) : List String → Bool
     | .true => .true
     | .false => listHas s rest
 
--- `--target`: the host's names are c, llvm and wasm; the self-hosted backend emits C
--- and, for C5's first slice, LLVM (a closed `main : Nat`, `genLLVM`), so `wasm` is the
--- one it refuses by name
-def targetModes : List String := .cons "c" (.cons "llvm" (.cons "wasm" .nil))
+-- `--target`: the host knows c, llvm, wasm, bpf and js; the self-hosted backend emits C
+-- and, for C5's first slice, LLVM (a closed `main : Nat`, `genLLVM`), so wasm, bpf and js
+-- are the names it refuses (a known name is not a capability)
+def targetModes : List String := .cons "c" (.cons "llvm" (.cons "wasm" (.cons "bpf" (.cons "js" .nil))))
 
 def targetOk (t : String) : Bool := Bool.or (strEq t "c") (strEq t "llvm")
 def targetKnown (t : String) : Bool := listHas t targetModes
@@ -1274,12 +1274,12 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                                   -- (the host's `takeTarget` messages and exit 1)
                                   | .false => match strEq a "--target" with
                                     | .true => match rest with
-                                      | .nil => .fail "--target needs c, llvm or wasm"
+                                      | .nil => .fail "--target needs c, llvm, wasm, bpf or js"
                                       | .cons t r2 => match targetOk t with
                                         | .true => parseOptsGo r2 { o with target := .some t } file extra
                                         | .false => match targetKnown t with
                                           | .true => .fail (String.append "unsupported target " (String.append t ": the self-hosted backend emits C and LLVM (C5)"))
-                                          | .false => .fail (String.append "unknown target " (String.append t " (choose c, llvm or wasm)"))
+                                          | .false => .fail (String.append "unknown target " (String.append t " (choose c, llvm, wasm, bpf or js)"))
                                     | .false => match strEq a "--cache-verify" with
                                       | .true => match rest with
                                         | .nil => .err "unknown flag: --cache-verify"
