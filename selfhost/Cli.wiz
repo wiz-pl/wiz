@@ -2088,8 +2088,11 @@ def legacyCmd (args : List String) : IO Unit := do
 -- each definition body's expected type, the goals after each tactic, and each
 -- declaration (`LspEntry` in `selfhost/Frontend.wiz`); the queries answer from those
 -- entries in the host's shapes (`Wiz/LSP.lean`): `plainTermGoal` is `{goal, range}` of the
--- innermost term at the cursor, `plainGoal` the nearest snapshot at or before it
--- (`{rendered, goals, messages}`, `null` outside every `by` block). `textDocument/hover`
+-- innermost term at the cursor, its goal the `GoalView.show` text (hypotheses, then
+-- `⊢`); `plainGoal` answers as `Query.goalsAt` does (the state before a tactic at its
+-- first character, after it inside, after the last one before the cursor, and the
+-- block's own state elsewhere; `{rendered, goals, messages}`, `null` outside every `by`
+-- block). `textDocument/hover`
 -- is the declaration's signature as Markdown, `definition` its `Location`, and
 -- `completion` the declarations matching the identifier before the caret (the shim's
 -- three, with the host's item fields); a name the index does not know is `null`. The
@@ -2653,29 +2656,107 @@ def lspTermAt (es : List LspEntry) (off : Nat) : Option LspTerm :=
           | .true => .some (LspTerm.mk s t g)
           | .false => .some b
         | .none => .some (LspTerm.mk s t g)
-    | .goal _ _ _ => lspTermAt rest off
+    | .goal _ _ _ _ => lspTermAt rest off
     | .decl _ _ _ _ _ => lspTermAt rest off
 
--- (D8 goals) the nearest goal snapshot at or before `off`, inside the `by` block it
--- belongs to (its stop); a later snapshot wins
+-- (D8 goals) the tactic state at a character offset, as the host's `Query.goalsAt`
+-- answers it: find the innermost `by` block containing `off` (a phase-0 entry), then
+--   * at a step's first character: the state before it (phase 1),
+--   * strictly inside a step (its end included): the state after it (phase 2),
+--   * between steps: the state after the last step ending at or before `off`,
+--   * anywhere else in the block: the block's own state (before its first step).
+-- `none` outside every `by` block. A block's phase-0 entries are the widest (`by`) span
+-- plus the zero-width final state at its end, which is why only positive-width entries
+-- identify a block here.
 structure LspGoal where
   start : Nat
   stop : Nat
   goals : List String
 
-def lspGoalAt (es : List LspEntry) (off : Nat) : Option LspGoal :=
-  match es with
-  | .nil => .none
+def lspGoalSize (g : LspGoal) : Nat := Nat.sub g.stop g.start
+def lspGoalWithin (b : LspGoal) (s t : Nat) : Bool :=
+  Bool.and (Nat.le b.start s) (Nat.le t b.stop)
+
+def lspGoalBlockGo (off : Nat) (best : Option LspGoal) : List LspEntry → Option LspGoal
+  | .nil => best
   | .cons e rest => match e with
-    | .goal s t gs => match Bool.and (Nat.le s off) (Nat.le off t) with
-      | .false => lspGoalAt rest off
-      | .true => match lspGoalAt rest off with
-        | .some b => match Nat.le b.start s with
-          | .true => .some (LspGoal.mk s t gs)
-          | .false => .some b
-        | .none => .some (LspGoal.mk s t gs)
-    | .term _ _ _ => lspGoalAt rest off
-    | .decl _ _ _ _ _ => lspGoalAt rest off
+    | .goal s t gs ph => match Bool.and (Nat.beq ph lspPhaseBlock)
+        (Bool.and (Nat.lt s t) (Bool.and (Nat.le s off) (Nat.le off t))) with
+      | .false => lspGoalBlockGo off best rest
+      | .true => match best with
+        | .none => lspGoalBlockGo off (.some (LspGoal.mk s t gs)) rest
+        | .some b => match Nat.le (lspGoalSize b) (Nat.sub t s) with
+          | .true => lspGoalBlockGo off (.some (LspGoal.mk s t gs)) rest
+          | .false => lspGoalBlockGo off best rest
+    | .term _ _ _ => lspGoalBlockGo off best rest
+    | .decl _ _ _ _ _ => lspGoalBlockGo off best rest
+
+-- the innermost `by` block containing `off`
+def lspGoalBlockAt (es : List LspEntry) (off : Nat) : Option LspGoal :=
+  lspGoalBlockGo off .none es
+
+-- at a step's first character: its phase-1 snapshot (the host's `before`/`starting`);
+-- among equal starts the outermost wins, and later entries win ties
+def lspGoalStartingGo (off : Nat) (b : LspGoal) (best : Option LspGoal) : List LspEntry → Option LspGoal
+  | .nil => best
+  | .cons e rest => match e with
+    | .goal s t gs ph => match Bool.and (Nat.beq ph lspPhaseBefore)
+        (Bool.and (Nat.beq s off) (lspGoalWithin b s t)) with
+      | .false => lspGoalStartingGo off b best rest
+      | .true => match best with
+        | .none => lspGoalStartingGo off b (.some (LspGoal.mk s t gs)) rest
+        | .some g => match Nat.le (lspGoalSize g) (Nat.sub t s) with
+          | .true => lspGoalStartingGo off b (.some (LspGoal.mk s t gs)) rest
+          | .false => lspGoalStartingGo off b best rest
+    | .term _ _ _ => lspGoalStartingGo off b best rest
+    | .decl _ _ _ _ _ => lspGoalStartingGo off b best rest
+
+-- inside a step (its end included): its phase-2 snapshot, the innermost entry; a caret
+-- exactly at a step's start is answered by `lspGoalStartingGo` first
+def lspGoalInsideGo (off : Nat) (b : LspGoal) (best : Option LspGoal) : List LspEntry → Option LspGoal
+  | .nil => best
+  | .cons e rest => match e with
+    | .goal s t gs ph => match Bool.and (Nat.beq ph lspPhaseAfter)
+        (Bool.and (Nat.le s off) (Bool.and (Nat.le off t) (lspGoalWithin b s t))) with
+      | .false => lspGoalInsideGo off b best rest
+      | .true => match best with
+        | .none => lspGoalInsideGo off b (.some (LspGoal.mk s t gs)) rest
+        | .some g => match Nat.le (Nat.sub t s) (lspGoalSize g) with
+          | .true => lspGoalInsideGo off b (.some (LspGoal.mk s t gs)) rest
+          | .false => lspGoalInsideGo off b best rest
+    | .term _ _ _ => lspGoalInsideGo off b best rest
+    | .decl _ _ _ _ _ => lspGoalInsideGo off b best rest
+
+-- between steps: the last step ending at or before `off` (the host's `before`: the
+-- greatest stop, and among equal stops the outermost)
+def lspGoalBeforeGo (off : Nat) (b : LspGoal) (best : Option LspGoal) : List LspEntry → Option LspGoal
+  | .nil => best
+  | .cons e rest => match e with
+    | .goal s t gs ph => match Bool.and (Nat.beq ph lspPhaseAfter)
+        (Bool.and (Nat.le t off) (lspGoalWithin b s t)) with
+      | .false => lspGoalBeforeGo off b best rest
+      | .true => match best with
+        | .none => lspGoalBeforeGo off b (.some (LspGoal.mk s t gs)) rest
+        | .some g => match Nat.lt g.stop t with
+          | .true => lspGoalBeforeGo off b (.some (LspGoal.mk s t gs)) rest
+          | .false => match Nat.beq g.stop t with
+            | .true => match Nat.le (lspGoalSize g) (Nat.sub t s) with
+              | .true => lspGoalBeforeGo off b (.some (LspGoal.mk s t gs)) rest
+              | .false => lspGoalBeforeGo off b best rest
+            | .false => lspGoalBeforeGo off b best rest
+    | .term _ _ _ => lspGoalBeforeGo off b best rest
+    | .decl _ _ _ _ _ => lspGoalBeforeGo off b best rest
+
+def lspGoalAt (es : List LspEntry) (off : Nat) : Option LspGoal :=
+  match lspGoalBlockAt es off with
+  | .none => .none
+  | .some b => match lspGoalStartingGo off b .none es with
+    | .some g => .some g
+    | .none => match lspGoalInsideGo off b .none es with
+      | .some g => .some g
+      | .none => match lspGoalBeforeGo off b .none es with
+        | .some g => .some g
+        | .none => .some b
 
 -- ## Declarations (the check's `.decl` entries: hover, definition, completion)
 --
@@ -2698,7 +2779,7 @@ def lspDeclsOf : List LspEntry → List LspDecl
   | .cons e es => match e with
     | .decl s t n ty k => .cons (LspDecl.mk s t n ty k) (lspDeclsOf es)
     | .term _ _ _ => lspDeclsOf es
-    | .goal _ _ _ => lspDeclsOf es
+    | .goal _ _ _ _ => lspDeclsOf es
 
 -- an identifier character (a dotted name is one word, as the host's `wordStart`)
 def lspIdCode (n : Nat) : Bool := Bool.or (isIdRest n) (Nat.beq n 46)
@@ -2883,7 +2964,8 @@ def lspGoalJson (gs : List String) : J :=
     (.ocons "goals" (.jarr (lspStrList gs))
     (.ocons "messages" (.jarr .jnil) .onil)))
 
--- the host's `plainTermGoal`: the expected type and the range of the term it belongs to
+-- the host's `plainTermGoal`: the goal text (`GoalView.show`) and the range of the term
+-- it belongs to
 def lspTermJson (text : String) (g : LspTerm) : J :=
   .jobj (.ocons "goal" (.jstr g.goal)
     (.ocons "range" (lspRangeOff text g.start g.stop) .onil))
