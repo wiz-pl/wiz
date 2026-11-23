@@ -897,6 +897,22 @@ CI job, so a change to one does not rerun or rekey the others. Only `.#release-b
 the leaf that patches ELF interpreters, strips, or scrubs store paths; the three packages
 are normal store paths.
 
+`.#tower` is the pure package (`towerFor wiz`). The flake also exposes
+`lib.<system>.towerWith wizPkg`, the same tower built with that `wiz`. The
+`packages (tower)` job passes the lean job's **seeded** compiler as a store path, so the
+seeded `wiz` is an input source and `wiz-unwrapped` is never instantiated:
+
+```sh
+nix build --impure --expr '
+  let f = builtins.getFlake "/path/to/checkout";
+  in f.lib."x86_64-linux".towerWith (builtins.storePath "/nix/store/…-wiz-0.1.0")'
+```
+
+The job fails before building when the seeded `wiz` is not substitutable, and its guard
+reads the derivation graph to require the seeded path among the `tower-unwrapped` inputs
+and no `wiz-unwrapped` derivation. `.#tower` itself is unchanged and still builds with the
+pure `wiz`.
+
 The release archive's metadata is the flake's commit time (`RELEASE_SOURCE_DATE_EPOCH`,
 with `SOURCE_DATE_EPOCH` set to the same value for the tools); an ambient epoch cannot
 change it, so two builds of one commit are byte-identical. The docs site and pages carry

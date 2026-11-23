@@ -685,6 +685,11 @@ jobs:
   # The Hdl derivation itself runs `check-standalone.sh` (build + its 32 goldens); the
   # scry derivation runs `grail build scry`. Hdl and tower own no Actions cache; the
   # scry job keeps the checkout's `.grail` mirror under the `scry` subset's key.
+  #
+  # `packages (tower)` is seeded: it substitutes the lean job's `wiz` store path and
+  # builds `lib.<system>.towerWith (builtins.storePath <wiz>)`, then asserts on the
+  # derivation graph that the seeded path is an input source of tower-unwrapped and that
+  # no `wiz-unwrapped` derivation is in it. A cache miss fails instead of cold-building.
 
   packages_hdl:
     name: packages (hdl)
@@ -859,29 +864,81 @@ jobs:
           cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
           cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
-      - name: nix build (tower, the toolchain manager)
-        id: nix
-        run: |
-          out=$(nix build .#tower --no-link --print-out-paths -L)
-          echo "out=$out" >> "$GITHUB_OUTPUT"
-          "$out/bin/tower" --help > /dev/null
-          du -sh "$out"
-      - name: nix build (wiz and grail, from the lean job or Cachix)
+      - name: wiz (the lean job's seeded compiler, substituted from Cachix)
+        # The seeded compiler is a store path: `nix build --option max-jobs 0` is
+        # substitution only (the configured trusted/PR caches; no local build jobs), so
+        # if neither cache holds it, this fails here instead of letting the tower
+        # derivation pull in `wiz-unwrapped` — the cold compile that timed out on a PR.
         id: wiz
         run: |
-          # The lean job's compiler (a PR's seeded build); a store path substitutes
-          # directly, and a miss falls back to the pure derivation the trusted cache
-          # carries. `grail` is installed beside `wiz` in the same store path.
           wiz='${{ needs.lean.outputs.wiz }}'
-          if [ -z "$wiz" ] || ! nix build --no-link "$wiz"; then
-            wiz=$(nix build .#wiz --no-link --print-out-paths)
+          if [ -z "$wiz" ]; then
+            echo "::error title=tower::the lean job produced no wiz store path"
+            exit 1
           fi
+          if ! nix build --no-link "$wiz" --option max-jobs 0; then
+            echo "::error title=tower::the seeded wiz $wiz is not substitutable from the PR or trusted cache; refusing a cold wiz-unwrapped build"
+            exit 1
+          fi
+          echo "wiz: substituted $wiz"
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           du -sh "$wiz"
           mkdir -p .lake/build/bin
           ln -sf "$wiz/bin/wiz" .lake/build/bin/wiz
           ln -sf "$wiz/bin/grail" .lake/build/bin/grail
           echo "$wiz/bin" >> "$GITHUB_PATH"
+      - name: "nix build (tower, with the lean job's seeded wiz)"
+        # `lib.towerWith (builtins.storePath <seeded wiz>)` makes the seeded compiler an
+        # input source of tower-unwrapped, so Nix substitutes it and never starts
+        # `wiz-unwrapped`. The guard below asserts that on the derivation graph *before*
+        # the build; it is what would have caught the PR timeout.
+        id: nix
+        env:
+          WIZ: ${{ steps.wiz.outputs.wiz }}
+        run: |
+          set -eu
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          expr="let f = builtins.getFlake \"$PWD\"; in f.lib.\"$sys\".towerWith (builtins.storePath \"$WIZ\")"
+          drv=$(nix eval --impure --raw --expr "($expr).drvPath")
+          nix derivation show "$drv" > "$RUNNER_TEMP/tower.json"
+          python3 - "$WIZ" "$RUNNER_TEMP/tower.json" <<'PY'
+          import json, subprocess, sys
+          wiz, path = sys.argv[1], sys.argv[2]
+          doc = json.load(open(path))
+          wrapper = next(iter(doc.get("derivations", doc).values()))
+
+          def drvs(v):
+              return v.get("inputs", {}).get("drvs", v.get("inputDrvs", {}))
+
+          def srcs(v):
+              return [
+                  s if s.startswith("/") else f"/nix/store/{s}"
+                  for s in v.get("inputs", {}).get("srcs", v.get("inputSrcs", []))
+              ]
+
+          # Nix 2.34's `inputs.drvs` keys are bare store-path basenames; older formats
+          # use the full path. Normalise before asking for the derivation.
+          unwrapped = [
+              p if p.startswith("/") else f"/nix/store/{p}"
+              for p in drvs(wrapper) if "-tower-unwrapped-" in p
+          ]
+          if len(unwrapped) != 1:
+              sys.exit(f"tower guard: expected one tower-unwrapped input, got {unwrapped}")
+          parsed = json.loads(subprocess.check_output(["nix", "derivation", "show", unwrapped[0]], text=True))
+          u = next(iter(parsed.get("derivations", parsed).values()))
+          if wiz not in srcs(u):
+              sys.exit(f"tower guard: the seeded wiz {wiz} is not an input source of {unwrapped[0]}")
+          wiz_drvs = [p for p in drvs(u) if "-wiz-" in p and p.endswith(".drv")]
+          if wiz_drvs:
+              sys.exit(f"tower guard: {unwrapped[0]} still depends on a wiz derivation: {wiz_drvs}")
+          if wiz not in u.get("env", {}).get("nativeBuildInputs", ""):
+              sys.exit(f"tower guard: the seeded wiz {wiz} is not in tower-unwrapped's nativeBuildInputs")
+          print(f"tower guard: {wiz} is an input source; no wiz-unwrapped derivation")
+          PY
+          out=$(nix build --impure --no-link --print-out-paths --expr "$expr")
+          echo "out=$out" >> "$GITHUB_OUTPUT"
+          "$out/bin/tower" --help > /dev/null
+          du -sh "$out"
       - name: The example index validates offline
         # stage 23m: entries, archive SHA-256s, semver ranges, module-prefix conflicts and
         # index.wiz; no network (the sources are relative paths).
