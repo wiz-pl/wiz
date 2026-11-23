@@ -1,0 +1,12 @@
+{
+  "name": "hover-def",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/hover-def.wiz",
+  "text": "import Prelude\ndef one : Nat := 1\ndef two : Nat := one\n",
+  "requests": [
+    { "method": "textDocument/hover", "params": { "position": { "line": 2, "character": 17 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.contents.value", "value": "```wiz\none : Nat\n```" }
+  ]
+}

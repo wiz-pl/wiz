@@ -1,0 +1,20 @@
+{
+  "name": "goal-dependent-binder",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-dependent-binder.wiz",
+  "text": "import Prelude\ndef h (v : (b : Bool) → SyntaxF b) : Nat := by\n  exact 0\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 2 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.goals", "value": ["v : (b : Bool) → SyntaxF b\n⊢ Nat"] }
+  ],
+  "note": "a dependent local binder: the type's own name `b` occurs in the codomain, so the host keeps it. The selfhost freshens every binder (`x1`); task 27b is the naming pass.",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "task 27b: the host keeps the name written in the type (`b`) where the selfhost freshens the binder (`v : (x1 : Bool) → (SyntaxF x1)`)",
+      "issue": "task 27b"
+    }
+  ]
+}

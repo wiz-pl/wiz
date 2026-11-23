@@ -1,0 +1,18 @@
+{
+  "name": "goal-try-by",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-try-by.wiz",
+  "text": "import Prelude\ndef k : Nat → Nat := by\n  try exact (by intro x; exact x)\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 15 } } }
+  ],
+  "expected": [{ "match": "exact", "path": "result.goals", "value": ["⊢ Nat → Nat"] }],
+  "note": "a `by` inside `try exact (…)`: `try`/`first`/`repeat` and a parenthesised tactic run through `STac.eval`, which takes no span, so the inner block has no entry (2:15 is just before the inner block's first step; 4b does not reach these).",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "span-less tactic combinators: `try`/`first`/`repeat`/parenthesised tactics elaborate their terms through `STac.eval`, which takes no span, so the inner `by` has no block entry",
+      "issue": "span-less combinators"
+    }
+  ]
+}

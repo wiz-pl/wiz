@@ -1,0 +1,19 @@
+{
+  "name": "didchange-full",
+  "servers": ["host"],
+  "uri": "file:///conf/didchange-full.wiz",
+  "text": "import Prelude\ndef one : Nat := 1\n",
+  "note": "A whole-document didChange (the form both servers advertise, textDocumentSync 1): the second definition must be visible to a later hover, so the server is reading the new text, not the didOpen buffer.",
+  "changes": [
+    {
+      "text": "import Prelude\ndef one : Nat := 1\ndef two : Nat := one\n",
+      "diagnostics": [{ "match": "exact", "path": "diagnostics", "value": [] }]
+    }
+  ],
+  "requests": [
+    { "method": "textDocument/hover", "params": { "position": { "line": 2, "character": 17 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.contents", "value": { "kind": "markdown", "value": "```wiz\none : Nat\n```" } }
+  ]
+}

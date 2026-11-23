@@ -1,0 +1,57 @@
+{
+  "name": "initialize-capabilities",
+  "servers": ["host"],
+  "uri": "file:///conf/initialize-capabilities.wiz",
+  "text": "import Prelude\ndef one : Nat := 1\n",
+  "note": "The whole initialize result is pinned exactly: every provider, the trigger characters, the token legend, the wizInfoview method list and the serverInfo. Any added, removed or retyped field fails this case even when every request still answers.",
+  "initialize": [
+    {
+      "match": "exact",
+      "path": "result",
+      "value": {
+        "capabilities": {
+          "positionEncoding": "utf-16",
+          "textDocumentSync": 1,
+          "hoverProvider": true,
+          "definitionProvider": true,
+          "declarationProvider": true,
+          "documentHighlightProvider": true,
+          "referencesProvider": true,
+          "renameProvider": { "prepareProvider": true },
+          "completionProvider": { "triggerCharacters": ["."] },
+          "signatureHelpProvider": { "triggerCharacters": [" ", "("], "retriggerCharacters": [" "] },
+          "inlayHintProvider": true,
+          "semanticTokensProvider": {
+            "legend": { "tokenTypes": ["keyword"], "tokenModifiers": [] },
+            "full": true
+          },
+          "documentSymbolProvider": true,
+          "workspaceSymbolProvider": true,
+          "foldingRangeProvider": true,
+          "documentFormattingProvider": true,
+          "documentRangeFormattingProvider": true,
+          "codeActionProvider": { "codeActionKinds": ["quickfix", "refactor.rewrite"], "resolveProvider": true },
+          "experimental": {
+            "wizInfoview": {
+              "version": 1,
+              "methods": [
+                "wiz/plainGoal",
+                "wiz/plainTermGoal",
+                "wiz/interactiveGoals",
+                "wiz/interactiveTermGoal",
+                "wiz/subtermInfo",
+                "wiz/interactiveInfo",
+                "wiz/typeAt",
+                "wiz/coreTerm"
+              ],
+              "notifications": ["wiz/elaborated"]
+            }
+          }
+        },
+        "serverInfo": { "name": "wiz" }
+      }
+    }
+  ],
+  "requests": [],
+  "expected": []
+}

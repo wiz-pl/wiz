@@ -1,0 +1,19 @@
+{
+  "name": "hover-json",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/hover-json.wiz",
+  "text": "import Prelude\ndef one : Nat := 1\ndef two : Nat := one\n",
+  "note": "The whole hover result is pinned: contents is an object with kind `markdown` and a value string. A change to a MarkedString string, an array, or a different kind fails even when the Markdown text is unchanged.",
+  "requests": [
+    { "method": "textDocument/hover", "params": { "position": { "line": 2, "character": 17 } } }
+  ],
+  "expected": [
+    {
+      "match": "exact",
+      "path": "result",
+      "value": {
+        "contents": { "kind": "markdown", "value": "```wiz\none : Nat\n```" }
+      }
+    }
+  ]
+}

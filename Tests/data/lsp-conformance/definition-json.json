@@ -1,0 +1,20 @@
+{
+  "name": "definition-json",
+  "servers": ["host"],
+  "uri": "file:///conf/definition-json.wiz",
+  "text": "import Prelude\ndef one : Nat := 1\ndef two : Nat := one\n",
+  "note": "The whole Location is pinned, both ends of the range in UTF-16 columns. The self-hosted server starts the range at the name token (character 4), so it is not in this case (see `definition`, which pins the line only).",
+  "requests": [
+    { "method": "textDocument/definition", "params": { "position": { "line": 2, "character": 17 } } }
+  ],
+  "expected": [
+    {
+      "match": "exact",
+      "path": "result",
+      "value": {
+        "uri": "$URI",
+        "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 18 } }
+      }
+    }
+  ]
+}

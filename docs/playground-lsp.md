@@ -560,6 +560,24 @@ server does.
   (`CompletionItem` with `textEdit`), hover (Markdown) and definition (`Location`) from
   the index, the goal and expected-type answers (including an astral character), and the
   page's wiring.
+* `node web/lsp_conformance_test.mjs [--only NAME[,NAME]] [--server host|selfhost] [--dump]`
+  — the LSP conformance corpus (`Tests/data/lsp-conformance/*.json`, one file per case;
+  the format and the cases are described in the driver's header). It drives the real
+  servers, one process per case per server: `WIZ_HOST_BIN lsp` (the Lean-hosted server)
+  and `WIZ_SELFHOST_COMPILER lsp` (the self-hosted one), each with a byte-correct
+  `Content-Length` session (`initialize` with `general.positionEncodings: ["utf-16"]`,
+  `didOpen`, the case's `changes` and requests, `shutdown`, `exit`, then exit code 0).
+  A case can pin the `initialize`/`shutdown` JSON itself and match `exact`, `subset`,
+  `absent`, `error`, `type` or `applyEquals` (apply the returned `TextEdit[]` to the
+  text); `changes` are range edits applied client-side and sent as whole-document
+  `didChange`s (both servers advertise full sync), each waited for its own
+  `publishDiagnostics`. `knownGap` makes a failure XFAIL and a pass a failing XPASS, so
+  a fixed gap has to be removed. `--dump` prints the raw JSON, which is how the expected
+  values are regenerated. A meta-test per server requires every advertised `*Provider`
+  and `wizInfoview` method to answer without an error and every unadvertised probe to
+  answer `-32601`. Against an existing build it is light; a server whose variable is
+  unset is skipped with a printed reason. It is not part of `web/test.sh` (no binary is
+  built there for it).
 * `node web/editor_test.mjs` — the editor's pure rules: UTF-16 versus code-point
   positions (including an astral character), squiggle ranges (no end, empty, multi-line,
   overlapping, past the text), and completion lists (shapes, filtering, ordering, the

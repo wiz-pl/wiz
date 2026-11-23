@@ -1,0 +1,20 @@
+{
+  "name": "goal-d2-erased-binder",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-d2-erased-binder.wiz",
+  "text": "import Prelude\ndef h (g : (0 n : Nat) → Nat) : Nat := by\n  exact g 0\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 2 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.goals", "value": ["g : (0 n : Nat) → Nat\n⊢ Nat"] }
+  ],
+  "note": "D2 (task 26 review): an erased (`:0`) binder in a hypothesis's type. The quantity must stay visible and in the host's place: `(0 n : Nat) → Nat`.",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "two differences: the binder name (the selfhost freshens `n` to `x1` — task 27b) and the quantity's position (` :0 ` after the name where the host writes `0 ` before it — task 27a′'s goal-mode spelling). With 27a it prints `g : (x1 :0 Nat) → Nat`",
+      "issue": "task 27b + 27a′"
+    }
+  ]
+}
