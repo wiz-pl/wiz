@@ -1,9 +1,8 @@
 # scry web, interactive: hover and definition from `wiz lsp` (lane `scry-web-ux`)
 
-Status: implementation + tests, branch `agent/scry-web-ux`, green end-to-end. The gate
-below ran on the restacked tree `94bf7388c` (merge of `integration/train12` `b5eb50555`;
-the merge itself is the only conflict resolution: `.github/repo-subsets.json`, which
-`scripts/repo-subsets.py --write` regenerated).
+Status: implementation + tests, branch `agent/scry-web-ux`, green end-to-end at
+`daf06385d`, restacked on `integration/train12` `b5eb50555`. The one merge conflict was
+`.github/repo-subsets.json`, regenerated with `scripts/repo-subsets.py --write`.
 The slice is the design note's P1 step, reduced to the one interaction it asks for:
 **the source reader's own page, mounted with `?lsp=`, asks a running `wiz lsp --ws`
 about the Wiz file it displays, and the answer lands in the reader's existing panels.**
@@ -206,28 +205,32 @@ browser's live section and found two defects the Node tests cannot see:
 
 Both fixes are in `c4aa5045`. The restack to `b5eb50555` is `94bf7388` (only
 `.github/repo-subsets.json` conflicted). On that tree, job 5360 was cancelled by Slurm
-before it ran; the rerun (job 5375) is green end-to-end: 66/66 static Node checks,
-10/10 real-`wiz lsp` Node checks, 47/47 browser assertions (real Chromium and real
-`wiz lsp`) and 0 failures, rc=0. The four Wiz checks (job 5339) are Model 106 s,
-View 32 s, source-ui 36 s, WebCmd 471 s, all rc=0. The mock-server fallback smoke
-runs locally: 44/44, rc=0. Bundle sizes: fixtures 1,017,425 B, live 1,084,960 B
-(`wiz-source-ui.wasm` 843,812 B, `wiz-source-ui.mjs` 14,726 B, merged `lsp-client.js`
-27,018 B, data 69,869 B).
+before it ran; the rerun (job 5375) was green end-to-end. The pre-push companion check
+then found that the 16 new Wiz forms had no `legacy-names.tsv` rows (a `docs_style`
+failure); `scripts/gen-legacy-names.py --update-digest` added them and updated
+`Wiz/LegacyNames.lean` (`daf06385`), and `check-companion-lists.py` is clean. The four
+Wiz checks and the full gate were rerun at that head: Model 104 s, View 30 s,
+source-ui 36 s, WebCmd 446 s, all rc=0; 66/66 static Node checks, 10/10 real-`wiz lsp`
+Node checks, 47/47 browser assertions (real Chromium and real `wiz lsp`), 0 failures,
+rc=0. The mock-server fallback smoke runs locally: 44/44, rc=0. Bundle sizes:
+fixtures 1,017,425 B, live 1,084,960 B (`wiz-source-ui.wasm` 843,812 B,
+`wiz-source-ui.mjs` 14,726 B, merged `lsp-client.js` 27,018 B, data 69,869 B).
 
 ## Honesty ledger
 
 | what | how it ran | verdict |
 |---|---|---|
-| Wiz model/view compile (`Source.Page.focus`, `lspHover`, definition answer, marks) | `wiz check` with the merged win3 binary (job 5339) | Model 106 s rc=0, View 32 s rc=0, source-ui 36 s rc=0, WebCmd 471 s rc=0 (4/4) |
-| `scry web --source` + bundle generation | `web/source-bundle.sh` inside `.scratch/build-bundles.sh` (jobs 5293/5326/5375, `win3`) | fixtures 3 files/2 findings; live 5 files/2 findings; runtime yes |
-| `scry.source.answer/1` static answers + patch replay (`source_static_test.mjs`) | job 5375 | 66/66 ok |
-| real `wiz lsp --ws` hover/definition on the bundled `Facts.wiz` → `Span.wiz` | `source_live_test.mjs`, job 5375 | 10/10 ok; hover on `contains`, definition on `Span.wiz`'s `def` line |
-| browser: no-JS SSR, mount, static finding hover, `#/f/` | `source_chrome_test.mjs`, real Chromium, job 5375 | all ok (26 assertions before the live section) |
-| browser: `?lsp=` live hover card on `Source.Span.contains` | job 5375, real `wiz lsp` | ok: LSP signature and "LSP hover at" |
-| browser: click → definition → info rows + `src-focus` jump | job 5375, real `wiz lsp` | ok: target `Span.wiz`, bundled file opened, `59:` range outlined |
-| browser: server dies mid-session (deliberate failure) | job 5375 | ok: "live: hover failed" note, files/findings kept, no `data-wiz-error` |
-| browser: `?lsp=` with a closed port (deliberate failure) | job 5375 | ok: `data-lsp=failed`, "live: off", static reader complete, no console error |
-| browser: mock-LSP fallback | `source_chrome_test.mjs` locally (`chromium 157`) | 44/44 ok, rc=0 |
+| Wiz model/view compile (`Source.Page.focus`, `lspHover`, definition answer, marks) | `wiz check` with the merged win3 binary, final run at `daf06385` | Model 104 s rc=0, View 30 s rc=0, source-ui 36 s rc=0, WebCmd 446 s rc=0 (4/4) |
+| `scry web --source` + bundle generation | `web/source-bundle.sh` inside `.scratch/build-bundles.sh` (jobs 5293/5326/5375 and the final run at `daf06385`, `win3`) | fixtures 3 files/2 findings; live 5 files/2 findings; runtime yes |
+| `scry.source.answer/1` static answers + patch replay (`source_static_test.mjs`) | final run at `daf06385` | 66/66 ok |
+| real `wiz lsp --ws` hover/definition on the bundled `Facts.wiz` → `Span.wiz` | `source_live_test.mjs`, final run at `daf06385` | 10/10 ok; hover on `contains`, definition on `Span.wiz`'s `def` line |
+| browser: no-JS SSR, mount, static finding hover, `#/f/` | `source_chrome_test.mjs`, real Chromium, final run at `daf06385` | all ok (26 assertions before the live section) |
+| browser: `?lsp=` live hover card on `Source.Span.contains` | final run at `daf06385`, real `wiz lsp` | ok: LSP signature and "LSP hover at" |
+| browser: click → definition → info rows + `src-focus` jump | final run at `daf06385`, real `wiz lsp` | ok: target `Span.wiz`, bundled file opened, `59:` range outlined |
+| browser: server dies mid-session (deliberate failure) | final run at `daf06385` | ok: "live: hover failed" note, files/findings kept, no `data-wiz-error` |
+| browser: `?lsp=` with a closed port (deliberate failure) | final run at `daf06385` | ok: `data-lsp=failed`, "live: off", static reader complete, no console error |
+| browser: mock-LSP fallback | `source_chrome_test.mjs` locally (`chromium 157`), final bundle | 44/44 ok, rc=0 |
+| companion lists (`docs_style`'s early gate) | `scripts/check-companion-lists.py` after `gen-legacy-names.py --update-digest` | clean (5 lists; test-shards skipped: no test driver in this worktree) |
 | browser console / network | smoke collects `Runtime.exceptionThrown` + `console.error`; a CDP probe also listened to `Network.loadingFailed` | 0 console errors on every JS load; no failed request in the probe (the smoke has no separate network assertion; the dead-server cases assert the UI effect) |
 
 Not run / not claimed: no full test suite, no site build, no Cachix push, no PR, no
