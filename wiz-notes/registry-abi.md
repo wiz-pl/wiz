@@ -939,10 +939,17 @@ unused `textLib`, `Tests/Scaling`'s `String.mk`, `Tests/Groups/Hdl`'s `String.Sl
 deprecations); none is from `Wiz/Ext/Basic.lean` or `Tests/Groups/Ext.lean`.
 
 `heavy --sshfs -- timeout 600 lake test -- '=ext'` (job 5163) ran the six cases:
-**6 passed, 0 failed, 0 skipped** (146.7 s, all six `✓`). What I did **not** run: the
-full suite, `=backend`, `=js`, `=bpf`, `=wasm`, `=selfhost`, `=selfhost-cli-diff`,
-`=wiz-lint`, `grail test`, any measurement. No Lean build was run on the controller;
-everything goes through `heavy`.
+**6 passed, 0 failed, 0 skipped** (146.7 s, all six `✓`).
+
+A separate CLI probe (`wiz check .scratch/t.wiz --target bogus`, `--target bpf`,
+`--llvm`, job 5185) did **not** run: the copied-back `.lake/build/bin/wiz` said
+`cannot execute: required file not found` because it binds a `win3` store interpreter
+that the sshfs node does not have (the known `heavy --rsync` round-trip caveat, not a
+test failure). The `Main` change compiled in job 5131 and the resolver is covered by
+`=ext`; the CLI runtime probe remains unrun. What I did **not** run: the full suite,
+`=backend`, `=js`, `=bpf`, `=wasm`, `=selfhost`, `=selfhost-cli-diff`, `=wiz-lint`,
+`grail test`, any measurement. No Lean build was run on the controller; everything goes
+through `heavy`.
 
 **Not implemented (the prototype stops here).**
 
