@@ -4569,6 +4569,13 @@ def selfHostHostGroup : Group where
     -- stub that echoes `input.wiz`. It runs each case of `selfhost` in a child process
     -- with `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER` set (the override in
     -- `Tests/Elab.lean`), so a new case that forgets to invoke the pipeline fails here.
+    --
+    -- Each case is bounded (600 s, then `SIGKILL` ten seconds later) and its output goes
+    -- to a file, not a pipe: `IO.Process.output` waits for the pipe's EOF, and a process
+    -- a case leaves behind inherits that pipe, so a case that has exited can still wedge
+    -- the sweep forever (the `=selfhost-host#3` hang: no child, no CPU). A case that does
+    -- not terminate is reported by name and index, never as a hang, and the sweep fails
+    -- at its own budget (45 min) rather than at the job's.
     { name := "an echoing stub compiler and checker fail every =selfhost case (the pipeline group is not vacuous)", run := fun _ => do
         let dir ← IO.FS.createTempDir
         let stub ← echoStub dir
@@ -4576,18 +4583,52 @@ def selfHostHostGroup : Group where
         let env : Array (String × Option String) :=
           #[("WIZ_SELFHOST_COMPILER", some stub.toString), ("WIZ_SELFHOST_CHECKER", some stub.toString)]
         let flags := (← flagsRef.get).toArray
+        let caseBound := 600
+        let sweepBound := 2700
+        let began ← IO.monoMsNow
         let mut passed := #[]
+        let mut hung := #[]
+        let mut log := ""
         for c in selfHostGroup.cases, i in [0:selfHostGroup.cases.length] do
+          let elapsed := ((← IO.monoMsNow) - began) / 1000
+          if elapsed > sweepBound then
+            throw (IO.userError s!"the stub sweep ran {elapsed} s (bound {sweepBound} s) without finishing: {i} of {selfHostGroup.cases.length} cases were not run; the meta-case cannot check the pipeline group within its job's limit\n{log}")
+          -- (`sh` execs `timeout`, which execs the case, so the output files, not the
+          -- sweep's pipes, are what the case and anything it leaves behind write to)
+          let outFile := dir / s!"case-{i}.out"
+          let errFile := dir / s!"case-{i}.err"
+          let script := "out=$1; err=$2; shift 2; exec timeout --kill-after=10 " ++
+            toString caseBound ++ " \"$@\" >\"$out\" 2>\"$err\""
+          let start ← IO.monoMsNow
           let out ← IO.Process.output
-            { cmd := "timeout", args := #["900", self.toString, "--run-case", "selfhost", toString i] ++ flags, env }
+            { cmd := "sh",
+              args := #["-c", script, "sh", outFile.toString, errFile.toString, self.toString,
+                "--run-case", "selfhost", toString i] ++ flags,
+              env }
+          let ms := (← IO.monoMsNow) - start
+          let stdoutText ← try
+            IO.FS.readFile outFile
+          catch _ =>
+            pure ""
+          let stderrText ← try
+            IO.FS.readFile errFile
+          catch _ =>
+            pure ""
+          let line := s!"{i}: {showMs ms} s, exit {out.exitCode}: {c.name}"
+          log := log ++ line ++ "\n"
+          progress s!"stub {i + 1}/{selfHostGroup.cases.length}: {line}"
+          if out.exitCode == 124 || out.exitCode == 137 then
+            hung := hung.push s!"{line}\n{(stderrText ++ stdoutText).trimAscii.toString.take 2000}"
           -- (a case that skipped did not demonstrate the pipeline, but it did not pass
           -- either: only an exit 0 without a `skipped` note is a vacuous case; both the
           -- note and the older printed `(skipped: …)` form count)
-          let skipped := (out.stdout.splitOn "\n").any fun l =>
+          let skipped := (stdoutText.splitOn "\n").any fun l =>
             l.startsWith (noteMarker ++ "skipped ") || l.trimAscii.toString.startsWith "(skipped: "
           if out.exitCode == 0 && !skipped then passed := passed.push s!"{i}: {c.name}"
+        unless hung.isEmpty do
+          throw (IO.userError s!"{hung.size} of {selfHostGroup.cases.length} =selfhost cases did not terminate under the stub (bound {caseBound} s; a case that cannot finish cannot be shown to reach the pipeline):\n{"\n\n".intercalate hung.toList}\n{log}")
         unless passed.isEmpty do
-          throw (IO.userError s!"{passed.size} of {selfHostGroup.cases.length} =selfhost cases pass with a stub compiler/checker that echoes its input; they do not test the pipeline:\n{"\n".intercalate passed.toList}")
+          throw (IO.userError s!"{passed.size} of {selfHostGroup.cases.length} =selfhost cases pass with a stub compiler/checker that echoes its input; they do not test the pipeline:\n{"\n".intercalate passed.toList}\n{log}")
         note s!"all {selfHostGroup.cases.length} =selfhost cases failed with the echo stub" },
     { name := "selfhost/Tables.wiz is current (regenerate with `lake build genSelfhostTables`)", run := fun _ => do
         -- the checked-in file is what the selfhost builds read; a grammar change that
