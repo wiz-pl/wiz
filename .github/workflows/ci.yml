@@ -57,7 +57,7 @@ on:
 #     by a merge.
 concurrency:
   group: ci-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.sha }}-${{ github.event_name == 'schedule' && 'fixpoint' || 'checks' }}${{ github.event_name == 'workflow_dispatch' && format('-dispatch-{0}', github.run_id) || '' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/integration/') }}
 
 # Least privilege: this workflow only reads the repository. The Cachix push uses the
 # CACHIX_AUTH_TOKEN secret (not a token permission); `deploy-docs` asks for its own
@@ -1654,10 +1654,13 @@ jobs:
           path: doc-site
           retention-days: 3
       - name: Save the elaboration cache
-        # The end of the job: the site built and checked, so a failed site never writes
-        # the docs subset's cache. A cache quota/upload failure must not fail the site.
+        # The end of the job, on success and failure alike: the entries are
+        # content-keyed by module text, so a failed run cannot poison the layer - it can
+        # only add modules that later runs reuse. Saving only on success meant a run with
+        # one bad module threw away 245 modules' worth of work for the retry.
+        # A cache quota/upload failure must not fail the site.
         continue-on-error: true
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: always() && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .wiz-doc-cache/ro
@@ -1826,7 +1829,18 @@ jobs:
           retention-days: 7
       - name: Verdict
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # What a red run is, in one place a phone can read: the failed jobs, by name and
+          # link, at the top of the summary - before the per-job result lines below.
+          failed=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?filter=latest&per_page=100" \
+            --jq '[.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out")]
+                  | "\(length) job(s) did not pass:\n" + (map("- **\(.name)** — \(.conclusion): \(.html_url)") | join("\n"))' 2>/dev/null || true)
+          if [ -n "$failed" ]; then
+            { echo "## Red: $failed"; echo; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=CI::$(printf '%s' "$failed" | head -1)"
+          fi
           echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, docs: ${{ needs.changes.outputs.docs }}, web: ${{ needs.changes.outputs.web }}, stc: ${{ needs.changes.outputs.stc }}, shards: ${{ needs.changes.outputs.shards }})"
           echo "subsets: lean=${{ needs.changes.outputs.subset_lean }}, runtime=${{ needs.changes.outputs.subset_runtime }}, wizlib=${{ needs.changes.outputs.subset_wizlib }}, packages=${{ needs.changes.outputs.subset_packages }}, tests=${{ needs.changes.outputs.subset_tests }}, docs=${{ needs.changes.outputs.subset_docs }}"
           echo "docs style: ${{ needs.docs_style.result }}"
