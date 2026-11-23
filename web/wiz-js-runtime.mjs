@@ -16,6 +16,7 @@
  *   `◾`                 null
  *   a closure           a JS function made by `wizClo` (callable from FFI too)
  *   String              the Wiz data type: `String.mk (List Char)`, code points
+ *   an export           `export function name(…)` — `wizCallExport`, the FFI table
  *   UInt64              BigInt below 2^64 (masked by the `wiz_u64_*` entries)
  *   Float64             a JS number
  *   UIntN / BitVec      BigInt (the bits; `wiz_word_*` masks at the width)
@@ -461,6 +462,22 @@ export function wizFileUrl(path) {
 
 export function wizIoResult(v, world) {
   return wizCtor(0, [v, world]);
+}
+
+/* ---- exported functions (stage 9g) ---- */
+
+/* An exported Wiz function called from JavaScript (`export "name" f`; the emitter's
+ * `export function name(…)`). `entry` is the IR's closure for it, `params`/`result` are
+ * FFI kinds (`n u f s b v p w`, the same table `wizExtern` marshals), and an `IO` export
+ * takes the world as its last argument and returns the pair's first field — the C
+ * wrapper's `callIntoWiz` and `wiz_io_value`. A zero-parameter export is the value
+ * itself, as in C (the entry is not applied). */
+export function wizCallExport(entry, params, result, io, args) {
+  const call = [];
+  for (let i = 0; i < params.length; i++) call.push(wizFromJs(params[i], args[i]));
+  if (io) call.push(0); /* the world */
+  const r = call.length === 0 ? entry() : wizApply(entry(), call);
+  return wizToJs(result, io ? wizProj(r, 0) : r);
 }
 
 /* ---- the FFI: `extern "js.path"` and the runtime natives ---- */

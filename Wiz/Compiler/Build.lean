@@ -484,7 +484,7 @@ def buildJs (s : CommandState R) (n : Name) (out : System.FilePath) : IO (Except
     unless ← runtimePath.pathExists do
       return .error s!"the JS runtime is missing: no {runtimePath} (a toolchain ships it in share/wiz/web; a checkout has web/wiz-js-runtime.mjs)"
     let runtime ← IO.FS.readFile runtimePath
-    match Js.program runtime decls (isIO ty) with
+    match Js.program runtime decls ((exports s).map (·.1)) (isIO ty) with
     | .error e => pure (.error e)
     | .ok text =>
       let outPath : System.FilePath :=

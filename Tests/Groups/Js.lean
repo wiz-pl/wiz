@@ -33,7 +33,7 @@ def jsCompile (src : String) : IO (CommandState ZeroOneMany × Term ZeroOneMany 
     | .ok r => pure r
     | .error e => throw (IO.userError e)
   let runtime ← jsRuntimeText
-  let text ← match Js.program runtime decls (Build.isIO ty) with
+  let text ← match Js.program runtime decls ((Build.exports s).map (·.1)) (Build.isIO ty) with
     | .ok t => pure t
     | .error e => throw (IO.userError e)
   -- the generated module is an ES module with a `main` export
@@ -50,6 +50,20 @@ def jsRunText (text : String) : IO String := do
     { cmd := "node", args := #[file.toString], env := #[("LD_LIBRARY_PATH", none)] }
   if out.exitCode != 0 then
     throw (IO.userError s!"the JS program failed ({out.exitCode}): {out.stderr.take 1500}")
+  pure out.stdout
+
+/-- Write the emitted module and a checker script beside it, run the checker with Node,
+and return its standard output. The checker is an ES module: it imports the module under
+test as `./wiz_main.mjs` and throws (or prints) as a case needs. -/
+def jsRunScript (text script : String) : IO String := do
+  let dir ← IO.FS.createTempDir
+  IO.FS.writeFile (dir / "wiz_main.mjs") text
+  let check := dir / "check.mjs"
+  IO.FS.writeFile check script
+  let out ← IO.Process.output
+    { cmd := "node", args := #[check.toString], env := #[("LD_LIBRARY_PATH", none)] }
+  if out.exitCode != 0 then
+    throw (IO.userError s!"the checker failed ({out.exitCode}): {out.stderr.take 1500}")
   pure out.stdout
 
 /-- The interpreter's answer for `main`: append `#eval main` and take its one info
@@ -102,7 +116,7 @@ def jsError (src : String) : IO String := do
     | .ok r => pure r
     | .error e => throw (IO.userError e)
   let runtime ← jsRuntimeText
-  match Js.program runtime decls (Build.isIO ty) with
+  match Js.program runtime decls ((Build.exports s).map (·.1)) (Build.isIO ty) with
   | .ok _ => throw (IO.userError "the JS backend accepted the program")
   | .error e => pure e
 
@@ -233,6 +247,39 @@ def jsGroup : Group where
         check ((text.splitOn "export function wiz_nat_add").length > 1) "no wiz_nat_add"
         check ((text.splitOn "export function wizApply").length > 1) "no wizApply"
         check ((text.splitOn "export function main").length > 1) "no main export" },
+    { name := "an exported function is an ES export (the Loom ABI's seam)", run := fun _ => do
+        unless ← jsNodeAvailable do skipMissing "no node"; return
+        -- `export "name" f` (stage 9g) is the C backend's C symbol; on this target it is
+        -- `export function name(…)`. The `State` handle goes out and back in as `w`
+        -- (opaque to JavaScript), the string result as `s`, an `IO` result is unwrapped,
+        -- and `main` stays the module's own entry point.
+        let (_, _, text) ← jsCompile ("import Prelude\nimport IO\nimport Text\n" ++
+          "structure State where\n  route : String\n" ++
+          "def init : State := State.mk \"/\"\n" ++
+          "def html (s : State) : String := s.route\n" ++
+          "def answer : Nat := 42\n" ++
+          "def echo (s : String) : IO String := IO.pure s\n" ++
+          "export \"wiz_loom_init\" init\n" ++
+          "export \"wiz_loom_html\" html\n" ++
+          "export \"wiz_answer\" answer\n" ++
+          "export \"wiz_echo\" echo\n" ++
+          "def main : IO Unit := IO.pure ()")
+        let script :=
+          "import * as ns from \"./wiz_main.mjs\";\n" ++
+          "const eq = (what, want, got) => {\n" ++
+          "  if (got !== want) throw new Error(what + \": got \" + String(got));\n" ++
+          "};\n" ++
+          "for (const name of [\"wiz_loom_init\", \"wiz_loom_html\", \"wiz_answer\", \"wiz_echo\", \"main\"]) {\n" ++
+          "  if (typeof ns[name] !== \"function\") throw new Error(\"no export \" + name);\n" ++
+          "}\n" ++
+          "const state = ns.wiz_loom_init();\n" ++
+          "if (typeof state !== \"object\" || state === null) throw new Error(\"the state is not a handle\");\n" ++
+          "eq(\"wiz_loom_html\", \"/\", ns.wiz_loom_html(state));\n" ++
+          "eq(\"wiz_answer (a zero-parameter value export)\", 42n, ns.wiz_answer());\n" ++
+          "eq(\"wiz_echo (String in, IO String out)\", \"hi\", ns.wiz_echo(\"hi\"));\n" ++
+          "console.log(\"exports ok\");\n"
+        let out ← jsRunScript text script
+        checkEq "exports ok" out.trimAscii.toString },
     { name := "the emitted module is deterministic", run := fun _ => do
         let a ← jsEmit ("import Prelude\ndef c : List Nat := .cons 1 (.cons 2 .nil)\n" ++
           "partial def loop (n acc : Nat) : Nat := match n with\n  | .zero => acc\n" ++

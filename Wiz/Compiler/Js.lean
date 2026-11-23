@@ -3,10 +3,12 @@ import Wiz.Compiler.C
 /-!
 # A JavaScript target (prototype)
 
-`Wiz.Js.program runtime decls io` emits an ES module for the IR that the C, LLVM and
-Wasm backends consume. `wiz build --target js prog.wiz -o prog.mjs` writes it; the
-module is self-contained (the runtime `web/wiz-js-runtime.mjs` is pasted at its top),
-exports `main`, and runs `main` when Node executes the file directly.
+`Wiz.Js.program runtime decls exports io` emits an ES module for the IR that the C,
+LLVM and Wasm backends consume. `wiz build --target js prog.wiz -o prog.mjs` writes it;
+the module is self-contained (the runtime `web/wiz-js-runtime.mjs` is pasted at its
+top), exports `main`, exports every `export "name" f` as `export function name(…)`
+(stage 9g, the same entries the C backend gives C), and runs `main` when Node executes
+the file directly.
 
 The representation is the runtime's (see the header of `web/wiz-js-runtime.mjs`):
 `Nat` is a `BigInt`, a constructor with fields is `{t, f}`, a constructor without
@@ -133,7 +135,10 @@ partial def bodyE (arities : Std.HashMap Name Nat) (ind : String) : Body → Exc
   | .unreachable => pure s!"{ind}throw new Error(\"wiz: reached an impossible case\");\n"
 
 /-- One IR function. A closed definition (`IR.cafs`) is built on its first use and kept,
-as the C and Wasm backends do; the rest is a plain JS function of the IR parameters. -/
+as the C and Wasm backends do; the rest is a plain JS function of the IR parameters. An
+exported function's closure (`wiz.export.<name>`) is never a CAF — `IR.cafExcluded`
+already keeps it out of `IR.cafs`, and the check here states the rule at the emitter —
+so a call of an export always runs the function. -/
 def declE (arities : Std.HashMap Name Nat) (cafs : Std.HashSet Name) (d : IR.Decl) :
     Except String String := do
   let locals := (C.bound d.body).filter (fun x => !d.params.contains x)
@@ -141,7 +146,7 @@ def declE (arities : Std.HashMap Name Nat) (cafs : Std.HashSet Name) (d : IR.Dec
     s!"  let {", ".intercalate (locals.toList.map var)};\n"
   let bodyT ← bodyE arities "  " d.body
   let m := mangle d.name
-  if cafs.contains d.name then
+  if cafs.contains d.name && !d.name.startsWith "wiz.export." then
     pure (s!"function {m}() {lb}\n  if (__caf_{m} === undefined) __caf_{m} = {m}_build();\n" ++
       s!"  return __caf_{m};\n{rb}\n" ++
       s!"function {m}_build() {lb}\n{loc}{bodyT}{rb}\n" ++
@@ -211,17 +216,39 @@ threads, MVar/Ref/Chan, `Str`, `WordArray` and `StrMap` natives are out of scope
 def checkExterns (decls : Array IR.Decl) : Except String Unit :=
   (C.externs decls).foldl (fun acc key => acc.bind (fun _ => checkExtern key)) (.ok ())
 
-/-- The whole ES module: the runtime, the functions, `main`, and a runner for
-`node prog.mjs` (not for an import: the importer's `main` is its own). -/
-def program (runtime : String) (decls : Array IR.Decl) (io : Bool := false) :
-    Except String String := do
+/-- The ES export of one `export "name" f` (stage 9g). The IR carries the exported
+function as a decl named `wiz.export.<name>` whose value is the function's closure (the
+C backend's `exportEntry`); this wrapper applies it through the same FFI table
+`wizExtern` uses, so the host sees `f`'s parameters and result as JavaScript values and
+an `IO` result is unwrapped as `wiz_io_value` does in C. `params`/`result` are the
+export's `RVal.ExternSig` kinds (an export never has a struct, a byte buffer or a
+callback: `ffiCallSig` admits `n u f s b p w` only). -/
+def exportE (decls : Array IR.Decl) (sig : RVal.ExternSig) : Except String String := do
+  let entry := C.exportEntry sig.cname
+  unless decls.any (fun d => d.name == entry) do
+    throw s!"the IR has no entry `{entry}` for the export `{sig.cname}`"
+  let kinds := String.ofList (sig.params.map (·.letter))
+  pure (
+    s!"export function {sig.cname}(...args) {lb}\n" ++
+    s!"  return wizCallExport({mangle entry}, {jsStr kinds}, {jsStr sig.result.letter.toString}, " ++
+    s!"{sig.io}, args);\n{rb}\n")
+
+/-- The whole ES module: the runtime, the functions, the exports, `main`, and a runner
+for `node prog.mjs` (not for an import: the importer's `main` is its own). -/
+def program (runtime : String) (decls : Array IR.Decl) (exports : List RVal.ExternSig := [])
+    (io : Bool := false) : Except String String := do
   match checkDecls decls with
   | .error e => .error s!"JS backend: {e}"
   | .ok () => pure ()
   checkExterns decls
+  if exports.any (fun sig => sig.cname == "main") then
+    throw "JS backend: `main` is the module's entry point; an export cannot be named `main`"
   let arities := decls.foldl (fun m d => m.insert d.name d.params.size) {}
   let cafs := IR.cafs decls
   let texts ← decls.toList.mapM (declE arities cafs)
+  let exportTexts ← exports.mapM fun sig => match exportE decls sig with
+    | .ok t => pure t
+    | .error e => throw s!"JS backend: export `{sig.cname}`: {e}"
   let entry := mangle "wiz.entry"
   let mainBody := if io then s!"  return wizApply({entry}(), [0]);\n" else s!"  return {entry}();\n"
   let runner := if io then "wizRunCli(main, true);" else "wizRunCli(main, false);"
@@ -229,7 +256,7 @@ def program (runtime : String) (decls : Array IR.Decl) (io : Bool := false) :
     "/* generated by wiz build --target js (Wiz/Compiler/Js.lean); the runtime is\n" ++
     "   web/wiz-js-runtime.mjs, pasted here so the module is self-contained. */\n\n" ++
     runtime ++ "\n/* ---- generated ---- */\n\n" ++
-    String.join texts ++
+    String.join texts ++ String.join exportTexts ++
     s!"\nexport function main() {lb}\n{mainBody}{rb}\n" ++
     s!"\nfunction __wizIsCli() {lb}\n" ++
     "  return typeof process !== \"undefined\" && process.argv && process.argv[1] &&\n" ++

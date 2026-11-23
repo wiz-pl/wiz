@@ -1,6 +1,6 @@
 # A JavaScript target for Wiz (`--target js`)
 
-**Status:** prototype on `integration/train12` (`d853fde79`), branch only, no PR.
+**Status:** prototype on `integration/train12`, branch `agent/js-dom-glue`, no PR.
 New pieces: `Wiz/Compiler/Js.lean`, `web/wiz-js-runtime.mjs`, the `=js` test group
 (`Tests/Groups/Js.lean`), and `examples/js-loom/` (a Loom-shaped demo). The other
 backends are untouched; `--target js` is additive, like `--target wasm` was.
@@ -16,9 +16,19 @@ no tail-call guarantee or filesystem/process/thread runtime.
 
 `wiz build --target js FILE -o OUT` writes one self-contained ES module (`OUT.mjs`
 unless `OUT` ends in `.mjs`/`.js`): the runtime is pasted at the top, then one JS
-function per IR declaration, then `export function main`, then a runner that fires only
-when Node executes the file directly (`import.meta.url === wizFileUrl(process.argv[1])`).
-Importing the module does not run `main`; the importer calls it.
+function per IR declaration, then one `export function NAME(…)` per `export "NAME" f`
+(stage 9g — the same entries the C backend gives C symbols), then `export function main`,
+then a runner that fires only when Node executes the file directly (`import.meta.url ===
+wizFileUrl(process.argv[1])`). Importing the module does not run `main`; the importer
+calls it.
+
+An export is one line: `wizCallExport(entry, params, result, io, args)`. `entry` is the
+IR's closure for the exported definition (the C backend's `wiz.export.<name>` decl, which
+`IR.cafExcluded` keeps out of the CAF cache), `params`/`result` are the same FFI kinds
+`wizExtern` marshals (`n u f s b v p w`), and an `IO` export takes the world as its last
+argument and returns the pair's first field — the C wrapper's `callIntoWiz` and
+`wiz_io_value`, exactly. A zero-parameter export is the value itself (the entry is not
+applied), as in C. `main` cannot be an export name.
 
 The IR is the same `Wiz/Compiler/IR.lean` the C, LLVM and Wasm backends consume, after
 lowering, Perceus and `Simp`. Every construct has a lowering:
@@ -159,9 +169,13 @@ callback is refused for a `wiz_` native, whose C signature expects the C pair; a
    promise-to-continuation bridge in this prototype. Loom's mount/route/patch path is
    synchronous; its storage path is not, and needs either a callback-shaped host API or
    an `IO` await primitive that does not exist yet.
-6. **No user exports.** `export "name" f` is not turned into a JS export; only `main`
-   is. The Loom host needs `main` (or a `js.` callback registration), and that is what
-   the demo uses. Exported C symbols are the C backend's contract.
+6. **~~No user exports.~~ Resolved.** `export "name" f` is an ES export
+   (`export function name(…)`, marshalled through the same FFI table as `wizExtern`), so a
+   `--target js` module can present the Loom ABI (`wiz_loom_init/html/step/effect/
+   requests/consume`) and be mounted by `web/framework/mount.js`. Two limits remain: an
+   export cannot be named `main` (the module's entry), and an export's signature is the
+   C ABI's subset — no parameter or result that is a C struct, a byte buffer, or a
+   callback (`ffiCallSig`).
 7. **Lazy cells are not memoised.** `coit`/`scofix` cells are ordinary constructors and
    `lazySet` returns the payload without rewriting the cell, so a second observation
    recomputes the same pure payload. The values agree; the work may be repeated.
