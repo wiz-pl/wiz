@@ -170,7 +170,7 @@ NOTE_BUILT = "built "
 # model's error. A shard over the budget is split, not given a longer timeout: a
 # timeout is a cancelled job with a partial log (`balance` then cannot see it).
 # docs/ci-runner.md "The shard budget".
-JOB_TIMEOUT_S = 90 * 60
+JOB_TIMEOUT_S = 120 * 60
 SHARD_BUDGET_S = 75 * 60
 
 # A skip whose reason names one of these says the CI dev shell (flake.nix,

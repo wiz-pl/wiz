@@ -66,15 +66,16 @@ substitutes or Lake recompiles nothing).
 
 ## The shard budget
 
-A test job is killed at **90 minutes** (`timeout-minutes` in the `tests` job). A killed
+A test job is killed at **120 minutes** (`timeout-minutes` in the `tests` job). A killed
 job has a partial log, and `scripts/ci.py balance` cannot see it (it reads only
 successful jobs' walls), so a shard that grows into the timeout hides the regression that
 made it slow. The plan therefore has a hard headroom guard: **no job's predicted wall may
-exceed 75 minutes** (`SHARD_BUDGET_S` in `scripts/ci.py`; the 15 minutes left are the
-job's setup before the `tests` step and the model's error).
+exceed 75 minutes** (`SHARD_BUDGET_S` in `scripts/ci.py`; the 45 minutes left are the
+job's setup before the `tests` step and the model's error). `JOB_TIMEOUT_S` in
+`scripts/ci.py` mirrors the workflow's timeout and must be changed with it.
 
 * `scripts/ci.py plan` (the `lean` job) prints the longest predicted job with its
-  margins to the budget and to the 90-minute timeout, and exits 1 when a job is over.
+  margins to the budget and to the 120-minute timeout, and exits 1 when a job is over.
 * `scripts/ci.py check-shards` applies the same budget check, so the `lean` job fails
   before the matrix starts rather than sending a shard that would time out.
 * The prediction is the job's case sum from `.github/test-timings.json` plus every

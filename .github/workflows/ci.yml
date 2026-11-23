@@ -1192,7 +1192,10 @@ jobs:
           jobs=()
           if [ -n "$JOBS" ]; then jobs=(--jobs "$JOBS"); fi
           jobs_s="${jobs[*]-}"
-          echo "tests -- --cache ~/.cache/wiz --cache-ro <wiz>/share/wiz/cache ${jobs_s:+$jobs_s }${allow[*]-}${allow:+ }${sel[*]}"
+          # The real `--cache-ro` path, not a placeholder: a shard's log is the only
+          # place a cache miss (or a layer that was substituted from Cachix) can be
+          # told apart from a source change, so it names the store path it read.
+          echo "tests -- --cache ~/.cache/wiz --cache-ro ${ro[1]} ${jobs_s:+$jobs_s }${allow[*]-}${allow:+ }${sel[*]}"
           # the Nix-built driver, exactly as `lake test -- …` would run it; every case's
           # time as JSON lines (scripts/ci.py summary and baseline read them)
           "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${ro[@]}" "${allow[@]}" "${jobs[@]}" \
