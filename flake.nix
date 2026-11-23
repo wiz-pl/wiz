@@ -785,6 +785,35 @@ EOF
               ./COPYING.RUNTIME
             ] ++ map (f: ./. + "/${f}") siteAssetFiles);
           };
+          # `wiz doc --lib` on its own: the API pages are the expensive, separately
+          # cacheable half of the site (`--jobs 4` over every module), and the site
+          # below consumes the result instead of re-running it. A `lib/` change rebuilds
+          # this and then the site; a change to the site's chrome rebuilds only the site.
+          docs-lib = pkgs.stdenv.mkDerivation {
+            pname = "wiz-docs-lib";
+            inherit (unwrapped) version;
+            src = docsSiteSource;
+            nativeBuildInputs = [ wiz pkgs.python3 pkgs.gnugrep ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR
+              mkdir -p out
+              ${wiz}/bin/wiz doc --lib --jobs 4 -o out/docs --web ${web-bundle} \
+                --source-url ${lib.escapeShellArg "${sourceUrl}/lib/"}
+              cp ${reference}/index.md out/docs/reference.md
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -R out $out
+              runHook postInstall
+            '';
+            passthru.subset = "lib/ + the docs tooling in siteAssetFiles + wiz + reference + web-bundle";
+            meta = {
+              description = "The API documentation: `wiz doc --lib` over lib/";
+              platforms = systems;
+            };
+          };
           docs-site = pkgs.stdenv.mkDerivation {
             pname = "wiz-docs-site";
             inherit (unwrapped) version;
@@ -794,9 +823,9 @@ EOF
               runHook preBuild
               export HOME=$TMPDIR
               mkdir -p site
-              ${wiz}/bin/wiz doc --lib --jobs 4 -o site/docs --web ${web-bundle} \
-                --source-url ${lib.escapeShellArg "${sourceUrl}/lib/"}
-              cp ${reference}/index.md site/docs/reference.md
+              # the API pages come from #docs-lib: `wiz doc --lib` is its own derivation
+              # now, so a site-only change does not re-render 245 modules
+              cp -R --no-preserve=mode ${docs-lib}/docs site/docs
               WIZ_SOURCE_URL=${lib.escapeShellArg sourceUrl} \
                 sh web/build-site.sh site ${web-bundle}
               runHook postBuild
@@ -849,17 +878,10 @@ EOF
               export HOME=$TMPDIR
               mkdir -p site
               cp -R --no-preserve=mode ${docs-site}/. site/
-              # scry's link_c points at native/tree-sitter-c-sharp, an uncommitted
-              # out-link in a checkout; in the sandbox it is the fetched grammar.
-              mkdir -p scrybuild
-              cp -R --no-preserve=mode scry scrybuild/
-              cp -R --no-preserve=mode web scrybuild/
-              chmod -R u+w scrybuild
-              rm -rf scrybuild/scry/native/tree-sitter-c-sharp
-              ln -s ${tree-sitter-c-sharp} scrybuild/scry/native/tree-sitter-c-sharp
-              ( cd scrybuild/scry && ${wiz}/bin/grail build scry )
+              # scry is a derivation now (`.#scry`): the sandbox no longer copies the
+              # package, links the grammar and runs `grail build scry` here
               mkdir -p bundle
-              sh web/source-bundle.sh scrybuild/scry/.grail/bin/scry bundle \
+              sh web/source-bundle.sh ${scry}/bin/scry bundle \
                 --ui ${wiz-source-ui} --target scry/tests/fixtures/report
               mkdir -p site/source
               cp -R --no-preserve=mode bundle/. site/source/
@@ -1373,7 +1395,7 @@ EOF
         in {
           inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native scry
                    wiz-web wiz-playground wiz-playground-ui wiz-landing-ui wiz-source-ui release-tarball
-                   wasm-fixtures web-bundle docs-site pages release-bin
+                   wasm-fixtures web-bundle docs-lib docs-site pages release-bin
                    release-unwrapped release-tower;
           # a function, not a package: `tower` is `towerFor wiz`, and `lib.towerWith`
           # is CI's seeded build. `packages` removes it (see below).
