@@ -818,9 +818,10 @@ jobs:
   #
   #   * the producer is `withLakeCache empty-lake`: the same function a pull request
   #     calls, applied to an empty seed, so the **sandbox** is the cold boundary —
-  #     no cache is restored, no dev shell, no impure path. Its `bin` is byte-identical
-  #     to the pure build's (the same compile), which is what makes it a trustworthy
-  #     substitute for the compile;
+  #     no cache is restored, no dev shell, no impure path. Its `bin` is **expected** to
+  #     be byte-identical to the pure build's (the same compile); the seed measurement's
+  #     `cmp` is the evidence and has not yet run, so this is a design expectation, not a
+  #     measured fact, and it is what makes the producer a trustworthy substitute;
   #   * its `unwrapped.lake` output (`.lake/build/lib`, `.lake/build/ir`, `.lake/config`
   #     and the toolchain stamp; no `build/bin`, no `.lake/cache`) is the seed,
   #     `.#lake-seed`. The job publishes that store path to the trusted Cachix; this
