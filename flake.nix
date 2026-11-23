@@ -863,8 +863,8 @@ EOF
             mkdir -p $out/lib
             cp -L ${release-gmp}/lib/libgmp.a $out/lib/libgmp.a
             cp -L ${release-libuv}/lib/libuv.a $out/lib/libuv.a
-            cp -L ${release-openssl}/lib/libssl.a $out/lib/libssl.a
-            cp -L ${release-openssl}/lib/libcrypto.a $out/lib/libcrypto.a
+            cp -L ${release-openssl.out}/lib/libssl.a $out/lib/libssl.a
+            cp -L ${release-openssl.out}/lib/libcrypto.a $out/lib/libcrypto.a
           '';
           releaseCC = pkgs.writeShellScript "wiz-release-cc" ''
             # The release's C compiler. Compile-only calls just get the release's
