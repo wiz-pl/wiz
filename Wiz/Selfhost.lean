@@ -1,5 +1,6 @@
 import Wiz.Parser.Builtin
 import Wiz.Version
+import Wiz.Compiler.Target
 
 /-!
 # The self-hosted toolchain's sources (stage 23e)
@@ -7,8 +8,10 @@ import Wiz.Version
 The self-hosted programs are one Wiz file each: the `selfhost/*.wiz` sources (their
 imports dropped: they are concatenated) — including the parser tables
 (`selfhost/Tables.wiz`, a checked-in file generated from the Lean parser's tables by
-`scripts/GenSelfhostTables.lean`) and the driver (`selfhost/Cli.wiz`, stage 21 D2-D7:
-subcommands, module roots, `-o`, a cache, positioned diagnostics, exit codes) — and a
+`scripts/GenSelfhostTables.lean`), the generated `--target` table (`targetsSource`,
+rendered from `Wiz.Target.all` so the driver has no second list) and the driver
+(`selfhost/Cli.wiz`, stage 21 D2-D7: subcommands, module roots, `-o`, a cache,
+positioned diagnostics, exit codes) — and a
 `main` (`selfhost/Main.wiz`, `selfhost/Check.wiz`). The tests (`Tests/Elab.lean`) and
 grail (`Grail/Selfhost.lean`) both build them from here.
 -/
@@ -64,6 +67,34 @@ def wizTables (t : ParserTables) : String := Id.run do
 /-- A source without its `import` lines. -/
 def strip (f : String) : String :=
   "\n".intercalate ((f.splitOn "\n").filter (!·.startsWith "import"))
+
+/-- The targets the self-hosted backend implements: C, and C5's first LLVM slice. This is
+the driver's *capability* list, not the name table — every other known name is refused by
+name (unsupported), never by falling back to C. -/
+def selfhostImplemented : List String := ["c", "llvm"]
+
+/-- The spellings the selfhost refuses as probes: the host table's `bpf` entry and its
+aliases (`ebpf`). Derived from `Wiz.Target.all`, so a new alias on the host row reaches
+the driver without a second edit. -/
+def selfhostProbeSpellings : List String :=
+  match Wiz.Target.ofName? "bpf" with
+  | some t => t.name :: t.aliases
+  | none => []
+
+/-- The `--target` preamble `compilerSource` splices before the driver
+(`selfhost/Cli.wiz`): `targetModes` is the host's one name table (`Wiz.Target.all`,
+aliases included), `targetImplemented` is the selfhost's capability, `targetProbe` its
+probe spellings, and `targetChoices` the shared choices sentence. `selfhost/Cli.wiz`
+therefore keeps no second list of target names. The source is generated in-process, like
+`wizVersion`/`toolchainId`, so the bootstrap program (`selfSource`) has it too. -/
+def targetsSource : String :=
+  "def targetModes : List String := " ++
+    wizList ((Wiz.Target.spellings Wiz.Target.all).map wizLit) ++ "\n" ++
+  "def targetImplemented : List String := " ++
+    wizList (selfhostImplemented.map wizLit) ++ "\n" ++
+  "def targetProbe : List String := " ++
+    wizList (selfhostProbeSpellings.map wizLit) ++ "\n" ++
+  "def targetChoices : String := " ++ wizLit Wiz.Target.choices ++ "\n"
 
 /-- (A13) The core tactic grammar, for the self-hosted frontend. The host reads tactics
 from `syntax … : tactic` declarations in `lib/Prelude.wiz`; the self-hosted frontend has no
@@ -150,10 +181,11 @@ def compilerFiles : List String :=
   frontendFiles ++ ["selfhost/Backend.wiz"] ++ tableFiles ++ driverFiles ++ mainFiles
 
 /-- The toolchain's identity, for the driver's cache key (source + toolchain): the
-version (`Wiz.Version.version`, one source for every tool) and the sources themselves.
-Any change to the selfhost sources makes the cache cold. -/
+version (`Wiz.Version.version`, one source for every tool), the sources themselves and
+the generated `--target` table (`targetsSource`, which is part of the driver's text). Any
+change to the selfhost sources or to `Wiz/Compiler/Target.lean` makes the cache cold. -/
 def toolchainId (srcs : List String) : String :=
-  s!"{hash (Wiz.version ++ "\n".intercalate srcs)}"
+  s!"{hash (Wiz.version ++ "\n".intercalate srcs ++ "\n" ++ targetsSource)}"
 
 /-- The self-hosted checker: reads `input.wiz` (and the modules it imports, with `-I`
 roots) and prints what the frontend makes of them. `srcs` is `checkerFiles`: the language,
@@ -170,12 +202,15 @@ standard error and the exit code is 1, 15g). A `link_c` file that doesn't exist 
 an error too (stage 21t, `missingLinks`).
 
 `wizVersion` and `toolchainId` are the build's identity, not Wiz source: the release
-string and a hash of these sources, which the driver keys its cache on. They are the one
-thing the build has to pass in (the tables are `selfhost/Tables.wiz`). -/
+string and a hash of these sources, which the driver keys its cache on. `targetsSource`
+is the other generated fragment: the `--target` name table, rendered from
+`Wiz.Target.all` so the driver has no second list. The tables themselves are
+`selfhost/Tables.wiz`. -/
 def compilerSource (srcs : List String) : String :=
   "import IO\nimport Std\nimport Sys\n" ++
     "def wizVersion : String := " ++ wizLit Wiz.version ++ "\n" ++
     "def toolchainId : String := " ++ wizLit (toolchainId srcs) ++ "\n" ++
+    targetsSource ++
     "\n".intercalate (srcs.map strip)
 
 /-- The toolchain as its own input (for the bootstrap check): the compiler's source, with

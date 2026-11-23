@@ -14,6 +14,8 @@ const ok = (cond, what, detail = "") => {
   if (cond) console.log("ok: " + what);
   else { failed++; console.log("FAIL: " + what + (detail ? "\n  " + detail : "")); }
 };
+const eq = (what, want, got) => ok(Object.is(got, want), what,
+  `want ${JSON.stringify(want)}\n  got  ${JSON.stringify(got)}`);
 
 const SSR = '<div><textarea id="editor" data-wiz-on-input="0">x</textarea>' +
   '<button data-wiz-on-click="1" data-wiz-on-keydown="2">Run</button></div>';
@@ -116,16 +118,26 @@ ok(key({ type: "keydown", key: "a" }) === false,
   "an unconsumed key still types (the runtime did not prevent)");
 ok(key({ type: "keydown", key: "Enter", ctrlKey: true }) === true,
   "a consumed key is prevented");
-ok(asks.length === 2 && asks[0] === "keydown\n0\na" && asks[1] === "keydown\n0\nEnter\nc",
+ok(asks.length === 2 && asks[0] === "keydown\n0\na\n\n@0@0" &&
+   asks[1] === "keydown\n0\nEnter\nc\n@0@0",
   "the consume query gets the same event string the step did", JSON.stringify(asks));
 
 // ## js_patch is wired to the patch applier
 globalThis.wizPatch(JSON.stringify([{ op: "text", path: "0.0", text: "patched" }]));
 ok(serialize(root).includes("patched"), "wizPatch applies a patch to the mounted tree", serialize(root));
+eq("a non-island mount reports the replace mode", "replace", globalThis.wizLoomMode);
+
+// ## resync is the JS-on reload: one full replace, never a partial adopt
+const beforeResync = root.childNodes[0];
+app.resync();
+ok(root.childNodes[0] !== beforeResync, "resync replaces the container's tree");
+ok(serialize(root) === SSR, "resync re-renders the current state's SSR", serialize(root));
 
 // ## setState: a page that changed the state itself hands it back
 app.setState(41);
-fire(button, { type: "click" });
+// resync above replaced the tree, so take the button from the current root.
+const current = root.childNodes[0].childNodes[1];
+fire(current, { type: "click" });
 ok(steps[steps.length - 1].state === 41, "the next event steps from the state the page set",
   JSON.stringify(steps[steps.length - 1]));
 

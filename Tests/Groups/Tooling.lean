@@ -314,7 +314,7 @@ def toolingGroup : Group where
           let (code, out, err) := ← runWiz (tc.toFlags ++ ["run", file.toString]) env
           if code != 0 then
             if ["gmp", "No such file", "not preprocessed", "cannot find", "could not execute"].any (fun s => ((out ++ err).splitOn s).length > 1) then
-              skip "no toolchain"
+              skipMissing "no toolchain"
               return
             throw (IO.userError s!"wiz run failed ({code}):\n{out}\n{err}")
           check ((out.splitOn "42").length > 1) s!"no result:\n{out}\n{err}"
@@ -381,7 +381,7 @@ def toolingGroup : Group where
         let some e := viaBuild | throw (IO.userError "a header the compiler could not read was dropped")
         if ((e.splitOn "could not execute").length > 1) then
           -- no `cc` on this machine: not this case's failure
-          skip "no toolchain"
+          skipMissing "no toolchain"
           return
         check ((e.splitOn "-E failed").length > 1) s!"the compiler's failure is not reported: {e}"
         check ((e.splitOn missing).length > 1) s!"the error does not name the header: {e}"
@@ -452,7 +452,7 @@ def toolingGroup : Group where
           let n1 ← compiles
           unless first.1 == 0 && n1 ≥ 3 do
             -- the program did not elaborate into a split build: not this case's claim
-            skip "no split build"
+            skipMissing "no split build"
             return
           -- the same inputs: every unit's stamp and object are reused
           let again ← build cc1 []

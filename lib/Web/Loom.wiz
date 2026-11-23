@@ -3,6 +3,7 @@ import Optic
 import Tagged
 import Text
 import Web.Style
+import Web.Wire
 /-!
 # Web.Loom
 
@@ -232,6 +233,124 @@ def Loom.RNode.key : Loom.RNode → String
   | .raw _ _ => ""
   | .el _ k _ _ _ => k
 
+-- ## The normalised SSR tree hash
+
+-- The adopt hash is over the *tree*, not over the HTML spelling of it: attributes are
+-- sorted by name, runs of white space in a text node collapse to one space (except in a
+-- `<pre>`/`<textarea>`/`<script>`/`<style>`, where it is content), and the element key
+-- is part of the identity (a keyed child's `move` is how the runtime keeps a node, so
+-- two trees that differ only by key are not the same page). Child order is significant.
+-- `raw` HTML is hashed verbatim: it is the trust boundary, and its author owns its
+-- spelling. `Loom.canonical` is an unambiguous, length-prefixed form (no escaping), so
+-- two different trees cannot share a canonical string.
+--
+-- The result is `t1-<fnv8>-<canonical length>-<node count>`. The last two fields are
+-- the collision witness: a digest collision with a different tree will almost always
+-- differ in length or node count, so it is a **replace**, not an adopt.
+
+/-- Collapse every run of ASCII white space to one space. Leading and trailing space is
+kept: it is significant between inline elements (`"count "` before a value). -/
+def Loom.collapseSpace : List Char → List Char → List Char
+  | .nil, acc => List.reverse acc
+  | .cons c cs, acc =>
+    match Char.isSpace c with
+    | .true => match acc with
+      | .cons p ps => match Nat.beq (Char.code p) 32 with
+        | .true => Loom.collapseSpace cs acc
+        | .false => Loom.collapseSpace cs (.cons (Char.mk 32) acc)
+      | .nil => Loom.collapseSpace cs (.cons (Char.mk 32) acc)
+    | .false => Loom.collapseSpace cs (.cons c acc)
+
+/-- A text node's content with white-space runs collapsed. -/
+def Loom.normaliseText (s : String) : String :=
+  String.mk (Loom.collapseSpace (String.chars s) .nil)
+
+/-- Elements whose text is content, not layout: a `<pre>`'s indentation and a
+`<textarea>`'s default program are significant, so their text is hashed verbatim. -/
+def Loom.verbatimTag (tag : String) : Bool :=
+  Bool.or (String.eq tag "pre")
+    (Bool.or (String.eq tag "textarea")
+      (Bool.or (String.eq tag "script") (String.eq tag "style")))
+
+/-- Insert an attribute into a list sorted by name. Equal names keep their order. -/
+def Loom.insertAttr (a : Loom.Attr) : List Loom.Attr → List Loom.Attr
+  | .nil => .cons a .nil
+  | .cons b bs => match String.lt a.1 b.1 with
+    | .true => .cons a (.cons b bs)
+    | .false => .cons b (Loom.insertAttr a bs)
+
+/-- Attributes sorted by name: two spellings of the same element normalise alike. -/
+def Loom.sortAttrs : List Loom.Attr → List Loom.Attr
+  | .nil => .nil
+  | .cons a rest => Loom.insertAttr a (Loom.sortAttrs rest)
+
+/-- Add `pieces` in list order after `h`. `Html` appends (its accumulator is reversed
+and `Loom.canonical` reverses once at the end), so the call nesting is reversed here:
+the first piece is added first. -/
+def Loom.litForward : List String → Html → Html
+  | .nil, h => h
+  | .cons s rest, h => Loom.litForward rest (Html.lit s h)
+
+/-- One attribute: `A<len>:<name>=<len>:<value>`. -/
+def Loom.canonAttr (a : Loom.Attr) (h : Html) : Html :=
+  Loom.litForward ["A", Nat.repr (String.length a.1), ":", a.1, "=",
+    Nat.repr (String.length a.2), ":", a.2] h
+
+/-- The attributes, in sorted order. -/
+def Loom.canonAttrs : List Loom.Attr → Html → Html
+  | .nil, h => h
+  | .cons a rest, h => Loom.canonAttrs rest (Loom.canonAttr a h)
+
+mutual
+/-- One rendered node and its siblings, in canonical form. Text is normalised unless
+`verbatim` (inside `<pre>`/`<textarea>`), attributes are sorted, and the element's key
+is included; an element ends with `z`. -/
+partial def Loom.canonRNode (verbatim : Bool) : Loom.RNode → Html → Html
+  | .nil, h => h
+  | .text s n, h =>
+    let t := match verbatim with | .true => s | .false => Loom.normaliseText s;
+    Loom.canonRNode verbatim n
+      (Loom.litForward ["t", Nat.repr (String.length t), ":", t] h)
+  | .raw r n, h =>
+    Loom.canonRNode verbatim n
+      (Loom.litForward ["r", Nat.repr (String.length r), ":", r] h)
+  | .el t k a cs n, h =>
+    Loom.canonRNode verbatim n
+      (Loom.canonElement (Bool.or verbatim (Loom.verbatimTag t)) t k a cs h)
+
+/-- An element: `e<len>:<tag>k<len>:<key>a<n>:<attrs>c<nodes>z`. -/
+partial def Loom.canonElement (verbatim : Bool) (t k : String) (a : List Loom.Attr)
+    (cs : Loom.RNode) (h : Html) : Html :=
+  let sorted := Loom.sortAttrs a;
+  let h1 := Loom.litForward
+    ["e", Nat.repr (String.length t), ":", t, "k", Nat.repr (String.length k), ":", k,
+     "a", Nat.repr (List.length sorted), ":"] h;
+  let h2 := Loom.canonAttrs sorted h1;
+  let h3 := Html.lit "c" h2;
+  let h4 := Loom.canonRNode verbatim cs h3;
+  Html.lit "z" h4
+end
+
+/-- Every node in the chain and below it. -/
+partial def Loom.nodeCount : Loom.RNode → Nat
+  | .nil => 0
+  | .text _ n => 1 + Loom.nodeCount n
+  | .raw _ n => 1 + Loom.nodeCount n
+  | .el _ _ _ cs n => 1 + Loom.nodeCount cs + Loom.nodeCount n
+
+/-- The canonical string of a sibling chain. -/
+def Loom.canonical (ns : List Loom.RNode) : String :=
+  match Loom.canonRNode .false (Loom.RNode.ofList ns) (Html.mk List.nil 0) with
+  | .mk acc _ => String.mk (List.revOnto acc [])
+
+/-- The normalised tree hash of a sibling chain: `t1-<fnv8>-<length>-<nodes>`. -/
+def Loom.ssrHash (ns : List Loom.RNode) : String :=
+  let canon := Loom.canonical ns;
+  let digest := Wire.ssrHash canon;
+  String.append "t1-" (String.append digest (String.append "-"
+    (String.append (Nat.repr (String.length canon)) (String.append "-"
+      (Nat.repr (Loom.nodeCount (Loom.RNode.ofList ns)))))))
+
 /-- The state of a render: the output (reversed characters), the number of the next
 handler, and the handlers so far (reversed). -/
 structure Loom.Out (M : Type) where
@@ -359,6 +478,10 @@ def Loom.render {M : Type} (v : Loom.VNode M) : Loom.Rendered M :=
 
 /-- A virtual tree as an HTML string (SSR). -/
 def Loom.toHtml {M : Type} (v : Loom.VNode M) : String := (Loom.render v).html
+
+/-- The normalised tree hash of a render, for `data-wiz-ssr` (`Loom.ssrHash`). -/
+def Loom.Rendered.ssrHash {M : Type} (r : Loom.Rendered M) : String :=
+  Loom.ssrHash (Loom.RNode.siblings r.tree)
 
 -- ## Patches
 
@@ -717,6 +840,10 @@ def Loom.LiveApp.render {S M : Type} (a : Loom.LiveApp S M) (s : S) : Loom.Rende
 def Loom.LiveApp.html {S M : Type} (a : Loom.LiveApp S M) (s : S) : String :=
   (Loom.LiveApp.render a s).html
 
+/-- The normalised tree hash of the app at `s` (the client half of adopt). -/
+def Loom.LiveApp.ssrHash {S M : Type} (a : Loom.LiveApp S M) (s : S) : String :=
+  (Loom.LiveApp.render a s).ssrHash
+
 /-- The patches from the app's state `s` to `s'`. -/
 def Loom.LiveApp.patch {S M : Type} (a : Loom.LiveApp S M) (s s' : S) : List Loom.Patch :=
   Loom.Rendered.diff (Loom.LiveApp.render a s) (Loom.LiveApp.render a s')
@@ -739,6 +866,9 @@ def Loom.LiveApp.session {S M : Type} (a : Loom.LiveApp S M) : Loom.Session S M 
 
 /-- The session's HTML (the tree it already rendered). -/
 def Loom.Session.html {S M : Type} (s : Loom.Session S M) : String := s.rendered.html
+
+/-- The session's normalised tree hash (the tree it already rendered). -/
+def Loom.Session.ssrHash {S M : Type} (s : Loom.Session S M) : String := s.rendered.ssrHash
 
 /-- Move the session to `next`, rendering only the next state: the patches from the
 retained tree and the new session. -/

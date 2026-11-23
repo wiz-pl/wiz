@@ -29,9 +29,15 @@ with its own tables, so the constructors may not change without a seed bump
 (`selfhost/Tables.wiz`, first lines; `Wiz/Selfhost.lean`). It is generated, never
 edited.
 
+The `--target` names are the other generated fragment: `Wiz.Selfhost.targetsSource`
+renders the host's one table (`Wiz/Compiler/Target.lean`, `Wiz.Target.all`) as
+`targetModes`/`targetImplemented`/`targetProbe`/`targetChoices`, and `compilerSource`
+splices it before `selfhost/Cli.wiz`. The driver keeps no second list; a name or alias
+added on the host side reaches the selfhost on the next build (`Wiz/Selfhost.lean`).
+
 The driver is a real command line, not a generated `main`: `wiz-selfhost check FILE`,
 `build FILE -o OUT`, `run FILE [ARG…]`, `version` and `help`, with `-I DIR`,
-`--cache`, `--no-cache`, `--cache-verify`, `--target c`, `-v`, `--types`, the C
+`--cache`, `--no-cache`, `--cache-verify`, `--target c|llvm`, `-v`, `--types`, the C
 toolchain flags and the backend flags (`selfhost/Cli.wiz`). Its diagnostics are one line
 per error (`file:line:col: severity: message [code]`), using the Lean frontend's error
 code where the message names the same mistake (`selfhost/Cli.wiz`).

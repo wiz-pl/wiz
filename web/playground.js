@@ -6,9 +6,10 @@
 //
 // Everything the page shows — the header and its toolbar (the examples menu, Share,
 // Save, Reset, Clear), the editor pane, the output pane, the status line, the footer —
-// is the runtime's. The page keeps no DOM structure of its own and never touches the
-// module's ABI: `mount`'s `call` is the only way in, so the next page to migrate is this
-// file with different effects.
+// is the runtime's. `web/playground.html` ships that tree statically (the build fills
+// it from the same renderer) and the runtime adopts it when the hash matches; this file
+// never builds DOM of its own and never touches the module's ABI: `mount`'s `call` is
+// the only way in, so the next page to migrate is this file with different effects.
 //
 // The runtime's effects come back as requests (`wiz_loom_requests`, a JSON list of
 // `{kind, payload}`); the page does one and acknowledges it. That is why the page still
@@ -134,6 +135,8 @@ function editorRules(handle, versionOf = null) {
     itemTitle: index.itemTitle,
     askKey: index.askKey,
     position: index.position,
+    // The LSP position → UTF-16 offset rule (the format action's edit applier uses it).
+    offset: index.offset,
     target: index.target,
   };
 }
@@ -241,11 +244,13 @@ function cannotStart(root, e) {
     "\"The playground\".";
 }
 
-// Mount the runtime on `root` (the body by default) and give it its effects. Exported for
-// the Node tests, which pass a stub module and a DOM double; `web/playground.html` calls
-// it from a module script.
+// Mount the runtime on `root` (the `#app` island by default) and give it its effects.
+// Exported for the Node tests, which pass a stub module and a DOM double;
+// `web/playground.html` calls it from a module script. `#app` is the static-complete
+// island the build fills; the noscript line is outside it, so it is not one of the
+// runtime's children and cannot shift a child-index patch path.
 export async function startPage({ root, module = runtimeModule } = {}) {
-  const target = root || document.body;
+  const target = root || document.getElementById("app") || document.body;
   try {
     handle = await mount(target, {
       module,

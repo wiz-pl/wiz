@@ -136,7 +136,7 @@ def infoviewGroup : Group where
         let env := #[("WIZ_CFLAGS", some (" ".intercalate tc.cflags)), ("WIZ_LDFLAGS", some (" ".intercalate tc.ldflags))]
         let out ← IO.Process.output { cmd := "sh", args := #["infoview/test.sh"], env := env }
         unless out.exitCode == 0 do
-          if ((out.stdout ++ out.stderr).splitOn "gmp.h").length > 1 then skip "no toolchain"
+          if ((out.stdout ++ out.stderr).splitOn "gmp.h").length > 1 then skipMissing "no toolchain"
           else throw (IO.userError s!"infoview/test.sh failed:\n{out.stdout}{out.stderr}") }
   ]
 

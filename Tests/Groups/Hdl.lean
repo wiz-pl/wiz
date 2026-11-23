@@ -45,7 +45,7 @@ def hdlMemTools : IO Unit := do
     let has (c : String) : IO Bool := (do let o ← IO.Process.output { cmd := c, args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
     let iv ← has "iverilog"
     let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-    unless iv || ys do skip "no iverilog, no yosys"; return
+    unless iv || ys do skipMissing "no iverilog, no yosys"; return
     let src ← Tests.hdlRead "examples/hdl-mem.wiz"
     let s := runFrontend (R := ZeroOneMany) (src ++ "\n#eval vRom\n#eval tbRam\n#eval vecRam\n" ++
         "def big : HwTy.El (HwTy.mem 8 8) := fun (a : BitVec 8) => BitVec.ofNat 8 (Nat.mul a.toNat 3)\n" ++
@@ -95,7 +95,7 @@ RAMB18E1 and a RAMB36E1, the ROM a RAMB18E1, the multiply a DSP48E1 (when yosys 
 PATH). -/
 def hdlArtyTools : IO Unit := do
     let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-    unless ys do skip "no yosys"; return
+    unless ys do skipMissing "no yosys"; return
     let texts := (← hdlArtyTexts).drop 4
     let unq (t : String) : String := ((t.drop 1).dropRight 1).replace "\\n" "\n" |>.replace "\\\"" "\""
     IO.FS.withTempDir fun dir => do
@@ -145,7 +145,7 @@ def hdlPrimCheck : IO Unit := do
 PLLE2_BASE, BUFG, OSERDESE2, IOBUF, ODDR, OBUF (when yosys is on PATH). -/
 def hdlPrimTools : IO Unit := do
     let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-    unless ys do skip "no yosys"; return
+    unless ys do skipMissing "no yosys"; return
     let v := hdlUnq (← hdlPrimTexts)[0]!
     IO.FS.withTempDir fun dir => do
       IO.FS.writeFile (dir / "serial.v") v
@@ -160,7 +160,7 @@ def hdlPrimTools : IO Unit := do
 hdl/examples/hdl-pipe.wiz (when yosys is on PATH). -/
 def hdlPipeTools : IO Unit := do
     let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-    unless ys do skip "no yosys"; return
+    unless ys do skipMissing "no yosys"; return
     let src ← Tests.hdlRead "examples/hdl-pipe.wiz"
     let s := runFrontend (R := ZeroOneMany) (src ++ "\n#eval aluVerilog\n#eval flowVerilog\n")
       { trustedModule := Tests.libModule, loader := ← libLoader }
@@ -200,7 +200,7 @@ def hdlFormalTools : IO Unit := do
     let smt ← has "yosys-smtbmc" #["--help"]
     let z3 ← has "z3" #["--version"]
     unless ys && smt && z3 do
-      skip s!"no formal toolchain (yosys {ys}, yosys-smtbmc {smt}, z3 {z3})"; return
+      skipMissing s!"no formal toolchain (yosys {ys}, yosys-smtbmc {smt}, z3 {z3})"; return
     let texts ← hdlFormalTexts
     let unq (t : String) : String := ((t.drop 1).dropRight 1).replace "\\n" "\n" |>.replace "\\\"" "\""
     IO.FS.withTempDir fun dir => do
@@ -570,7 +570,7 @@ def hdlGroup : Group where
     { name := "Hdl.Formal: yosys-smtbmc proves the correct harness and finds the wrong RTL (skipped without yosys, yosys-smtbmc or z3)", run := fun _ => hdlFormalTools },
     { name := "Verilog: Icarus Verilog accepts the emitted modules (skipped without iverilog on PATH)", run := fun _ => do
         let found ← (do let o ← IO.Process.output { cmd := "iverilog", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-        unless found do skip "no iverilog"; return
+        unless found do skipMissing "no iverilog"; return
         let s := runFrontend (R := ZeroOneMany) (hdlVerilogSrc ++ "#eval v1\n#eval v2\n#eval v3\n")
           { trustedModule := Tests.libModule, loader := ← libLoader }
         let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render ""
@@ -661,7 +661,7 @@ def hdlGroup : Group where
     { name := "H14 S5: yosys check -assert on the data-path and flow pipeline Verilog (skipped without yosys)", run := fun _ => hdlPipeTools },
     { name := "H14 S5: simFast = Circuit.run = netlist for the pipelines (compiled; skipped without a C toolchain)", run := fun _ => do
         let has (c : String) : IO Bool := (do let o ← IO.Process.output { cmd := c, args := #["--version"] }; pure (o.exitCode == 0)) <|> pure false
-        unless (← has "cc") do skip "no cc"; return
+        unless (← has "cc") do skipMissing "no cc"; return
         cRunLibs (← Tests.hdlRead "examples/hdl-pipe.wiz")
           "alu3: simFast = run = netlist: yes\nflow3: simFast = run = netlist: yes\n" },
     { name := "L3: signals — sized `mapS`, the counter through `Signal.fix`, the baud generator, and `+`/`if` at a size (hdl/examples/hdl-l3.wiz)", run := fun _ => do

@@ -114,6 +114,7 @@ def parseMapKind (s : String) : Except String MapKind :=
   | "array" => pure .array
   | "percpu_array" => pure .percpuArray
   | "lru_hash" => pure .lruHash
+  | "perf_event_array" => pure .perfEventArray
   | _ => .error s!"bpf-core: unknown map kind `{s}`"
 
 mutual
@@ -132,6 +133,7 @@ partial def parseTy (p : P) : Except String (Ty × P) := do
   | .atom "i32" => pure (.i32, p)
   | .atom "i64" => pure (.i64, p)
   | .atom "packet" => pure (.packet, p)
+  | .atom "userptr" => pure (.userPtr, p)
   | .atom other => .error s!"bpf-core: unknown type `{other}`"
   | .str _ => .error "bpf-core: a type is a symbol, not a string"
   | .rp => .error "bpf-core: unexpected `)` in a type"
@@ -151,9 +153,15 @@ partial def parseTy (p : P) : Except String (Ty × P) := do
       let k ← match k with
         | "xdp" => pure .xdp
         | "tc" => pure .tc
+        | "tracepoint" => pure .tracepoint
+        | "uprobe" => pure .uprobe
         | other => .error s!"bpf-core: unknown context `{other}`"
       let p ← p.expectRp
       pure (.ctx k, p)
+    | "userstr" =>
+      let (cap, p) ← p.nat
+      let p ← p.expectRp
+      pure (.userStr cap, p)
     | "struct" =>
       let p ← p.expectLp
       let (fields, p) ← parseTys p
@@ -341,6 +349,58 @@ partial def parseTmForm (p : P) : Except String (Tm × P) := do
     let (c, p) ← parseTm p
     let p ← p.expectRp
     pure (.mk {} (.ctxRxQueue c), p)
+  | "ctx-pid" =>
+    let (c, p) ← parseTm p
+    let p ← p.expectRp
+    pure (.mk {} (.ctxPid c), p)
+  | "ctx-tgid" =>
+    let (c, p) ← parseTm p
+    let p ← p.expectRp
+    pure (.mk {} (.ctxTgid c), p)
+  | "ctx-now" =>
+    let (c, p) ← parseTm p
+    let p ← p.expectRp
+    pure (.mk {} (.ctxNow c), p)
+  | "ctx-arg" =>
+    let (i, p) ← p.nat
+    let (c, p) ← parseTm p
+    let p ← p.expectRp
+    pure (.mk {} (.ctxArg i c), p)
+  | "ctx-arg-word" =>
+    let (i, p) ← p.nat
+    let (c, p) ← parseTm p
+    let p ← p.expectRp
+    pure (.mk {} (.ctxArgWord i c), p)
+  | "read-user-str" =>
+    let (cap, p) ← p.nat
+    let (c, p) ← parseTm p
+    let (ptr, p) ← parseTm p
+    let p ← p.expectRp
+    pure (.mk {} (.readUserStr (.option (.userStr cap)) c ptr), p)
+  | "argv-slot" =>
+    let (cap, p) ← p.nat
+    let (c, p) ← parseTm p
+    let (argv, p) ← parseTm p
+    let (slot, p) ← p.nat
+    let p ← p.expectRp
+    pure (.mk {} (.argvSlot (.option (.userStr cap)) c argv slot), p)
+  | "probe-emit" =>
+    let (ty, p) ← parseTy p
+    let (events, p) ← p.str
+    let (kind, p) ← p.atom
+    let kind ← match EventKind.ofName? kind with
+      | some k => pure k
+      | none => .error s!"bpf-core: unknown event kind `{kind}` \
+(choose execve, openat, write, connect or heartbeat)"
+    let (slot, p) ← p.nat
+    let (c, p) ← parseTm p
+    let (pid, p) ← parseTm p
+    let (tgid, p) ← parseTm p
+    let (ppid, p) ← parseTm p
+    let (ts, p) ← parseTm p
+    let (data, p) ← parseTm p
+    let p ← p.expectRp
+    pure (.mk {} (.probeEmit ty events kind slot c pid tgid ppid ts data), p)
   | "map-lookup" =>
     let (ty, p) ← parseTy p
     let (m, p) ← p.str

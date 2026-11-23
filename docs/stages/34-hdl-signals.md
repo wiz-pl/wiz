@@ -169,34 +169,66 @@ kernel:
 * **Congruence.** `Signal.Eqv.map`, `Eqv.zipWith`, `Eqv.zipWith3`, `Eqv.register`,
   `Eqv.registerS`, `Eqv.mealy` and `Eqv.ofCircuit`: equivalent signals give equivalent
   results, so a proof about the model transfers under the combinators and across the
-  circuit bridge.
+  circuit bridge. The sized combinators have the same congruences —
+  `Eqv.mapS`, `Eqv.zipWithS` and `Eqv.zipWith3S` — but, unlike their `coit` counterparts,
+  these are not `rfl`: a step compares `f` applied to two observations that agree only
+  pointwise, so the proof rewrites with `mapS_at`/`zipWithS_at`/`zipWith3S_at` and
+  `Eq.congrArg` (`congrArg2`/`congrArg3` for two/three inputs).
 
-**What is not proved, and why.** The *sized-observation* laws (`mapS_at`, `zipWithS_at`,
-`mapS_id`, `mapS_comp`, the `mapS_head`/`mapS_tail` prefix forms and the `Eqv`
-congruences for `mapS`/`zipWithS`/`zipWith3S`) need `out (mapS f s)` to unfold for a
-*variable* `s`, i.e. the body's payload observation must reduce. There are three body
-shapes and none both typechecks and reduces:
+### 34c.1: `out`'s payload at the predecessor (HDL-2.2a)
 
-1. `let (h, r) := out a` (the shipped shape, and the one train11 used): a `Signal.fix`
-   knot costs one observation per cycle (linear), but `split` on a *neutral* payload is
-   stuck, so `out (mapS f s)` does not unfold and no law is `rfl`.
-2. two projections `(out a).1`/`(out a).2.1`: it unfolds and every law above is `rfl`,
-   but it re-evaluates `out a` at every step, so a knot is exponential — with that body
-   `hdl/examples/hdl-l3.wiz`'s counter/baud generator no longer finishes (measured: the
-   `hdl` group's L3 case ran for over 45 minutes and was killed).
-3. `let p := out a` (one observation: linear *and* unfolding): the kernel rejects the
-   sized `cocon` under a `let` (`expected: … ν (Signal.desc d A) … inferred: … ν^j …`),
-   because the surface `out` erases the size *and* the index of the payload's recursive
-   field, so the let-bound payload carries the predecessor size where the `cocon` check
-   wants the family size.
+**The defect.** A surface `out x` inferred its payload at `ν^∞`: the builtin `out` case
+in `Wiz/Elab/Term.lean` used `nuFamily` (`λ j. ν^∞ D j`), while the kernel's rule
+(`inferCore`, `Wiz/Core/Check.lean`, and `selfhost/Kernel.wiz`) types it at the
+*predecessor* of the observed size — `out x : Desc.interp D (ν^{s'}) i` where
+`s' = sizePred? s`, `∞ ↦ ∞` — which is also what the sized copattern elaborator and
+`Mark` already used. For a value at `∞` the two agree; for a value at `↑j` they do not,
+and the elaborator's type is one the kernel cannot accept at the let (a value at `ν^j`
+does not check against `ν^∞`: `ν` is contravariant in its size). So the one body shape
+that is both linear and unfolding — `let p := out a`, project `p` — was rejected:
+`expected … ν (Signal.desc d A) …  inferred … ν^j …`.
 
-Unblocking (1) is an elaborator/kernel change: type `out`'s payload at the predecessor
-(`ν^j D i`, not `ν^∞ D ()`) in the builtin `out` case of `Wiz/Elab/Term.lean` (and the
-`selfhost/Frontend.wiz` mirror). With that, shape 3 typechecks and every sized law is
-`rfl` while the knot stays linear. That is the first item of HDL-2.2.
+**The fix.** The builtin `out` case now reads the size out of the coinductive type and
+types the payload with `nuFamilyAt l I D s'` (`s' = sizePred? s`), throwing the kernel's
+error ("only a value of size ↑s or ∞ can be observed") for a size variable, exactly as
+`inferCore` does. `selfhost/Frontend.wiz`'s `inferBuiltin` mirrors it (its `cocon` case
+already did). No kernel, evaluator or erasure change: they already had the rule, and
+`Mark` (which infers `out`'s type for the marking pass) and the sized copattern
+elaborator already computed this type.
+
+With that, `Signal.mapS`/`zipWithS`/`zipWith3S` observe their input once through a
+shared `let`:
+
+```wiz no-check
+def Signal.mapS {A B : Type} {i : Size} (f : A → B) (s : (Signal d A)^i) : (Signal d B)^i :=
+  scofix (fun (j : Size) => fun _ => (Signal d A)^j)
+    (fun (j : Size) rec idx a =>
+      let p := out a
+      cocon (f p.1, rec idx p.2.1, (), ()))
+    i () s
+```
+
+and the sized-observation laws are `rfl`:
+
+* `Signal.mapS_head`, `Signal.mapS_tail`, `Signal.zipWithS_head` (one `scofix` step),
+* `Signal.mapS_at`, `Signal.zipWithS_at`, `Signal.zipWith3S_at` (`f` on the value of
+  every cycle, by induction on `t` with `rfl` in both cases),
+* `Signal.mapS_id` and `Signal.mapS_comp` (as `Signal.Eqv`, pointwise, `rfl`).
+
+The knot stays linear: `let p := out a` evaluates the observation once per cycle and
+both projections read the shared value, so `Signal.fix`'s counter and the baud generator
+in `hdl/examples/hdl-l3.wiz` still run in the `hdl` group's time (the `hdl` case, and
+`hdl-signal`'s L3 case, are the check). The shapes this replaced are not an option: a
+`let (h, r) := out a` splits a neutral payload (stuck, so no law unfolds), and two
+separate `(out a).1`/`(out a).2.1` observations re-evaluate `out a` at every step, which
+made the same L3 example run for over 45 minutes before it was killed (2026-11-22).
+
+**What it does not do.** `out` on a value at a *size variable* is still an error (that
+is the kernel's rule, and a value at an unknown size cannot be observed); and nothing
+about the size is computed at run time — sizes stay erased bounds.
 
 The `hdl-signal` group pins the proved statements with `#check` (the rendered text, so a
-changed statement fails) and `#print axioms` (none for the thirteen algebraic ones; the
+changed statement fails) and `#print axioms` (none for the algebraic ones; the
 four that mention a `Circuit` or compute `BitVec` literals inherit the library's trusted
 `Hw HwTy.El`/`UIntN` natives, exactly as `ofCircuit_at`/`ofCircuit_delay` do).
 

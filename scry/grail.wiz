@@ -22,6 +22,10 @@ def package : Package := Package.new "scry"
   |> Package.exe "scry" "App.wiz"
   |> Package.exe "scry-schema" "tools/SchemaMain.wiz"
   |> Package.exe "scry-cst" "tools/CstMain.wiz"
+  -- the canonical artifact bundle the incremental differential harness compares
+  -- (scripts/incremental-fuzz.py): every CST column, the lowered Wil, the EDB and the
+  -- report, with cache statistics kept out of the compared artifacts.
+  |> Package.exe "scry-artifacts" "tools/ArtifactsMain.wiz"
   -- the C# external-frequency probe (`scry/CSHARP.md` §"External models"): the merged
   -- program's unmodelled callees, counted. Measurement only; no test depends on it.
   |> Package.exe "cs-externals" "tools/CsExternalsMain.wiz"

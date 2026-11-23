@@ -70,6 +70,7 @@ lib/Lint.wiz
 lib/Logic.wiz
 lib/MVar.wiz
 lib/Nat.wiz
+lib/Omega.wiz
 lib/Optic.wiz
 lib/OpticDerive.wiz
 lib/Plot.wiz
@@ -184,6 +185,7 @@ scry/src/Scry/NullExamples.wiz
 scry/src/Scry/Nullness.wiz
 scry/src/Scry/Optics.wiz
 scry/src/Scry/OpticsExamples.wiz
+scry/src/Scry/Output.wiz
 scry/src/Scry/Parse.wiz
 scry/src/Scry/PointsTo.wiz
 scry/src/Scry/Preproc.wiz
@@ -230,10 +232,12 @@ scry/tests/e2e-egraph.wiz
 scry/tests/e2e-prover.wiz
 scry/tests/egraph-rewrite.wiz
 scry/tests/egraph.wiz
+scry/tests/emit.wiz
 scry/tests/fuzz.wiz
 scry/tests/native.wiz
 scry/tests/oob.wiz
 scry/tests/optics.wiz
+scry/tests/output.wiz
 scry/tests/parse-stats.wiz
 scry/tests/preproc.wiz
 scry/tests/project.wiz
@@ -251,7 +255,9 @@ scry/tests/schema.wiz
 scry/tests/taint.wiz
 scry/tests/uaf.wiz
 scry/tests/workflow-e2e.wiz
+scry/tests/workflow-records.wiz
 scry/tests/workflow.wiz
+scry/tools/ArtifactsMain.wiz
 scry/tools/CsCover.wiz
 scry/tools/CsExternalsMain.wiz
 scry/tools/CsTraceMain.wiz

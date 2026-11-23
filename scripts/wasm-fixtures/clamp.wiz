@@ -1,0 +1,5 @@
+import Prelude
+
+-- Nat subtraction saturates at zero; the wasm host must agree with the C runtime's
+-- `wiz_nat_sub`.
+def main : Nat := 5 - 7

@@ -1,0 +1,8 @@
+import Prelude
+
+-- 200k frames: without the tail-call proposal this exhausts the engine's stack.
+partial def countdown (n acc : Nat) : Nat := match n with
+  | .zero => acc
+  | .succ k => countdown k (acc + 1)
+
+def main : Nat := countdown 200000 0

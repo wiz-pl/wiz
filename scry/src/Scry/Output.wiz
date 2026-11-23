@@ -1,0 +1,669 @@
+import Sys
+import Text
+import Json
+import Scry.Rules
+import Scry.Budget
+import Scry.Sarif
+import Scry.TaintCmd
+import Scry.ReportCmd
+import Scry.ProjectIO
+/-!
+# Scry.Output: one per-finding output pipeline (JSON + SARIF, baseline, budget)
+
+`scry findings emit` is the machine-readable side of a run. It analyses one file or a
+directory with **the same** `Scry.analyzeFile` entry point `scry taint`, `scry report`
+and `scry web` use, and writes two renderings of exactly the same finding set:
+
+```
+scry findings emit FILE.c|DIR (--json OUT | --sarif OUT)…
+                    [--baseline FILE] [--update-baseline FILE]
+                    [--budget N | --budget error=N]… [--fail-on-finding]
+                    [--rules FILE] [--allow-errors]
+                    [--timeout SECS] [--max-nodes N] [--max-rounds N]
+```
+
+* `--json OUT` is the plain JSON report (`scry-findings/1`), one object per finding
+  with the stable `f_<16 hex>` id, rule, severity, message, location and path.
+* `--sarif OUT` is SARIF 2.1.0 from `Scry.Sarif`'s one writer. The finding id is the
+  same `partialFingerprints.scry/v1` value the web bundle (`data/findings.json`) and
+  the HTML report use; `Scry.Output` never derives an id of its own.
+* `--baseline FILE` accepts a baseline of known ids (its own `scry-baseline/1` file, a
+  previous `--json` report, or a SARIF log) and suppresses those findings. A run with
+  only known findings exits 0; every new finding is named on stderr and exits 1.
+* `--budget N` caps the number of new (post-baseline) findings, `--budget error=N` caps
+  one severity. Exceeding a cap writes the outputs and exits 1 with the count in the
+  message. `--budget` is a **finding-count** cap; the analysis resource limits
+  (`--max-rounds`/`--timeout`) stay separate and are reported as `truncated` and
+  `scry/budget/*` warnings.
+* `--update-baseline FILE` writes the ids the run found and exits 0, so a baseline is
+  bootstrapped from the same pipeline that consumes it.
+
+Ordering is by id, so two runs over the same input are byte-identical. Outputs are
+written before a gate is decided: a failed gate never hides the evidence. Human
+diagnostics (the summary, new-finding names, budget messages) go to **stderr** while
+`--json -` uses stdout, so a pipe sees only JSON.
+-/
+
+-- ## Budget specifications
+
+/-- A finding-count cap: `total` or one severity. -/
+inductive Scry.BudgetScope where
+  | total
+  | severity (level : String)
+
+def Scry.BudgetScope.show : Scry.BudgetScope → String
+  | .total => "total"
+  | .severity l => l
+
+structure Scry.BudgetLimit where
+  scope : Scry.BudgetScope
+  limit : Nat
+
+/-- A severity name, or `none` for an unknown one. -/
+def Scry.severityOfName (s : String) : Option Scry.Severity :=
+  match s with
+  | "error" => .some .error
+  | "warning" => .some .warning
+  | "note" => .some .note
+  | _ => .none
+
+def Scry.severityEq (a b : Scry.Severity) : Bool :=
+  match a, b with
+  | .error, .error => .true
+  | .warning, .warning => .true
+  | .note, .note => .true
+  | _, _ => .false
+
+/-- Parse one `--budget` argument: `N` (total) or `SCOPE=N`. -/
+def Scry.parseBudgetLimit (spec : String) : Except String Scry.BudgetLimit :=
+  match String.splitOn spec "=" with
+  | .cons one .nil => match String.parseNat one with
+    | .some n => .ok (Scry.BudgetLimit.mk .total n)
+    | .none => .error ("--budget \"" ++ spec
+        ++ "\" is not a number (N, error=N, warning=N or note=N)")
+  | .cons name (.cons value .nil) => match Scry.severityOfName name with
+    | .some _ => match String.parseNat value with
+      | .some n => .ok (Scry.BudgetLimit.mk (.severity name) n)
+      | .none => .error ("--budget \"" ++ spec ++ "\" needs a number after \"=\"")
+    | .none => match String.eq name "total" with
+      | .true => match String.parseNat value with
+        | .some n => .ok (Scry.BudgetLimit.mk .total n)
+        | .none => .error ("--budget \"" ++ spec ++ "\" needs a number after \"=\"")
+      | .false => .error ("--budget \"" ++ spec
+          ++ "\": the scope is total, error, warning or note")
+  | _ => .error ("--budget \"" ++ spec
+      ++ "\" is not a number (N, error=N, warning=N or note=N)")
+
+-- ## Records
+
+/-- One emitted finding with both renderings already built from the same analysis. -/
+structure Scry.EmitFinding where
+  id : String
+  rule : String
+  severity : Scry.Severity
+  message : String
+  file : String
+  line : Nat
+  column : Nat
+  function : String
+  checked : Bool
+  json : Json
+  sarif : Json
+
+/-- A boundary/memory/analysis-budget diagnostic (not a finding, not counted by
+`--budget`). It carries the same `b_<16 hex>` id as its SARIF result. -/
+structure Scry.EmitWarning where
+  id : String
+  rule : String
+  message : String
+  file : String
+  line : Nat
+  column : Nat
+  function : String
+  kind : String
+  json : Json
+  sarif : Json
+
+/-- One analysed file's metadata row. -/
+structure Scry.EmitFileReport where
+  path : String
+  parseErrors : Nat
+  findings : Nat
+  truncated : Bool
+
+structure Scry.OutputOpts where
+  path : String
+  jsonOut : Option String
+  sarifOut : Option String
+  baseline : Option String
+  updateBaseline : Option String
+  budgets : List Scry.BudgetLimit
+  rules : Option String
+  allowErrors : Bool
+  failOnFinding : Bool
+  timeoutSecs : Option Nat
+  maxNodes : Option Nat
+  maxRounds : Option Nat
+
+def Scry.emptyOutputOpts : Scry.OutputOpts :=
+  Scry.OutputOpts.mk "" .none .none .none .none .nil .none .false .false
+    (.some 300) (.some 2000000) .none
+
+/-- `List.filterMap` for the budget/news list (the standard list library lacks one). -/
+partial def Scry.emitFilterMap {A B : Type} (f : A → Option B) : List A → List B
+  | .nil => .nil
+  | .cons x rest => match f x with
+    | .some y => List.cons y (Scry.emitFilterMap f rest)
+    | .none => Scry.emitFilterMap f rest
+
+-- ## Budget checks
+
+/-- How many emitted findings have one severity. -/
+def Scry.emitSeverityCount (s : Scry.Severity) (fs : List Scry.EmitFinding) : Nat :=
+  List.length (List.filter (fun f => Scry.severityEq s f.severity) fs)
+
+/-- How many emitted findings a cap counts. -/
+def Scry.budgetCount (l : Scry.BudgetLimit) (fs : List Scry.EmitFinding) : Nat :=
+  match l.scope with
+  | .total => List.length fs
+  | .severity name => match Scry.severityOfName name with
+    | .some s => Scry.emitSeverityCount s fs
+    | .none => 0
+
+def Scry.budgetExceeded (l : Scry.BudgetLimit) (fs : List Scry.EmitFinding) : Bool :=
+  Nat.lt l.limit (Scry.budgetCount l fs)
+
+def Scry.budgetFailed (limits : List Scry.BudgetLimit) (fs : List Scry.EmitFinding) : Bool :=
+  List.any (fun l => Scry.budgetExceeded l fs) limits
+
+/-- The gate message for one exceeded cap; the count is always in it. -/
+def Scry.budgetMessage (l : Scry.BudgetLimit) (fs : List Scry.EmitFinding) : String :=
+  match l.scope with
+  | .total => "budget exceeded: " ++ Nat.repr (Scry.budgetCount l fs)
+      ++ " finding(s) > --budget " ++ Nat.repr l.limit
+  | .severity name => "budget exceeded: " ++ Nat.repr (Scry.budgetCount l fs)
+      ++ " " ++ name ++ " finding(s) > --budget " ++ name ++ "=" ++ Nat.repr l.limit
+
+def Scry.budgetMessages (limits : List Scry.BudgetLimit)
+    (fs : List Scry.EmitFinding) : List String :=
+  Scry.emitFilterMap (fun l => match Scry.budgetExceeded l fs with
+    | .true => .some (Scry.budgetMessage l fs)
+    | .false => .none) limits
+
+-- ## Building the two renderings
+
+/-- The stable id of a finding, exactly as `Scry.Sarif.resultJsonFull` derives it. -/
+def Scry.emitFindingId (m : Scry.OriginMap) (f : Scry.RuleFinding) : String :=
+  Scry.semanticId f (Scry.findingFile m f)
+
+/-- Build a finding's two renderings once. `baselineMode` is true when `--baseline`
+was given, so the SARIF/JSON result says `baselineState: new`. -/
+def Scry.emitFindingOf (file : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (f : Scry.RuleFinding) (checked : Bool) (baselineMode : Bool) : Scry.EmitFinding :=
+  let id := Scry.emitFindingId m f;
+  let origin := Scry.originAt m f.func f.sink;
+  let line := match origin with
+    | .some o => o.line
+    | .none => 0;
+  let column := match origin with
+    | .some o => o.column
+    | .none => 0;
+  let baseline : Option String := match baselineMode with
+    | .true => .some "new"
+    | .false => .none;
+  let idFile := Scry.findingFile m f;
+  let shown := match String.isEmpty idFile with
+    | .true => file
+    | .false => idFile;
+  let row := Json.mkObj (List.append
+    [ ("id", Json.mkStr id)
+    , ("ruleId", Json.mkStr (Scry.sarifRuleId f.rule))
+    , ("file", Json.mkStr shown)
+    , ("level", Json.mkStr (Scry.Severity.sarif f.severity))
+    , ("checked", Json.mkBool checked) ]
+    (List.append (Scry.findingFields m f checked)
+      [ ("baselineState", match baseline with
+          | .some b => Json.mkStr b
+          | .none => Json.mkNull) ]));
+  Scry.EmitFinding.mk id f.rule f.severity f.message shown line column f.func checked
+    row (Scry.resultJsonFull m pack f checked baseline)
+
+/-- Build a warning's two renderings once. `file` is the analysed path SARIF uses for
+the `b_` id, matching `Scry.boundaryResultJsonFull`. -/
+def Scry.emitWarningOf (file : String) (w : Scry.BoundaryFinding) : Scry.EmitWarning :=
+  let id := Scry.boundaryId w.rule file w.func w.message;
+  let line := match w.origin with
+    | .some o => o.line
+    | .none => 0;
+  let column := match w.origin with
+    | .some o => o.column
+    | .none => 0;
+  let kind := match String.startsWith w.rule "scry/memory/" with
+    | .true => "memory"
+    | .false => "boundary";
+  let row := Json.mkObj (List.append
+    [ ("id", Json.mkStr id), ("file", Json.mkStr file), ("level", Json.mkStr "warning") ]
+    (Scry.boundaryFields w));
+  Scry.EmitWarning.mk id w.rule w.message file line column w.func kind row
+    (Scry.boundaryResultJsonFull w.rule w.origin w.func w.point w.message file .none)
+
+/-- An analysis budget note (`scry/budget/*`) as a warning row. Its function is
+`<budget>`, matching `scry taint`'s SARIF. -/
+def Scry.emitBudgetWarning (file : String) (n : Scry.BudgetNote) : Scry.EmitWarning :=
+  Scry.emitWarningOf file (Scry.BoundaryFinding.mk n.rule n.message "<budget>" 0 .none)
+
+-- ## Deterministic order
+
+def Scry.emitInsertFinding (x : Scry.EmitFinding) :
+    List Scry.EmitFinding → List Scry.EmitFinding
+  | .nil => [x]
+  | .cons y rest => match String.lt x.id y.id with
+    | .true => List.cons x (List.cons y rest)
+    | .false => List.cons y (Scry.emitInsertFinding x rest)
+
+def Scry.emitSortFindings (fs : List Scry.EmitFinding) : List Scry.EmitFinding :=
+  List.foldl (fun acc f => Scry.emitInsertFinding f acc) .nil fs
+
+def Scry.emitInsertWarning (x : Scry.EmitWarning) :
+    List Scry.EmitWarning → List Scry.EmitWarning
+  | .nil => [x]
+  | .cons y rest => match String.lt x.id y.id with
+    | .true => List.cons x (List.cons y rest)
+    | .false => List.cons y (Scry.emitInsertWarning x rest)
+
+def Scry.emitSortWarnings (ws : List Scry.EmitWarning) : List Scry.EmitWarning :=
+  List.foldl (fun acc w => Scry.emitInsertWarning w acc) .nil ws
+
+-- ## Baseline files
+
+partial def Scry.baselineStringsGo (acc : List String) :
+    List Json → Except String (List String)
+  | .nil => .ok (List.reverse acc)
+  | .cons x rest => match Json.asString x with
+    | .some s => Scry.baselineStringsGo (List.cons s acc) rest
+    | .none => .error "every id must be a string"
+
+partial def Scry.baselineFindingIdsGo (acc : List String) :
+    List Json → Except String (List String)
+  | .nil => .ok (List.reverse acc)
+  | .cons x rest => match Json.get x "id" with
+    | .some v => match Json.asString v with
+      | .some s => Scry.baselineFindingIdsGo (List.cons s acc) rest
+      | .none => .error "a finding id must be a string"
+    | .none => .error "a baseline finding has no \"id\""
+
+/-- The `partialFingerprints.scry/v1` ids of a SARIF log. Malformed results are
+ignored: a SARIF log with no fingerprints contributes no known ids. -/
+partial def Scry.sarifFingerprintGo (acc : List String) : List Json → List String
+  | .nil => acc
+  | .cons r rest =>
+    let more := match Json.get r "partialFingerprints" with
+      | .some fp => match Json.get fp "scry/v1" with
+        | .some v => match Json.asString v with
+          | .some s => List.cons s acc
+          | .none => acc
+        | .none => acc
+      | .none => acc;
+    Scry.sarifFingerprintGo more rest
+
+def Scry.sarifFingerprints (runs : List Json) : List String :=
+  List.concat (List.map (fun run =>
+    Scry.sarifFingerprintGo .nil (Json.getList run "results")) runs)
+
+/-- The ids in a baseline document: a bare array, `{"ids": […]}`, a previous
+`scry-findings/1` report, or a SARIF log. Anything else is a usage error, so a broken
+gate fails closed. -/
+def Scry.baselineIdsOfJson (j : Json) : Except String (List String) :=
+  match j with
+  | .arr xs => Scry.baselineStringsGo .nil (Jsons.toList xs)
+  | .obj _ => match Json.get j "ids" with
+    | .some v => match v with
+      | .arr xs => Scry.baselineStringsGo .nil (Jsons.toList xs)
+      | _ => .error "\"ids\" must be an array of strings"
+    | .none => match Json.get j "findings" with
+      | .some v => match v with
+        | .arr xs => Scry.baselineFindingIdsGo .nil (Jsons.toList xs)
+        | _ => .error "\"findings\" must be an array"
+      | .none => match Json.get j "runs" with
+        | .some v => match v with
+          | .arr xs => .ok (Scry.sarifFingerprints (Jsons.toList xs))
+          | _ => .error "\"runs\" must be an array"
+        | .none => .error
+            "expected a baseline object (\"ids\"), a findings report, or a SARIF log"
+  | _ => .error "expected a JSON array, object, or SARIF log"
+
+def Scry.loadBaselineIds (path : String) : EIO (List String) := do
+  present ← EIO.lift (FS.exists path);
+  match present with
+  | .false => EIO.fail ("baseline " ++ path ++ ": no such file")
+  | .true => do
+    text ← FS.readFile path;
+    match Json.parse text with
+    | .error e => EIO.fail ("baseline " ++ path ++ ": " ++ e)
+    | .ok j => match Scry.baselineIdsOfJson j with
+      | .error e => EIO.fail ("baseline " ++ path ++ ": " ++ e)
+      | .ok ids => EIO.pure ids
+
+/-- `scry-baseline/1`: the sorted stable ids, nothing else (no timestamp, no machine). -/
+def Scry.renderBaseline (ids : List String) : String :=
+  String.append (Json.render (Json.mkObj
+    [ ("schema", Json.mkStr "scry-baseline/1")
+    , ("ids", Json.mkArr (List.map Json.mkStr (Scry.sortStrings ids))) ])) "\n"
+
+-- ## The JSON report
+
+def Scry.emitFileJson (f : Scry.EmitFileReport) : Json :=
+  Json.mkObj
+    [ ("path", Json.mkStr f.path)
+    , ("parseErrors", Json.ofNat f.parseErrors)
+    , ("findings", Json.ofNat f.findings)
+    , ("truncated", Json.mkBool f.truncated) ]
+
+def Scry.emitNoteJson (file : String) (n : Scry.BudgetNote) : Json :=
+  Json.mkObj
+    [ ("file", Json.mkStr file)
+    , ("rule", Json.mkStr n.rule)
+    , ("message", Json.mkStr n.message) ]
+
+def Scry.emitBudgetJson (limits : List Scry.BudgetLimit)
+    (fs : List Scry.EmitFinding) : Json :=
+  let rows := List.map (fun l => Json.mkObj
+    [ ("scope", Json.mkStr (Scry.BudgetScope.show l.scope))
+    , ("limit", Json.ofNat l.limit)
+    , ("count", Json.ofNat (Scry.budgetCount l fs))
+    , ("exceeded", Json.mkBool (Scry.budgetExceeded l fs)) ]) limits;
+  Json.mkObj
+    [ ("findings", Json.ofNat (List.length fs))
+    , ("bySeverity", Json.mkObj
+        [ ("error", Json.ofNat (Scry.emitSeverityCount .error fs))
+        , ("warning", Json.ofNat (Scry.emitSeverityCount .warning fs))
+        , ("note", Json.ofNat (Scry.emitSeverityCount .note fs)) ])
+    , ("limits", Json.mkArr rows)
+    , ("exceeded", Json.mkBool (Scry.budgetFailed limits fs)) ]
+
+/-- The plain JSON report. `total` is every finding the analysis produced; `findings`
+is the post-baseline set (and `counts.baselineSuppressed` says how many were known). -/
+def Scry.emitJson (o : Scry.OutputOpts) (pack : Scry.RulePack)
+    (files : List Scry.EmitFileReport) (findings : List Scry.EmitFinding)
+    (warnings : List Scry.EmitWarning) (notes : List (String × Scry.BudgetNote))
+    (total suppressed checked : Nat) (truncated : Bool)
+    (baselineIds : Option Nat) : Json :=
+  let baseline := match o.baseline, baselineIds with
+    | .some path, .some ids => Json.mkObj
+        [ ("path", Json.mkStr path)
+        , ("ids", Json.ofNat ids)
+        , ("suppressed", Json.ofNat suppressed) ]
+    | _, _ => Json.mkNull;
+  Json.mkObj
+    [ ("schema", Json.mkStr "scry-findings/1")
+    , ("tool", Json.mkStr "scry")
+    , ("files", Json.mkArr (List.map Scry.emitFileJson files))
+    , ("baseline", baseline)
+    , ("budget", Scry.emitBudgetJson o.budgets findings)
+    , ("counts", Json.mkObj
+        [ ("findings", Json.ofNat total)
+        , ("emitted", Json.ofNat (List.length findings))
+        , ("baselineSuppressed", Json.ofNat suppressed)
+        , ("checked", Json.ofNat checked)
+        , ("boundary", Json.ofNat (List.length (List.filter
+            (fun w => String.eq w.kind "boundary") warnings)))
+        , ("memory", Json.ofNat (List.length (List.filter
+            (fun w => String.eq w.kind "memory") warnings)))
+        ])
+    , ("analysis", Json.mkObj
+        [ ("truncated", Json.mkBool truncated)
+        , ("notes", Json.mkArr (List.map (fun p => Scry.emitNoteJson p.1 p.2) notes)) ])
+    , ("findings", Json.mkArr (List.map (fun f => f.json) findings))
+    , ("warnings", Json.mkArr (List.map (fun w => w.json) warnings))
+    ]
+
+-- ## Collecting one run
+
+structure Scry.EmitAcc where
+  findings : List Scry.EmitFinding
+  warnings : List Scry.EmitWarning
+  files : List Scry.EmitFileReport
+  notes : List (String × Scry.BudgetNote)
+  truncated : Bool
+  total : Nat
+  suppressed : Nat
+
+def Scry.emitEmptyAcc : Scry.EmitAcc :=
+  Scry.EmitAcc.mk .nil .nil .nil .nil .false 0 0
+
+/-- The analysis options for one file: the same pipeline `scry taint`/`scry report`
+run, with the user's rules and resource limits. -/
+def Scry.emitTaintOpts (o : Scry.OutputOpts) (file : String) : Scry.TaintOpts :=
+  { Scry.emptyTaintOpts file with
+    rules := o.rules, allowErrors := o.allowErrors,
+    timeoutSecs := o.timeoutSecs, maxNodes := o.maxNodes, maxRounds := o.maxRounds }
+
+/-- Fold one file's findings into the accumulator, applying the baseline by id. -/
+partial def Scry.emitAddFindingsGo (file : String) (m : Scry.OriginMap)
+    (pack : Scry.RulePack) (baselineMode : Bool) (baselineIds : List String) :
+    List (Scry.RuleFinding × Bool) → Scry.EmitAcc → Scry.EmitAcc
+  | .nil, acc => acc
+  | .cons p rest, acc =>
+    let id := Scry.emitFindingId m p.1;
+    let known := List.any (fun b => String.eq id b) baselineIds;
+    if known then
+      let acc' := { acc with total := Nat.succ acc.total,
+                            suppressed := Nat.succ acc.suppressed };
+      Scry.emitAddFindingsGo file m pack baselineMode baselineIds rest acc'
+    else
+      let acc' := { acc with total := Nat.succ acc.total,
+                            findings := List.cons
+                              (Scry.emitFindingOf file m pack p.1 p.2 baselineMode)
+                              acc.findings };
+      Scry.emitAddFindingsGo file m pack baselineMode baselineIds rest acc'
+
+def Scry.emitAddFindings (file : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (baselineMode : Bool) (baselineIds : List String)
+    (acc : Scry.EmitAcc) (pairs : List (Scry.RuleFinding × Bool)) : Scry.EmitAcc :=
+  Scry.emitAddFindingsGo file m pack baselineMode baselineIds pairs acc
+
+/-- Analyse one file and add its findings, warnings and metadata. -/
+def Scry.emitOne (o : Scry.OutputOpts) (pack : Scry.RulePack)
+    (baselineMode : Bool) (baselineIds : List String)
+    (acc : Scry.EmitAcc) (file : String) : EIO Scry.EmitAcc := do
+  rep ← Scry.analyzeFile (Scry.emitTaintOpts o file);
+  let withFindings := Scry.emitAddFindings file rep.origins pack baselineMode baselineIds acc (Scry.zipFindings rep.findings rep.checks);
+  let boundaries := List.map (Scry.emitWarningOf file) rep.boundaries;
+  let memory := List.map (Scry.emitWarningOf file) rep.memory;
+  let notes := List.map (fun n => (file, n)) rep.budgetNotes;
+  let budgetWarnings := List.map (Scry.emitBudgetWarning file) rep.budgetNotes;
+  let report := Scry.EmitFileReport.mk file rep.parseErrors
+    (List.length rep.findings) rep.truncated;
+  let acc' := { withFindings with
+    warnings := List.append withFindings.warnings
+      (List.append boundaries (List.append memory budgetWarnings)),
+    files := List.append withFindings.files [report],
+    notes := List.append withFindings.notes notes,
+    truncated := Bool.or withFindings.truncated rep.truncated };
+  EIO.pure acc'
+
+partial def Scry.emitAllGo (o : Scry.OutputOpts) (pack : Scry.RulePack)
+    (baselineMode : Bool) (baselineIds : List String) :
+    List String → Scry.EmitAcc → EIO Scry.EmitAcc
+  | .nil, acc => EIO.pure acc
+  | .cons f rest, acc => do
+    acc' ← Scry.emitOne o pack baselineMode baselineIds acc f;
+    Scry.emitAllGo o pack baselineMode baselineIds rest acc'
+
+-- ## The command
+
+def Scry.emitUsage : String :=
+  "usage: scry findings emit FILE.c|DIR (--json OUT | --sarif OUT)\n"
+  ++ "                            [--baseline FILE] [--update-baseline FILE]\n"
+  ++ "                            [--budget N | --budget error=N]…\n"
+  ++ "                            [--fail-on-finding] [--rules FILE] [--allow-errors]\n"
+  ++ "                            [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
+  ++ "  writes one row per finding to --json and one SARIF result per finding to\n"
+  ++ "  --sarif, from the same analysis. OUT `-` is stdout (only one output may use it).\n"
+  ++ "  --baseline suppresses known ids; a new finding is named and exits 1.\n"
+  ++ "  --budget N caps new findings; error=N/warning=N/note=N caps one severity.\n"
+  ++ "  --update-baseline writes the ids this run found and exits 0.\n"
+  ++ "  exit: 0 clean, 1 new finding/--fail-on-finding/over budget/usage or IO.\n"
+
+/-- The one-line addition to `scry findings --help`. -/
+def Scry.emitHelpLine : String :=
+  "\n  emit FILE.c|DIR …            per-finding JSON + SARIF, with a baseline and a budget\n"
+
+partial def Scry.outputArgsGo (path : Option String) (o : Scry.OutputOpts) :
+    List String → Except String Scry.OutputOpts
+  | .nil => match path with
+    | .some p => .ok ({ o with path := p })
+    | .none => .error Scry.emitUsage
+  | .cons a rest => match a with
+    | "--json" => match rest with
+      | .cons p more => Scry.outputArgsGo path { o with jsonOut := .some p } more
+      | .nil => .error "--json needs an output file (or - for stdout)"
+    | "--sarif" => match rest with
+      | .cons p more => Scry.outputArgsGo path { o with sarifOut := .some p } more
+      | .nil => .error "--sarif needs an output file (or - for stdout)"
+    | "--baseline" => match rest with
+      | .cons p more => Scry.outputArgsGo path { o with baseline := .some p } more
+      | .nil => .error "--baseline needs a file"
+    | "--update-baseline" => match rest with
+      | .cons p more => Scry.outputArgsGo path { o with updateBaseline := .some p } more
+      | .nil => .error "--update-baseline needs a file"
+    | "--budget" => match rest with
+      | .cons v more => match Scry.parseBudgetLimit v with
+        | .error e => .error e
+        | .ok l =>
+          let o' := { o with budgets := List.append o.budgets [l] };
+          Scry.outputArgsGo path o' more
+      | .nil => .error "--budget needs N or SCOPE=N"
+    | "--rules" => match rest with
+      | .cons p more => Scry.outputArgsGo path { o with rules := .some p } more
+      | .nil => .error "--rules needs a file"
+    | "--allow-errors" => Scry.outputArgsGo path { o with allowErrors := .true } rest
+    | "--fail-on-finding" => Scry.outputArgsGo path { o with failOnFinding := .true } rest
+    | "--timeout" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.outputArgsGo path { o with timeoutSecs := .some n } more
+        | .none => .error ("--timeout needs a number of seconds, not \"" ++ p ++ "\"")
+      | .nil => .error "--timeout needs a number of seconds"
+    | "--max-nodes" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.outputArgsGo path { o with maxNodes := .some n } more
+        | .none => .error ("--max-nodes needs a node count, not \"" ++ p ++ "\"")
+      | .nil => .error "--max-nodes needs a node count"
+    | "--max-rounds" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.outputArgsGo path { o with maxRounds := .some n } more
+        | .none => .error ("--max-rounds needs a round count, not \"" ++ p ++ "\"")
+      | .nil => .error "--max-rounds needs a round count"
+    | "--help" => .error Scry.emitUsage
+    | _ => match String.startsWith a "--" with
+      | .true => .error ("unknown flag " ++ a ++ "\n" ++ Scry.emitUsage)
+      | .false => match path with
+        | .some _ => .error ("unexpected argument " ++ a ++ "\n" ++ Scry.emitUsage)
+        | .none => Scry.outputArgsGo (.some a) o rest
+
+def Scry.outputArgs (args : List String) : Except String Scry.OutputOpts :=
+  match Scry.outputArgsGo .none Scry.emptyOutputOpts args with
+  | .error e => .error e
+  | .ok o => match o.path, o.jsonOut, o.sarifOut, o.updateBaseline with
+    | "", _, _, _ => .error Scry.emitUsage
+    | _, .none, .none, .none => .error ("give --json OUT and/or --sarif OUT\n"
+        ++ Scry.emitUsage)
+    | _, .some "-", .some "-", _ => .error "--json - and --sarif - cannot both use stdout"
+    | _, _, _, _ => match o.baseline, o.updateBaseline with
+      | .some _, .some _ => .error "--baseline and --update-baseline are mutually exclusive"
+      | _, _ => .ok o
+
+-- ## Writing and gating
+
+def Scry.emitWrite (out : String) (text : String) : EIO Unit :=
+  match String.eq out "-" with
+  | .true => EIO.lift (IO.println text)
+  | .false => FS.writeFile out text
+
+def Scry.emitSayErr (s : String) : EIO Unit := EIO.lift (IO.ePrintln s)
+
+partial def Scry.emitForFindings (act : Scry.EmitFinding → EIO Unit) :
+    List Scry.EmitFinding → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons f rest => do
+    act f;
+    Scry.emitForFindings act rest
+
+partial def Scry.emitForStrings (act : String → EIO Unit) : List String → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons s rest => do
+    act s;
+    Scry.emitForStrings act rest
+
+def Scry.emitGateNew (findings : List Scry.EmitFinding) : EIO Unit :=
+  let act := fun (f : Scry.EmitFinding) => Scry.emitSayErr
+    ("new finding: " ++ f.id ++ " " ++ f.rule ++ " " ++ f.file ++ ":"
+      ++ Nat.repr f.line ++ ":" ++ Nat.repr f.column ++ " (" ++ f.function ++ ")");
+  Scry.emitForFindings act findings
+
+/-- `scry findings emit …`: analyse, write both formats, then decide the gate. -/
+def Scry.emitRun (o : Scry.OutputOpts) : EIO Nat := do
+  pack ← Scry.loadTaintPack o.rules;
+  let baselineMode : Bool := match o.baseline with
+    | .some _ => .true
+    | .none => .false;
+  baselineIds ← match o.baseline with
+    | .some p => Scry.loadBaselineIds p
+    | .none => EIO.pure ([] : List String);
+  found ← Scry.reportFilesOf o.path;
+  acc0 ← Scry.emitAllGo o pack baselineMode baselineIds found.1 Scry.emitEmptyAcc;
+  let findings := Scry.emitSortFindings acc0.findings;
+  let warnings := Scry.emitSortWarnings acc0.warnings;
+  let checked := List.length (List.filter (fun f => f.checked) findings);
+  let countBaseline : Option Nat := match o.baseline with
+    | .some _ => .some (List.length baselineIds)
+    | .none => .none;
+  -- Both formats are rendered from this one `findings`/`warnings` pair.
+  match o.jsonOut with
+  | .some out => Scry.emitWrite out (String.append (Json.render
+      (Scry.emitJson o pack acc0.files findings warnings acc0.notes acc0.total
+        acc0.suppressed checked acc0.truncated countBaseline)) "\n")
+  | .none => EIO.pure ();
+  match o.sarifOut with
+  | .some out => Scry.emitWrite out (String.append (Json.render
+      (Scry.sarifLog "scry" pack .nil
+        (List.append (List.map (fun f => f.sarif) findings)
+          (List.map (fun w => w.sarif) warnings)))) "\n")
+  | .none => EIO.pure ();
+  match o.updateBaseline with
+  | .some path => do
+    FS.writeFile path (Scry.renderBaseline (List.map (fun f => f.id) findings));
+    Scry.emitSayErr ("wrote baseline: " ++ path ++ " ("
+      ++ Nat.repr (List.length findings) ++ " id(s))")
+  | .none => EIO.pure ();
+  Scry.emitSayErr ("scry findings emit: " ++ Nat.repr acc0.total ++ " finding(s), "
+    ++ Nat.repr (List.length findings) ++ " emitted, "
+    ++ Nat.repr acc0.suppressed ++ " baseline-suppressed, "
+    ++ Nat.repr checked ++ " checked, "
+    ++ Nat.repr (List.length warnings) ++ " warning(s)");
+  -- A new finding under `--baseline` (or any finding under `--fail-on-finding`)
+  -- is named before the status. `--update-baseline` is a bootstrap: never gated.
+  let newGate : Bool := match o.baseline with
+    | .some _ => Nat.lt 0 (List.length findings)
+    | .none => .false;
+  let failGate := Bool.and o.failOnFinding (Nat.lt 0 (List.length findings));
+  let budgetGate := Scry.budgetFailed o.budgets findings;
+  let updateMode : Bool := match o.updateBaseline with
+    | .some _ => .true
+    | .none => .false;
+  match updateMode with
+  | .true => EIO.pure 0
+  | .false => do
+    match o.baseline with
+    | .some _ => Scry.emitGateNew findings
+    | .none => EIO.pure ();
+    Scry.emitForStrings (fun s => Scry.emitSayErr s) (Scry.budgetMessages o.budgets findings);
+    match Bool.or newGate (Bool.or failGate budgetGate) with
+    | .true => EIO.pure 1
+    | .false => EIO.pure 0
+
+/-- `scry findings emit …`. -/
+def Scry.emitCmd (args : List String) : EIO Nat :=
+  match Scry.outputArgs args with
+  | .error e => EIO.fail e
+  | .ok o => Scry.emitRun o

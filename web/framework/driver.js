@@ -114,8 +114,11 @@ export function start(wasm, root, { events, parse, onStep, adopt = true, warn } 
     return takeString(wasm, wasm._wiz_loom_html(state));
   };
   // The runtime may export its own SSR hash (`wiz_loom_ssr_hash`), so the client does
-  // not have to hash `html` in JS. Read-only, the same extra reference as `html`; absent
-  // -> the host hashes the string (`adopt.js`).
+  // not have to hash `html` in JS. The Wiz side hashes the **normalised tree**
+  // (`Loom.ssrHash`: sorted attributes, collapsed white space, keys included, plus a
+  // length/node-count witness), so an HTML formatting difference cannot force a replace.
+  // Read-only, the same extra reference as `html`; absent -> the host hashes the exact
+  // string (`adopt.js`).
   const ssrHash = () => {
     if (typeof wasm._wiz_loom_ssr_hash !== "function") return null;
     if (typeof wasm._wiz_retain === "function") {
@@ -140,6 +143,12 @@ export function start(wasm, root, { events, parse, onStep, adopt = true, warn } 
     : { mode: "replace", reason: "adopt-disabled", hash: null };
   if (decision.mode === "replace") mount(root, first, parse);
   globalThis.wizPatch = (json) => applyPatches(root, JSON.parse(json), parse);
+  // The JS-on reload: re-render the current state and replace the container. It is the
+  // recovery path behind the wire's `resync` (a dropped/gapped batch is one full
+  // replace, never a partial adopt), and the same primitive the first mount uses.
+  const resync = () => { mount(root, html(), parse); return root; };
+  globalThis.wizResync = resync;
+  globalThis.wizLoomMode = decision.mode;
   let lastPayload = "";
   // `Loom.onPrevent`: after a handled event, the runtime's `wiz_loom_consume` says
   // whether it consumed the default action. A runtime without the export keeps the old
@@ -177,5 +186,6 @@ export function start(wasm, root, { events, parse, onStep, adopt = true, warn } 
     adopted: decision.mode === "adopt",
     ssrHash: decision.hash,
     decision,
+    resync,
   };
 }

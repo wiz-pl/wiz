@@ -13,7 +13,7 @@ yosys is on PATH: an unmapped cell or a combinational loop in the write or read 
 fails here. -/
 def hdlAxi4Synthesis : IO Unit := do
   let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-  unless ys do skip "no yosys"; return
+  unless ys do skipMissing "no yosys"; return
   let src ← Tests.hdlRead "examples/hdl-axi4.wiz"
   let body := "import Hdl.Core\nimport Hdl.Axi4\nimport Hdl.Axi4Law\n" ++ src ++
     "\n#eval Verilog.emit (Circuit.netlist \"axi4_wr\" (Axi4.wrC 8 16 4))\n" ++
@@ -34,7 +34,7 @@ def hdlAxi4Synthesis : IO Unit := do
 yosys is on PATH: the register slice, both width converters and the source/sink pair. -/
 def hdlStreamSynthesis : IO Unit := do
   let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-  unless ys do skip "no yosys"; return
+  unless ys do skipMissing "no yosys"; return
   let src ← Tests.hdlRead "examples/hdl-stream.wiz"
   let body := "import Hdl.Core\nimport Hdl.AxiStream\nimport Hdl.AxiStreamLaw\n" ++ src ++
     "\n#eval Verilog.emit (Circuit.netlist \"stream_slice\" (AxiStream.sliceC 8))\n" ++
@@ -56,7 +56,7 @@ def hdlStreamSynthesis : IO Unit := do
 `synth_ice40`) when yosys is on PATH. -/
 def hdlSpiSynthesis : IO Unit := do
   let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-  unless ys do skip "no yosys"; return
+  unless ys do skipMissing "no yosys"; return
   let src ← Tests.hdlRead "examples/hdl-spi.wiz"
   let body := "import Hdl.Core\nimport Hdl.Spi\nimport Hdl.SpiLaw\n" ++ src ++
     "\n#eval Verilog.emit (Circuit.netlist \"spi_mode0\" (Spi.masterModeCW 8 Spi.cntW 1 0 2))\n" ++

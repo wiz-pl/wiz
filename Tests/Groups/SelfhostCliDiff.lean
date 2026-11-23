@@ -25,14 +25,16 @@ LSP/doc).
 
 ## A difference is asserted, not skipped
 
-A skip is for a case that could not run (no C compiler, no collector) and for nothing
-else: it is not a pass, and an allow-list entry that excuses 14 of 30 cases hides the
-group. A known parity difference is therefore an **expected difference**: the case
-checks the exact symptom (the exit code, the message, the artifact) and records
+A `skip` is for a declared parity difference (`-- test: skip`) and for nothing else: it
+is not a pass, and an allow-list entry that excuses 14 of 30 cases hides the group. A
+known parity difference is therefore an **expected difference**: the case checks the
+exact symptom (the exit code, the message, the artifact) and records
 `expected-difference: …` with `Tests.note`, then passes. If the driver catches up the
 assertion stops holding and the case fails — the prompt to promote it — whereas a skip
-would stay silent. This group has no `.github/skip-allowlist.json` entry; the two `run`
-cases still skip on a host without the collector, as they must.
+would stay silent. This group has no `.github/skip-allowlist.json` entry; a case that
+cannot run because the collector or the C toolchain is missing is `Tests.skipMissing`:
+it fails by default and is a reported skip only under `--allow-missing-deps`, which the
+`selfhost` shard does not set (the dev shell has both).
 
 ## What "normalised" means here
 
@@ -529,7 +531,23 @@ def cliDiffGroup : Group where
         checkEq 1 sW.code
         checkEq "" sW.out
         cliCheck sW.err "unsupported target wasm: the self-hosted backend emits C and LLVM (C5)" "the driver's rejection"
-        cliDiffKnown "flags: `--llvm` selects the host's LLVM path and is C5's first slice here; `--wasm` is still refused (exit 1), as `--target wasm` (C5)" },
+        -- (the names the host learned later: a known name is not a capability. `js` is a
+        -- C5 gap; `bpf`/`ebpf` are the probe backend and get the targets-ext §4 sentence)
+        for t in ["js"] do
+          let spec : CliDiffSpec := { files := files, args := #["check", "good.wiz", "--target", t] }
+          let (h, s) ← cliDiffBoth host exe spec
+          checkEq 0 h.code
+          checkEq 1 s.code
+          checkEq "" s.out
+          cliCheck s.err s!"unsupported target {t}: the self-hosted backend emits C and LLVM (C5)" "the driver's rejection"
+        for t in ["bpf", "ebpf"] do
+          let spec : CliDiffSpec := { files := files, args := #["check", "good.wiz", "--target", t] }
+          let (h, s) ← cliDiffBoth host exe spec
+          checkEq 0 h.code
+          checkEq 1 s.code
+          checkEq "" s.out
+          cliCheck s.err "unsupported-target: the backend 'ebpf' reads bpf-core/1" "the driver's probe refusal"
+        cliDiffKnown "flags: `--llvm` selects the host's LLVM path and is C5's first slice here; `--wasm` is still refused (exit 1), as `--target wasm` (C5); `js` is a known name with no self-hosted backend (C5); `bpf`/`ebpf` are the host's probe backend, refused with the targets-ext §4 sentence" },
     { name := "build --split N: the host splits the C into N units, the driver refuses it (C5)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let tc ← cliDiffHostToolchain
@@ -573,14 +591,23 @@ def cliDiffGroup : Group where
         -- (the host has a backend for both: bpf takes a manifest and its typed core,
         -- js emits an ES module; the self-hosted driver emits C and LLVM, so it knows
         -- the names and refuses the *capability* — the distinction F42 asks for)
-        for t in ["bpf", "js"] do
+        let spec : CliDiffSpec := { files := files, args := #["check", "good.wiz", "--target", "js"] }
+        let (h, s) ← cliDiffBoth host exe spec
+        checkEq 0 h.code
+        checkEq 1 s.code
+        checkEq "" s.out
+        checkEq "unsupported target js: the self-hosted backend emits C and LLVM (C5)\n" s.err
+        check (!cliHas s.err "unknown target") "a known target was refused as an unknown one"
+        -- (`bpf` and its `ebpf` alias are the probe backend: a more specific
+        -- unsupported sentence, and still not an unknown name)
+        for t in ["bpf", "ebpf"] do
           let spec : CliDiffSpec := { files := files, args := #["check", "good.wiz", "--target", t] }
           let (h, s) ← cliDiffBoth host exe spec
           checkEq 0 h.code
           checkEq 1 s.code
           checkEq "" s.out
-          checkEq s!"unsupported target {t}: the self-hosted backend emits C and LLVM (C5)\n" s.err
-          check (!cliHas s.err "unknown target") "a known target was refused as an unknown one"
+          cliCheck s.err "unsupported-target: the backend 'ebpf' reads bpf-core/1" "the probe refusal"
+          check (!cliHas s.err "unknown target") s!"a known target {t} was refused as an unknown one"
         -- (the rejection half of the `--target c` case: an unknown name and a missing
         -- value are the same sentence and exit code in both, including the full list)
         for args in [#["check", "good.wiz", "--target", "bogus"],
@@ -590,23 +617,40 @@ def cliDiffGroup : Group where
           cliDiffSame spec h s
           checkEq 1 s.code
           checkEq 1 h.code
-        cliDiffKnown "target names: the host has c/llvm/wasm/bpf/js; the self-hosted driver has the same five names and emits C and LLVM, so it refuses wasm/bpf/js by capability (exit 1). An unknown name, and `--target` without a value, are the identical sentence and exit code in both, so the two tables agree on the names" },
-    { name := "the target table: five names, one per backend, and unknown ≠ unsupported", run := fun _ => do
+        cliDiffKnown "target names: the host has c/llvm/wasm/bpf/js and the `ebpf` alias of bpf; the self-hosted driver is compiled with the same spellings and emits C and LLVM, so it refuses wasm/js by capability (exit 1) and bpf/ebpf as the probe backend. An unknown name, and `--target` without a value, are the identical sentence and exit code in both, so the two tables agree on the names" },
+    { name := "the target table: the host table is the one list, with ebpf as bpf's alias", run := fun _ => do
         checkEq "c llvm wasm bpf js" (" ".intercalate (Wiz.Target.all.map (·.name)))
-        checkEq "c, llvm, wasm, bpf or js" Wiz.Target.choices
+        checkEq "c llvm wasm bpf js ebpf"
+          (" ".intercalate (Wiz.Target.spellings Wiz.Target.all))
+        checkEq "c, llvm, wasm, bpf, js or ebpf" Wiz.Target.choices
         check (Wiz.Target.all.all (·.supported)) "a host target is marked unsupported"
         check (Wiz.Target.ofName? "js").isSome "the host does not know js"
         check (Wiz.Target.ofName? "bogus").isNone "a made-up name is a known target"
-        checkEq "unknown target bogus (choose c, llvm, wasm, bpf or js)"
+        -- (`ebpf` is `bpf`, one entry with two spellings: the CLI dispatches on the
+        -- spelling `ebpf`, whose backend is `bpf`)
+        checkEq (some "bpf") (Wiz.Target.canonicalIn Wiz.Target.all "ebpf")
+        checkEq "unknown target bogus (choose c, llvm, wasm, bpf, js or ebpf)"
           (Wiz.Target.unknown "bogus")
+        -- (the selfhost is compiled with the same spellings: `targetsSource` derives
+        -- `targetModes` from `Wiz.Target.all`, and the driver has no second list)
+        let rendered :=
+          "def targetModes : List String := " ++
+            "(.cons \"c\" (.cons \"llvm\" (.cons \"wasm\" (.cons \"bpf\" (.cons \"js\" (.cons \"ebpf\" .nil))))))"
+        check (cliHas Wiz.Selfhost.targetsSource rendered)
+          "the generated targetModes is not the host table in order"
+        check (cliHas Wiz.Selfhost.targetsSource "def targetChoices : String := \"c, llvm, wasm, bpf, js or ebpf\"")
+          "the generated choices sentence differs from the host's"
+        let cli ← IO.FS.readFile "selfhost/Cli.wiz"
+        check (!cliHas cli "def targetModes")
+          "selfhost/Cli.wiz defines targetModes again (it must use the generated one)"
         -- (the mechanism's second refusal, on a table with an absent backend: the
-        -- self-hosted table is the one that has three such entries today (C5))
+        -- self-hosted driver has such entries today (C5))
         let ts : List Wiz.Target :=
           [{ name := "ghost", supported := false, reason := "no ghost backend" }]
         match Wiz.Target.resolve ts "ghost", Wiz.Target.resolve ts "bogus" with
         | .error e, .error u =>
           checkEq "unsupported target ghost: no ghost backend" e
-          checkEq "unknown target bogus (choose c, llvm, wasm, bpf or js)" u
+          checkEq "unknown target bogus (choose ghost)" u
         | _, _ => throw (IO.userError "the target resolver accepted a name") },
     { name := "--cache-verify: the modes are accepted, and strict is warm in both", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
@@ -827,7 +871,7 @@ def cliDiffGroup : Group where
         cliDiffKnown "artifact: `build` writes an executable (via C), the self-hosted `build` the generated C (D4)" },
     { name := "build --lib: the object, its header and the C match the host's shapes", run := fun _ => do
         match ← cliRunOptions with
-        | none => skip "no garbage collector, --gc-cflags"
+        | none => skipMissing "no garbage collector, --gc-cflags"
         | some shOpts => withSelfhostCli fun exe => do
           let host ← cliDiffHost
           let tc ← cliDiffHostToolchain
@@ -935,7 +979,7 @@ def cliDiffGroup : Group where
         -- (the host's `build --llvm` links its executable with `llc`; a `grail.local.wiz`
         -- from another machine may name a store path that is not here)
         if wt.llc.startsWith "/" && !(← (System.FilePath.mk wt.llc).pathExists) then
-          skip s!"llc is not present at {wt.llc}: the host cannot build --llvm here"
+          skipMissing s!"llc is not present at {wt.llc}: the host cannot build --llvm here"
         else do
           let spec : CliDiffSpec := { files := #[("good.wiz", cliDiffNat)]
                                       args := #["build", "good.wiz", "-o", "out", "--llvm"]
@@ -969,7 +1013,7 @@ def cliDiffGroup : Group where
           skip "artifact: the lowered `w_main`/`w_wiz_2e_entry` text is equal to the host's (D4: the host links an executable, the driver writes the IR); the driver's `main` prints the scalar itself, where the host calls the runtime's `wiz_run_main` (C5's result protocol)" },
     { name := "run --llvm: `main : Nat` prints the same value (C5's first slice)", run := fun _ => do
         match ← cliRunOptions with
-        | none => skip "no garbage collector, --gc-cflags"
+        | none => skipMissing "no garbage collector, --gc-cflags"
         | some shOpts => withSelfhostCli fun exe => do
           let host ← cliDiffHost
           let tc ← cliDiffHostToolchain
@@ -977,7 +1021,7 @@ def cliDiffGroup : Group where
           -- (a `grail.local.wiz` written on another machine may name a missing `llc`;
           -- the build case still compares the IR, so only this run skips here)
           if wt.llc.startsWith "/" && !(← (System.FilePath.mk wt.llc).pathExists) then
-            skip s!"llc is not present at {wt.llc}: the IR text is compared, `run` is not exercised"
+            skipMissing s!"llc is not present at {wt.llc}: the IR text is compared, `run` is not exercised"
           else do
             let spec : CliDiffSpec := { files := #[("n.wiz", cliDiffNat)]
                                         args := #["run", "n.wiz", "--llvm"]
@@ -1011,7 +1055,7 @@ def cliDiffGroup : Group where
         cliDiffKnown "subcommands: parse, doc, fmt, repl, test-driver, cache prune|verify|manifest and lsp are the host's; the driver has check/build/run/version/help (D2/D8)" },
     { name := "run: an IO program prints the same output and exits 0", run := fun _ => do
         match ← cliRunOptions with
-        | none => skip "no garbage collector, --gc-cflags"
+        | none => skipMissing "no garbage collector, --gc-cflags"
         | some shOpts => withSelfhostCli fun exe => do
           let host ← cliDiffHost
           let tc ← cliDiffHostToolchain
@@ -1024,7 +1068,7 @@ def cliDiffGroup : Group where
           checkEq "hello from the selfhost driver\n42\n" s.out },
     { name := "run: program arguments are the driver's (the host's `run` takes flags only)", run := fun _ => do
         match ← cliRunOptions with
-        | none => skip "no garbage collector, --gc-cflags"
+        | none => skipMissing "no garbage collector, --gc-cflags"
         | some shOpts => withSelfhostCli fun exe => do
           let host ← cliDiffHost
           let tc ← cliDiffHostToolchain

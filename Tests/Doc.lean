@@ -709,8 +709,8 @@ def docGroup : Group where
         let tc ← toolchain
         let o ← IO.Process.output { cmd := ← wiz, args := (tc.toFlags ++ ["run", (dir / "page.wiz").toString]).toArray }
         if o.exitCode != 0 then
-          if ["gmp.h", "No such file"].any (has o.stderr ·) then skip "no toolchain" else
-          throw (IO.userError s!"wiz run: {o.stdout}\n{o.stderr}")
+          if ["gmp.h", "No such file"].any (has o.stderr ·) then skipMissing "no toolchain"; return
+          else throw (IO.userError s!"wiz run: {o.stdout}\n{o.stderr}")
         let lines := o.stdout.splitOn "\n"
         -- rendered as tagged text, every subterm a span
         check ((lines.headD "").startsWith "sig-0: <span class=\"tt k-pi\" data-ref=\"") (lines.headD "")
@@ -766,6 +766,7 @@ def docGroup : Group where
               checkHas (← httpGet port "/lsp-client.js") "export class LspClient"
               checkHas (← httpGet port "/framework/mount.js") "export async function mount"
               checkHas (← httpGet port "/framework/runtime.js") "export function applyPatches"
+              checkHas (← httpGet port "/framework/adopt.js") "export function decideAdopt"
               -- (the module's source, for the client to open in the server)
               let src ← httpGet port "/sources/Shapes.Basic.wiz"
               check (has src "200 OK") s!"GET /sources: {src.take 200}"

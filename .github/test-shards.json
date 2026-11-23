@@ -69,6 +69,7 @@
     "name": "library",
     "split": 8,
     "jobs": 4,
+    "allow-missing-deps": true,
     "select": [
       "=bus-crc",
       "=bus-law",
@@ -166,6 +167,7 @@
       "data",
       "desceq",
       "elab",
+      "elab-ext",
       "eval",
       "format",
       "=fmt",
@@ -201,7 +203,8 @@
       "=scaling",
       "=prop",
       "=audit",
-      "=desc-sweep"
+      "=desc-sweep",
+      "=perf-core"
     ]
   },
   {

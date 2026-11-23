@@ -49,7 +49,7 @@ if ! command -v emcc >/dev/null; then
 fi
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
 # (after the compiler's own -O2, so emcc's last -O wins)
-CFLAGS="-I$OUT/gmp -DWIZ_NO_THREADS"
+CFLAGS="-I$OUT/gmp -DWIZ_NO_THREADS -ffile-prefix-map=$ROOT=. -ffile-prefix-map=$OUT=."
 [ -z "$OPT" ] || CFLAGS="$CFLAGS -O$OPT"
 
 # 1. mini-gmp, as web/build.sh does (share web/out when both are built)
@@ -92,15 +92,26 @@ ENGINE="$OUT/playground.wiz"
 -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString \
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build "$ENGINE" -o "$OUT/wiz-playground.mjs" --no-main)
-cp "$ROOT/web/playground.html" "$ROOT/web/playground.js" \
+# The static-complete page. The generator is the same Loom renderer as the runtime, so
+# the tree and its hash cannot drift: `Page.initial`'s first paint, and
+# `Loom.LiveApp.ssrHash` as `data-wiz-ssr`. With JavaScript off this is the page; with
+# it on, `mount` adopts it (hash match) instead of replacing it.
+set -- run -I "$ROOT/lib" "$ROOT/web/playground_static_gen.wiz"
+[ -z "${WIZ_CFLAGS:-}" ] || set -- "$@" --cflags "$WIZ_CFLAGS"
+[ -z "${WIZ_LDFLAGS:-}" ] || set -- "$@" --ldflags "$WIZ_LDFLAGS"
+"$WIZ" "$@" > "$OUT/playground-static.json"
+node "$ROOT/web/playground_static.mjs" "$ROOT/web/playground.html" \
+  "$OUT/playground-static.json" "$OUT/playground.html"
+cp "$ROOT/web/playground.js" \
   "$ROOT/web/playground.css" "$ROOT/web/overlays.css" "$ROOT/web/widgets.css" \
   "$ROOT/web/lsp-client.js" "$ROOT/web/widgets.js" \
   "$ROOT/web/playground-lsp.js" "$ROOT/web/selfhost-lsp-shim.js" \
   "$ROOT/web/playground-engine.js" \
   "$ROOT/web/squiggles.js" "$ROOT/web/completions.js" "$ROOT/web/hover.js" "$OUT/"
 # The entry point imports the mount contract statically (web/framework/mount.js), which
-# imports the driver and its patch applier.
+# imports the driver, its patch applier and the adopt verifier.
 mkdir -p "$OUT/framework"
 cp "$ROOT/web/framework/mount.js" "$ROOT/web/framework/driver.js" \
-  "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/editor-text.js" "$OUT/framework/"
+  "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/adopt.js" \
+  "$ROOT/web/framework/editor-text.js" "$OUT/framework/"
 echo "built $OUT/wiz-playground.mjs"

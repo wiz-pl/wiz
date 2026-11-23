@@ -7,7 +7,11 @@
                                      selectors are joined by newlines, "heavy"
                                      says whether it may use the self-hosted runner, and
                                      "jobs" how many cases it runs at a time (`--jobs`);
-                                     with --only ["NAME",…], only those shards (and
+                                     and "allow-missing-deps": whether the test step sets
+                                     WIZ_ALLOW_MISSING_DEPS (a shard whose environment
+                                     deliberately lacks an optional tool; see
+                                     check-skips). With --only ["NAME",…], only those
+                                     shards (and
                                      their parts) A shard with
                                      "split": N becomes N shards NAME-1 … NAME-N, its
                                      cases balanced by .github/test-timings.json (needs
@@ -39,10 +43,29 @@
                                      browser-facing file (`web/*`) changed, stc=true
                                      when `STC.lean` or `STC/` changed (the `stc` job
                                      typechecks that library, which nothing else
-                                     imports), and shards=[NAMES], the shards of
+                                     imports), subset_NAME=true for each build subset
+                                     of `.github/repo-subsets.json` that a changed file
+                                     belongs to (`scripts/repo-subsets.py`: lean,
+                                     runtime, wizlib, packages, tests, docs), and
+                                     shards=[NAMES], the shards of
                                      .github/test-shards.json to run (each shard's
-                                     "inputs", see `needed_shards`). `changes --all`
-                                     prints everything
+                                     "inputs", see `needed_shards`). A changed file no
+                                     subset claims (`scripts/`, `flake.*`,
+                                     `selfhost/`, ...), and any `.github/` edit, sets
+                                     every subset: it is a build input the table has
+                                     not classified, so every subset job runs.
+                                     `changes --all` prints everything
+  scripts/ci.py subset-key NAME [--with NAME] [--scope S] [--suffix S]
+                                     the Actions cache key and restore prefix for a
+                                     subset job (`$GITHUB_OUTPUT` lines `key=` and
+                                     `prefix=`): `subset-v1-<name>[-<name>...]-<os>-
+                                     <arch>-<toolchain12>`, then `-<scope>` (in key and
+                                     prefix), the subset sha(s) `-<sha12>` (one per
+                                     name), and `-<suffix>` (key only). <sha12> is the
+                                     subset's `sha256` from .github/repo-subsets.json;
+                                     the prefix stops before the subset hashes, so a
+                                     later run restores its own subset's previous
+                                     entry and recompiles what changed.
   scripts/ci.py summary TITLE FILE.. a Markdown summary for $GITHUB_STEP_SUMMARY of
                                      `lake test` logs (*.log: pass/fail, failing cases)
                                      and `--timings` files (*.jsonl: a table of every
@@ -99,7 +122,10 @@
                                      a green run must have tested something: fail when
                                      a group skipped wholesale, when a skip names a tool
                                      the CI dev shell must provide (cc, GMP, GC, yosys,
-                                     node, nix, …), when a group's unexplained skipped
+                                     node, nix, …), when a skip that a
+                                     `--allow-missing-deps` run recorded as a missing
+                                     dependency (`missing-dep` note) is not named by an
+                                     allow-list entry, when a group's unexplained skipped
                                      ratio is over F (default 0.25, of the group's
                                      cases in all shards), or when the logs parse no
                                      records at all. A skip excused by an entry of
@@ -116,13 +142,14 @@ Selectors are the arguments of `lake test --`: `=NAME` selects the group NAME,
 Tests/Main.lean).
 """
 import datetime as dt
-import fnmatch, json, os, re, subprocess, sys
+import fnmatch, hashlib, json, os, platform, re, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHARDS = os.path.join(ROOT, ".github", "test-shards.json")
 TIMINGS = os.path.join(ROOT, ".github", "test-timings.json")
 SKIPS = os.path.join(ROOT, ".github", "skip-allowlist.json")
 EXCLUSIONS = os.path.join(ROOT, ".github", "test-shard-exclusions.json")
+REPO_SUBSETS = os.path.join(ROOT, ".github", "repo-subsets.json")
 DEFAULT_BIN = os.path.join(ROOT, ".lake/build/bin/tests")
 NOTE_USES = "uses "
 NOTE_BUILT = "built "
@@ -365,9 +392,16 @@ def matrix_entries(binary, only=None):
     # runner (vars.WIZ_RUNNER_HEAVY, docs/ci-runner.md)
     heavy = {s["name"] for s in shards() if s.get("heavy")}
     split = {s["name"] for s in shards() if s.get("split", 1) > 1}
+    # a shard that may report a missing dependency as a skip (`--allow-missing-deps`):
+    # only a shard whose environment deliberately lacks an optional tool, and only with
+    # an allow-list entry per case (scripts/ci.py check-skips)
+    allow_missing = {s["name"] for s in shards() if s.get("allow-missing-deps")}
     def is_heavy(n):
         base = n.rsplit("-", 1)[0]
         return n in heavy or (base in split and base in heavy)
+    def allows_missing(n):
+        base = n.rsplit("-", 1)[0]
+        return n in allow_missing or (base in split and base in allow_missing)
     def wanted(n):
         return only is None or n in only or (n.rsplit("-", 1)[0] in split and n.rsplit("-", 1)[0] in only)
     base = baseline()
@@ -386,7 +420,8 @@ def matrix_entries(binary, only=None):
     # late entries waiting (`test (prop)` started 16 minutes after the wave did), so the
     # longest shards come first: the expensive work is in the first wave, not the tail.
     rows.sort(key=lambda r: (r[3] is None, -(r[3] or 0.0), r[0]))
-    return [{"name": n, "select": "\n".join(sel), "heavy": is_heavy(n), "jobs": jobs}
+    return [{"name": n, "select": "\n".join(sel), "heavy": is_heavy(n), "jobs": jobs,
+             "allow-missing-deps": allows_missing(n)}
             for n, sel, jobs, _ in rows]
 
 
@@ -691,6 +726,106 @@ def is_code_change(files):
     return any(not matches(f, DOCS + SELF_TESTED + STC) for f in files)
 
 
+def repo_subsets():
+    """The committed subset table (`.github/repo-subsets.json`): name -> path patterns.
+    `scripts/repo-subsets.py` is the source of truth and `docs_style` proves the JSON
+    describes the tree; reading the generated copy keeps the `changes` job free of a
+    second pattern table. A missing or malformed table is an error, never a silent
+    "nothing changed"."""
+    try:
+        with open(REPO_SUBSETS, encoding="utf-8") as f:
+            doc = json.load(f)
+        return {name: entry["paths"] for name, entry in doc["subsets"].items()}
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise ShardPlanError(f"{REPO_SUBSETS}: cannot read the subset table: {e}")
+
+
+def subset_flags(files):
+    """The `subset_NAME` path filters: for each subset, whether a changed file belongs
+    to it. A path that matches several subsets sets all of them (the union over the
+    files), so a change touching, say, `Tests/` and `lib/` runs both the Lean build and
+    every test shard.
+
+    A changed file no subset claims (`scripts/`, `flake.*`, `selfhost/`, `examples/`,
+    `infoview/`, ...) is a build input the table has not classified: it sets every
+    subset, exactly as `changes --all` does, so a change can never skip the job that
+    would have caught it. A `.github/` edit is in the `docs` subset for the cache-key
+    table (`.github/**`), but it changes CI itself, so it also sets every subset; a
+    workflow change must exercise every job, not just the docs ones."""
+    table = repo_subsets()
+    claimed = {f for f in files if any(matches(f, paths) for paths in table.values())}
+    unclassified = [f for f in files if f not in claimed or matches(f, [".github/*"])]
+    if unclassified:
+        return {name: True for name in table}
+    return {name: any(matches(f, paths) for f in files) for name, paths in table.items()}
+
+
+def subset_key(args):
+    """The Actions-cache key for one subset job (see the docstring at the top).
+
+    `NAME` is a subset of `.github/repo-subsets.json`; `--with NAME` adds another
+    subset the job's cache also reads (the test shards read `tests` and `wizlib`).
+    `--scope S` is a correctness input that must match before a restore is offered
+    (the driver's compiler key, the self-hosted program inputs); it is in both the
+    key and the prefix. `--suffix S` is a content hash that belongs in the exact key
+    but not in the restore prefix (the `**/*.wiz` tree the last run saw), so a changed
+    file still restores the previous entry and the job overwrites it on success.
+
+    Key:        subset-v1-<name>[-<name>…]-<os>-<arch>-<toolchain12>[-<scope>]-<sha12>[-<sha12>…][-<suffix>]
+    Prefix:     subset-v1-<name>[-<name>…]-<os>-<arch>-<toolchain12>[-<scope>]-
+    <sha12>     first 12 hex of the subset's `sha256` in .github/repo-subsets.json
+    <toolchain12> first 12 hex of sha256(flake.lock + lean-toolchain)
+    <os>/<arch> `RUNNER_OS`/`RUNNER_ARCH` (lowercased) under Actions, else uname.
+    """
+    names, scope, suffix = [], None, None
+    it = iter(args)
+    for a in it:
+        if a == "--with":
+            names.append(next(it))
+        elif a == "--scope":
+            scope = next(it)
+        elif a == "--suffix":
+            suffix = next(it)
+        elif a.startswith("--"):
+            raise SystemExit(f"subset-key: unknown option {a!r}")
+        else:
+            names.append(a)
+    if not names:
+        raise SystemExit("subset-key: a subset name is required")
+    try:
+        table = json.load(open(REPO_SUBSETS, encoding="utf-8"))["subsets"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise SystemExit(f"{REPO_SUBSETS}: cannot read the subset table: {e}")
+    for n in names:
+        if n not in table:
+            raise SystemExit(f"subset-key: {n!r} is not a subset of {REPO_SUBSETS}")
+    try:
+        toolchain = hashlib.sha256(
+            open(os.path.join(ROOT, "flake.lock"), "rb").read()
+            + b"\0"
+            + open(os.path.join(ROOT, "lean-toolchain"), "rb").read()
+        ).hexdigest()[:12]
+    except OSError as e:
+        raise SystemExit(f"subset-key: cannot hash the toolchain: {e}")
+    osname = (os.environ.get("RUNNER_OS") or platform.system()).lower()
+    arch = (os.environ.get("RUNNER_ARCH") or platform.machine()).lower()
+    def sha(name):
+        return table[name]["sha256"][:12]
+    names_part = "-".join(names)
+    shas = "-".join(sha(n) for n in names)
+    head = f"subset-v1-{names_part}-{osname}-{arch}-{toolchain}"
+    key = head
+    prefix = head + "-"
+    if scope:
+        key += f"-{scope}"
+        prefix += f"{scope}-"
+    key += f"-{shas}"
+    if suffix:
+        key += f"-{suffix}"
+    print(f"key={key}")
+    print(f"prefix={prefix}")
+
+
 def needed_shards(files):
     """The shards a change needs: all of them when a file of EVERYTHING changed; else a
     shard with "inputs" (globs; lib/ files among them bring the lib/ files they import)
@@ -722,6 +857,8 @@ def changes(args):
         print("docs=true")
         print("web=true")
         print("stc=true")
+        for name in repo_subsets():
+            print(f"subset_{name}=true")
         print(f"shards={json.dumps(names)}")
         return 0
     base, head = args[0], (args[1] if len(args) > 1 else "HEAD")
@@ -733,13 +870,18 @@ def changes(args):
     docs = any(matches(f, DOCS) for f in files)
     web = any(matches(f, WEB) for f in files)
     stc = any(matches(f, STC) for f in files)
+    subsets = subset_flags(files)
     print(f"code={'true' if code else 'false'}")
     print(f"docs={'true' if docs else 'false'}")
     print(f"web={'true' if web else 'false'}")
     print(f"stc={'true' if stc else 'false'}")
+    for name in subsets:
+        print(f"subset_{name}={'true' if subsets[name] else 'false'}")
     print(f"shards={json.dumps(names)}")
     print(f"{len(files)} files changed; code: {code}; docs: {docs}; web: {web}; "
-          f"stc: {stc}; shards: {', '.join(names) or 'none'}", file=sys.stderr)
+          f"stc: {stc}; subsets: "
+          f"{', '.join(n for n in subsets if subsets[n]) or 'none'}; "
+          f"shards: {', '.join(names) or 'none'}", file=sys.stderr)
     return 0
 
 
@@ -1069,25 +1211,31 @@ def dead_allowlist_entries(allowed, binary):
 
 
 def skip_records(paths):
-    """{(shard, group, case): (skipped, reason)} from `lake test` logs and `--timings`
-    files (both describe the run: a log keeps the reason a case printed, including the
-    old style; a --timings file the `skipped` note). A concrete reason wins over none."""
+    """{(shard, group, case): (skipped, reason, missing)} from `lake test` logs and
+    `--timings` files (both describe the run: a log keeps the reason a case printed,
+    including the old style; a `--timings` file the `skipped` note). A concrete reason
+    wins over none; `missing` is whether the case's `--timings` notes say it was a
+    missing dependency allowed by `--allow-missing-deps` (a log carries no notes, so the
+    two files together are what tells the lint the whole story)."""
     recs = {}
 
-    def put(key, skipped, why):
+    def put(key, skipped, why, missing=False):
         old = recs.get(key)
         if old is None:
-            recs[key] = (skipped, why)
+            recs[key] = (skipped, why, missing)
         else:
             recs[key] = (old[0] or skipped,
-                         old[1] if old[1] not in (None, NO_REASON) else why or old[1])
+                         old[1] if old[1] not in (None, NO_REASON) else why or old[1],
+                         old[2] or missing)
 
     for p in paths:
         if p.endswith(".jsonl"):
             for r in read_timings([p]):
-                why = next((n[len("skipped "):] for n in r.get("notes", [])
+                notes = r.get("notes", [])
+                why = next((n[len("skipped "):] for n in notes
                             if n.startswith("skipped ")), None)
-                put((r["shard"], r["group"], r["case"]), why is not None, why)
+                missing = any(n.startswith("missing-dep ") for n in notes)
+                put((r["shard"], r["group"], r["case"]), why is not None, why, missing)
             continue
         shard = os.path.basename(p)
         for ext in (".log", ".txt"):
@@ -1127,40 +1275,51 @@ def allowed_entry(allowed, group, case, why):
 def analyze(recs, allowed, max_ratio):
     """(errors, warnings, lines) for the skip rule on one run's records: a group that
     skipped wholesale in a shard is an error unless it is allow-listed with that reason;
-    a skip that names a tool the dev shell must provide is an error always; a GROUP's
-    unexplained skipped ratio (over all its cases, in every shard) may not be over
-    max_ratio. The ratio is per group, not per shard, so moving a group's cases between
-    shards (a refreshed timings file) cannot flip it. Explained skips are reported."""
+    a skip that names a tool the dev shell must provide is an error always; a skip that a
+    `--allow-missing-deps` run recorded as a missing dependency is an error unless the
+    allow-list names that case (the flag is not a place to hide an unexpected dependency);
+    a GROUP's unexplained skipped ratio (over all its cases, in every shard) may not be
+    over max_ratio. The ratio is per group, not per shard, so moving a group's cases
+    between shards (a refreshed timings file) cannot flip it. Explained skips are
+    reported."""
     shards_ = {}
-    for (shard, group, case), (skipped, why) in recs.items():
-        shards_.setdefault(shard, {}).setdefault(group, []).append((case, skipped, why if skipped else None))
+    for (shard, group, case), (skipped, why, missing) in recs.items():
+        shards_.setdefault(shard, {}).setdefault(group, []).append(
+            (case, skipped, why if skipped else None, missing))
 
-    def explained(group, case, why):
+    def explained(group, case, why, missing):
         """None when the skip is explained, else (kind, text): 'tool' for a tool the CI
-        dev shell must provide, 'unlisted' for a group, case or reason the allow-list lacks."""
+        dev shell must provide, 'missing' for a dependency the job allowed with
+        `--allow-missing-deps` but did not name in the allow-list, 'unlisted' for a group,
+        case or reason the allow-list lacks."""
         low = (why or "").lower()
         for pattern, tool in REQUIRED_TOOLS:
             # a clause of its own ("no node", "no iverilog, no yosys"), not a phrase in a
             # longer reason ("`lake` has no toolchain outside a checkout")
             if re.search(r"(?:^|, |; )" + re.escape(pattern), low):
                 return ("tool", f"the dev shell must provide {tool} (`{why}`)")
+        if missing:
+            if allowed_entry(allowed, group, case, why) is not None:
+                return None
+            return ("missing", f"a missing dependency was reported as a skip (`{why}`), but "
+                               f".github/skip-allowlist.json has no entry naming this case")
         if allowed_entry(allowed, group, case, why) is not None:
             return None
         return ("unlisted", f"`{why}`")
 
     errors, warnings, rows, details = [], [], [], []
     total = len(recs)
-    skipped = sum(1 for s, _ in recs.values() if s)
+    skipped = sum(1 for s, _, _ in recs.values() if s)
     # what each skip is: an error (reported here), a warning (unexplained but tolerated,
     # counted by its group's ratio), or fine (allow-listed)
     verdicts = {}
     for shard in sorted(shards_):
         for group, cs in sorted(shards_[shard].items()):
-            skipped_cases = [(c, w) for c, s, w in cs if s]
+            skipped_cases = [(c, w, m) for c, s, w, m in cs if s]
             whole = len(skipped_cases) == len(cs)
             by_why = {}
-            for c, w in skipped_cases:
-                v = explained(group, c, w)
+            for c, w, m in skipped_cases:
+                v = explained(group, c, w, m)
                 verdicts[(shard, group, c)] = v
                 # one summary line per (reason, verdict); a case-named entry may excuse
                 # one case of a reason and not another
@@ -1178,6 +1337,12 @@ def analyze(recs, allowed, max_ratio):
                     msg = f"**{md(group)}**: {the} skipped in shard `{md(shard)}` — {v[1]}"
                     errors.append(msg)
                     details.append(f"- ❌ {msg}")
+                elif kind == "missing":
+                    msg = (f"**{md(group)}**: {the} skipped in shard `{md(shard)}` — {v[1]}")
+                    errors.append(msg)
+                    details.append(f"- ❌ {msg}")
+                    for c, _ in items:
+                        verdicts[(shard, group, c)] = ("error", v[1])
                 elif whole:
                     msg = (f"**{md(group)}**: all {len(cs)} cases skipped in shard `{md(shard)}` — "
                            f"{v[1]}; not explained by .github/skip-allowlist.json")
@@ -1189,7 +1354,7 @@ def analyze(recs, allowed, max_ratio):
                     warnings.append(f"**{md(group)}**: {the} skipped in shard `{md(shard)}`: {v[1]}")
                     details.append(f"- ⚠️ **{md(group)}**: {the} in `{md(shard)}` — {v[1]}")
     groups_ = {}
-    for (shard, group, case), (s, _) in recs.items():
+    for (shard, group, case), (s, _, _) in recs.items():
         groups_.setdefault(group, []).append((shard, case, s))
     for group in sorted(groups_):
         cases = groups_[group]
@@ -1217,8 +1382,8 @@ def analyze(recs, allowed, max_ratio):
     elif not skipped:
         lines.append(f"✅ No skips: all {total} cases ran.")
     else:
-        lines.append(f"✅ {skipped} of {total} cases skipped, each explained (allow-listed or an "
-                     f"environment skip); a skipped case is not a pass.")
+        lines.append(f"✅ {skipped} of {total} cases skipped, each explained by "
+                     f".github/skip-allowlist.json; a skipped case is not a pass.")
     if details:
         lines += [""] + details[:300]
     if rows:
@@ -1250,11 +1415,13 @@ def self_test():
             out.append(f"  ({g}: 0.010 s; cases 0.010 s)")
         return "\n".join(out) + "\n"
 
-    def timing(shard, group, cases):
-        """[(case, skip reason or None)] as a --timings file."""
+    def timing(shard, group, cases, missing=False):
+        """[(case, skip reason or None)] as a --timings file. `missing`: add the
+        `missing-dep` note a `--allow-missing-deps` run records."""
         return "".join(json.dumps({"shard": shard, "group": group, "index": i, "case": c,
                                    "seconds": 0.01, "ok": True,
-                                   "notes": [f"skipped {w}"] if w else []}) + "\n"
+                                   "notes": ([f"skipped {w}"] if w else []) +
+                                            ([f"missing-dep {w}"] if w and missing else [])}) + "\n"
                        for i, (c, w) in enumerate(cases))
 
     pass10 = [f"case {i}" for i in range(10)]
@@ -1306,6 +1473,15 @@ def self_test():
          "group `zeta`: 1 of 3"),
         ("--timings file", {"library-2.jsonl": timing("library-2", "wasm",
                                                       [(f"m{i}", "no node") for i in range(25)])}, 1, "node"),
+        # `--allow-missing-deps` is not a place to hide an unexpected dependency: each
+        # missing-dep skip needs an allow-list entry naming that case, while one that has
+        # it (the hdl entry below) is explained.
+        ("a flagged missing dependency with no allow-list entry",
+         {"library-2.jsonl": timing("library-2", "wasm",
+                                    [(f"m{i}", "no ssh-keygen") for i in range(3)], missing=True)}, 1,
+         "no entry naming this case"),
+        ("a flagged missing dependency that is allow-listed",
+         {"library-1.jsonl": timing("library-1", "hdl", [("sim", "no iverilog")], missing=True)}, 0, None),
     ]
     allowed = {"groups": [{"group": "hdl", "case": "sim", "reason": "no iverilog",
                            "owner": "HDL fixtures", "expires": "2099-01-01"},
@@ -1774,6 +1950,9 @@ def _main(args):
         return 0
     if args[:1] == ["changes"] and len(args) >= 2:
         return changes(args[1:])
+    if args[:1] == ["subset-key"]:
+        subset_key(args[1:])
+        return 0
     binary = args[1] if len(args) > 1 else DEFAULT_BIN
     if args[:1] == ["matrix"]:
         matrix(binary)

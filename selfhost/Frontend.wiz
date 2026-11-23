@@ -426,7 +426,11 @@ def elab : Scope → Syntax → Elab
     | .privTo m => .err (("'" +++ privBase n) +++ "' is private to module " +++ m)
     | .missing => match strEq n "Unit" with
       | .true => .ok (.unit (ln 1))
-      | .false => .err ("unknown identifier " +++ n)
+      | .false => match strEq n "Size" with
+        -- (the size sort, as in the Lean frontend: `Size`, `∞`, `↑s` and `Size< s` are
+        -- terms; this path is the declaration scope checker)
+        | .true => .ok .size
+        | .false => .err ("unknown identifier " +++ n)
   | names, s => match strEq (kindOf s) "term.ident" with
     | .true => elab names (kid s 0)
     | .false => match strEq (kindOf s) "term.paren" with
@@ -616,17 +620,27 @@ def builtinDerivers : StrMap (Option String) :=
     (Str.ofString "DecidableEq") (.some "deriveDecidableEq"))
     (Str.ofString "Compare") (.some "deriveCompare")
 -- (D8 goals) what the language server keeps from a check: a body's expected type (a
--- `term`), or the goals after a tactic (a `goal`). Both are character offsets into the
--- document's text; the driver (`selfhost/Cli.wiz`) answers the infoview's plain queries
--- from them. An entry is recorded only while `LspCtx.on`, so `check` does not build it.
+-- `term`), or a tactic state (a `goal`). Both are character offsets into the document's
+-- text; the driver (`selfhost/Cli.wiz`) answers the infoview's plain queries from them.
+-- An entry is recorded only while `LspCtx.on`, so `check` does not build it.
 -- (playground LSP, stage 2) The in-page server also reads them: `watch` records a
 -- checked node's expected type (`term`), the state before a tactic (`goal`), and each
 -- declaration (`decl`, with its name, printed type and source span), for the page's
 -- completion, hover and definition.
+--
+-- (D8 goals) a goal entry carries the phase it is a snapshot of: a `by` block's state
+-- (0: before its first step, or the zero-width final state at its end), the state before
+-- a step (1), or the state after it (2). The plain-goal lookup needs the phases to
+-- answer as the host's `Query.goalsAt` does: a caret at a step's first character shows
+-- the state before it, a caret strictly inside (or at its end) the state after it.
 inductive LspEntry where
   | term (start stop : Nat) (goal : String)
-  | goal (start stop : Nat) (goals : List String)
+  | goal (start stop : Nat) (goals : List String) (phase : Nat)
   | decl (start stop : Nat) (name ty : String) (kind : Nat)
+-- (D8 goals) `LspEntry.goal`'s phase: a block's own state, before a step, after a step
+def lspPhaseBlock : Nat := 0
+def lspPhaseBefore : Nat := 1
+def lspPhaseAfter : Nat := 2
 
 structure LspSpan where
   start : Nat
@@ -3509,16 +3523,46 @@ def tailKinds : List BKind → List BKind
 def scopeNames : Scope → List String
   | .mk ls _ _ _ _ _ _ => List.reverseOf ls .nil
 
+-- (D8 goals) a goal as `GoalView.show` prints it (`x : T` per hypothesis, then `⊢ T`).
+-- From a context and its target: the body's expected-type view (`lspAddCommand` peels a
+-- declaration's type at its body) and a checked node's expected type (`recordTerm`) both
+-- render through it, so `plainTermGoal` answers with the host's full goal text.
+partial def goalShowHyps (names : List String) (types : List Val) (d : Nat) : Nat → Bool → String → String
+  | i, first, acc => match Nat.lt i d with
+    | .false => acc
+    | .true =>
+      let line := String.append (String.append (nthStr names i) " : ")
+        (show names d (match nthVal types (d - 1 - i) with
+          | .some v => quote d v
+          | .none => .star));
+      let acc' := match first with
+        | .true => line
+        | .false => String.append (String.append acc "\n") line;
+      goalShowHyps names types d (i + 1) .false acc'
+def goalShowCtx (names : List String) (c : TCtx) (target : Val) : String :=
+  let d := TCtx.lvl c;
+  let ctx := goalShowHyps names (envToList (TCtx.types c)) d 0 .true "";
+  let body := String.append "⊢ " (show names d (quote d target));
+  match strEq ctx "" with
+  | .true => body
+  | .false => String.append (String.append ctx "\n") body
+
 -- (playground LSP, stage 2) record a checked node's expected type for the position index.
 -- `sp` is the node's span from the parser's side table; `none` (spans off, or a node the
--- parser did not build — a macro expansion, a rewrite) records nothing. The text is the
--- type as the kernel prints it in the node's own context, which is what `plainTermGoal`
--- shows; entries are kept in `ES` and end up in the language server's entries when the
--- command succeeds.
-def recordTerm (es : ES) (sp : Option SpT) (cx : Cx) (ty : Val) : ES := match sp with
-  | .none => es
-  | .some t => ES.addSnap es (.term (SpT.start t) (SpT.stop t)
-      (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) ty)))
+-- parser did not build — a macro expansion, a rewrite) records nothing. For the server
+-- (`lspOn`) the text is the full goal `GoalView.show` prints in the node's own context
+-- (`n : Nat` per hypothesis, then `⊢ Nat`), which is what `plainTermGoal` shows; the
+-- playground's index wants just the expected type. Entries are kept in `ES` and end up
+-- in the language server's entries when the command succeeds.
+def recordTerm (gs : Globals) (es : ES) (sp : Option SpT) (cx : Cx) (ty : Val) : ES :=
+  match Bool.or (Globals.lspOn gs) (Globals.watch gs) with
+  | .false => es
+  | .true => match sp with
+    | .none => es
+    | .some t => ES.addSnap es (.term (SpT.start t) (SpT.stop t)
+        (match Globals.lspOn gs with
+          | .true => goalShowCtx (scopeNames (Cx.sc cx)) (Cx.c cx) ty
+          | .false => show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) ty)))
 -- the spans of the arguments of a node's `i`th child (the `null` of an application, say),
 -- one per argument; empty when the node has no span
 def argSpans (sp : Option SpT) (i : Nat) : List (Option SpT) := spKidsOpt (spKid sp i)
@@ -5050,36 +5094,44 @@ def lspFindWord (input : Array Nat) (word : String) (i stop : Nat) : Option Nat 
   match word with
   | .mk cs => lspFindWordGo input cs (List.length cs) i stop
 
--- (playground LSP, stage 3) the tactic state before a step, keyed by the step's span:
--- the answer `wiz/plainGoal` gives while the caret is in that step. `sp` is `.none`
--- everywhere except the playground's check, so the recorder costs a match.
-def recordGoal (es : ES) (sp : Option SpT) (st : STacState) : ES := match sp with
-  | .none => es
-  | .some t => ES.addSnap es (.goal (SpT.start t) (SpT.stop t) (tacGoalsList es st))
+-- (D8 goals) a tactic state snapshot, keyed by the span it describes. The phase says
+-- which state it is (a block's, before a step, after it: see `LspEntry`). `sp` is `.none`
+-- when spans are off (a compiled `check`), so the recorder costs a match.
+def recordGoal (gs : Globals) (es : ES) (sp : Option SpT) (st : STacState) (phase : Nat) : ES :=
+  match Bool.or (Globals.lspOn gs) (Globals.watch gs) with
+  | .false => es
+  | .true => match sp with
+    | .none => es
+    | .some t => ES.addSnap es (.goal (SpT.start t) (SpT.stop t) (tacGoalsList es st) phase)
 
 -- (D8 goals) at each top-level tactic boundary, record the state after the tactic,
--- keyed by the tactic's first token. `last` is where the previous snapshot's search
+-- keyed by the tactic's own span (the parser's, so the head is exact; `lspFindWord` is
+-- the fallback when spans are off). `last` is where the previous snapshot's search
 -- stopped; `check` never reaches these (the `lspOn` branch is false there). When the
 -- playground is watching, the state *before* the step is recorded too, keyed by the
 -- parser's span for the step (Lean's `plainGoal` semantics).
 def runTacticSteps (gs : Globals) (es : ES) (st : STacState) (endSp : Option SpT) (last : Nat)
     (steps : List Syntax) (sps : List (Option SpT)) : STacR := match steps with
-  | .nil => .ok st (recordGoal es endSp st)
+  | .nil => .ok st (recordGoal gs es endSp st lspPhaseBlock)
   | .cons t rest =>
-    let found : Option Nat := match Globals.lspOn gs with
+    let head : Option LspSpan := match Globals.lspOn gs with
       | .false => .none
-      | .true => match tacticHead t with
-        | .some h => lspFindWord (Globals.lspSrc gs) h last (Globals.lspStop gs)
-        | .none => .none;
-    let at := match found with
-      | .some n => n
+      | .true => match spHead sps with
+        | .some h => .some (LspSpan.mk (SpT.start h) (SpT.stop h))
+        | .none => match tacticHead t with
+          | .some w => match lspFindWord (Globals.lspSrc gs) w last (Globals.lspStop gs) with
+            | .some n => .some (LspSpan.mk n (Globals.lspStop gs))
+            | .none => .some (LspSpan.mk last (Globals.lspStop gs))
+          | .none => .some (LspSpan.mk last (Globals.lspStop gs));
+    let at := match head with
+      | .some h => h.start
       | .none => last;
-    let esB := recordGoal es (spHead sps) st;
+    let esB := recordGoal gs es (spHead sps) st lspPhaseBefore;
     match evalTacticStx gs esB st t with
     | .ok st' es' =>
-      let es'' := match Globals.lspOn gs with
-        | .true => ES.addSnap es' (.goal at (Globals.lspStop gs) (tacGoalsList es' st'))
-        | .false => es';
+      let es'' := match head with
+        | .some h => ES.addSnap es' (.goal h.start h.stop (tacGoalsList es' st') lspPhaseAfter)
+        | .none => es';
       runTacticSteps gs es'' st' endSp (at + 1) rest (spTail sps)
     | .err m => .err (errMarkIf (spHead sps) (String.append m (String.append "\nremaining goals:\n" (tacGoalsShow es st))))
     | .abort m => .abort (errMarkIf (spHead sps) m)
@@ -5090,10 +5142,11 @@ def elabBy (gs : Globals) (es : ES) (cx : Cx) (stx : Syntax) (expected : Val) (s
   match newMeta es cx expected with
   | .mk m es0 =>
     let st0 := STacState.mk (.cons (TacGoal.mk cx expected m) .nil) (.cons 0 .nil) .nil;
-    -- (stage 3) the state at the `by` itself, and (zero-width, so it wins at the block's
-    -- end) the final state: a caret outside every step but inside the block gets one of
-    -- those, and an inner step's own span wins where it contains the caret
-    let es1 := recordGoal es0 sp st0;
+    -- (stage 3) the state at the `by` itself (phase 0: a block snapshot), and (zero-width,
+    -- so it wins at the block's end) the final state: a caret outside every step but
+    -- inside the block gets one of those, and an inner step's own span wins where it
+    -- contains the caret
+    let es1 := recordGoal gs es0 sp st0 lspPhaseBlock;
     let endSp : Option SpT := match sp with
       | .some t => .some (.leaf (SpT.stop t) (SpT.stop t))
       | .none => .none;
@@ -5167,7 +5220,11 @@ def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
         | .true => .ok .ptrue (.vsort (.lnum 0)) es .nil
         | .false => match strEq n "False" with
           | .true => .ok .pfalse (.vsort (.lnum 0)) es .nil
-          | .false => .err (String.append "unknown identifier " n)
+          | .false => match strEq n "Size" with
+            -- (A19) the size sort, as in the Lean frontend (`Qty` is not a term here:
+            -- quantities are the `quantity` grammar's)
+            | .true => .ok .size (.vsort (.lnum 1)) es .nil
+            | .false => .err (String.append "unknown identifier " n)
   | .ok i => match Nat.lt i d with
     | .true => .ok (.var i) (lookup (TCtx.types (Cx.c cx)) i) es .nil
     | .false => match globalUse gs es cx (i - d) .nil with
@@ -5402,7 +5459,12 @@ def inferBuiltin (gs : Globals) (es : ES) (cx : Cx) (n : String) (args : List Sy
     | .cons x .nil => match inferT gs es cx x .none with
       | .err m => .err m
       | .ok x0 xty es1 => match whnf (force es1 xty) with
-        | .vnu l I D i sz => .ok (.out x0) (vInterp l I D (nuFamily l I D) i) es1
+        | .vnu l I D i sz => match sizePred sz with
+          -- (HDL 34c) `out`'s payload is at the **predecessor** size (`ν^s'`), as in
+          -- `Kernel.wiz`'s and the Lean kernel's `out` rule. `∞` is its own
+          -- predecessor; a size variable cannot be observed.
+          | .none => .err "only a value of size ↑s or ∞ can be observed"
+          | .some s' => .ok (.out x0) (vInterp l I D (nuFamilyAt l I D s') i) es1
         | v => .err (String.append "out expects a coinductive value, got " (show (scopeNames (Cx.sc cx)) d (quote d v)))
     | _ => .err "out takes one value"
   else if strEq n "coit" then .err "coit builds a coinductive value"
@@ -5562,11 +5624,14 @@ def inferT1_0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp0 : Option SpT)
                           | .true => let d := Cx.lvl cx;
                             match inferT gs es cx (kid s 0) (spKid sp 0) with
                             | .err m => .err m
-                            | .ok t0 _ es1 => match checkT gs es1 cx (kid s 2) .vsize (spKid sp 2) with
+                            | .ok t0 ty0 es1 => match checkT gs es1 cx (kid s 2) .vsize (spKid sp 2) with
                               | .err m => .err m
                               | .ok sz0 _ es2 => match whnf (force es2 (eval (TCtx.env (Cx.c cx)) t0)) with
-                                | .vmu l I D i _ => .ok (.mus l (quote d I) (quote d D) (quote d i) sz0) (.vmu l I D i (eval (TCtx.env (Cx.c cx)) sz0)) es2
-                                | .vnu l I D i _ => .ok (.nu l (quote d I) (quote d D) (quote d i) sz0) (.vnu l I D i (eval (TCtx.env (Cx.c cx)) sz0)) es2
+                                -- (`ty0` is the head's own type (a sort), as in the Lean
+                                -- frontend's `term.sized`; the sized type is not its own
+                                -- sort, `T^s : Sort (l+1)` when `T : Sort (l+1)`)
+                                | .vmu l I D i _ => .ok (.mus l (quote d I) (quote d D) (quote d i) sz0) ty0 es2
+                                | .vnu l I D i _ => .ok (.nu l (quote d I) (quote d D) (quote d i) sz0) ty0 es2
                                 | v => .err (String.append "only inductive and coinductive types have sizes, not "
                                     (show (scopeNames (Cx.sc cx)) d (quote d v)))
                           | .false => inferT2 gs es cx s sp
@@ -6135,7 +6200,7 @@ def checkUnitVal (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE
 -- stage 2), recorded with `ty` for `wiz/plainTermGoal`
 def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp0 : Option SpT) : TE :=
   let sp := spCheck sp0 s;
-  let es := recordTerm es sp cx ty;
+  let es := recordTerm gs es sp cx ty;
   let k := kindOf s;
   markTE sp (match strEq k "term.letUnit" with
   | .true => letUnitT gs es cx s (.some ty)
@@ -6768,29 +6833,6 @@ def peelCtx : Nat → TCtx → Val → Peeled
   | .succ k, c, v => match whnf v with
     | .vpi _ _ _ dom env cod => peelCtx k (TCtx.bind c dom) (eval (.cons (fresh (TCtx.lvl c)) env) cod)
     | v' => .mk c v'
-
--- (D8 goals) a goal as `GoalView.show` prints it (`x : T` per hypothesis, then `⊢ T`),
--- from a declaration's type peeled at its body: the diagnostics path already computes
--- the type for a definition's line, and this is its body's expected-type view
-partial def goalShowHyps (names : List String) (types : List Val) (d : Nat) : Nat → Bool → String → String
-  | i, first, acc => match Nat.lt i d with
-    | .false => acc
-    | .true =>
-      let line := String.append (String.append (nthStr names i) " : ")
-        (show names d (match nthVal types (d - 1 - i) with
-          | .some v => quote d v
-          | .none => .star));
-      let acc' := match first with
-        | .true => line
-        | .false => String.append (String.append acc "\n") line;
-      goalShowHyps names types d (i + 1) .false acc'
-def goalShowCtx (names : List String) (c : TCtx) (target : Val) : String :=
-  let d := TCtx.lvl c;
-  let ctx := goalShowHyps names (envToList (TCtx.types c)) d 0 .true "";
-  let body := String.append "⊢ " (show names d (quote d target));
-  match strEq ctx "" with
-  | .true => body
-  | .false => String.append (String.append ctx "\n") body
 
 -- (D8 goals) the body's span: after the command's top-level `:=`, to the command's end
 partial def lspBodyStartGo (input : Array Nat) (i stop depth : Nat) : Option Nat :=
@@ -10743,8 +10785,8 @@ def setOptionCmd (cats : List Cat) (tokens : List String) (stx : Syntax) : Tab0 
   | .ident o => match Bool.or (strEq o "pp.notation") (strEq o "pp.all") with
     | .true => match setOptionBool (kid stx 2) with
       | .some _ => .mk cats tokens .nil .none
-      | .none => .mk cats tokens .nil (.some "expected `true` or `false`")
-    | .false => .mk cats tokens .nil (.some ("unknown option " +++ o +++ " (there are pp.notation and pp.all)"))
+      | .none => .mk cats tokens .nil (.some ("option '" +++ o +++ "' expects `true` or `false`"))
+    | .false => .mk cats tokens .nil (.some ("unknown option '" +++ o +++ "' (registered: pp.notation, pp.all)"))
   | _ => .mk cats tokens .nil (.some "a set_option needs an option name")
 def unwrapLocal (s : Syntax) : Syntax := match strEq (kindOf s) "command.local" with
   | .true => kid s 1
@@ -10846,16 +10888,34 @@ def deriverCmd (gs : Globals) (stx : Syntax) : LinkR :=
           +++ " arguments, expected one (String → MacroM (List Syntax))")) gs
 -- (stage 21u) `attribute [inline] f`: a hint to the Lean compiler, checked as the Lean
 -- frontend does (`f` must have a definition); it changes nothing here
-def attrStep (gs : Globals) (stx : Syntax) : Option LinkR := match strEq (kindOf stx) "command.attrInline" with
-  | .true => .some (match kid stx 4 with
-    | .ident f => match Scope.lookup (Globals.scope gs) f with
-      | .none => LinkR.mk (.some (String.append "error: unknown declaration " f)) gs
-      | .some i => match globalTm .false gs i with
-        | .const _ _ _ v _ => match isAxiomTm v with
-          | .false => LinkR.mk .none gs
-          | .true => LinkR.mk (.some (String.append "error: " (String.append f " has no definition to inline"))) gs
-        | _ => LinkR.mk (.some (String.append "error: " (String.append f " has no definition to inline"))) gs
-    | _ => LinkR.mk (.some "error: attribute [inline] needs a name") gs)
+def inlineCheck (gs : Globals) (f : String) : LinkR :=
+  match Scope.lookup (Globals.scope gs) f with
+  | .none => LinkR.mk (.some (String.append "error: unknown declaration " f)) gs
+  | .some i => match globalTm .false gs i with
+    | .const _ _ _ v _ => match isAxiomTm v with
+      | .false => LinkR.mk .none gs
+      | .true => LinkR.mk (.some (String.append "error: " (String.append f " has no definition to inline"))) gs
+    | _ => LinkR.mk (.some (String.append "error: " (String.append f " has no definition to inline"))) gs
+
+-- (TT-04) Attributes are looked up in the host's registry now, so `[inline]` parses in
+-- the generic `command.attr` form: `attribute [ name payload* ] target` (name child 2,
+-- payload child 3, target child 5). This frontend has no user registrations, so the
+-- registered names are exactly the host's `builtinAttributes`; an unknown name is
+-- reported with the host's message, not silently accepted. `attrDeriver` still parses
+-- in its own form.
+def attrStep (gs : Globals) (stx : Syntax) : Option LinkR := match strEq (kindOf stx) "command.attr" with
+  | .true => .some (match kid stx 2 with
+    | .ident a => match strEq a "inline" with
+      | .true => match kid stx 3 with
+        | .node _ payload => match payload with
+          | .nil => match kid stx 5 with
+            | .ident f => inlineCheck gs f
+            | _ => LinkR.mk (.some "error: attribute [inline] needs a name") gs
+          | _ => LinkR.mk (.some "error: attribute '[inline]' takes no arguments") gs
+        | _ => LinkR.mk (.some "error: attribute '[inline]' takes no arguments") gs
+      | .false => LinkR.mk (.some ("error: unknown attribute '" +++ a
+          +++ "' (registered: macro, tactic, implemented_by, inline, default_instance, binop, deriver, app_unexpander, simp, hint)")) gs
+    | _ => LinkR.mk (.some "error: an attribute needs a name") gs)
   | .false => match strEq (kindOf stx) "command.attrDeriver" with
     | .true => .some (deriverCmd gs stx)
     | .false => .none

@@ -137,7 +137,7 @@ def pgiHead (s e : Nat) : String :=
 
 def pgiEntry (i : LspEntry) : String := match i with
   | .term s e t => pgiHead s e +++ ",\"kind\":\"term\",\"expected\":" +++ pgcStr t +++ "}"
-  | .goal s e gs => pgiHead s e +++ ",\"kind\":\"goal\",\"goals\":[" +++ pgiGoals gs +++ "]}"
+  | .goal s e gs _ => pgiHead s e +++ ",\"kind\":\"goal\",\"goals\":[" +++ pgiGoals gs +++ "]}"
   | .decl s e n ty k => pgiHead s e +++ ",\"kind\":\"decl\",\"name\":" +++ pgcStr n
       +++ ",\"detail\":" +++ pgcStr ty +++ ",\"ckind\":" +++ Nat.toString k +++ "}"
 
