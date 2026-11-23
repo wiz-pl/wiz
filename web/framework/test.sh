@@ -32,6 +32,9 @@ if [ -n "${WIZ_LDFLAGS:-}" ]; then set -- "$@" --ldflags "$WIZ_LDFLAGS"; fi
 node "$ROOT/web/framework/hash_test.mjs" "$OUT/hash.json"
 # The morph fallback (focus/selection/value preservation, keyed moves): Node only.
 node "$ROOT/web/framework/morph_test.mjs"
+# The runtime seam: a Wasm instance and a `--target js` module namespace normalise to
+# one profile, and `start` drives both the same way: Node only, two stubs.
+node "$ROOT/web/framework/profile_test.mjs"
 # The driver's ABI (event strings, payloads, onStep, js_patch): Node only, no wiz.
 node "$ROOT/web/framework/driver_test.mjs"
 # The mount contract (one export; element, module, events, host capabilities): Node only.

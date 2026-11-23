@@ -44,21 +44,19 @@
 // reference first. A page that calls its own `wiz_loom_*` entry points must do the same:
 // pass the state, keep the returned one.
 //
-// It is the intended integration, not yet exercised by a Wasm build (no Emscripten on
-// the machine where the prototype was written); web/framework/driver_test.mjs checks the
-// event strings and the mount under Node with minidom.mjs.
+// That ownership rule is the Wasm module's. A `--target js` module has no references and
+// no linear memory, and the same three exports under the same names; `profile.js` is the
+// seam that hides the difference, so `start` (and `mount`) drive either kind with the
+// code below. The Wasm branch of `profile.js` is this file's pre-profile logic unchanged.
+//
+// It is the intended integration for the Wasm path (no Emscripten on the machine where
+// the prototype was written); web/framework/driver_test.mjs checks the event strings and
+// the mount under Node with minidom.mjs, and `mount_test.mjs`/`profile_test.mjs` drive a
+// real `--target js` module through the same seam.
 "use strict";
 import { applyPatches, delegate, mount } from "./runtime.js";
 import { decideAdopt } from "./adopt.js";
-
-const big = (x) => (typeof x === "bigint" ? x : BigInt(x));   // wasm64: pointers are i64
-
-function takeString(wasm, p) {
-  if (!p) return "";
-  const s = wasm.UTF8ToString(Number(p));
-  wasm._free(p);
-  return s;
-}
+import { profile } from "./profile.js";
 
 // What the step receives after the handler index: a form control's live value, a key,
 // or nothing. (`value` is a string property on input/textarea/select; a test double may
@@ -94,48 +92,34 @@ export function payloadOf(type, e) {
   return "";
 }
 
-// Load `wasm` (Emscripten's MODULARIZE module), mount `wiz_loom_html`'s output into
-// `root`, and wire events. `events` limits the delegated event types; `parse` is the
-// HTML parser (the browser's by default, `minidom.mjs`'s in a test); `onStep(state,
-// event, index, payload)` sees every step after it happened (a page's effect hook).
+// Load `wasm` (a runtime module — a Wasm instance or a `--target js` module namespace —
+// or its profile), mount `wiz_loom_html`'s output into `root`, and wire events. `events`
+// limits the delegated event types; `parse` is the HTML parser (the browser's by
+// default, `minidom.mjs`'s in a test); `onStep(state, event, index, payload)` sees every
+// step after it happened (a page's effect hook).
 //
 // `adopt` decides whether the container's `data-wiz-*` attributes describe a
 // server-rendered island whose hash matches this runtime's first render. Equal -> adopt
 // (keep every node, attach the listeners); unequal/absent -> replace through
 // `runtime.js` (the pre-adopt behaviour). `warn` receives the one replace warning.
 export function start(wasm, root, { events, parse, onStep, adopt = true, warn } = {}) {
-  let state = wasm._wiz_loom_init();
+  const rt = profile(wasm);
+  let state = rt.init();
   // An exported function *consumes* its argument (the C ABI's ownership rule, stage 9g):
-  // the SSR call only reads the state, so take an extra reference for it and keep ours.
-  const html = () => {
-    if (typeof wasm._wiz_retain === "function") {
-      wasm._wiz_retain(typeof state === "bigint" ? state : big(state));
-    }
-    return takeString(wasm, wasm._wiz_loom_html(state));
-  };
+  // the SSR call only reads the state, so the profile takes an extra reference for it
+  // and keeps ours (a `--target js` module keeps nothing: its state is a JS value).
+  const html = () => rt.html(state);
   // The runtime may export its own SSR hash (`wiz_loom_ssr_hash`), so the client does
   // not have to hash `html` in JS. The Wiz side hashes the **normalised tree**
   // (`Loom.ssrHash`: sorted attributes, collapsed white space, keys included, plus a
   // length/node-count witness), so an HTML formatting difference cannot force a replace.
   // Read-only, the same extra reference as `html`; absent -> the host hashes the exact
   // string (`adopt.js`).
-  const ssrHash = () => {
-    if (typeof wasm._wiz_loom_ssr_hash !== "function") return null;
-    if (typeof wasm._wiz_retain === "function") {
-      wasm._wiz_retain(typeof state === "bigint" ? state : big(state));
-    }
-    return takeString(wasm, wasm._wiz_loom_ssr_hash(state));
-  };
+  const ssrHash = () => rt.ssrHash(state);
   // The pending effect requests, as the runtime serialized them (`wiz_loom_requests`,
   // an optional export: a runtime with no effects does not have it). Read-only, so the
   // same extra reference as `html`.
-  const requests = () => {
-    if (typeof wasm._wiz_loom_requests !== "function") return "";
-    if (typeof wasm._wiz_retain === "function") {
-      wasm._wiz_retain(typeof state === "bigint" ? state : big(state));
-    }
-    return takeString(wasm, wasm._wiz_loom_requests(state));
-  };
+  const requests = () => rt.requests(state);
   const first = html();
   const decision = adopt
     ? decideAdopt({ root, html: first, runtimeHash: ssrHash(),
@@ -153,22 +137,12 @@ export function start(wasm, root, { events, parse, onStep, adopt = true, warn } 
   // `Loom.onPrevent`: after a handled event, the runtime's `wiz_loom_consume` says
   // whether it consumed the default action. A runtime without the export keeps the old
   // rule (a handler that asked decides: prevent).
-  const consume = (event, index) => {
-    if (typeof wasm._wiz_loom_consume !== "function") return true;
-    if (typeof wasm._wiz_retain === "function") {
-      wasm._wiz_retain(typeof state === "bigint" ? state : big(state));
-    }
-    const p = wasm.stringToNewUTF8(event + "\n" + index + "\n" + lastPayload);
-    const answer = Number(wasm._wiz_loom_consume(state, big(p)));
-    wasm._free(p);
-    return answer !== 0;
-  };
+  const consume = (event, index) =>
+    rt.consume(state, event + "\n" + index + "\n" + lastPayload);
   delegate(root, (event, index, e) => {
     const payload = payloadOf(event, e);
     lastPayload = payload;
-    const p = wasm.stringToNewUTF8(event + "\n" + index + "\n" + payload);
-    state = wasm._wiz_loom_step(state, big(p));
-    wasm._free(p);
+    state = rt.step(state, event + "\n" + index + "\n" + payload);
     if (typeof onStep === "function") onStep(state, event, index, payload);
     return true;   // a handled event does not also submit a form or follow a link
   }, events, consume);
@@ -187,5 +161,8 @@ export function start(wasm, root, { events, parse, onStep, adopt = true, warn } 
     ssrHash: decision.hash,
     decision,
     resync,
+    // The normalised runtime interface (profile.js): `kind` is "wasm" or "js", and
+    // `call`/`ask` are the page's entry points into the runtime.
+    profile: rt,
   };
 }

@@ -12,11 +12,16 @@
 //
 // and nothing else. `module` is the runtime (a Wasm module built from a `Web.Loom` app,
 // or any object with the same three exports: `wiz_loom_init`, `wiz_loom_html`,
-// `wiz_loom_step`); `transport` is whatever the runtime needs from outside (an engine,
-// a language server's socket), and is handed to the module factory and published as
-// `globalThis.wizTransport`. Everything the page can see of the runtime is this one
-// call: the SSR is mounted into `el`, patches from `js_patch` land in `el`, DOM events
-// on it become steps, and the page's effects go back through `call`.
+// `wiz_loom_step`). Since `--target js` exists, "the same three exports" no longer
+// implies Wasm: a `wiz build --target js` module namespace is the other kind, with
+// `wiz_loom_init/_html/_step`, a JavaScript state and JavaScript strings. `profile.js`
+// normalises either to one interface (no linear memory, no retain/free, no i64 state in
+// the `js` case), so nothing below this comment branches on the kind. `transport` is
+// whatever the runtime needs from outside (an engine, a language server's socket), and is
+// handed to the module factory and published as `globalThis.wizTransport`. Everything the
+// page can see of the runtime is this one call: the SSR is mounted into `el`, patches
+// from `js_patch` land in `el`, DOM events on it become steps, and the page's effects go
+// back through `call`.
 //
 // **What a runtime may ask the host for, and nothing more** (`globalThis.wizHost`, the
 // browser APIs a Wiz program cannot reach itself):
@@ -45,17 +50,7 @@
 "use strict";
 import { start } from "./driver.js";
 import { islandInfo, islandProps, writeError } from "./adopt.js";
-
-const big = (x) => (typeof x === "bigint" ? x : BigInt(x));   // wasm64: pointers are i64
-
-// Take an owned UTF-8 string out of the module (the module allocated it; free it after
-// copying).
-function takeString(wasm, p) {
-  if (!p) return "";
-  const s = wasm.UTF8ToString(Number(p));
-  wasm._free(p);
-  return s;
-}
+import { profile } from "./profile.js";
 
 // Find the mount point: an element, or a selector (a missing `#id` is created, so a
 // page needs no placeholder); null when there is nothing to mount on.
@@ -73,9 +68,10 @@ function resolveTarget(target, doc) {
 }
 
 // The runtime: a factory (the dynamic import's default), a module object with
-// `default`/`create`, or the factory itself. Its ABI is checked before the page is
-// touched, so a module built by an older compiler cannot half-render one: `mount` throws
-// and the page decides what to say.
+// `default`/`create`, the factory itself, or the ES module namespace `wiz build
+// --target js` writes. Its ABI is checked before the page is touched (`profile.js`), so a
+// module built by an older compiler cannot half-render one: `mount` throws and the page
+// decides what to say.
 async function instantiate(module, options) {
   const opts = {
     print: options.print || ((s) => console.log(s)),
@@ -91,11 +87,13 @@ async function instantiate(module, options) {
     : wasm && typeof wasm.create === "function" ? wasm.create
       : null;
   if (factory) wasm = await factory(opts);
-  if (!wasm || typeof wasm._wiz_loom_init !== "function" ||
-      typeof wasm._wiz_loom_html !== "function" || typeof wasm._wiz_loom_step !== "function") {
+  try {
+    // A Wasm instance has `_wiz_loom_*` and i64 state; a `--target js` namespace has
+    // `wiz_loom_*` and a JavaScript state value. The profile is the one ABI check.
+    return { wasm, rt: profile(wasm) };
+  } catch {
     throw new TypeError("mount: the runtime does not export wiz_loom_init/html/step");
   }
-  return wasm;
 }
 
 // The text field inside the mount point: the element itself when it is one, else the
@@ -254,9 +252,9 @@ export async function mount(target, { module, transport, env = globalThis, print
     : (transport && typeof transport === "object" && !Array.isArray(transport)
       ? { ...transport, props }
       : { transport, props });
-  let wasm;
+  let wasm, rt;
   try {
-    wasm = await instantiate(module, { transport: runtimeTransport, print, printErr });
+    ({ wasm, rt } = await instantiate(module, { transport: runtimeTransport, print, printErr }));
   } catch (e) {
     if (island.island) writeError(el, doc, "mount: " + (e && e.message ? e.message : String(e)));
     throw e;
@@ -293,7 +291,7 @@ export async function mount(target, { module, transport, env = globalThis, print
   };
 
   try {
-    app = start(wasm, el, {
+    app = start(rt, el, {
       events, parse,
       warn,
       onStep: (state, event, index, payload) => {
@@ -306,48 +304,18 @@ export async function mount(target, { module, transport, env = globalThis, print
     throw e;
   }
 
-  // The runtime's own entry points (`wiz_loom_effect`, …): strings are allocated here
-  // and freed after, numbers are wasm64 pointers, and the returned state is the next one.
+  // The runtime's own entry points (`wiz_loom_effect`, …): strings are allocated in the
+  // module's memory and freed after (a Wasm module) or passed as JavaScript strings (a
+  // `--target js` module), and the returned state is the next one — `profile.js` owns
+  // that difference, so this is one call for either kind.
   const call = (name, ...args) => {
-    const fn = wasm["_" + name];
-    if (typeof fn !== "function") throw new TypeError("mount: the runtime has no " + name);
-    const pointers = [];
-    const rest = args.map((a) => {
-      if (typeof a === "string") {
-        const p = wasm.stringToNewUTF8(a);
-        pointers.push(p);
-        return big(p);
-      }
-      return typeof a === "number" ? big(a) : a;
-    });
-    try {
-      app.setState(fn(app.state(), ...rest));
-    } finally {
-      for (const p of pointers) wasm._free(p);
-    }
+    app.setState(app.profile.call(app.state(), name, args));
     service();
   };
 
   // A read-only runtime query (the editor's pure rules, `wiz_loom_editor_*`): strings
   // in, an owned string out, no state and no effect. The page parses the JSON.
-  const ask = (name, ...args) => {
-    const fn = wasm["_" + name];
-    if (typeof fn !== "function") throw new TypeError("mount: the runtime has no " + name);
-    const pointers = [];
-    const rest = args.map((a) => {
-      if (typeof a === "string") {
-        const p = wasm.stringToNewUTF8(a);
-        pointers.push(p);
-        return big(p);
-      }
-      return typeof a === "number" ? big(a) : a;
-    });
-    try {
-      return takeString(wasm, fn(...rest));
-    } finally {
-      for (const p of pointers) wasm._free(p);
-    }
-  };
+  const ask = (name, ...args) => app.profile.ask(name, args);
 
   service();
   return { ...app, call, ask, host, module: wasm };
