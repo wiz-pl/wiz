@@ -3,13 +3,14 @@ import Wiz.Core.Level
 import Wiz.Core.Value
 
 /-!
-# Core evaluator counters (`WIZ_STATS`)
+# Core evaluator counters (`--stats`)
 
 A small, always-compiled-in counter layer for the core evaluator, so that the changes of
 CORE-2.2–2.4 (a shared closed value, memoised head types, a cheap failure path) have
-numbers to move. It is **off by default**: `WIZ_STATS=1` in the environment enables it for
-that process (the `wiz` command and the test driver read it at start-up and print the
-counters at exit), and a test may enable it explicitly (`Wiz.Stats.enable`).
+numbers to move. It is **off by default**: `--stats` on the `wiz` command or the test
+driver enables it for that process (they print the counters at exit), and a test may
+enable it explicitly (`Wiz.Stats.enable`). Like every other input, it is a flag and not
+an environment variable: a program's output must not depend on the process environment.
 
 The counters are measurement, not semantics: nothing here is read by `eval`, `conv`,
 `quote` or the checker unless the flag is set, and no result depends on them. Every call
@@ -99,14 +100,8 @@ initialize closedSeen : IO.Ref (Std.HashMap (Name × List Level) Unit) ← IO.mk
 
 /-! ### Turning it on and reading it -/
 
-/-- Start counting (explicitly, or from `WIZ_STATS` at start-up). -/
+/-- Start counting (the `--stats` flag, or a test that enables it explicitly). -/
 def enable : IO Unit := enabledRef.set true
-
-/-- Read `WIZ_STATS`; `1`, `on` and `true` enable the counters (anything else leaves them
-off). Called once by `wiz` and by the test driver at start-up. -/
-def fromEnv : IO Unit := do
-  let v ← (IO.getEnv "WIZ_STATS").map (·.getD "")
-  if v == "1" || v == "on" || v == "true" then enable
 
 /-- Is counting on? (A caller that wants to turn it on reads this first; nothing in the
 evaluator does.) -/
@@ -135,8 +130,8 @@ def read : IO (List (String × Nat)) := do
         ← one "zonk" cells.zonk]
 
 /-- Print every counter as `stat<TAB>name<TAB>value` on stderr, if counting is on. Called
-at process exit by `wiz` and by the test driver, so `WIZ_STATS=1 wiz check f.wiz` prints
-them once the file is elaborated. -/
+at process exit by `wiz` and by the test driver, so `wiz --stats check f.wiz` prints them
+once the file is elaborated. -/
 def report : IO Unit := do
   unless (← enabledRef.get) do return
   for (n, v) in ← read do

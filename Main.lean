@@ -101,7 +101,9 @@ def usage : String := "usage:
   wiz lsp … --ws-insecure          no token: any local process may connect (loopback only)
   wiz lsp … --web DIR              the web infoview's files, served on the WebSocket's port
                                    (default: share/wiz/web, or web/out in a checkout)
-options: --cache DIR (the elaboration cache, default ~/.cache/wiz; shared, since it is
+options: --stats (print the core evaluator's counters on stderr at exit; a development
+measurement, and not part of a cache key or a result),
+--cache DIR (the elaboration cache, default ~/.cache/wiz; shared, since it is
 content-addressed), --cache-ro DIR (repeatable: a read-only cache, searched in order
 after the write cache and never written, as in a Nix package's share/wiz/cache; its
 manifests are self-signed, so the layer is refused unless --cache-ro-unsigned),
@@ -1310,6 +1312,10 @@ def mainImpl (args : List String) : IO UInt32 := do
   let defaults ← ({ cacheDir := some (System.FilePath.mk home / ".cache" / "wiz") } : Toolchain).withBundled
   let (tc, args) := defaults.parseFlags args
   regionCacheOpt.set tc.regionCache
+  -- (`--stats`: print the core evaluator counters at exit; a flag, not an environment
+  -- variable, so a check's output never depends on the process environment)
+  if args.contains "--stats" then Wiz.Stats.enable
+  let args := args.filter (· != "--stats")
   if args.contains "--strict-privacy" then strictPrivacyOpt.set true
   let args := args.filter (· != "--strict-privacy")
   if args.contains "--pp-all" then ppAllOpt.set true
@@ -1435,10 +1441,9 @@ def mainImpl (args : List String) : IO UInt32 := do
     IO.eprintln usage
     pure 2
 
-/-- The executable: read `WIZ_STATS` before the run and print the core counters at exit
-(`wiz` is one process per file, so this is the whole check). -/
+/-- The executable: `--stats` prints the core counters at exit (`wiz` is one process per
+file, so this is the whole check). -/
 def main (args : List String) : IO UInt32 := do
-  Wiz.Stats.fromEnv
   let rc ← mainImpl args
   Wiz.Stats.report
   return rc
