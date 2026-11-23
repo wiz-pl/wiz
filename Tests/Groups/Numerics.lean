@@ -209,7 +209,7 @@ def numericsGroup : Group where
     { name := "R6: every printed Float64 reads back to the same bits (random patterns and boundaries)", run := fun _ => do
         let path ← IO.getEnv "PATH"
         let some cc ← findCC ((path.getD "").splitOn ":")
-          | skip "no cc on PATH to build the round-trip probe"
+          | skipMissing "no cc on PATH to build the round-trip probe"
         let src ← ryuRoundTripProgram
         let dir ← IO.FS.createTempDir
         let c := dir / "ryu_roundtrip.c"

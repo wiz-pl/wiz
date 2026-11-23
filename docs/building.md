@@ -24,22 +24,27 @@ the self-hosted checker and compiler are built by the first case that needs them
 kept under `/tmp`).
 
 An unimplemented exercise shows up as `✗ ... not implemented yet (hit a sorry)`. A case
-that cannot run here (no C toolchain, no `nix`, …) calls `Tests.skip REASON` and shows up
-as `⊘ name` with `skipped (REASON)`; the total counts it apart (`…, 2 skipped`), and it is
-not a pass. A selector that picks no group, a case index the group lacks, and an unknown
-flag are errors (exit code 2), not an empty run.
+that cannot run here because a dependency is absent (no C toolchain, no `nix`, …) calls
+`Tests.skipMissing REASON`: by default it is a `✗` failure whose output names the
+dependency; `lake test -- --allow-missing-deps` (or `WIZ_ALLOW_MISSING_DEPS=1`) reports
+it as `⊘ name` with `skipped (REASON)` instead. A skip the case *declares*
+(`Tests.skip`) always shows as `⊘`. The total counts skips apart (`…, 2 skipped`), and a
+skip is not a pass. A selector that picks no group, a case index the group lacks, and an
+unknown flag are errors (exit code 2), not an empty run.
 
-**A missing toolchain is a skip; a failing program is a failure.** `Build.runGlobal`
+**A missing toolchain fails by default; a failing program is a failure.** `Build.runGlobal`
 returns a `Build.RunError` that says which happened: `.build`, or `.toolchain` when the
 compiler, `llc` or GMP's `gmp.h` could not be found (no program ran), and `.run` with the
 program's exit code and standard error, `.timeout`, or `.readback` when the program itself
-failed. The helpers in `Tests/Elab.lean` (`failRun`, and `cRun`/`ioRun`/`cRunLibs`/…) skip
-only a `.toolchain` failure and otherwise fail the case, reporting the exit code and the
-program's stderr. Never look for `No such file` in a program's stderr to decide "no
-toolchain": a program may print that itself (a missing fixture, a `File.open`, a
-`Process.output` of a command not on `PATH`), and the case then failed. The `conc` group
-has a case for each half: a run-time ENOENT failure, a pass whose program writes that
-text on stderr and exits 0, and a build that cannot find the compiler.
+failed. The helpers in `Tests/Elab.lean` (`failRun`, and `cRun`/`ioRun`/`cRunLibs`/…) call
+`Tests.skipMissing` on a `.toolchain` failure — a failure naming the dependency by
+default, a reported skip under `--allow-missing-deps` — and otherwise fail the case,
+reporting the exit code and the program's stderr. Never look for `No such file` in a
+program's stderr to decide "no toolchain": a program may print that itself (a missing
+fixture, a `File.open`, a `Process.output` of a command not on `PATH`), and the case then
+failed. The `conc` group has a case for each half: a run-time ENOENT failure, a pass whose
+program writes that text on stderr and exits 0, and a build that cannot find the compiler
+(failing by default, skipping with `--allow-missing-deps`).
 
 A case whose name claims **linear** time must measure it. `Tests.checkScaling`
 (`Tests/Harness.lean`) runs the same action at `n` and `2n` (best of three, the fixed
@@ -1247,7 +1252,19 @@ setup action keeps the elan cache for those
   [ci-shard-packing.md](ci-shard-packing.md) for the numbers, the packing tables and
   what a later attempt would have to change.
 * **Skips.** A green run must have run its cases: a skipped case is not a pass, and a
-  group that skipped wholesale means CI tested nothing there. The `CI result` job runs
+  group that skipped wholesale means CI tested nothing there. There are two kinds of
+  skip. A **declared** skip is part of the case (`Tests.skip`): a documented gap, a
+  `-- test: skip` marker, a parity difference; it is a skip on every machine. A case
+  that cannot run because a **dependency is missing** (no `cc`, GMP, Boehm GC, `node`,
+  `iverilog`, `yosys`, `z3`, `CaDiCaL`, `llc`, a `wiz`/`grail` binary, the self-hosted
+  toolchain, a browser, ...) uses `Tests.skipMissing` instead: by default it **fails**,
+  naming the dependency, so a machine that cannot run the test cannot make the suite
+  green. `--allow-missing-deps` (or `WIZ_ALLOW_MISSING_DEPS=1`, the shard driver's
+  equivalent) reports those as skips instead; `lake test -- --allow-missing-deps` is
+  the local spelling. A `.github/test-shards.json` shard sets `"allow-missing-deps":
+  true` only when its environment deliberately lacks an optional tool (today the
+  `library` shard: iverilog, and the tower "from source" case's Lake toolchain), and the
+  test step exports the variable with a comment saying why. The `CI result` job runs
   `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when
   * a group's cases all skipped and the group is not in
     `.github/skip-allowlist.json`. Each entry names exactly one `case` (there is no
@@ -1260,6 +1277,9 @@ setup action keeps the elan cache for those
     `devShells.default`, not an environment skip, even for an allow-listed group. A tool
     that is only needed on some machines (Icarus Verilog, an ARM toolchain) is excused by
     the allow-list instead;
+  * a `--allow-missing-deps` shard recorded a missing dependency (the `missing-dep` note
+    in its `--timings` file) that no allow-list entry names: the flag alone is not an
+    excuse, so it cannot hide an unexpected missing compiler or runtime;
   * a group's unexplained skipped ratio is over 25% (`--max-ratio`), counted over all
     of the group's cases in every shard, so moving cases between shards (a refreshed
     `.github/test-timings.json`) cannot change the verdict;

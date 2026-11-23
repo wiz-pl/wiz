@@ -24,14 +24,16 @@ LSP/doc).
 
 ## A difference is asserted, not skipped
 
-A skip is for a case that could not run (no C compiler, no collector) and for nothing
-else: it is not a pass, and an allow-list entry that excuses 14 of 30 cases hides the
-group. A known parity difference is therefore an **expected difference**: the case
-checks the exact symptom (the exit code, the message, the artifact) and records
+A `skip` is for a declared parity difference (`-- test: skip`) and for nothing else: it
+is not a pass, and an allow-list entry that excuses 14 of 30 cases hides the group. A
+known parity difference is therefore an **expected difference**: the case checks the
+exact symptom (the exit code, the message, the artifact) and records
 `expected-difference: …` with `Tests.note`, then passes. If the driver catches up the
 assertion stops holding and the case fails — the prompt to promote it — whereas a skip
-would stay silent. This group has no `.github/skip-allowlist.json` entry; the two `run`
-cases still skip on a host without the collector, as they must.
+would stay silent. This group has no `.github/skip-allowlist.json` entry; a case that
+cannot run because the collector or the C toolchain is missing is `Tests.skipMissing`:
+it fails by default and is a reported skip only under `--allow-missing-deps`, which the
+`selfhost` shard does not set (the dev shell has both).
 
 ## What "normalised" means here
 
@@ -785,7 +787,7 @@ def cliDiffGroup : Group where
         cliDiffKnown "artifact: `build` writes an executable (via C), the self-hosted `build` the generated C (D4)" },
     { name := "build --lib: the object, its header and the C match the host's shapes", run := fun _ => do
         match ← cliRunOptions with
-        | none => skip "no garbage collector, --gc-cflags"
+        | none => skipMissing "no garbage collector, --gc-cflags"
         | some shOpts => withSelfhostCli fun exe => do
           let host ← cliDiffHost
           let tc ← cliDiffHostToolchain
@@ -893,7 +895,7 @@ def cliDiffGroup : Group where
         -- (the host's `build --llvm` links its executable with `llc`; a `grail.local.wiz`
         -- from another machine may name a store path that is not here)
         if wt.llc.startsWith "/" && !(← (System.FilePath.mk wt.llc).pathExists) then
-          skip s!"llc is not present at {wt.llc}: the host cannot build --llvm here"
+          skipMissing s!"llc is not present at {wt.llc}: the host cannot build --llvm here"
         else do
           let spec : CliDiffSpec := { files := #[("good.wiz", cliDiffNat)]
                                       args := #["build", "good.wiz", "-o", "out", "--llvm"]
@@ -927,7 +929,7 @@ def cliDiffGroup : Group where
           skip "artifact: the lowered `w_main`/`w_wiz_2e_entry` text is equal to the host's (D4: the host links an executable, the driver writes the IR); the driver's `main` prints the scalar itself, where the host calls the runtime's `wiz_run_main` (C5's result protocol)" },
     { name := "run --llvm: `main : Nat` prints the same value (C5's first slice)", run := fun _ => do
         match ← cliRunOptions with
-        | none => skip "no garbage collector, --gc-cflags"
+        | none => skipMissing "no garbage collector, --gc-cflags"
         | some shOpts => withSelfhostCli fun exe => do
           let host ← cliDiffHost
           let tc ← cliDiffHostToolchain
@@ -935,7 +937,7 @@ def cliDiffGroup : Group where
           -- (a `grail.local.wiz` written on another machine may name a missing `llc`;
           -- the build case still compares the IR, so only this run skips here)
           if wt.llc.startsWith "/" && !(← (System.FilePath.mk wt.llc).pathExists) then
-            skip s!"llc is not present at {wt.llc}: the IR text is compared, `run` is not exercised"
+            skipMissing s!"llc is not present at {wt.llc}: the IR text is compared, `run` is not exercised"
           else do
             let spec : CliDiffSpec := { files := #[("n.wiz", cliDiffNat)]
                                         args := #["run", "n.wiz", "--llvm"]
@@ -969,7 +971,7 @@ def cliDiffGroup : Group where
         cliDiffKnown "subcommands: parse, doc, fmt, repl, test-driver, cache prune|verify|manifest and lsp are the host's; the driver has check/build/run/version/help (D2/D8)" },
     { name := "run: an IO program prints the same output and exits 0", run := fun _ => do
         match ← cliRunOptions with
-        | none => skip "no garbage collector, --gc-cflags"
+        | none => skipMissing "no garbage collector, --gc-cflags"
         | some shOpts => withSelfhostCli fun exe => do
           let host ← cliDiffHost
           let tc ← cliDiffHostToolchain
@@ -982,7 +984,7 @@ def cliDiffGroup : Group where
           checkEq "hello from the selfhost driver\n42\n" s.out },
     { name := "run: program arguments are the driver's (the host's `run` takes flags only)", run := fun _ => do
         match ← cliRunOptions with
-        | none => skip "no garbage collector, --gc-cflags"
+        | none => skipMissing "no garbage collector, --gc-cflags"
         | some shOpts => withSelfhostCli fun exe => do
           let host ← cliDiffHost
           let tc ← cliDiffHostToolchain

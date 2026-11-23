@@ -203,7 +203,7 @@ def stdGroup : Group where
           "--gmp", String.intercalate " " tc.gmp]
         let b ← IO.Process.output { cmd := wiz.toString, args := args.toArray, cwd := some dir }
         if b.exitCode != 0 then
-          if (b.stderr.splitOn "gmp.h").length > 1 then skip "no toolchain"
+          if (b.stderr.splitOn "gmp.h").length > 1 then skipMissing "no toolchain"; return
           else throw (IO.userError s!"the asan probe did not build:\n{b.stderr}")
         let spawn : IO.Process.SpawnArgs := { cmd := exe.toString }
         let spawn := { spawn with env := #[("ASAN_OPTIONS", some "detect_leaks=0:abort_on_error=1")] }

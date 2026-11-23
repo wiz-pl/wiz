@@ -109,7 +109,7 @@ flags). Prints the case's name and result (and a failure's output) and exits 0 i
 passed, 1 if it failed, 2 on a usage error and 3 if it was skipped: a skipped case is not
 a pass. -/
 def runOne (args : List String) : IO UInt32 := do
-  let usage := "usage: tests --run GROUP INDEX [--jobs N] [toolchain flags] (INDEX from 0: `tests --list-cases '=GROUP'`)"
+  let usage := "usage: tests --run GROUP INDEX [--jobs N] [--allow-missing-deps] [toolchain flags] (INDEX from 0: `tests --list-cases '=GROUP'`)"
   let args := match args with
     | [one] => one.splitOn "#"
     | args => args
@@ -194,8 +194,12 @@ starts with one of the arguments, `lake test -- =c` only the group named `c`, an
 against them), and `lake test -- --list-cases SELECTOR…` the selected cases, as
 `GROUP<tab>INDEX<tab>NAME` lines; `lake test -- --run GROUP INDEX` runs one case and
 exits with its result (`runOne`). A selector that picks nothing, a case index the group
-lacks and an unknown flag are errors. A skipped case (`Tests.skip`) shows as `⊘` and is
-counted apart. `--timings FILE` appends one line of JSON per case to
+lacks and an unknown flag are errors. A skip the case declares (`Tests.skip`: a
+documented gap, a `-- test: skip` marker) shows as `⊘` and is counted apart. A case that
+cannot run because a dependency is missing (`Tests.skipMissing`) is a **failure** that
+names the dependency, unless `--allow-missing-deps` (or `WIZ_ALLOW_MISSING_DEPS=1`, the
+shard driver's equivalent) is given, in which case it is a reported skip and the summary
+counts it. `--timings FILE` appends one line of JSON per case to
 FILE (its group, index, name, wall time in seconds, whether it passed, and its notes:
 `Tests.note`), labelled with `--shard NAME`.
 
@@ -223,6 +227,14 @@ def main (args : List String) : IO UInt32 := do
   -- a `panic!` fails the case that hits it (each case runs in its own process), as it
   -- fails `wiz check`; `--panic-probe continue` turns it off again
   Wiz.exitOnPanic
+  -- A missing dependency is a failure unless this explicit opt-out is given, and the
+  -- environment variable is its equivalent for the shard driver (CI sets it from
+  -- `.github/test-shards.json`'s `allow-missing-deps`, never by default). It is taken off
+  -- before the toolchain flags and passed to each case's process, which strips it again.
+  let (allowArg, args) := takeSwitch "--allow-missing-deps" args
+  let allowEnv ← IO.getEnv "WIZ_ALLOW_MISSING_DEPS"
+  let allowMissing := allowArg || allowEnv.isSome
+  setAllowMissingDeps allowMissing
   -- (23k) a grail job's supervisor, and grail itself (the job-hygiene tests run it)
   -- (13b) `--trace-guess-fallback`: each case's process reports the declarations that reach
   -- the fallback recheck (`checkGuessedDecl`), and the driver forwards them (`forwardGuessLines`)
@@ -254,7 +266,8 @@ def main (args : List String) : IO UInt32 := do
     | _ => false
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
-  flagsRef.set (tc.toFlags ++ (if traceGuesses then ["--trace-guess-fallback"] else []))
+  flagsRef.set (tc.toFlags ++ (if traceGuesses then ["--trace-guess-fallback"] else [])
+    ++ (if allowMissing then ["--allow-missing-deps"] else []))
   match args' with
   -- one case in this process: what `Group.run` starts for each case
   | ["--run-case", group, ix] =>
@@ -350,6 +363,7 @@ def main (args : List String) : IO UInt32 := do
     let mut passed := 0
     let mut failed := 0
     let mut skipped := 0
+    let mut missingDeps := 0
     for g in selected do
       let start ← IO.monoMsNow
       let results ← if jobs > 1 && (g.parallel || jobsAll) then
@@ -362,6 +376,13 @@ def main (args : List String) : IO UInt32 := do
       let k := (results.filter (·.skipped.isSome)).length
       passed := passed + (p - k)
       skipped := skipped + k
+      missingDeps := missingDeps + (results.filter
+        (fun r => r.notes.any (·.startsWith missingDepMarker))).length
       failed := failed + (results.length - p)
     IO.println s!"\n{passed} passed, {failed} failed{if skipped == 0 then "" else s!", {skipped} skipped"}"
+    -- Visible in the shard log (and in the skip lint, which reads the `--timings` notes):
+    -- the environment skips a job allowed with `--allow-missing-deps` are counted, never
+    -- silent. Without the flag these cases are failures, so this line is empty.
+    if missingDeps > 0 then
+      IO.println s!"{missingDeps} case(s) skipped for a missing dependency (--allow-missing-deps / WIZ_ALLOW_MISSING_DEPS=1)"
     pure (if failed == 0 then 0 else 1)

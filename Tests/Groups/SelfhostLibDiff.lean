@@ -1052,7 +1052,7 @@ def libDiffSweepCase (k : Nat) : Case :=
       let say := fun (_ : String) => pure ()
       -- the per-file lines, a heartbeat and the counts reach the CI log while it runs
       match ← libDiffSweep o say (some progress) with
-      | none => skip "no C toolchain (no self-hosted compiler)"
+      | none => skipMissing "no C toolchain (no self-hosted compiler)"
       | some (recs, workers) =>
         let sum := libDiffSummarize recs
         let label := s!"{k + 1}-of-{libDiffChunks}"

@@ -18,7 +18,7 @@ def jsNodeAvailable : IO Bool := do
   catch _ => pure false
 
 /-- The runtime shim the emitted module pastes in. A checkout has it at `web/`; a test
-without it skips rather than pretends. -/
+without it fails rather than pretending to test the backend. -/
 def jsRuntimeText : IO String := do
   let p : System.FilePath := "web" / "wiz-js-runtime.mjs"
   unless ← p.pathExists do throw (IO.userError "no web/wiz-js-runtime.mjs")
@@ -67,7 +67,7 @@ def jsNative (src : String) : IO String := do
 /-- A golden test: the emitted module and the interpreter run the same `main`, and their
 results (read back with `main`'s type) must be equal. -/
 def jsGolden (src : String) : IO Unit := do
-  unless ← jsNodeAvailable do skip "no node"; return
+  unless ← jsNodeAvailable do skipMissing "no node"; return
   let expected ← jsNative src
   let (s, ty, text) ← jsCompile src
   let out ← jsRunText text
@@ -78,7 +78,7 @@ def jsGolden (src : String) : IO Unit := do
 /-- A pure result whose `#eval` cannot run (a native such as `UInt64`), against an
 explicit expected value. -/
 def jsRun (src expected : String) : IO Unit := do
-  unless ← jsNodeAvailable do skip "no node"; return
+  unless ← jsNodeAvailable do skipMissing "no node"; return
   let (s, ty, text) ← jsCompile src
   let out ← jsRunText text
   match Build.parseValue out with
@@ -88,7 +88,7 @@ def jsRun (src expected : String) : IO Unit := do
 /-- An `IO` program prints for itself; compare its standard output (the interpreter
 cannot run the foreign functions). -/
 def jsStdout (src expected : String) : IO Unit := do
-  unless ← jsNodeAvailable do skip "no node"; return
+  unless ← jsNodeAvailable do skipMissing "no node"; return
   let (_, _, text) ← jsCompile src
   let out ← jsRunText text
   checkEq expected out
@@ -115,13 +115,13 @@ def jsEmit (src : String) : IO String := do
 answer: the generic tree read back with `main`'s type for a pure `main`, and standard
 output for an `IO` one. This is the acceptance comparison for the target. -/
 def jsAgreesWithC (src : String) : IO Unit := do
-  unless ← jsNodeAvailable do skip "no node"; return
+  unless ← jsNodeAvailable do skipMissing "no node"; return
   let s := runFrontend (R := ZeroOneMany) src { loader := ← libLoader, trustedModule := Tests.libModule }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   let dir ← IO.FS.createTempDir
   match ← Build.runGlobal (← toolchain) s "main" dir with
-  | .error e => if e.isToolchain then skip "no toolchain" else throw (IO.userError e.message)
+  | .error e => if e.isToolchain then skipMissing "no toolchain" else throw (IO.userError e.message)
   | .ok cOut =>
     match ← Build.runJsGlobal s "main" dir with
     | .error e => throw (IO.userError e)
@@ -250,7 +250,7 @@ def jsGroup : Group where
           "def main : IO String := cwd")
         unless (e.splitOn "no JavaScript runtime").length > 1 do throw (IO.userError e) },
     { name := "the build path writes OUT.mjs and runs it", run := fun _ => do
-        unless ← jsNodeAvailable do skip "no node"; return
+        unless ← jsNodeAvailable do skipMissing "no node"; return
         let s := runFrontend (R := ZeroOneMany) "import Prelude\ndef main : Nat := 6 * 7"
           { loader := ← libLoader, trustedModule := Tests.libModule }
         let dir ← IO.FS.createTempDir
@@ -266,7 +266,7 @@ def jsGroup : Group where
           | .error e => throw (IO.userError e)
           | .ok v => checkEq "42" v },
     { name := "the Loom-shaped demo: mount, route, delegate and patch, in Wiz", run := fun _ => do
-        unless ← jsNodeAvailable do skip "no node"; return
+        unless ← jsNodeAvailable do skipMissing "no node"; return
         let src ← IO.FS.readFile ("examples" / "js-loom" / "loom.wiz")
         let (code, stdout, stderr) ← jsLoomRun src
         if code != 0 then
@@ -274,7 +274,7 @@ def jsGroup : Group where
         unless (stdout.splitOn "PASS loom demo").length > 1 do
           throw (IO.userError s!"no PASS line:\n{stdout}") },
     { name := "the Loom demo fails when its route is broken", run := fun _ => do
-        unless ← jsNodeAvailable do skip "no node"; return
+        unless ← jsNodeAvailable do skipMissing "no node"; return
         let src ← IO.FS.readFile ("examples" / "js-loom" / "loom.wiz")
         -- `/` now routes to About: the first patch list is the wrong one, and the
         -- harness's assertion must say so

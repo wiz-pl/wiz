@@ -178,7 +178,7 @@ def hdlExamplesCase (name : String) (keep : String → Bool) (skips : List Strin
         -- (`run` tests need the C toolchain; on a machine without it the case is
         -- skipped, as the tour's are)
         else if !t.ok && (t.message.splitOn "gmp.h").length > 1 then
-          skip "no toolchain"; return
+          skipMissing "no toolchain"; return
         else check t.ok s!"{t.file}: {t.message}" }
 
 def hdlExamplesGroup : Group where

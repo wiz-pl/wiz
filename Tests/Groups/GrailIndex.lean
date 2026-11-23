@@ -15,8 +15,9 @@ def exampleIndex : IO System.FilePath := do
 def hasModuleConflict (r : Grail.CheckResult) : Bool :=
   r.errors.any fun e => (e.splitOn "module conflict").length > 1
 
-/-- `ssh-keygen` signs and verifies the index snapshots; a machine without it skips the
-signed-index cases (as the toolchain cases skip without a C compiler). -/
+/-- `ssh-keygen` signs and verifies the index snapshots; a machine without it cannot run
+the signed-index cases, so they fail by default (`Tests.skipMissing`) and are reported as
+skips only under `--allow-missing-deps`. -/
 def haveSshKeygen : IO Bool := do
   try
     let _ ← IO.Process.output { cmd := "ssh-keygen", args := #["-h"] }
@@ -252,7 +253,7 @@ def grailIndexGroup : Group where
         check ((entry.splitOn "(modules Greet.Hello)").length > 1) entry },
     { name := "a signed index snapshot is verified offline and pinned in the lock", run := fun _ => do
         unless ← haveSshKeygen do
-          skip "no ssh-keygen"
+          skipMissing "no ssh-keygen"
           return
         let root ← IO.FS.createTempDir
         let (idx, _key, allowed, _sha, fp) ← signedGreetIndex root 1
@@ -313,7 +314,7 @@ def grailIndexGroup : Group where
         checkEq 0 (← run2 ["update", "--allow-unsigned"]) },
     { name := "an edited entry, snapshot or expiry is refused", run := fun _ => do
         unless ← haveSshKeygen do
-          skip "no ssh-keygen"
+          skipMissing "no ssh-keygen"
           return
         let root ← IO.FS.createTempDir
         let (idx, key, allowed, sha, fp) ← signedGreetIndex root 1
@@ -352,7 +353,7 @@ def grailIndexGroup : Group where
         | .ok r => check r.hasErrors s!"the expired snapshot passed: {r.errors}" },
     { name := "a lower snapshot seq is a rollback; a same-seq rewrite is refused", run := fun _ => do
         unless ← haveSshKeygen do
-          skip "no ssh-keygen"
+          skipMissing "no ssh-keygen"
           return
         let root ← IO.FS.createTempDir
         let (idx, key, allowed, sha, fp) ← signedGreetIndex root 1
@@ -386,7 +387,7 @@ def grailIndexGroup : Group where
         checkEq 1 (← run (updated ++ ["--allow-rewind"])) },
     { name := "a signed entry digest covers tree, commit and deps (P0)", run := fun _ => do
         unless ← haveSshKeygen do
-          skip "no ssh-keygen"
+          skipMissing "no ssh-keygen"
           return
         let root ← IO.FS.createTempDir
         let (idx, _key, allowed, _sha, tree) ← signedEntryIndex root 1
@@ -427,7 +428,7 @@ def grailIndexGroup : Group where
         checkEq 0 (← run updated) },
     { name := "yank state is signed, and a yanked version names its reason", run := fun _ => do
         unless ← haveSshKeygen do
-          skip "no ssh-keygen"
+          skipMissing "no ssh-keygen"
           return
         let root ← IO.FS.createTempDir
         let (idx, _key, allowed, _sha, _tree) ← signedEntryIndex root 1

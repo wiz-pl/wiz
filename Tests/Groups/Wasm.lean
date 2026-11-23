@@ -54,9 +54,9 @@ def wasmRunBytes (bytes : ByteArray) : IO String := do
 /-- Compile `main` with the Wasm backend, run it under Node with `web/wasm-host.mjs`,
 and read its printed result back with `main`'s type (as `wiz run` does for C). -/
 def wasmRun (src expected : String) : IO Unit := do
-  unless ← nodeAvailable do skip "no node"; return
+  unless ← nodeAvailable do skipMissing "no node"; return
   let host : System.FilePath := "web" / "wasm-host.mjs"
-  unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+  unless ← host.pathExists do skipMissing "no web/wasm-host.mjs"; return
   let (s, ty, bytes) ← wasmCompile src
   let out ← wasmRunBytes bytes
   match Build.parseValue out with
@@ -84,9 +84,9 @@ def wasmGolden (src : String) : IO Unit := do
 /-- A program that must fail at run time (a trap), with a fragment of the engine's
 message. -/
 def wasmTrap (src fragment : String) : IO Unit := do
-  unless ← nodeAvailable do skip "no node"; return
+  unless ← nodeAvailable do skipMissing "no node"; return
   let host : System.FilePath := "web" / "wasm-host.mjs"
-  unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+  unless ← host.pathExists do skipMissing "no web/wasm-host.mjs"; return
   let (_, _, bytes) ← wasmCompile src
   let dir ← IO.FS.createTempDir
   let file := dir / "wiz_main.wasm"
@@ -101,9 +101,9 @@ def wasmTrap (src fragment : String) : IO Unit := do
 must report it (not print a value). This is the trap path without a source-level
 construct that Wiz's type system would reject. -/
 def wasmTrapIr (fragment : String) : IO Unit := do
-  unless ← nodeAvailable do skip "no node"; return
+  unless ← nodeAvailable do skipMissing "no node"; return
   let host : System.FilePath := "web" / "wasm-host.mjs"
-  unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+  unless ← host.pathExists do skipMissing "no web/wasm-host.mjs"; return
   let decls : Array Wiz.IR.Decl := #[{ name := "wiz.entry", params := #[], body := .unreachable }]
   let bytes ← match Wasm.program decls false with
     | .ok bytes => pure bytes
@@ -181,9 +181,9 @@ def wasmPeakBytes (bytes : ByteArray) : IO (String × Nat) := do
 pages. A bump allocator's peak is everything the program allocated; the reference
 counting allocator's is its peak live set. -/
 def wasmRunPeak (src expected : String) (maxPages : Nat) : IO Unit := do
-  unless ← nodeAvailable do skip "no node"; return
+  unless ← nodeAvailable do skipMissing "no node"; return
   let host : System.FilePath := "web" / "wasm-host.mjs"
-  unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+  unless ← host.pathExists do skipMissing "no web/wasm-host.mjs"; return
   let (s, ty, bytes) ← wasmCompile src
   let (out, pages) ← wasmPeakBytes bytes
   match Build.parseValue out with
@@ -224,9 +224,9 @@ def wasmCafRunTwice (bytes : ByteArray) : IO (String × Nat × Nat) := do
 /-- A closed definition is evaluated once and shared: the module's CAF-build counter
 is non-zero after `main`, and running `main` a second time does not build it again. -/
 def wasmCafCached (src expected : String) : IO Unit := do
-  unless ← nodeAvailable do skip "no node"; return
+  unless ← nodeAvailable do skipMissing "no node"; return
   let host : System.FilePath := "web" / "wasm-host.mjs"
-  unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+  unless ← host.pathExists do skipMissing "no web/wasm-host.mjs"; return
   let (s, ty, bytes) ← wasmCompile src
   let (out, b1, b2) ← wasmCafRunTwice bytes
   match Build.parseValue out with
@@ -423,9 +423,9 @@ def wasmGroup : Group where
         let e ← wasmError "import IO\ndef main : Nat := Bytes.size Bytes.empty"
         unless (e.splitOn "not supported by the Wasm backend").length > 1 do throw (IO.userError e) },
     { name := "the build path validates, writes and runs the module", run := fun _ => do
-        unless ← nodeAvailable do skip "no node"; return
+        unless ← nodeAvailable do skipMissing "no node"; return
         let host : System.FilePath := "web" / "wasm-host.mjs"
-        unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+        unless ← host.pathExists do skipMissing "no web/wasm-host.mjs"; return
         let s := runFrontend (R := ZeroOneMany) "import Prelude\ndef main : Nat := 6 * 7"
           { loader := ← libLoader, trustedModule := Tests.libModule }
         let dir ← IO.FS.createTempDir
@@ -444,8 +444,8 @@ def wasmGroup : Group where
         -- an installed toolchain has `share/wiz/web/wasm-host.mjs` beside `share/wiz/lib`
         let host ← Build.wasmHostPath
         check (host.toString.endsWith "web/wasm-host.mjs") s!"unexpected host path: {host}"
-        unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
-        unless ← nodeAvailable do skip "no node"; return
+        unless ← host.pathExists do skipMissing "no web/wasm-host.mjs"; return
+        unless ← nodeAvailable do skipMissing "no node"; return
         let tc ← toolchain
         let dir ← IO.FS.createTempDir
         try

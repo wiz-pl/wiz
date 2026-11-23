@@ -101,7 +101,7 @@ def wordGroup : Group where
         -- `Bytes.push` is native (`wiz_bytes_push`), so the round-trip is compiled code:
         -- the interpreters refuse the foreign call ("foreign functions only run in
         -- compiled code"). The `#eval` half cannot exist, not even in CI.
-        unless ← hasCC do skip "no C toolchain (cc)"; return
+        unless ← hasCC do skipMissing "no C toolchain (cc)"; return
         cRunLibs ("import Prelude\nimport Text\nimport Word\nimport Data.WordBytes\n" ++
           "def b1 := Bytes.ofU8s (.cons (U8.ofNat 0) (.cons (U8.ofNat 255) .nil))\n" ++
           "def b2 := Bytes.ofU8s (.cons (U8.ofNat 1) (.cons (U8.ofNat 2) (.cons (U8.ofNat 3) (.cons (U8.ofNat 4) (.cons (U8.ofNat 5) .nil)))))\n" ++
@@ -120,7 +120,7 @@ def wordGroup : Group where
         let src ← IO.FS.readFile "examples/words.wiz"
         okLib (src ++ "\n#eval main\n#run main\n") ["1748694682", "1748694682"] },
     { name := "examples/words.wiz: C and LLVM agree with the kernel and the interpreters", run := fun _ => do
-        unless ← hasCC do skip "no C toolchain (cc)"; return
+        unless ← hasCC do skipMissing "no C toolchain (cc)"; return
         let src ← IO.FS.readFile "examples/words.wiz"
         cRunLibs src "1748694682"
         cRunLibs src "1748694682" (llvm := true) },
