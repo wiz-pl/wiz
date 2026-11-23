@@ -256,6 +256,7 @@ scry/tests/uaf.wiz
 scry/tests/workflow-e2e.wiz
 scry/tests/workflow-records.wiz
 scry/tests/workflow.wiz
+scry/tools/ArtifactsMain.wiz
 scry/tools/CsCover.wiz
 scry/tools/CsExternalsMain.wiz
 scry/tools/CsTraceMain.wiz
