@@ -965,7 +965,27 @@ def grailDepsGroup : Group where
         | .error e =>
           check ((e.splitOn "is unknown").length == 1) s!"the URL was parsed as a curl option: {e}"
           check (!(← dest2.pathExists)) "a failed download left a partial file"
-        | .ok () => throw (IO.userError "an invalid URL was downloaded") }
+        | .ok () => throw (IO.userError "an invalid URL was downloaded") },
+    { name := "the lock's declared size is enforced before the archive is unpacked (PK-1.2)", run := fun _ => do
+        let (root, dir, sha, tc) ← registryTree
+        let idx := root / "index"
+        let cache := tc.cacheDir.getD "."
+        let .ok (pkg, _) ← Grail.readConfig tc (← binId tc) "lib" dir
+          | throw (IO.userError "bad manifest")
+        let .ok lock ← Grail.Registry.resolveLock cache idx.toString false (readPkg tc) dir pkg
+          | throw (IO.userError "resolve failed")
+        check (lock.pkgs.any fun p => p.name == "greet" && p.sha256 == sha)
+          "the lock does not contain greet"
+        let wrong := { lock with
+          pkgs := lock.pkgs.map fun p => if p.name == "greet" then { p with size := some 1 } else p }
+        match ← Grail.Registry.fetch cache dir wrong with
+        | .error e =>
+          check ((e.splitOn "size").length > 1) s!"the size error is not named: {e}"
+          check ((e.splitOn "the entry says 1").length > 1) e
+          -- nothing was unpacked into the project
+          check (!(← (dir / ".grail" / "packages" / "greet").pathExists))
+            "a wrong-size archive was unpacked"
+        | .ok _ => throw (IO.userError "a wrong declared size was accepted") }
   ]
 
 builtin_initialize registerGroup grailDepsGroup
