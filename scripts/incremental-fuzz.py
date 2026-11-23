@@ -441,6 +441,18 @@ def compare_runs(label: str, full: Run, inc: Run) -> Optional[str]:
     return None
 
 
+def compare_cli_runs(full: Run, inc: Run, full_dir: Path, inc_dir: Path) -> Optional[str]:
+    """The CLI's stderr names the --sarif output path, which is the only difference
+    between the two runs by construction; normalize that directory, not the analysis."""
+    if full.code != inc.code:
+        return f"cli: exit code full={full.code} incremental={inc.code}"
+    fs = normalize_text(full.stderr).replace(str(full_dir), "<OUT>")
+    ins = normalize_text(inc.stderr).replace(str(inc_dir), "<OUT>")
+    if fs != ins:
+        return "cli: stderr differs\n" + first_diff(fs.encode(), ins.encode())
+    return None
+
+
 def compare_trees(label: str, full: Path, inc: Path) -> Optional[str]:
     if not full.exists() and not inc.exists():
         return None
@@ -553,7 +565,7 @@ def run_campaign(seed: int, program: int, steps: int, artifacts: Path, scry: Pat
                     return CampaignResult(seed, program, True,
                                           f"slow-input (skipped: cli/{mode})",
                                           muts, {}, root if keep else None)
-                why = compare_runs(f"cli/{mode}", full, inc)
+                why = compare_cli_runs(full, inc, cli_full_dir, cli_inc_dir)
                 if why is None:
                     fs = full.stdout.strip()
                     ins = inc.stdout.strip()
@@ -677,6 +689,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.nightly:
         args.seed = 20261123
         args.programs, args.steps = NIGHTLY_PROGRAMS, NIGHTLY_STEPS
+    # run_cli chdirs into scry/, so every binary/rule path must be absolute
+    args.artifacts = args.artifacts.resolve()
+    args.scry = args.scry.resolve()
+    args.rules = args.rules.resolve()
     if args.programs < 1 or args.steps < 0:
         print("incremental-fuzz: --programs must be positive and --steps non-negative",
               file=sys.stderr)
@@ -711,8 +727,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.json_out:
         args.json_out.write_text(json.dumps(rows, indent=1) + "\n")
 
-    passed = len(rows) - failures
-    print(f"incremental-fuzz: {passed} converged, {failures} diverged "
+    slow = sum(1 for r in rows if str(r.get("message", "")).startswith("slow-input"))
+    passed = len(rows) - failures - slow
+    print(f"incremental-fuzz: {passed} converged, {slow} slow-input, {failures} diverged "
           f"({len(rows)} campaign(s), seed {args.seed}…{args.seed + len(rows) - 1}, "
           f"{args.steps} step(s))")
     return 1 if failures else 0

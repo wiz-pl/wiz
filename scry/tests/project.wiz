@@ -395,10 +395,9 @@ def main : IO Unit := EIO.toIO (do
   f8 ← build fmtDir fmtCache;
   check "cache: the digest-mismatched entry warms after rewrite" (Nat.beq f8.2.hit 1);
   -- a warm hit is the *same store*, column for column, as a cold parse
-  fCold ← Scry.ProjectIO.buildProject fmtDir .none "cc" .true .false .false .nil
-    (Scry.CacheOpts.mk .false "" .json);
+  fCold ← Scry.ProjectIO.buildProject fmtDir .none "cc" .true .false .false .nil (Scry.CacheOpts.mk .false "" .json);
   fWarm ← build fmtDir fmtCache;
-  let sameStore := match fCold.1.units, fWarm.1.units with
+  let sameStore : Bool := match fCold.1.units, fWarm.1.units with
     | .cons a _, .cons b _ => String.eq (Scry.cstFullDigest a.store) (Scry.cstFullDigest b.store)
     | _, _ => .false;
   check "cache: a warm CST has the cold parse's full-column digest" sameStore;
