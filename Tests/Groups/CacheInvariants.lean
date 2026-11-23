@@ -668,11 +668,11 @@ def cacheInvariantsGroup : Group where
         check (← Cache.readModuleRegion (R := ZeroOneMany) w binary rig k).isSome
           "the write layer's own region is not valid"
         let store ← Cache.Store.layeredRegion (R := ZeroOneMany) (some w) [ro] binary opts
-          .warn rig (roUnsigned := true)
+          .warn rig (unsignedReads := [ro])
         check (← store.getRegion k).isNone
           "a poisoned read layer did not hide the write cache's valid region"
         let (s, _) ← Cache.elaborateCached (some w) [ro] src init 0 (region := some opts)
-          (verify := .warn) (rig := rig) (roUnsigned := true)
+          (verify := .warn) (rig := rig) (unsignedReads := [ro])
         checkEq expected (s.messages.toList.map (·.render src))
         checkEq before (← snapshot ro) },
     /- K3 pending (task 11): the opt-in must cover only the layer before it. -/
