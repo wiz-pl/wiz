@@ -45,7 +45,7 @@ def cliCheck (s want msg : String) : IO Unit :=
 def withSelfhostCli (k : System.FilePath → IO Unit) : IO Unit := do
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if (e.splitOn "gmp.h").length > 1 then skipMissing "no toolchain" else throw (IO.userError e)
   | .ok exe => k exe
 
 def cliHello : String := "import Prelude
@@ -188,7 +188,7 @@ def cliGroup : Group where
         unless !(← (dir / "out.c").pathExists) do throw (IO.userError "build wrote the C of a bad file") },
     { name := "run: the program's output, and -o keeps the C", run := fun _ => do
         match ← cliRunOptions with
-        | none => skip "no garbage collector, --gc-cflags"
+        | none => skipMissing "no garbage collector, --gc-cflags"
         | some opts => withSelfhostCli fun exe => do
           let cacheDir ← IO.FS.createTempDir
           let cache := (cacheDir / "c").toString
@@ -211,7 +211,7 @@ def cliGroup : Group where
     { name := "run: a `--rt` path and program arguments with spaces, `;`, `$` and `'` are quoted",
       run := fun _ => do
         match ← cliRunOptions with
-        | none => skip "no garbage collector, --gc-cflags"
+        | none => skipMissing "no garbage collector, --gc-cflags"
         | some opts => withSelfhostCli fun exe => do
           let cacheDir ← IO.FS.createTempDir
           let cache := (cacheDir / "c").toString
@@ -242,7 +242,7 @@ def cliGroup : Group where
           checkEq "" err },
     { name := "run: a program killed by a signal is a failure, not exit 0", run := fun _ => do
         match ← cliRunOptions with
-        | none => skip "no garbage collector, --gc-cflags"
+        | none => skipMissing "no garbage collector, --gc-cflags"
         | some opts => withSelfhostCli fun exe => do
           let cacheDir ← IO.FS.createTempDir
           let cache := (cacheDir / "c").toString
@@ -741,13 +741,13 @@ def cliGroup : Group where
         Tests.check (cliHas sll "add i64 0, 11") "`Nat.add 2 3` folded through the IR"
         -- `llc` and `cc`, then the value as `wiz run` prints a Nat
         match ← cliRunOptions with
-        | none => skip "no C toolchain (--gc-cflags): the module is built, `run` is not exercised"
+        | none => skipMissing "no C toolchain (--gc-cflags): the module is built, `run` is not exercised"
         | some opts => do
           let tc ← toolchain
           -- (a `grail.local.wiz` written on another machine names a store path that may
           -- not exist here; the module is still built above, so only `run` skips)
           if tc.llc.startsWith "/" && !(← (System.FilePath.mk tc.llc).pathExists) then
-            skip s!"llc is not present at {tc.llc}: the module is built, `run` is not exercised"
+            skipMissing s!"llc is not present at {tc.llc}: the module is built, `run` is not exercised"
           else do
             let opts := opts ++ #["--cc", tc.cc, "--llc", tc.llc]
             let (c, out, err) ← cliRun exe files (#["run", "n.wiz", "--target", "llvm"] ++ opts)

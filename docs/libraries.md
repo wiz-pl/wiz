@@ -2378,9 +2378,13 @@ shape; and the CWE tier names from
 and writes `scry-workflow/findings.json` plus `scry-workflow/<id>/` (`static.json`,
 certificate, assumptions, boundaries, `finding.json`). `repro`
 (`scry/src/Scry/Repro.wiz`) selects/generates an input and harness, builds under
-ASAN/UBSAN when available (recording a fallback), runs under `timeout`, and stores
-`dynamic.json`, `repro.sh` and `run.log`. `verify` re-runs the analysis and the repro and
-reports "not reported by this run" (never absence).
+ASAN/UBSAN when available (recording a fallback), runs under `timeout`, and stores the
+run as two records: `repro.json` (the recipe) and `dynamic.json` (the evidence), with
+`repro.sh` and `run.log` beside them. The two records are written together by one
+function and tied by a pair id and the recipe's digest. `verify` re-runs
+the recipe, refuses a torn or disagreeing pair loudly, and reports "not reported by this
+run" (never absence). A probe run whose event stream is empty is `skipped` with
+`probe-no-heartbeat`, not clean: a silent sensor is not evidence of absence.
 
 The root bundle keeps `static`, `dynamic`, `verify` and `repro` separate and adds an
 `evidenceItems` array with `kind` (`static`, `dynamic-observed`, `smt-model`,

@@ -13,6 +13,7 @@ repo: the finding is in src/Helper.cs: ok
 coverage: 9 rows: ok
 coverage: one parse failure row: ok
 coverage: the failed file is named: ok
+coverage: the failure names its node kind, not just the path: ok
 coverage: the exclusion rules are rows: ok
 gate: --fail-on error exits 1: ok
 gate: the JSON exit field is 1: ok

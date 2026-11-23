@@ -24,22 +24,27 @@ the self-hosted checker and compiler are built by the first case that needs them
 kept under `/tmp`).
 
 An unimplemented exercise shows up as `✗ ... not implemented yet (hit a sorry)`. A case
-that cannot run here (no C toolchain, no `nix`, …) calls `Tests.skip REASON` and shows up
-as `⊘ name` with `skipped (REASON)`; the total counts it apart (`…, 2 skipped`), and it is
-not a pass. A selector that picks no group, a case index the group lacks, and an unknown
-flag are errors (exit code 2), not an empty run.
+that cannot run here because a dependency is absent (no C toolchain, no `nix`, …) calls
+`Tests.skipMissing REASON`: by default it is a `✗` failure whose output names the
+dependency; `lake test -- --allow-missing-deps` (or `WIZ_ALLOW_MISSING_DEPS=1`) reports
+it as `⊘ name` with `skipped (REASON)` instead. A skip the case *declares*
+(`Tests.skip`) always shows as `⊘`. The total counts skips apart (`…, 2 skipped`), and a
+skip is not a pass. A selector that picks no group, a case index the group lacks, and an
+unknown flag are errors (exit code 2), not an empty run.
 
-**A missing toolchain is a skip; a failing program is a failure.** `Build.runGlobal`
+**A missing toolchain fails by default; a failing program is a failure.** `Build.runGlobal`
 returns a `Build.RunError` that says which happened: `.build`, or `.toolchain` when the
 compiler, `llc` or GMP's `gmp.h` could not be found (no program ran), and `.run` with the
 program's exit code and standard error, `.timeout`, or `.readback` when the program itself
-failed. The helpers in `Tests/Elab.lean` (`failRun`, and `cRun`/`ioRun`/`cRunLibs`/…) skip
-only a `.toolchain` failure and otherwise fail the case, reporting the exit code and the
-program's stderr. Never look for `No such file` in a program's stderr to decide "no
-toolchain": a program may print that itself (a missing fixture, a `File.open`, a
-`Process.output` of a command not on `PATH`), and the case then failed. The `conc` group
-has a case for each half: a run-time ENOENT failure, a pass whose program writes that
-text on stderr and exits 0, and a build that cannot find the compiler.
+failed. The helpers in `Tests/Elab.lean` (`failRun`, and `cRun`/`ioRun`/`cRunLibs`/…) call
+`Tests.skipMissing` on a `.toolchain` failure — a failure naming the dependency by
+default, a reported skip under `--allow-missing-deps` — and otherwise fail the case,
+reporting the exit code and the program's stderr. Never look for `No such file` in a
+program's stderr to decide "no toolchain": a program may print that itself (a missing
+fixture, a `File.open`, a `Process.output` of a command not on `PATH`), and the case then
+failed. The `conc` group has a case for each half: a run-time ENOENT failure, a pass whose
+program writes that text on stderr and exits 0, and a build that cannot find the compiler
+(failing by default, skipping with `--allow-missing-deps`).
 
 A case whose name claims **linear** time must measure it. `Tests.checkScaling`
 (`Tests/Harness.lean`) runs the same action at `n` and `2n` (best of three, the fixed
@@ -424,7 +429,9 @@ offline). An index may publish a signed `index/snapshot.sexpr` (+ `.sig`);
 `grail update --require-signature --allowed-signers FILE` verifies it offline and pins
 its key, sequence and digest in the lock, and `grail index verify` checks one without a
 network. `--locked` reads no index, so it checks the signature entry's shape; use
-`grail index verify --locked` to re-verify the signature itself. SHA-256 and the lock
+`grail index verify --locked` to re-verify the signature itself and to check every `pkg`
+entry of the lock against the signed snapshot (the lock is not signed, so a hand-edited
+archive or tree hash is refused there, not by `fetch --locked`). SHA-256 and the lock
 still give integrity, the index's git history and review give names, and building a
 package still runs its author's code.
 
@@ -1250,7 +1257,19 @@ setup action keeps the elan cache for those
   [ci-shard-packing.md](ci-shard-packing.md) for the numbers, the packing tables and
   what a later attempt would have to change.
 * **Skips.** A green run must have run its cases: a skipped case is not a pass, and a
-  group that skipped wholesale means CI tested nothing there. The `CI result` job runs
+  group that skipped wholesale means CI tested nothing there. There are two kinds of
+  skip. A **declared** skip is part of the case (`Tests.skip`): a documented gap, a
+  `-- test: skip` marker, a parity difference; it is a skip on every machine. A case
+  that cannot run because a **dependency is missing** (no `cc`, GMP, Boehm GC, `node`,
+  `iverilog`, `yosys`, `z3`, `CaDiCaL`, `llc`, a `wiz`/`grail` binary, the self-hosted
+  toolchain, a browser, ...) uses `Tests.skipMissing` instead: by default it **fails**,
+  naming the dependency, so a machine that cannot run the test cannot make the suite
+  green. `--allow-missing-deps` (or `WIZ_ALLOW_MISSING_DEPS=1`, the shard driver's
+  equivalent) reports those as skips instead; `lake test -- --allow-missing-deps` is
+  the local spelling. A `.github/test-shards.json` shard sets `"allow-missing-deps":
+  true` only when its environment deliberately lacks an optional tool (today the
+  `library` shard: iverilog, and the tower "from source" case's Lake toolchain), and the
+  test step exports the variable with a comment saying why. The `CI result` job runs
   `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when
   * a group's cases all skipped and the group is not in
     `.github/skip-allowlist.json`. Each entry names exactly one `case` (there is no
@@ -1263,6 +1282,9 @@ setup action keeps the elan cache for those
     `devShells.default`, not an environment skip, even for an allow-listed group. A tool
     that is only needed on some machines (Icarus Verilog, an ARM toolchain) is excused by
     the allow-list instead;
+  * a `--allow-missing-deps` shard recorded a missing dependency (the `missing-dep` note
+    in its `--timings` file) that no allow-list entry names: the flag alone is not an
+    excuse, so it cannot hide an unexpected missing compiler or runtime;
   * a group's unexplained skipped ratio is over 25% (`--max-ratio`), counted over all
     of the group's cases in every shard, so moving cases between shards (a refreshed
     `.github/test-timings.json`) cannot change the verdict;
@@ -1359,9 +1381,13 @@ the generated reference manual (`result/index.md`, and `result/site`).
   `.wizc` effects and the `.wizm` seen markers, with no `bin/` memo or `roots/` pointer
   index (both are write-cache aids) and `a-w` permissions. Both wrappers (`wiz` and
   `grail`) add
-  `--cache-ro $out/share/wiz/cache` after their toolchain flags, so a packaged run
-  replays the standard library instead of elaborating it; a user's `--cache` (the
-  default `~/.cache/wiz`) is still written, so the store cache is only ever read. The
+  `--cache-ro $out/share/wiz/cache --cache-ro-unsigned` after their toolchain flags, so a
+  packaged run replays the standard library instead of elaborating it; a user's
+  `--cache` (the default `~/.cache/wiz`) is still written, so the store cache is only
+  ever read. The opt-in is deliberate: a read-only layer is refused by default because a
+  manifest is a self-signed digest, and this layer is the one case where the reader and
+  the writer are the same derivation (the store path is content-addressed and the entries
+  are keyed by the packaged binary's hash), not a foreign trust domain. The
   warm runs pass the *same* toolchain flags the wrappers add: `Toolchain.tag` hashes
   exactly those fields and is part of every manifest's strong key, so a cache warmed
   with default flags is rejected by every wrapper invocation (it would be a clean miss
@@ -1388,7 +1414,9 @@ the generated reference manual (`result/index.md`, and `result/site`).
     minutes of build time, which is not worth it for the uncommon imports.
   Flags parse left to right: a later `--no-cache` turns both the packaged cache and the
   write cache off, and a user's `--cache-ro DIR` appends another read-only layer
-  (`--cache-ro` is repeatable and searched in the order given). The entries are keyed
+  (`--cache-ro` is repeatable and searched in the order given). A layer passed this way
+  is refused unless `--cache-ro-unsigned` (or `--cache-verify off`) is also given: its
+  manifests are self-signed, so they are integrity, not authenticity. The entries are keyed
   by the packaged binary's hash (its bytes) and by `lib`'s text and module names, so
   the Nix build invalidates them automatically; there is no manual invalidation and a
   stale store path is never reused (a new build gets new keys). The cache is
@@ -1402,8 +1430,9 @@ the generated reference manual (`result/index.md`, and `result/site`).
   same compiler (the elaboration cache's own keys include the wiz binary's hash, but the
   test driver's grail runs use a fixed binary id and the `/tmp` programs a timestamp).
   The elaboration cache may also have read-only layers (`--cache-ro DIR`, repeatable,
-  searched in order after the written `--cache DIR`, never written). The Nix package
-  can ship one in `$out/share/wiz/cache` for `--cache-ro $out/share/wiz/cache`, so CI and
+  searched in order after the written `--cache DIR`, never written; refused by default
+  unless `--cache-ro-unsigned`). The Nix package
+  ships one in `$out/share/wiz/cache` and its wrappers pass both flags, so CI and
   users share a warm cache without a writable store path; a run with no write cache
   hashes the wiz executable each time instead of remembering it under `bin/`.
 * **Storage.** CI no longer stores the build in the Actions cache: the build lives in the

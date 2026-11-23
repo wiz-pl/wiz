@@ -75,7 +75,7 @@ check() {
   awk 'NF && $1 !~ /^#/' "$corpus" > "$tmp/list"
   LC_ALL=C sort "$tmp/list" > "$tmp/list.sorted"
   # The tree the group actually walks.
-  ( cd "$root" && find lib scry -name '*.wiz' ) | LC_ALL=C sort > "$tmp/disk"
+  ( cd "$root" && find lib scry -name '*.wiz' ! -name 'grail.local.wiz' ) | LC_ALL=C sort > "$tmp/disk"
 
   if ! cmp -s "$tmp/list" "$tmp/list.sorted"; then
     echo "libdiff corpus: entries are not in LC_ALL=C order; first out-of-order line:" >&2

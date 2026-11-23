@@ -149,11 +149,11 @@ def selfhostTrustGroup : Group where
         let root ← trustRoot
         let wiz := root / ".lake" / "build" / "bin" / "wiz"
         unless ← wiz.pathExists do
-          skip "no .lake/build/bin/wiz"
+          skipMissing "no .lake/build/bin/wiz"
           return
         match ← selfhostCompiler with
         | .error e =>
-          if (e.splitOn "gmp.h").length > 1 then skip "no C toolchain" else
+          if (e.splitOn "gmp.h").length > 1 then skipMissing "no C toolchain" else
             throw (IO.userError s!"no self-hosted compiler: {e}")
         | .ok exe =>
           let tc ← toolchain

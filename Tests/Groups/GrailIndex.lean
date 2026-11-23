@@ -15,8 +15,9 @@ def exampleIndex : IO System.FilePath := do
 def hasModuleConflict (r : Grail.CheckResult) : Bool :=
   r.errors.any fun e => (e.splitOn "module conflict").length > 1
 
-/-- `ssh-keygen` signs and verifies the index snapshots; a machine without it skips the
-signed-index cases (as the toolchain cases skip without a C compiler). -/
+/-- `ssh-keygen` signs and verifies the index snapshots; a machine without it cannot run
+the signed-index cases, so they fail by default (`Tests.skipMissing`) and are reported as
+skips only under `--allow-missing-deps`. -/
 def haveSshKeygen : IO Bool := do
   try
     let _ ← IO.Process.output { cmd := "ssh-keygen", args := #["-h"] }
@@ -252,7 +253,7 @@ def grailIndexGroup : Group where
         check ((entry.splitOn "(modules Greet.Hello)").length > 1) entry },
     { name := "a signed index snapshot is verified offline and pinned in the lock", run := fun _ => do
         unless ← haveSshKeygen do
-          skip "no ssh-keygen"
+          skipMissing "no ssh-keygen"
           return
         let root ← IO.FS.createTempDir
         let (idx, _key, allowed, _sha, fp) ← signedGreetIndex root 1
@@ -313,7 +314,7 @@ def grailIndexGroup : Group where
         checkEq 0 (← run2 ["update", "--allow-unsigned"]) },
     { name := "an edited entry, snapshot or expiry is refused", run := fun _ => do
         unless ← haveSshKeygen do
-          skip "no ssh-keygen"
+          skipMissing "no ssh-keygen"
           return
         let root ← IO.FS.createTempDir
         let (idx, key, allowed, sha, fp) ← signedGreetIndex root 1
@@ -352,7 +353,7 @@ def grailIndexGroup : Group where
         | .ok r => check r.hasErrors s!"the expired snapshot passed: {r.errors}" },
     { name := "a lower snapshot seq is a rollback; a same-seq rewrite is refused", run := fun _ => do
         unless ← haveSshKeygen do
-          skip "no ssh-keygen"
+          skipMissing "no ssh-keygen"
           return
         let root ← IO.FS.createTempDir
         let (idx, key, allowed, sha, fp) ← signedGreetIndex root 1
@@ -386,7 +387,7 @@ def grailIndexGroup : Group where
         checkEq 1 (← run (updated ++ ["--allow-rewind"])) },
     { name := "a signed entry digest covers tree, commit and deps (P0)", run := fun _ => do
         unless ← haveSshKeygen do
-          skip "no ssh-keygen"
+          skipMissing "no ssh-keygen"
           return
         let root ← IO.FS.createTempDir
         let (idx, _key, allowed, _sha, tree) ← signedEntryIndex root 1
@@ -427,7 +428,7 @@ def grailIndexGroup : Group where
         checkEq 0 (← run updated) },
     { name := "yank state is signed, and a yanked version names its reason", run := fun _ => do
         unless ← haveSshKeygen do
-          skip "no ssh-keygen"
+          skipMissing "no ssh-keygen"
           return
         let root ← IO.FS.createTempDir
         let (idx, _key, allowed, _sha, _tree) ← signedEntryIndex root 1
@@ -461,7 +462,188 @@ def grailIndexGroup : Group where
         | .ok _ => throw (IO.userError "resolved a yanked version")
         -- through the CLI it is exit 1 as well (the snapshot no longer covers the entry)
         IO.FS.writeFile entryPath yankedEntry
-        checkEq 1 (← run updated) }
+        checkEq 1 (← run updated) },
+    { name := "publish re-derives size, tree and commands from the archive (PK-1.2)", run := fun _ => do
+        let root ← IO.FS.createTempDir
+        let manifest := "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.0.0\"\n  |> Package.lib \"greet\" \"src\"\n  |> Package.command (Command.new \"say\" (Tool.path \"sh\") |> Command.arg \"-c\" |> Command.arg \"echo hi\")\n"
+        let files : List (String × String) :=
+          [("grail.wiz", manifest), ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 1\n")]
+        let work ← mkTree files
+        let (tar, _sha) ← tarballOf root "greet" "1.0.0" files
+        let .ok (pkg, _) ← Grail.readConfig {} 7 "lib" work
+          | throw (IO.userError "bad manifest")
+        let .ok truthful ← Grail.Registry.publishVersion (some tar)
+            "https://example.org/greet-1.0.0.tar.gz" pkg
+          | throw (IO.userError "publish failed")
+        check (truthful.size.isSome) "the entry has no size"
+        check (!truthful.tree.isEmpty) "the entry has no tree"
+        check (!truthful.commands.isEmpty) "the archive's command target gave no command digest"
+        -- every declared mismatch names the field and both values
+        let tryBad (why field : String) (declared : Grail.IxVersion) (values : List String) : IO Unit := do
+          match ← Grail.Registry.publishVersion (some tar) "https://example.org/greet-1.0.0.tar.gz" pkg
+              (declared := some declared) with
+          | .ok _ => throw (IO.userError s!"{why}: publish accepted a wrong {field}")
+          | .error e =>
+            check ((e.splitOn field).length > 1) s!"{why}: {e} does not name {field}"
+            for v in values do
+              check ((e.splitOn v).length > 1) s!"{why}: {e} omits {v}"
+        let size := truthful.size.getD 0
+        tryBad "wrong size" "size" ({ truthful with size := some (size + 1) })
+          [toString size, toString (size + 1)]
+        let wrongTree := String.ofList (List.replicate 64 'e')
+        tryBad "wrong tree" "tree" ({ truthful with tree := wrongTree }) [truthful.tree, wrongTree]
+        let wrongCmd := String.ofList (List.replicate 64 'f')
+        tryBad "wrong commands" "commands" ({ truthful with commands := wrongCmd })
+          [truthful.commands, wrongCmd]
+        -- the truthful declared entry publishes
+        match ← Grail.Registry.publishVersion (some tar)
+            "https://example.org/greet-1.0.0.tar.gz" pkg (declared := some truthful) with
+        | .error e => throw (IO.userError s!"a truthful declared entry was refused: {e}")
+        | .ok _ => pure ()
+        -- `grail index check` makes the same comparison for an index already written
+        let idx := root / "idx"
+        IO.FS.createDirAll (idx / "index")
+        IO.FS.writeFile (idx / "registry.sexpr") "(registry (name \"test/fate-index\") (format 1))\n"
+        let localEntry := { truthful with source := s!"file://{tar}" }
+        let entry := Grail.Index.renderVersion localEntry
+        let cache ← IO.FS.createTempDir
+        let checkIndex (why : String) : IO Grail.CheckResult := do
+          match ← Grail.checkDir cache {} 7 "lib" idx.toString false with
+          | .error e => throw (IO.userError s!"{why}: {e}")
+          | .ok r => pure r
+        IO.FS.writeFile (idx / "index" / "greet.sexpr") s!"(index (package \"greet\" {entry}))\n"
+        let good ← checkIndex "truthful"
+        checkEq ([] : List String) good.errors
+        let checkBad (why field needle : String) (text : String) : IO Unit := do
+          IO.FS.writeFile (idx / "index" / "greet.sexpr") s!"(index (package \"greet\" {text}))\n"
+          let r ← checkIndex why
+          check (r.errors.any fun e =>
+            (e.splitOn field).length > 1 && (e.splitOn needle).length > 1) s!"{why}: {r.errors}"
+        checkBad "wrong size" "size" (toString (size + 1))
+          (entry.replace s!"(size {size})" s!"(size {size + 1})")
+        checkBad "wrong tree" "tree" wrongTree (entry.replace truthful.tree wrongTree)
+        checkBad "wrong commands" "commands" wrongCmd (entry.replace truthful.commands wrongCmd) },
+    { name := "unsigned publish needs the opt-in; a signed publish writes allowed_signers (PK-1.3)",
+      run := fun _ => do
+        unless ← haveSshKeygen do
+          skip "no ssh-keygen"
+          return
+        let root ← IO.FS.createTempDir
+        let files : List (String × String) :=
+          [("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.0.0\"\n  |> Package.lib \"greet\" \"src\"\n"),
+           ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 1\n")]
+        let work ← mkTree files
+        let (tar, _sha) ← tarballOf root "greet" "1.0.0" files
+        let .ok (pkg, _) ← Grail.readConfig {} 7 "lib" work
+          | throw (IO.userError "bad manifest")
+        let .ok v ← Grail.Registry.publishVersion (some tar) s!"file://{tar}" pkg
+          | throw (IO.userError "publish failed")
+        let mkIndex (d : System.FilePath) : IO Unit := do
+          IO.FS.createDirAll (d / "index")
+          IO.FS.writeFile (d / "registry.sexpr") "(registry (name \"test/fate-index\") (format 1))\n"
+        let idx := root / "idx"
+        mkIndex idx
+        -- unsigned without the opt-in: refused, the message says how to opt in, and
+        -- nothing is written
+        match ← Grail.Registry.publishInto idx "greet" v none "" "" false with
+        | .ok _ => throw (IO.userError "an unsigned publish succeeded without the opt-in")
+        | .error e =>
+          check ((e.splitOn "--allow-unsigned").length > 1) e
+          check ((e.splitOn "--key").length > 1) e
+        check (!(← (idx / "index" / "greet.sexpr").pathExists))
+          "a refused publish wrote the entry"
+        let cache := root / "cache"
+        let std ← IO.FS.realPath "lib"
+        let grailIn (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", work.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        let publishArgs := ["publish", tar.toString, "--source", s!"file://{tar}", "--index", idx.toString]
+        checkEq 1 (← grailIn publishArgs)
+        -- the same through the CLI, explicitly unsigned, writes the entry and no snapshot
+        let idxU := root / "idx-unsigned"
+        mkIndex idxU
+        checkEq 0 (← grailIn (["publish", tar.toString, "--source", s!"file://{tar}",
+          "--index", idxU.toString, "--allow-unsigned"]))
+        check (← (idxU / "index" / "greet.sexpr").pathExists) "the opt-in did not write the entry"
+        check (!(← (idxU / "index" / "snapshot.sexpr").pathExists)) "an unsigned publish wrote a snapshot"
+        -- signed: the entry, a signed snapshot, and allowed_signers for a fresh consumer
+        let key := root / "key"
+        let _ ← runIn root "ssh-keygen"
+          ["-q", "-t", "ed25519", "-N", "", "-C", "publish test", "-f", key.toString]
+        checkEq 0 (← grailIn (publishArgs ++ ["--key", key.toString, "--identity", "test",
+          "--expires", "2030-01-01T00:00:00Z"]))
+        let allowed := idx / "allowed_signers"
+        check (← allowed.pathExists) "no allowed_signers was written"
+        let allowedText ← IO.FS.readFile allowed
+        let pub ← match ← Grail.Sign.publicKeyOf key with
+          | .ok p => pure p
+          | .error e => throw (IO.userError e)
+        check ((allowedText.splitOn s!"test {pub}").length > 1) allowedText
+        match ← Grail.Sign.verifySnapshot idx (some allowed) none with
+        | .error e => throw (IO.userError s!"a fresh consumer cannot verify: {e}")
+        | .ok (snap, sig) =>
+          checkEq "test" sig.identity
+          checkEq 1 snap.seq
+        match ← Grail.checkDir cache {} 7 "lib" idx.toString false true (some allowed.toString) with
+        | .error e => throw (IO.userError e)
+        | .ok r =>
+          checkEq 1 r.signatures
+          checkEq ([] : List String) r.errors
+        -- verification fails when the signing key is not in allowed_signers
+        let other := root / "other"
+        let _ ← runIn root "ssh-keygen"
+          ["-q", "-t", "ed25519", "-N", "", "-C", "other key", "-f", other.toString]
+        let otherPub ← IO.FS.readFile (System.FilePath.mk (other.toString ++ ".pub"))
+        IO.FS.writeFile allowed s!"test {otherPub}"
+        match ← Grail.Sign.verifySnapshot idx (some allowed) none with
+        | .ok _ => throw (IO.userError "verified with a key that is not in allowed_signers")
+        | .error e => check ((e.splitOn "not valid").length > 1) e },
+    { name := "a lock's registry entries are checked against the signed snapshot", run := fun _ => do
+        unless ← haveSshKeygen do
+          skip "no ssh-keygen"
+          return
+        let root ← IO.FS.createTempDir
+        let (idx, _key, allowed, sha, tree) ← signedEntryIndex root 1
+        let std ← IO.FS.realPath "lib"
+        let cache := root / "cache"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n")]
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        checkEq 0 (← run ["update", "--require-signature", "--allowed-signers", allowed.toString])
+        let lockPath := dir / "grail.lock"
+        let lockText ← IO.FS.readFile lockPath
+        -- the lock the update wrote is the signed state: the audit passes
+        checkEq 0 (← run ["index", "verify", idx.toString, "--locked"])
+        -- A second archive for the same name@version, built from other sources, is not
+        -- the release the index signed. A lock edited to name it (with its real tree)
+        -- and a vendor directory holding it pass every local check: `--locked` reads no
+        -- index, and the archive hash in the lock is what fetch and build check.
+        let evilRoot := root / "evil"
+        IO.FS.createDirAll evilRoot
+        let (evilTar, evilSha) ← tarballOf evilRoot "greet" "1.2.0"
+          [("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.2.0\"\n  |> Package.toolchain \">=0.1.0\"\n  |> Package.lib \"greet\" \"src\"\n"),
+           ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 666\n")]
+        let .ok evilTree ← Grail.Registry.unpackTreeHash evilTar
+          | throw (IO.userError "could not hash the second archive")
+        let vend := dir / "vendor"
+        IO.FS.createDirAll vend
+        let _ ← runIn root "cp" [evilTar.toString, (vend / (evilSha ++ ".tar.gz")).toString]
+        IO.FS.writeFile (vend / "index.sexpr")
+          s!"(vendor\n  (format 1)\n  (archive \"greet\" \"1.2.0\" \"{evilSha}\" \"{evilSha}.tar.gz\"))\n"
+        IO.FS.writeFile lockPath ((lockText.replace sha evilSha).replace tree evilTree)
+        checkEq 0 (← run ["update", "--locked", "--require-signature"])
+        checkEq 0 (← run ["fetch", "--locked", "--offline", "--vendor", vend.toString])
+        let unpacked ← IO.FS.readFile (dir / ".grail/packages/greet/src/Greet/Hello.wiz")
+        check ((unpacked.splitOn "666").length > 1) unpacked
+        -- The signed audit is what notices (the archive hash is compared first).
+        checkEq 1 (← run ["index", "verify", idx.toString, "--locked"])
+        -- A swapped tree hash alone is refused too (the signed entry carries the tree).
+        let otherTree := String.ofList (List.replicate 64 '6')
+        IO.FS.writeFile lockPath (lockText.replace tree otherTree)
+        checkEq 1 (← run ["index", "verify", idx.toString, "--locked"])
+        -- and the honest lock still passes
+        IO.FS.writeFile lockPath lockText
+        checkEq 0 (← run ["index", "verify", idx.toString, "--locked"]) }
   ]
 
 builtin_initialize registerGroup grailIndexGroup

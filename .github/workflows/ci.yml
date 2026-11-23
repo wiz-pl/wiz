@@ -801,20 +801,34 @@ jobs:
         env:
           SELECT: ${{ matrix.shard.select }}
           JOBS: ${{ matrix.shard.jobs }}
+          ALLOW_MISSING_DEPS: "${{ matrix.shard['allow-missing-deps'] }}"
         run: |
           mapfile -t sel <<< "$SELECT"
           mkdir -p logs ~/.cache/wiz
           du -sh ~/.cache/wiz .grail /tmp/wiz-selfhost-* 2>/dev/null || true
+          # A missing dependency is a failure (Tests.skipMissing) unless the shard is one
+          # whose environment deliberately lacks an optional tool: only `library` sets
+          # "allow-missing-deps" in .github/test-shards.json, for iverilog (the one Icarus
+          # case) and the tower "from source" case's Lake toolchain. The flag is the
+          # driver's `--allow-missing-deps` by another name; every skip it allows still
+          # needs an .github/skip-allowlist.json entry (`scripts/ci.py check-skips`), so it
+          # cannot hide an unexpected missing cc, node, yosys, ...
+          allow=()
+          if [ "$ALLOW_MISSING_DEPS" = "true" ]; then
+            export WIZ_ALLOW_MISSING_DEPS=1
+            allow=(--allow-missing-deps)
+          fi
+          echo "allow-missing-deps: ${ALLOW_MISSING_DEPS:-false}"
           # A shard without "jobs" gets no `--jobs`: the driver already runs one case at
           # a time, and a case with an auto mode (`=selfhost-libdiff`) tells "not given"
           # from "--jobs 1" (`Tests.caseJobsGiven`).
           jobs=()
           if [ -n "$JOBS" ]; then jobs=(--jobs "$JOBS"); fi
           jobs_s="${jobs[*]-}"
-          echo "tests -- --cache ~/.cache/wiz ${jobs_s:+$jobs_s }${sel[*]}"
+          echo "tests -- --cache ~/.cache/wiz ${jobs_s:+$jobs_s }${allow[*]-}${allow:+ }${sel[*]}"
           # the Nix-built driver, exactly as `lake test -- …` would run it; every case's
           # time as JSON lines (scripts/ci.py summary and baseline read them)
-          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${jobs[@]}" \
+          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${allow[@]}" "${jobs[@]}" \
             --timings "logs/${{ matrix.shard.name }}.jsonl" \
             --shard "${{ matrix.shard.name }}" "${sel[@]}" 2>&1 | tee "logs/${{ matrix.shard.name }}.log"
       - name: Save the Wiz build caches
@@ -963,7 +977,6 @@ jobs:
             echo "::error title=Cachix::CACHIX_AUTH_TOKEN is empty on a run that must publish"
             exit 1
           fi
-          nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
           nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
             ${{ steps.nix.outputs.web }} ${{ steps.nix.outputs.playground }} ${{ steps.nix.outputs.ui }} ${{ steps.nix.outputs.source_ui }}
 
@@ -1313,8 +1326,10 @@ jobs:
       # A green run must have tested something. Fails when a group skipped wholesale
       # (unless .github/skip-allowlist.json allows it, with a reason and an owner), when
       # a skip names a tool the dev shell must provide (cc, GMP, GC, yosys, node, nix,
-      # …), or when a group's unexplained skipped ratio (over its cases in every shard) is over 25%. The self-test runs
-      # first, so the rule itself is checked on synthetic logs without the suite.
+      # …), when a `--allow-missing-deps` shard recorded a missing dependency that the
+      # allow-list does not name, or when a group's unexplained skipped ratio (over its
+      # cases in every shard) is over 25%. The self-test runs first, so the rule itself
+      # is checked on synthetic logs without the suite.
       - name: Skips are explained
         if: needs.test.result != 'skipped'
         shell: bash

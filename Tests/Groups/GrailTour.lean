@@ -28,7 +28,7 @@ def tourCase (f : String) : Case :=
       checkEq 1 res.size
       for t in res do
         if !t.ok && (t.message.splitOn "gmp.h").length > 1 then
-          skip "no toolchain"; return
+          skipMissing "no toolchain"; return
         check t.ok s!"{t.file}: {t.message}" }
 
 /-- Section 11's command: `grail new` writes the `exe` template, and its package tests
@@ -51,7 +51,7 @@ def tourNewCase : Case :=
       checkEq 1 res.size
       for t in res do
         if !t.ok && (t.message.splitOn "gmp.h").length > 1 then
-          skip "no toolchain"; return
+          skipMissing "no toolchain"; return
         check t.ok s!"{t.file}: {t.message}" }
 
 def tourGroup : Group where

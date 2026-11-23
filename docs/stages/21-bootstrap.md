@@ -535,8 +535,11 @@ There is still no `let (x, y) := …` (`Kernel.wiz` has no `split`, §7.1 of Cor
 `#eval t` is `#reduce t` (the value is printed as the kernel's normal form, not as the
 Lean toolchain prints it), and `attribute [inline] f` is checked as in the Lean frontend
 (`f` must be a declaration with a definition) and otherwise ignored: inlining is a hint
-to the Lean compiler. Not checked here: a second `attribute [inline]` of the same name
-(an error in the Lean frontend).
+to the Lean compiler. `[inline]` now parses in the host's generic `command.attr` form
+(TT-04), so this frontend also reports the host's `unknown attribute '<a>' (registered:
+…)` for a name the registry does not know, and `attribute '[inline]' takes no arguments`
+for a payload. Not checked here: a second `attribute [inline]` of the same name (an
+error in the Lean frontend).
 
 **Tests** (group `selfhost`): 10 Σ/∀ declarations with the same verdicts in both
 frontends; `#eval` and `attribute [inline]` (5 verdicts and one output).
@@ -1402,10 +1405,10 @@ host's behaviour, with the host's text:
   and a numeral adds no dependency (the host lists only the `nat` registrations made
   outside the toolchain's library).
 * **`set_option pp.notation v` / `set_option pp.all v`** (`setOptionCmd`). Takes
-  `true`/`false` and reports the host's two errors, ``expected `true` or `false``` and
-  `unknown option … (there are pp.notation and pp.all)`. The option changes nothing
-  here: the self-hosted printer prints the kernel's normal form and has no notation to
-  turn off.
+  `true`/`false` and reports the host's two errors, ``option 'pp.notation' expects `true`
+  or `false``` and `unknown option '…' (registered: pp.notation, pp.all)`. The option
+  changes nothing here: the self-hosted printer prints the kernel's normal form and has
+  no notation to turn off.
 
 **Tests** (group `selfhost`): "#print axioms lists the same axioms as the Lean frontend
 (A23)", "#print axioms walks a partial definition's body only as code, as the Lean

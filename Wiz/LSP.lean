@@ -11,6 +11,7 @@ import Wiz.Refs
 import Wiz.Symbols
 import Wiz.Socket
 import Wiz.WebSocket
+import Wiz.Format
 import Std.Sync.Channel
 
 /-!
@@ -286,6 +287,36 @@ def diagnostics (srv : Server) (uri : String) (doc : Doc) : Json :=
   Json.mkObj [("jsonrpc", "2.0"), ("method", "textDocument/publishDiagnostics"),
               ("params", Json.mkObj [("uri", uri), ("diagnostics", Json.arr ds.toArray)])]
 
+/-! ## Formatting (`wiz fmt`, stage 11aa) -/
+
+/-- The formatter's initial state for `doc`: the server's libraries (the modules the
+document's `import`s resolve to, exactly as for elaboration), the document's
+`include_str` table, and the trust/kernel settings. This is the state `wiz fmt` would
+start from with the same roots. -/
+def formattingState (srv : Server) (doc : Doc) : St :=
+  { loader := fun m => (srv.libs.get? m).map (·.2)
+    includes := doc.includes
+    trustedModule := srv.trusted.contains
+    trustNative := srv.trustNative
+    nativeFuel := srv.nativeFuel
+    smt := srv.smt }
+
+/-- The one text edit turning `text` into `formatted`: the span between their first and
+last differing characters, as character offsets (`toPos` counts characters). `none`
+when the texts are equal. -/
+def diffEdit (text formatted : String) : Option (Nat × Nat × String) := Id.run do
+  let a := text.toList.toArray
+  let b := formatted.toList.toArray
+  let mut pre := 0
+  while pre < a.size && pre < b.size && a[pre]! == b[pre]! do pre := pre + 1
+  if pre == a.size && pre == b.size then return none
+  let mut suf := 0
+  while suf < a.size - pre && suf < b.size - pre && a[a.size - 1 - suf]! == b[b.size - 1 - suf]! do
+    suf := suf + 1
+  let ae := a.size - suf
+  let be := b.size - suf
+  pure (some (pre, ae, String.ofList (b.extract pre be).toList))
+
 def infoviewMethods : List String :=
   ["wiz/plainGoal", "wiz/plainTermGoal", "wiz/interactiveGoals", "wiz/interactiveTermGoal", "wiz/subtermInfo",
    "wiz/interactiveInfo", "wiz/typeAt", "wiz/coreTerm"]
@@ -303,6 +334,7 @@ def capabilities : Json :=
     ("semanticTokensProvider", Json.mkObj [("legend", Json.mkObj [("tokenTypes", Json.arr #["keyword"]), ("tokenModifiers", Json.arr #[])]),
                                            ("full", true)]),
     ("documentSymbolProvider", true), ("workspaceSymbolProvider", true), ("foldingRangeProvider", true),
+    ("documentFormattingProvider", true), ("documentRangeFormattingProvider", true),
     ("codeActionProvider", Json.mkObj [("codeActionKinds", Json.arr #["quickfix", "refactor.rewrite"]),
                                        ("resolveProvider", true)]),
     ("experimental", Json.mkObj [("wizInfoview", Json.mkObj [("version", (1 : Nat)),
@@ -837,6 +869,40 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
     pure ({ srv with docs := srv.docs.insert uri doc, sessions := session },
      #[diagnostics srv uri doc] ++ (if srv.elaboratedNotes then #[note] else #[]))
   | "textDocument/didClose" => pure ({ srv with docs := srv.docs.erase uri }, #[])
+  | "textDocument/formatting" | "textDocument/rangeFormatting" =>
+    let some doc := srv.docs.get? uri | return (srv, #[reply (Json.arr #[])])
+    -- `wiz fmt` indents with spaces: a tab counts as one column to the parser, so
+    -- `insertSpaces: false` cannot be honoured and is refused rather than ignored
+    let insertSpaces := match get? msg ["params", "options", "insertSpaces"] with
+      | some (.bool b) => b
+      | _ => true
+    if !insertSpaces then
+      return (srv, #[replyError (-32602) "wiz's formatter indents with spaces: insertSpaces=false is not supported"])
+    -- (`tabSize` does not apply: indentation is the formatter's fixed two spaces)
+    let range? : Option (Nat × Nat) :=
+      if method == "textDocument/rangeFormatting" then
+        let atPos (k : String) : Nat :=
+          ofPos doc.text (getNat msg ["params", "range", k, "line"]) (getNat msg ["params", "range", k, "character"])
+        let a := atPos "start"
+        let b := atPos "end"
+        some (min a b, max a b)
+      else none
+    let init := formattingState srv doc
+    let r := Fmt.run init doc.text { range := range? }
+    -- a parse error: no edits (the diagnostics already say where and why)
+    if !r.errors.isEmpty then return (srv, #[reply Json.null])
+    match diffEdit doc.text r.text with
+    | none => pure (srv, #[reply (Json.arr #[])])
+    | some (lo, hi, newText) =>
+      -- a range request changes nothing outside its range: a change that would straddle
+      -- the boundary is not applied
+      let inside := match range? with
+        | none => true
+        | some (rlo, rhi) => rlo ≤ lo && hi ≤ rhi
+      if !inside then pure (srv, #[reply (Json.arr #[])]) else
+        pure (srv, #[reply (Json.arr #[Json.mkObj [
+          ("range", Json.mkObj [("start", toPos doc.text lo), ("end", toPos doc.text hi)]),
+          ("newText", Json.str newText)]])])
   | "textDocument/inlayHint" =>
     let some doc := srv.docs.get? uri | return (srv, #[reply (Json.arr #[])])
     let pos (k : String) := ofPos doc.text (getNat msg ["params", "range", k, "line"]) (getNat msg ["params", "range", k, "character"])

@@ -60,7 +60,7 @@ def onPath (cmd : String) : IO Bool := do
   catch _ => pure false
 
 def needs (cmd : String) (k : IO Unit) : IO Unit := do
-  if ← onPath cmd then k else skip s!"no {cmd} on PATH (nix develop has it)"
+  if ← onPath cmd then k else skipMissing s!"no {cmd} on PATH (nix develop has it)"
 
 /-! ## Cache entries (R5)
 

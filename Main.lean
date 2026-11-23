@@ -23,16 +23,19 @@ def usage : String := "usage:
                           standard input; --lint-baseline reports (and fails on) only
                           findings whose path/rule/anchor key is not in FILE, and
                           --lint-baseline-write records this run as that file
-  wiz build FILE -o OUT [--target c|llvm|wasm|bpf|js]  compile the definition `main` to an
-                                   executable (C or LLVM) or a WebAssembly module (stage
-                                   8f: no IO, Nat/Int, closures, arrays; run it with
-                                   web/wasm-host.mjs). `--llvm` and `--wasm` still work.
-                                   `--target bpf` takes a manifest (`bpf.toml`) and its
-                                   `bpf-core/1` typed core, and writes freestanding C
-                                   plus `bpf_rt.h` (run `clang -target bpf` yourself).
-                                   `--target js` writes a self-contained ES module
-                                   (`OUT.mjs`, the runtime pasted in) that Node runs and
-                                   a browser can import (`export function main`).
+  wiz build FILE -o OUT [--target c|llvm|wasm|bpf|js|ebpf]  compile the definition
+                                   `main` to an executable (C or LLVM) or a WebAssembly
+                                   module (stage 8f: no IO, Nat/Int, closures, arrays;
+                                   run it with web/wasm-host.mjs). `--llvm` and
+                                   `--wasm` still work. `--target bpf` (alias `ebpf`)
+                                   takes a manifest (`bpf.toml`) and its `bpf-core/1`
+                                   typed core, and writes freestanding C plus
+                                   `bpf_rt.h`; a tracepoint/uprobe program also writes
+                                   `OUT.probe.json` (`wiz-probe/1`). Run
+                                   `clang -target bpf` yourself. `--target js` writes
+                                   a self-contained ES module (`OUT.mjs`, the runtime
+                                   pasted in) that Node runs and a browser can import
+                                   (`export function main`).
   wiz build FILE -o OUT [--attest [FILE]]  … and write a build attestation (default
                                    OUT.attest.json: an unsigned in-toto statement, see
                                    stage 11ae and docs/building.md); c and llvm only
@@ -82,7 +85,9 @@ def usage : String := "usage:
                                     N days (default 30) from the write cache; a pruned file is
                                     just a miss, and --cache-ro layers are never touched
   wiz cache verify [--strict]        check every cache entry against its output manifest
-                                    (a full scan); exit 1 on a mismatch or missing file
+                                    (a full scan; integrity, not authenticity); exit 1 on a
+                                    mismatch or missing file, and --strict also fails on an
+                                    unmanifested keyed file
   wiz cache manifest                 rebuild the write cache's manifest.sexpr generation
                                     index from its per-module manifests
   wiz lsp                          a language server on stdin/stdout
@@ -98,7 +103,9 @@ def usage : String := "usage:
                                    (default: share/wiz/web, or web/out in a checkout)
 options: --cache DIR (the elaboration cache, default ~/.cache/wiz; shared, since it is
 content-addressed), --cache-ro DIR (repeatable: a read-only cache, searched in order
-after the write cache and never written, as in a Nix package's share/wiz/cache),
+after the write cache and never written, as in a Nix package's share/wiz/cache; its
+manifests are self-signed, so the layer is refused unless --cache-ro-unsigned),
+--cache-ro-unsigned (serve a read-only layer although it is unauthenticated),
 --no-cache (both), -I DIR (another module root, after lib/),
 --cache-prune DAYS (before the run: from the write cache only, remove keyed
   .wizc/.wizm/.wizr files older than DAYS days; a pruned entry is just a miss, and
@@ -107,8 +114,10 @@ after the write cache and never written, as in a Nix package's share/wiz/cache),
   read from the same caches and written to the write cache), --region-stats (print what
   the regions served, with --region-cache)
 --cache-verify off|warn|strict (default warn: check an entry's bytes against its output
-  manifest before using it; strict: only manifested entries; --cache-verify=strict works
-  too), --cache-verify-stats (print what the manifests verified)
+  manifest before using it; strict: an unlisted entry is a mismatch too. Neither is an
+  authenticity check: a manifest is a self-signed digest; a read-only layer needs
+  --cache-ro-unsigned or --cache-verify off; --cache-verify=strict works too),
+--cache-verify-stats (print what the manifests verified)
 trust: --trust-native (27a: `def X : a = b := native_refl` is decided by running a and b;
 the kernel does not check it, `#print axioms` lists it), --native-fuel N (its step limit)
 experimental kernel options (D1, they turn the cache off): --regularity off|full (full:
@@ -424,7 +433,7 @@ def elaborateHitsCore (tc : Toolchain) (path : String) (input : String)
       (verify := verify) (rig := RigTag.tag (R := ZeroOneMany))
       (stats := if verify == .off then none else some verifyStats)
       (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := key₀Tag)
-      (rootPath := path))
+      (rootPath := path) (roUnsigned := tc.cacheRoUnsigned))
   else
     pure ((← Cache.elaborateUncached input init), 0)
 
@@ -706,9 +715,15 @@ def cachePruneCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
 
 /-- `wiz cache verify`: check every manifest in each cache layer against the bytes beside
 it (a full scan; normal runs verify only what they read). Exit 1 on a mismatch or a missing
-file, and in `strict`/`--strict` also on an unmanifested keyed file. -/
+file, and in `strict`/`--strict` also on an unmanifested keyed file. A `--cache-ro` layer
+is always scanned as if `--strict` (a manifest, never an unverified file, is its only
+integrity claim). This is an integrity scan: a manifest is a self-signed digest, so it does
+not show that a writer and a builder are the same party. -/
 def cacheVerifyCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
-  let strict := tc.cacheVerify == "strict" || args.contains "--strict" || !tc.readCaches.isEmpty
+  -- (A read-only layer is scanned as if `strict`: "has a manifest" is all it claims, and
+  -- that is integrity, not authenticity. The name `strict` is about manifest presence
+  -- only; it is not a signature check.)
+  let requireManifest := tc.cacheVerify == "strict" || args.contains "--strict" || !tc.readCaches.isEmpty
   for a in args do
     unless a == "--strict" do
       IO.eprintln s!"cache verify: unknown argument {a}"
@@ -720,9 +735,12 @@ def cacheVerifyCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let mut bad := 0
   for dir in dirs do
     let c ← Cache.verifyLayer dir
+    let note := if tc.readCaches.any (·.toString == dir.toString) then
+      " (read-only: a manifest is integrity, not authenticity)"
+    else ""
     IO.println (s!"cache verify: {dir}: {c.modules} modules, {c.entries} entries, {c.regions} regions, " ++
-      s!"{c.mismatches} mismatched, {c.missing} missing, {c.expired} expired, {c.unmanifested} unmanifested")
-    if c.mismatches + c.missing + c.expired > 0 || (strict && c.unmanifested > 0) then bad := bad + 1
+      s!"{c.mismatches} mismatched, {c.missing} missing, {c.expired} expired, {c.unmanifested} unmanifested" ++ note)
+    if c.mismatches + c.missing + c.expired > 0 || (requireManifest && c.unmanifested > 0) then bad := bad + 1
   pure (if bad == 0 then 0 else 1)
 
 /-- `wiz cache manifest`: rebuild (or, for a read-only layer, report) the generation index
@@ -920,8 +938,9 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
     if m.severity == .error then IO.eprintln s!"{path}:{m.render input}"
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
-/-- The backend names `wiz build --target` accepts. -/
-def targets : List String := ["c", "llvm", "wasm", "bpf", "js"]
+/-- The backend names `wiz build --target` accepts. `ebpf` is the tracing-flavoured
+alias of the tree spelling `bpf`; both resolve to `Wiz.Compiler.Bpf`. -/
+def targets : List String := ["c", "llvm", "wasm", "bpf", "js", "ebpf"]
 
 /-- `wiz verify [--attest FILE] [--artifact-only] ARTIFACT`. -/
 def verifyCmd (tc : Toolchain) (attest : Option String) (args : List String) : IO UInt32 := do
@@ -944,9 +963,9 @@ backend and the rest. A flag and a conflicting `--target` are an error, as is tw
 different targets. -/
 def takeTarget : List String → Except String (Option String × List String)
   | [] => pure (none, [])
-  | "--target" :: [] => throw "--target needs c, llvm, wasm, bpf or js"
+  | "--target" :: [] => throw "--target needs c, llvm, wasm, bpf, js or ebpf"
   | "--target" :: t :: rest => do
-    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm, wasm, bpf or js)"
+    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm, wasm, bpf, js or ebpf)"
     let (other, rest) ← takeTarget rest
     match other with
     | some u => if u != t then throw s!"two targets: {t} and {u}" else pure (some t, rest)
@@ -967,9 +986,11 @@ def takeTarget : List String → Except String (Option String × List String)
 
 def buildCmd (tc : Toolchain) (path out : String) (target : String) (lib : Bool := false)
     (noMain : Bool := false) (split : Nat := 0) (attest : Option String := none) : IO UInt32 := do
-  -- `bpf` is the one target whose input is not the untyped IR: it consumes the typed
-  -- core (`bpf.toml` + `bpf-core/1`) and emits C for `clang -target bpf` (§1.2, §3.2).
-  if target == "bpf" then
+  -- `bpf` (and its `ebpf` alias) is the one target whose input is not the untyped IR: it
+  -- consumes the typed core (`bpf.toml` + `bpf-core/1`) and emits C for
+  -- `clang -target bpf` (§1.2, §3.2). A tracepoint/uprobe program also writes the
+  -- `wiz-probe/1` descriptor.
+  if target == "bpf" || target == "ebpf" then
     if attest.isSome then
       IO.eprintln "wiz build --attest: the bpf target does not emit a build attestation"
       pure 2
@@ -1004,7 +1025,7 @@ def buildCmd (tc : Toolchain) (path out : String) (target : String) (lib : Bool 
         | .ok () => IO.eprintln s!"wiz: attestation written to {file}"; pure 0
 
 def runCmd (tc : Toolchain) (path : String) (target : String) (split : Nat := 0) : IO UInt32 := do
-  if target == "bpf" then do
+  if target == "bpf" || target == "ebpf" then do
     IO.eprintln "wiz run --target bpf: the bpf backend builds an object; the ubpf/hosted \
 oracle is not wired in P0 (it needs the ELF reader and the helper harness)"
     pure 2
@@ -1278,7 +1299,7 @@ def kernelOpt : List String → Except String (Regularity × Bool × List String
     return (r, p, a :: rest)
   | [] => return (.off, false, [])
 
-def main (args : List String) : IO UInt32 := do
+def mainImpl (args : List String) : IO UInt32 := do
   -- (after the toolchain flags: the tarball's and tower's wrappers put `-I LIB` and
   -- their flags before the user's arguments)
   if ((({} : Toolchain).parseFlags args).2) == ["--version"] then
@@ -1369,7 +1390,7 @@ def main (args : List String) : IO UInt32 := do
     else if target == "js" then
       IO.eprintln "wiz repl: targets are c, llvm and bpf (no js REPL)"
       pure 2
-    else if target == "bpf" then
+    else if target == "bpf" || target == "ebpf" then
       IO.eprintln "wiz repl: the bpf backend has no REPL (a kernel program has no world)"
       pure 2
     else match takePrelude rest with
@@ -1413,3 +1434,11 @@ def main (args : List String) : IO UInt32 := do
     | none => IO.eprintln s!"unknown command: {" ".intercalate args}"
     IO.eprintln usage
     pure 2
+
+/-- The executable: read `WIZ_STATS` before the run and print the core counters at exit
+(`wiz` is one process per file, so this is the whole check). -/
+def main (args : List String) : IO UInt32 := do
+  Wiz.Stats.fromEnv
+  let rc ← mainImpl args
+  Wiz.Stats.report
+  return rc
