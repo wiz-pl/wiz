@@ -996,22 +996,22 @@ A **pull request**'s `lean` job does not compile from scratch. A push to master'
 *inside the derivation* (the sandbox enforces it — no cache, no dev shell), whose second
 output `lake` carries what Lake wrote — `.lake/build/lib`, `.lake/build/ir`,
 `.lake/config` and the `toolchain` stamp, without `build/bin` (a consumer relinks) and
-without `.lake/cache` (the build phase keeps that in `$TMPDIR`). The job saves that
-output under two Actions-cache keys (`scripts/lake-cache.sh key`: `flake.lock`, the
-`lean-toolchain` stamp, the architecture and the `lean`/`runtime` subset hashes), a
-trusted one and an untrusted one. A pull request first restores its own PR-scoped
-`lean` subset cache (`.subset-cache/lean`, keyed by the `lean` subset's sha and the
-toolchain, not by the whole tree), then the untrusted seed key (its own previous run),
-then the trusted one, and builds `withLakeCache <seed>`: the
+without `.lake/cache` (the build phase keeps that in `$TMPDIR`). The job publishes that
+output's store path — the flake's `.#lake-seed` — to the trusted Cachix. A pull request
+first restores its own PR-scoped `lean` subset cache (`.subset-cache/lean`, keyed by the
+`lean` subset's sha and the toolchain, not by the whole tree), then its own previous
+untrusted seed, then names its **base commit's** `.#lake-seed` derivation and
+**substitutes** that store path from the trusted Cachix (`scripts/lake-cache.sh
+trusted`); it builds `withLakeCache <seed>`: the
 same function, so Lake recompiles only the modules whose inputs changed. The producer's
 `bin` **should** be byte-identical to the pure build's — it is the same sources compiled
 by the same Lake — and the equality is asserted by the seed measurement's `cmp` of all
 three binaries; that measurement has **not yet run in CI**, so the claim is a design
 expectation, not a measured fact. It is what would make the producer a trustworthy
 substitute for the compile; **nothing a pull request writes is read by a
-trusted job** — its only write is that PR-scoped subset cache, never the
-trusted/untrusted seed keys, and the producer only ever passes
-`empty-lake` (its job has no restore step). A missing seed is `empty-lake`, the same cold
+trusted job** — its only write is that PR-scoped subset cache, never the trusted
+Cachix, and the producer only ever passes `empty-lake` (its job has no restore
+step). A missing seed is `empty-lake`, the same cold
 build, never an error. Those store paths differ from the pure build's — the seed is an
 input — so the shards, `trust-ledger`, `web` and `wasm` ask for the `lean` job's
 paths directly (`nix build /nix/store/…`, which substitutes them from Cachix) instead of

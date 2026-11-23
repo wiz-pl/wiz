@@ -1221,6 +1221,13 @@ EOF
                    wiz-web wiz-playground wiz-playground-ui wiz-source-ui release-tarball
                    wasm-fixtures web-bundle docs-site pages release-bin
                    release-unwrapped release-tower;
+          # The trusted Lake seed as a package: `withLakeCache empty-lake`'s `lake`
+          # output (the compiled `.lake` directory without the linked binaries). A master
+          # push builds this and publishes the store path to the trusted Cachix; a pull
+          # request names its base commit's output, substitutes it and passes it to
+          # `withLakeCache` (scripts/lake-cache.sh `trusted`). The seed is a derivation
+          # output, not a tarball in an Actions cache.
+          lake-seed = (packagesWith pkgs (emptyLake pkgs)).unwrapped.lake;
           source-tarball = release-tarball;
           default = wiz;
           wizc = bootstrapChain.wizc;

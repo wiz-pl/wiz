@@ -9,8 +9,9 @@
 #
 # Lake seeds have a direction: a push to master's `lake_seed` job builds
 # `withLakeCache empty-lake` — a cold compile *inside* the derivation, whose `.lake`
-# output is the seed — and saves that seed to the trusted and untrusted Actions keys; a
-# pull request restores the untrusted key first and the trusted one second and builds
+# output is the seed — and publishes that store path (`.#lake-seed`) to the trusted
+# Cachix; a pull request restores its own untrusted seed first and otherwise names its
+# base commit's `.#lake-seed` and substitutes it from Cachix, then builds
 # `withLakeCache <seed>` (flake.nix), recompiling only the modules the branch changed.
 # Nothing a pull request writes is read by a trusted job: the producer only ever passes
 # `empty-lake` (it has no restore step), a pull request never writes this namespace, and
@@ -155,9 +156,10 @@ defaults:
 #     docs/package/test step for that cache) reaches no save step, so it cannot write a
 #     cache for the next run to trust. The lean seed is saved right after the Nix build,
 #     so a later docs/web failure does not discard it.
-#   * the trusted seed (`lake_seed` -> `.lake-seed`, `scripts/lake-cache.sh key`) is
-#     master-only and unchanged; a PR writes only the subset keys above, and a PR's
-#     Actions entries are PR-scoped and untrusted.
+#   * the trusted Lake seed is not an Actions entry: `lake_seed` publishes the
+#     `.#lake-seed` store path to Cachix, and a PR substitutes its base commit's output
+#     (`scripts/lake-cache.sh trusted`). A PR writes only the subset keys above, and a
+#     PR's Actions entries are PR-scoped and untrusted.
 #
 # On this tree (linux/x64, toolchain d6162537714e) the exact keys are:
 #   subset-v1-lean-linux-x64-d6162537714e-f5590ef639de
@@ -484,38 +486,26 @@ jobs:
           path: .subset-cache/lean
           key: ${{ steps.subset-key.outputs.key }}
           restore-keys: ${{ steps.subset-key.outputs.prefix }}
-      - name: Lake cache key (a pull request)
-        # The seed (a cold build's compiled modules) is only safe for the toolchain and
-        # sources that produced it: the key names flake.lock and the lean-toolchain
-        # stamp, the architecture and the `lean`/`runtime` subset hashes, and the prefix
-        # names the toolchain alone, so restore-keys falls back to a previous seed from
-        # the same toolchain and never to one from another. See scripts/lake-cache.sh.
-        id: lake-key
-        if: github.event_name == 'pull_request'
+      - name: Trusted Lake seed (the base commit's flake output, from Cachix)
+        # The second choice (the PR's own lean subset cache is the first): the base
+        # commit's `.#lake-seed` derivation (flake.nix). It is the same output master's
+        # `lake_seed` job builds and publishes to the trusted Cachix, so Nix names the
+        # store path and substitutes it; there is no tarball in an Actions cache, and
+        # nothing a pull request writes can enter this cache. `trusted` prints `empty`
+        # when the base predates the output or the cache does not hold it, and the build
+        # falls back to `empty-lake` (never a failure).
+        id: lake-trusted
+        if: github.event_name == 'pull_request' && steps.subset-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          scripts/lake-cache.sh key >> "$GITHUB_OUTPUT"
-          cat "$GITHUB_OUTPUT"
-      - name: Restore the untrusted Lake seed (a pull request)
-        # First choice: this pull request's own previous save, or the producer's copy
-        # published under the untrusted key. Nothing here is trusted by a later job.
-        id: lake-pr
-        if: github.event_name == 'pull_request'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .lake-seed-pr
-          key: ${{ steps.lake-key.outputs.pr-key }}
-          restore-keys: ${{ steps.lake-key.outputs.pr-prefix }}
-      - name: Restore the trusted Lake seed (a pull request)
-        # Second choice: the cold seed a push to master saved. That job is the only
-        # writer of this namespace (scripts/lake-cache.sh's header).
-        id: lake-trusted
-        if: github.event_name == 'pull_request' && steps.lake-pr.outputs.cache-hit != 'true'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .lake-seed-trusted
-          key: ${{ steps.lake-key.outputs.trusted-key }}
-          restore-keys: ${{ steps.lake-key.outputs.trusted-prefix }}
+          base="${{ github.event.pull_request.base.sha }}"
+          dir="$RUNNER_TEMP/lake-base"
+          rm -rf "$dir"; mkdir -p "$dir"
+          git fetch --no-tags --depth=1 origin "$base"
+          git archive "$base" | tar -x -C "$dir"
+          seed=$(scripts/lake-cache.sh trusted "$dir")
+          echo "seed=$seed" >> "$GITHUB_OUTPUT"
+          echo "trusted seed: $seed"
       - name: nix build (wiz, grail and the test driver)
         id: nix
         run: |
@@ -529,11 +519,13 @@ jobs:
             # The PR-only fast path: the same packages from a seeded `.lake`
             # (flake.nix's withLakeCache, a different derivation), so Lake recompiles
             # only the modules the branch changed. The seed is this pull request's own
-            # previous lean cache, else the untrusted producer copy, else the trusted
-            # cold seed, else `empty-lake` (the cold build — a miss is never a failure).
-            # This build's `.lake` is saved below under the untrusted, lean-keyed subset
-            # cache; the trusted namespace is written only by `lake_seed` on master.
-            seed=$(scripts/lake-cache.sh choose .subset-cache/lean .lake-seed-pr .lake-seed-trusted)
+            # previous lean cache, else the base commit's `.#lake-seed` substituted from
+            # the trusted Cachix, else `empty-lake` (the cold build — a miss is never a
+            # failure). This build's `.lake` is saved below under the untrusted,
+            # lean-keyed subset cache; only `lake_seed` on master publishes the trusted
+            # store path.
+            seed=$(scripts/lake-cache.sh choose .subset-cache/lean \
+              "${{ steps.lake-trusted.outputs.seed }}")
             echo "seed: $seed"
             scripts/lake-cache.sh build "$seed" wiz tests unwrapped.lake | tee lake-paths
             wiz=$(sed -n 's/^wiz=//p' lake-paths)
@@ -830,13 +822,15 @@ jobs:
   #     to the pure build's (the same compile), which is what makes it a trustworthy
   #     substitute for the compile;
   #   * its `unwrapped.lake` output (`.lake/build/lib`, `.lake/build/ir`, `.lake/config`
-  #     and the toolchain stamp; no `build/bin`, no `.lake/cache`) is the seed, saved
-  #     under both keys. This job is the only writer of either for this key; a pull
-  #     request reads them and writes only its own PR-scoped subset cache, never this
-  #     namespace;
-  #   * it publishes no store path and nothing waits on it (it runs beside `lean`,
-  #     off the shards' critical path). It needs no elan (`lean: false`): nixpkgs' Lean
-  #     compiles it, exactly as the pure build does.
+  #     and the toolchain stamp; no `build/bin`, no `.lake/cache`) is the seed,
+  #     `.#lake-seed`. The job publishes that store path to the trusted Cachix; this
+  #     job is its only writer. A pull request names its base commit's same output and
+  #     substitutes the path (`scripts/lake-cache.sh trusted`) — there is no trusted
+  #     Actions-cache entry for `.lake`, and a pull request writes only its own
+  #     PR-scoped subset cache;
+  #   * nothing waits on it (it runs beside `lean`, off the shards' critical path). It
+  #     needs no elan (`lean: false`): nixpkgs' Lean compiles it, exactly as the pure
+  #     build does.
   lake_seed:
     name: lake seed
     needs: changes
@@ -849,46 +843,40 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
-          # substitution only (cachix-action is set up with skipPush); this job
-          # publishes no store path
+          # substitution only here (cachix-action's skipPush); the explicit step below
+          # publishes exactly this job's seed
           cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
           # nixpkgs' Lean, as the pure build uses: no elan and no dev-shell `lake build`
           lean: false
-      - name: Key
-        id: key
-        shell: bash
-        run: |
-          scripts/lake-cache.sh key >> "$GITHUB_OUTPUT"
-          cat "$GITHUB_OUTPUT"
-      - name: Build the cold seed (withLakeCache from empty-lake)
-        # There is no restore step anywhere in this job: the seed it saves comes from
-        # this derivation, so a pull request's `.lake` can never become the trusted one.
+      - name: Build the cold seed (.#lake-seed)
+        # There is no restore step anywhere in this job: the seed comes from this
+        # derivation (`withLakeCache empty-lake`'s `lake` output), so a pull request's
+        # `.lake` can never become the trusted one. The store path is pushed below; a
+        # pull request names its base commit's same output and substitutes it.
         id: seed
         shell: bash
         run: |
-          empty=$(scripts/lake-cache.sh empty)
-          echo "empty seed: $empty"
-          scripts/lake-cache.sh build "$empty" unwrapped.lake | tee seed-paths
-          echo "lake=$(sed -n 's/^unwrapped\.lake=//p' seed-paths)" >> "$GITHUB_OUTPUT"
-      - name: The seed (the `.lake` output, without the linked binaries)
-        shell: bash
-        run: scripts/lake-cache.sh save "${{ steps.seed.outputs.lake }}" .lake-seed
-      # The same cold seed under both keys: a pull request restores the untrusted key
-      # first (its own previous run) and the trusted key second. A master commit whose
-      # key an earlier commit already saved is not a failure (`continue-on-error`):
-      # that entry is the same toolchain and sources, so it is the same seed.
-      - name: Save the trusted seed
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .lake-seed
-          key: ${{ steps.key.outputs.trusted-key }}
-      - name: Publish the same seed to the untrusted key (for a pull request's first restore)
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .lake-seed
-          key: ${{ steps.key.outputs.pr-key }}
+          lake=$(nix build .#lake-seed --no-link --print-out-paths -L)
+          echo "seed: $lake"
+          echo "lake=$lake" >> "$GITHUB_OUTPUT"
+      - name: Publish the trusted seed to Cachix
+        # The trusted substituter is the only place a pull request can get this seed.
+        # An empty token would silently stop the seed from advancing (review ci-13), so
+        # fail loudly, as the `lean` job's publish step does.
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "::error title=Cachix::CACHIX_AUTH_TOKEN is empty on a run that must publish"
+            exit 1
+          fi
+          nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_AUTH_TOKEN" \
+            cachix push "$CACHIX_NAME" "${{ steps.seed.outputs.lake }}"
+          # A pull request's `trusted` check reads this cache; a push that did not make
+          # the seed substitutable would silently send every PR back to a cold build.
+          nix path-info --store "https://$CACHIX_NAME.cachix.org" \
+            "${{ steps.seed.outputs.lake }}" >/dev/null
+          echo "published and substitutable: ${{ steps.seed.outputs.lake }}"
 
   # The trust ledger (scripts/trust-ledger.sh, .github/trust-baseline.tsv): every
   # declaration of `lib/` (and the axiom-free example) goes through `#print axioms`, and a
@@ -952,7 +940,11 @@ jobs:
         shell: bash
         run: |
           bin=$(sha256sum "${{ steps.nix.outputs.tests }}/bin/tests" | cut -d' ' -f1)
-          python3 scripts/ci.py subset-key wizlib --scope "$bin" >> "$GITHUB_OUTPUT"
+          prefix=""
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            prefix="pr-${{ github.event.pull_request.number }}-"
+          fi
+          python3 scripts/ci.py subset-key wizlib --scope "${prefix}${bin}" >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
       - name: Restore the elaboration cache
         id: trust-cache
@@ -970,7 +962,11 @@ jobs:
         env:
           TRUST_CACHE_MODE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && '--cache' || '--cache-ro' }}
         run: |
-          scripts/trust-ledger.sh --check --strict-legacy "$TRUST_CACHE_MODE" .lake/trust-cache
+          # The packaged `wiz` cache is a Nix derivation (substituted with the store
+          # path), read-only here like the restored layer; the writable cache is only
+          # the PR's own (master writes it).
+          scripts/trust-ledger.sh --check --strict-legacy "$TRUST_CACHE_MODE" .lake/trust-cache \
+            --cache-ro "${{ steps.nix.outputs.wiz }}/share/wiz/cache" --cache-ro-unsigned
           Tests/trust-ledger/run.sh
           scripts/trust-ledger-merge_test.sh
           python3 scripts/host-unsafe-ledger.py --check
@@ -1111,8 +1107,15 @@ jobs:
         id: subset-key
         shell: bash
         run: |
+          # A pull request's entry is PR-scoped: master's `.cache/wiz` is never offered
+          # to it (the trusted layer is the packaged Nix cache below), and its own
+          # previous runs still match.
+          prefix=""
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            prefix="pr-${{ github.event.pull_request.number }}-"
+          fi
           python3 scripts/ci.py subset-key tests --with wizlib \
-            --scope "${{ matrix.shard.name }}-${{ needs.lean.outputs.compiler-key }}-${{ hashFiles('selfhost/*.wiz', 'selfhost/Tables.wiz', 'lib/*.wiz') }}" \
+            --scope "${prefix}${{ matrix.shard.name }}-${{ needs.lean.outputs.compiler-key }}-${{ hashFiles('selfhost/*.wiz', 'selfhost/Tables.wiz', 'lib/*.wiz') }}" \
             --suffix "${{ hashFiles('**/*.wiz') }}" >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
       - name: Restore the Wiz build caches
@@ -1134,6 +1137,12 @@ jobs:
           mapfile -t sel <<< "$SELECT"
           mkdir -p logs ~/.cache/wiz
           du -sh ~/.cache/wiz .grail /tmp/wiz-selfhost-* 2>/dev/null || true
+          # The packaged `wiz` store path carries a Nix-built read-only elaboration
+          # cache (`share/wiz/cache`, the same layer the wrappers add with
+          # `--cache-ro`); the tests driver does not add it itself. It is a derivation
+          # output substituted from Cachix (the lean job publishes `wiz`), not a
+          # tarball in an Actions cache, and this job never writes it.
+          ro=(--cache-ro "${{ steps.nix.outputs.wiz }}/share/wiz/cache" --cache-ro-unsigned)
           # A missing dependency is a failure (Tests.skipMissing) unless the shard is one
           # whose environment deliberately lacks an optional tool: only `library` sets
           # "allow-missing-deps" in .github/test-shards.json, for iverilog (the one Icarus
@@ -1153,10 +1162,10 @@ jobs:
           jobs=()
           if [ -n "$JOBS" ]; then jobs=(--jobs "$JOBS"); fi
           jobs_s="${jobs[*]-}"
-          echo "tests -- --cache ~/.cache/wiz ${jobs_s:+$jobs_s }${allow[*]-}${allow:+ }${sel[*]}"
+          echo "tests -- --cache ~/.cache/wiz --cache-ro <wiz>/share/wiz/cache ${jobs_s:+$jobs_s }${allow[*]-}${allow:+ }${sel[*]}"
           # the Nix-built driver, exactly as `lake test -- …` would run it; every case's
           # time as JSON lines (scripts/ci.py summary and baseline read them)
-          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${allow[@]}" "${jobs[@]}" \
+          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${ro[@]}" "${allow[@]}" "${jobs[@]}" \
             --timings "logs/${{ matrix.shard.name }}.jsonl" \
             --shard "${{ matrix.shard.name }}" "${sel[@]}" 2>&1 | tee "logs/${{ matrix.shard.name }}.log"
       - name: Save the Wiz build caches
@@ -1236,32 +1245,36 @@ jobs:
           cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
           cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
-      - name: Lake cache key (a pull request)
-        id: lake-key
+      - name: Subset cache key (the PR's lean seed)
+        id: lean-subset-key
         if: github.event_name == 'pull_request'
         shell: bash
-        run: |
-          scripts/lake-cache.sh key >> "$GITHUB_OUTPUT"
-          cat "$GITHUB_OUTPUT"
-      - name: Restore the untrusted Lake seed (a pull request)
-        # The untrusted key first (a pull request's own previous save, or the trusted
-        # producer's copy), the trusted key next. Nothing this job reads is ever read
-        # by a trusted job: the producer has no restore (ci.yml, `lake_seed`).
-        id: lake-pr
+        run: python3 scripts/ci.py subset-key lean >> "$GITHUB_OUTPUT"
+      - name: Restore the PR's lean subset cache (a pull request)
+        # The PR's own previous `withLakeCache` `.lake` (saved by the `lean` job); this
+        # job runs after it. Untrusted and PR-scoped, like the `lean` job's first choice.
+        id: lean-seed
         if: github.event_name == 'pull_request'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .lake-seed-pr
-          key: ${{ steps.lake-key.outputs.pr-key }}
-          restore-keys: ${{ steps.lake-key.outputs.pr-prefix }}
-      - name: Restore the trusted Lake seed (a pull request)
+          path: .subset-cache/lean
+          key: ${{ steps.lean-subset-key.outputs.key }}
+          restore-keys: ${{ steps.lean-subset-key.outputs.prefix }}
+      - name: Trusted Lake seed (the base commit's flake output, from Cachix)
+        # The base commit's `.#lake-seed`, substituted from the trusted Cachix exactly
+        # as in the `lean` job; `empty` means the cache does not hold it.
         id: lake-trusted
-        if: github.event_name == 'pull_request' && steps.lake-pr.outputs.cache-hit != 'true'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .lake-seed-trusted
-          key: ${{ steps.lake-key.outputs.trusted-key }}
-          restore-keys: ${{ steps.lake-key.outputs.trusted-prefix }}
+        if: github.event_name == 'pull_request' && steps.lean-seed.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          dir="$RUNNER_TEMP/lake-base"
+          rm -rf "$dir"; mkdir -p "$dir"
+          git fetch --no-tags --depth=1 origin "$base"
+          git archive "$base" | tar -x -C "$dir"
+          seed=$(scripts/lake-cache.sh trusted "$dir")
+          echo "seed=$seed" >> "$GITHUB_OUTPUT"
+          echo "trusted seed: $seed"
       - name: nix build (wiz-web, wiz-playground, wiz-playground-ui, wiz-source-ui)
         id: nix
         run: |
@@ -1270,11 +1283,13 @@ jobs:
           # not fit a 16 GB runner). `--max-jobs 1`: one at a time, for the same reason.
           # `wiz` and emscripten are substitutes.
           if [ "${{ github.event_name }}" = pull_request ]; then
-            # a pull request: build from the seed (untrusted first, trusted second,
-            # else empty) so `wiz` is this branch's seeded build, not a cold rebuild.
-            # `wiz-source-ui` is built the same way, so it uses the seeded compiler too
-            # (a pure `.#wiz-source-ui` would drag in a cold pure `.#wiz`).
-            seed=$(scripts/lake-cache.sh choose .lake-seed-pr .lake-seed-trusted)
+            # a pull request: build from the seed (its own lean subset cache first, the
+            # base commit's substituted store path second, else empty) so `wiz` is this
+            # branch's seeded build, not a cold rebuild. `wiz-source-ui` is built the
+            # same way, so it uses the seeded compiler too (a pure `.#wiz-source-ui`
+            # would drag in a cold pure `.#wiz`).
+            seed=$(scripts/lake-cache.sh choose .subset-cache/lean \
+              "${{ steps.lake-trusted.outputs.seed }}")
             echo "seed: $seed"
             LAKE_CACHE_NIX_ARGS='--max-jobs 1' \
               scripts/lake-cache.sh build "$seed" wiz-web wiz-playground wiz-playground-ui wiz-source-ui \

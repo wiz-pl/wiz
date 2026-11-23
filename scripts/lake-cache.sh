@@ -8,12 +8,14 @@
 #   producer   A push to master's `lake_seed` job builds flake.nix's
 #              `withLakeCache empty-lake`: a cold compile *inside* the derivation, so
 #              the sandbox — not an assertion about cache restores — enforces it. Its
-#              `unwrapped.lake` output is the seed; the job saves it under both the
-#              trusted and the untrusted key. It publishes no store path, and its
-#              `bin` is byte-identical to the pure build's (measured).
-#   consumer   A pull request restores the untrusted namespace first (its own
-#              previous run, or the producer's copy) and the trusted one second, and
-#              builds `withLakeCache <seed>` from it; with no usable restore it builds
+#              `unwrapped.lake` output is the seed; the job publishes that store path
+#              (`.#lake-seed`) to the trusted Cachix. Its `bin` is byte-identical to
+#              the pure build's (measured).
+#   consumer   A pull request restores its own untrusted seed first (a previous run)
+#              and otherwise names its base commit's `.#lake-seed` derivation and
+#              **substitutes** it from the trusted Cachix (`trusted` below); it builds
+#              `withLakeCache <seed>` from that store path. The trusted seed is never a
+#              tarball in an Actions cache. With no substitutable output it builds
 #              `withLakeCache empty-lake`, the same cold build, never a failure.
 #   guard      Every seed's `lake` output carries a `toolchain` stamp
 #              (lean-toolchain's text); `withLakeCache` refuses a seed whose stamp
@@ -22,14 +24,15 @@
 #              another toolchain is never offered under an exact key or a prefix.
 #
 #   scripts/lake-cache.sh key
-#       four `name=value` lines for $GITHUB_OUTPUT:
+#       two `name=value` lines for $GITHUB_OUTPUT, the pull request's own untrusted
+#       entry:
 #         pr-key=<base>-pr-<sources>              pr-prefix=<base>-pr-
-#         trusted-key=<base>-trusted-<sources>    trusted-prefix=<base>-trusted-
 #       <base> = lake-<os>-<arch>-<toolchain>; <toolchain> hashes flake.lock and
 #       lean-toolchain (nixpkgs' Lean pin and the compiler the stamp names); <sources>
-#       hashes the `lean` and `runtime` subset hashes (scripts/repo-subsets.py). Both
-#       namespaces use this one function, so a PR can fall back from its own seed to
-#       the trusted one without ever being offered a different toolchain. flake.nix is
+#       hashes the `lean` and `runtime` subset hashes (scripts/repo-subsets.py). The
+#       trusted seed is not keyed here: it is a store path named by the base commit's
+#       flake and substituted from Cachix (`trusted`), so it cannot be a stale entry
+#       from another toolchain. flake.nix is
 #       not in the key: it names the derivation, not the oleans' inputs — Lake
 #       content-keys every module, so a changed fileset or flag recompiles what changed.
 #
@@ -37,6 +40,13 @@
 #       build and print `lib.<system>.empty-lake`: a store path with an empty
 #       `.lake/build` and the toolchain stamp. It is the producer's seed and the
 #       consumer's fallback, so the function's argument is never nullable.
+#
+#   scripts/lake-cache.sh trusted BASE
+#       evaluate the `packages.<system>.lake-seed` output of the flake at BASE (a
+#       checkout of the pull request's base commit), check it against the trusted
+#       Cachix and substitute it; print the store path, or `empty` when the base
+#       predates the output or the cache does not hold it. It never builds the seed:
+#       a cold compile is the consumer's `empty-lake` fallback.
 #
 #   scripts/lake-cache.sh save OUT [DIR]
 #       copy OUT/.lake and OUT/toolchain (OUT is a `withLakeCache` `lake` output) into
@@ -92,11 +102,40 @@ case ${1:-} in
                  python3 scripts/repo-subsets.py --print runtime; } | sha256sum | cut -d' ' -f1)
     printf 'pr-key=%s-pr-%s\n' "$base" "$sources"
     printf 'pr-prefix=%s-pr-\n' "$base"
-    printf 'trusted-key=%s-trusted-%s\n' "$base" "$sources"
-    printf 'trusted-prefix=%s-trusted-\n' "$base"
     ;;
   empty)
     empty_seed
+    ;;
+  trusted)
+    # BASE is a checkout of the pull request's base commit (master). The seed is the
+    # base flake's `.#lake-seed` output — the same derivation master's `lake_seed` job
+    # built — so a store path that is present in the trusted cache is the cold seed,
+    # not a tarball this or any other job wrote. `nix path-info --store` is a read:
+    # when it misses, the printer is `empty`, never a local build of the seed.
+    [ $# -eq 2 ] || { usage >&2; exit 2; }
+    base=$2
+    [ -f "$base/flake.nix" ] || {
+      echo "lake-cache: $base has no flake.nix" >&2
+      exit 2
+    }
+    out=$(nix eval --raw "path:$base#packages.$(system).lake-seed.outPath" 2>/dev/null) || {
+      printf 'lake-cache: no lake-seed output at %s; using empty-lake\n' "$base" >&2
+      echo empty
+      exit 0
+    }
+    cache=${CACHIX_NAME:+https://$CACHIX_NAME.cachix.org}
+    # `nix path-info --store` is a read of the binary cache; `nix copy --from` is a
+    # substitution, never a build. Do not use `nix build`/`nix-store --realise` on the
+    # output path here: with the derivation instantiated, Nix may build it (the cold
+    # seed) and then the seeded build — exactly the duplicate compile this branch
+    # exists to avoid. A failed check or copy is the `empty-lake` fallback.
+    if [ -n "$cache" ] && nix path-info --store "$cache" "$out" >/dev/null 2>&1 \
+       && nix copy --from "$cache" "$out" >/dev/null 2>&1; then
+      printf '%s\n' "$out"
+    else
+      printf 'lake-cache: trusted seed %s is not substitutable; using empty-lake\n' "$out" >&2
+      echo empty
+    fi
     ;;
   save)
     [ $# -le 3 ] || { usage >&2; exit 2; }

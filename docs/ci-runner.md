@@ -232,9 +232,13 @@ Each job starts with an empty container. The Nix store comes from the image and 
 Cachix: the `lean` job's `nix build .#wiz .#tests` store paths are published and the
 shards substitute them. The Wiz build caches (`~/.cache/wiz`, `.grail`,
 `/tmp/wiz-selfhost-*`) and the per-subset workspace caches below still come from the
-GitHub Actions cache, as on GitHub's runners. A pull request saves its own PR-scoped
-`lean` subset cache (`.subset-cache/lean`, a `withLakeCache` `.lake` output); it is
-untrusted and PR-scoped, and the shards still have no `.lake` build or `.lake` cache.
+GitHub Actions cache, as on GitHub's runners, but the **trusted** elaboration layer is
+not one of them: every shard also reads the packaged `$wiz/share/wiz/cache` (a Nix
+derivation, substituted with the `wiz` store path) through `--cache-ro`, and a pull
+request's writable `~/.cache/wiz` key is PR-scoped, so master's entry is never offered to
+it. A pull request saves its own PR-scoped `lean` subset cache (`.subset-cache/lean`, a
+`withLakeCache` `.lake` output); it is untrusted and PR-scoped, and the shards still have
+no `.lake` build or `.lake` cache.
 
 ### Subset caches
 
@@ -260,8 +264,8 @@ restores its own subset's previous entry and recompiles what changed.
 | `docs examples` | `.lake/docs-examples` | `subset-v1-docs-<os>-<arch>-<toolchain12>-examples-<docs12>` |
 | `docs` | `.wiz-doc-cache/ro` | `subset-v1-docs-<os>-<arch>-<toolchain12>-site-<docs12>` |
 | `packages` | `scry/.grail` | `subset-v1-packages-<os>-<arch>-<toolchain12>-<compiler-key>-<packages12>` |
-| `tests` | `~/.cache/wiz`, `.grail`, `/tmp/wiz-selfhost-*` | `subset-v1-tests-wizlib-<os>-<arch>-<toolchain12>-<shard>-<compiler-key>-<selfhost/lib hash>-<tests12>-<wizlib12>-<wiz tree hash>` |
-| `trust ledger` | `.lake/trust-cache` | `subset-v1-wizlib-<os>-<arch>-<toolchain12>-<driver sha>-<wizlib12>` |
+| `tests` | `~/.cache/wiz`, `.grail`, `/tmp/wiz-selfhost-*` | `subset-v1-tests-wizlib-<os>-<arch>-<toolchain12>-[pr-<N>-]<shard>-<compiler-key>-<selfhost/lib hash>-<tests12>-<wizlib12>-<wiz tree hash>` |
+| `trust ledger` | `.lake/trust-cache` | `subset-v1-wizlib-<os>-<arch>-<toolchain12>-[pr-<N>-]<driver sha>-<wizlib12>` |
 
 `web`, `wasm` and `runtime` own no Actions cache: the modules are Nix store paths in
 the PR Cachix cache (content-addressed and reused path by path), the web job's product
@@ -272,8 +276,10 @@ saves with `actions/cache/save` under the same key. The save step has no `always
 only a successful build (or check, or test) reaches it, so a failed subset writes
 nothing. A failed `docs` or `web` job does not touch the `lean` key (the lean seed is
 saved right after its Nix build), and the `tests` shards save their own keys (each shard
-is a separate key). The trusted Lake seed (`lake_seed` -> `.lake-seed`, keys from
-`scripts/lake-cache.sh key`) stays master-only; a PR writes only the subset keys above.
+is a separate key). The trusted Lake seed is **not** an Actions entry: `lake_seed`
+publishes the `.#lake-seed` store path to Cachix, and a PR names its base commit's
+output and substitutes it (`scripts/lake-cache.sh trusted`). A PR writes only the subset
+keys above; its own `.lake` seed entry is untrusted and PR-scoped.
 
 ### Which cache is trusted
 
