@@ -1,0 +1,10 @@
+import Prelude
+
+-- `f = g` computes to pointwise equality, so function extensionality is the identity.
+def funext {A B : Type} (f g : A → B) (h : (x : A) → f x = g x) : f = g := h
+
+-- Propositions are types: equality of propositions is mutual implication.
+def propext (P Q : Prop) (pq : P → Q) (qp : Q → P) : P = Q := (pq, qp)
+
+-- `rfl` proves an equality that holds by computation.
+def twoPlusTwo : 2 + 2 = 4 := rfl

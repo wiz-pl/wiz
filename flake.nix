@@ -529,6 +529,44 @@ EOF
               platforms = systems;
             };
           };
+          # The landing page's quantity island (`web/landing_ui.wiz`, Web.Landing as a
+          # Loom LiveApp): a tiny module, built here so neither the `web` nor the
+          # `docs` job needs Emscripten. `lib/` is its `-I` root, so a library change
+          # rebuilds it; the page's static first paint (web/build-landing.sh) is a
+          # separate, compiler-only step.
+          wiz-landing-ui = pkgs.stdenv.mkDerivation {
+            pname = "wiz-landing-ui";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [
+                ./web/build-landing-ui.sh ./web/landing_ui.wiz ./web/js.c
+                ./web/framework/driver.js ./web/framework/runtime.js
+                ./web/framework/adopt.js ./web/framework/mount.js
+                ./lib
+              ];
+            };
+            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              sh web/build-landing-ui.sh out --gmp-src ${pkgs.gmp.src}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              # build-landing-ui.sh writes OUT/landing/ (the page's asset directory);
+              # the store path is that directory, so the page's --from/--ui copy finds
+              # wiz-landing-ui.mjs at its root.
+              mkdir -p $out
+              cp -r out/landing/. $out/
+              runHook postInstall
+            '';
+            meta = {
+              description = "The landing page's quantity island (wiz-landing-ui.mjs, web/build-landing-ui.sh)";
+              platforms = systems;
+            };
+          };
           # The source reader's Loom UI (`web/source-ui.wiz`: Web.Source.View as a
           # LiveApp). `scry web --ui` copies the module into a bundle and
           # `web/source-static.js` mounts it; the site's `/source/` page is the same
@@ -1295,7 +1333,7 @@ EOF
           };
         in {
           inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native
-                   wiz-web wiz-playground wiz-playground-ui wiz-source-ui release-tarball
+                   wiz-web wiz-playground wiz-playground-ui wiz-landing-ui wiz-source-ui release-tarball
                    wasm-fixtures web-bundle docs-site pages release-bin
                    release-unwrapped release-tower;
           # a function, not a package: `tower` is `towerFor wiz`, and `lib.towerWith`

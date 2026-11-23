@@ -1,0 +1,11 @@
+import Prelude
+
+-- Every binder has a quantity: how often the body may use it at run time.
+--   0  never (erased: types, proofs, indices)
+--   1  exactly once (linear)
+--   ω  any number of times (the default)
+def ignore {0 A : Type} (0 x : A) : Nat := 0
+
+def identity {0 A : Type} (1 x : A) : A := x
+
+def dup {0 A : Type} (ω x : A) : A × A := (x, x)

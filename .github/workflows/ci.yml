@@ -1451,6 +1451,17 @@ jobs:
         env:
           WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
         run: sh web/playground-loom-test.sh
+      - name: The landing page (snippets, carousel, island, Chromium)
+        # The snippet/highlighter agreement and the page's contract need no browser;
+        # this also drives the no-JS load, the carousel's keys and the Loom island's
+        # adoption in headless Chromium. The module is a Nix derivation, so Emscripten
+        # is not an input of this job.
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+        run: |
+          ui=$(nix build .#wiz-landing-ui --no-link --print-out-paths --max-jobs 1)
+          chrome=$(nix shell --inputs-from . nixpkgs#chromium -c sh -c 'command -v chromium')
+          sh web/landing/test.sh --ui "$ui" --require-ui --chrome "$chrome"
 
   # (11s) The published site, as the artifact `wiz-docs`: on master only (a push), kept
   # 3 days (artifact storage). The tree is the landing page at the root, the standard
@@ -1598,6 +1609,19 @@ jobs:
             --ui "$SOURCE_UI" --target scry/tests/fixtures/report
           echo "SOURCE_BUNDLE=$bundle/b" >> "$GITHUB_ENV"
           echo "ui=$SOURCE_UI" >> "$GITHUB_OUTPUT"
+      - name: The landing page's island module (nix build .#wiz-landing-ui)
+        id: landing
+        run: |
+          ui=$(nix build .#wiz-landing-ui --no-link --print-out-paths --max-jobs 1)
+          echo "ui=$ui" >> "$GITHUB_OUTPUT"
+          du -sh "$ui"
+      - name: The landing page (web/build-landing.sh)
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+          WIZ_LANDING_UI_FROM: ${{ steps.landing.outputs.ui }}
+        run: |
+          sh web/build-landing-ui.sh web/out --from "$WIZ_LANDING_UI_FROM"
+          sh web/build-landing.sh web/out
       - name: The landing page and the playground (web/build-site.sh)
         env:
           # The reader is part of the published product, so a site without it is red.
