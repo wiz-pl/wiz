@@ -145,7 +145,8 @@ def selfhostLspGroup : Group where
         let uri := "untitled:test.wiz"
         let dir ← IO.FS.createTempDir
         let (code, out, err) ← selfhostLspSession exe dir #[] (lspLspMsgs uri)
-        checkEq 0 code
+        unless code == 0 do
+          throw (IO.userError s!"the server exited {code} ({out.utf8ByteSize} bytes of output)\nstderr:\n{err}")
         checkEq "" err
         let msgs ← lspMessages out
         checkEq 9 msgs.length
