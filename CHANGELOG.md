@@ -12,7 +12,7 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 `scripts/trust-counts.py --write` and checked by `scripts/trust-counts.py --check` (the
 `native` group runs the check), so this file cannot drift from the ledger.
 
-<!-- trust-counts: rows=858 partial=254 axiom_rows=267 builtin_rows=261 native_rows=76 implemented_by=71 repr=5 extern_declarations=233 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=559 shared_reasons=299 legacy=0 expired=0 -->
+<!-- trust-counts: rows=857 partial=253 axiom_rows=267 builtin_rows=261 native_rows=76 implemented_by=71 repr=5 extern_declarations=233 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=558 shared_reasons=299 legacy=0 expired=0 -->
 
 ## [Unreleased]
 
@@ -1073,6 +1073,15 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   (seven fields against five) or the `applyAt`/`applyMatches` signature, and cannot be
   imported into one program; they are not drop-in replacements. Six of the seventeen
   e-graph examples are differential. Groups `scry-egraph` and `scry-taint` cover them.
+
+* lib(Web.Source): `Source.firstLocatedRow`, `Source.View.clipSpans` and
+  `Source.firstFileWithFinding` are total `def`s again, so three hand-written axioms are
+  gone and `Source.firstFileWithFinding`'s ledger row with them. The lesson is not the
+  deletion but why it took a day of merges to say so: the rows had gone unreviewed and
+  only `=native` case 18 reports that, and the group was not run. A structural recursion
+  on a list tail needs no `partial` — `Source.View.insertSpan`, eight lines from
+  `clipSpans`, is the total proof — so reach for `partial` only after checking whether
+  `List.find`/`map`/`filter` already has the shape (case 18 green).
 
 ## [0.1.0] - unreleased (draft)
 

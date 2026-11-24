@@ -131,7 +131,7 @@ def Source.Page.initial : Source.Page :=
     "loading the bundle…" .none .false .none
 
 /-- The first file (in the bundle's order) that a finding names. -/
-partial def Source.firstFileWithFinding (findings : List Source.Finding) :
+def Source.firstFileWithFinding (findings : List Source.Finding) :
     List Source.File → Option String
   | .nil => .none
   | .cons f rest =>
@@ -272,7 +272,7 @@ def Source.Page.lspHover (s : Source.Page) (payload raw : String) : Source.Page 
 
 /-- The first located target of a definition answer: a row that names a file the
 reader has and a non-empty span. -/
-partial def Source.firstLocatedRow : List Source.FactRow → Option (String × Source.Span)
+def Source.firstLocatedRow : List Source.FactRow → Option (String × Source.Span)
   | .nil => .none
   | .cons r rest =>
     match Bool.and (Bool.not (String.isEmpty r.fileId)) (Bool.not (Source.Span.isEmpty r.span)) with
