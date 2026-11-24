@@ -2579,6 +2579,7 @@
    "selfhost/Tables.wiz is current (regenerate with `lake build genSelfhostTables`)": {"seconds": 0.108},
    "the additive match (T.casesOnA) runs, compiled by the Lean compiler (21v)": {"seconds": 3.321},
    "the host frontend elaborates the self-hosted checker and compiler (a fast guard)": {"seconds": 184.455},
+   "the injection assertion rejects a child that did not run the stub (the stub meta-case's mutation self-test)": {"seconds": 0.05},
    "the size of μ and ν is checked (and both kernels agree on it below)": {"seconds": 0.125},
    "transp is rejected at a proposition, as eq and refl are (and both kernels agree on it below)": {"seconds": 0.113},
    "∞ is not below itself (and both kernels agree on it below)": {"seconds": 0.137}
@@ -2850,6 +2851,7 @@
    "--rerun runs recorded passes again and records the new result": {"seconds": 37.408},
    "--update never records a failure: a program that doesn't build, fails or times out": {"seconds": 26.394},
    "a failing test without a `-- test:` line says it was a check (icestick-cpu C8)": {"seconds": 30.984},
+   "an effective-value line names its source: flag, env and build": {"seconds": 4.5},
    "a missing dependency fails by default, skips with --allow-missing-deps / WIZ_ALLOW_MISSING_DEPS, and a declared skip still skips": {"seconds": 44.421},
    "a nested package under the tests root is not a test": {"seconds": 24.373},
    "a wrong output fails, with the first difference": {"seconds": 20.324},

@@ -39,7 +39,7 @@ commit or a push.
 | `check-boundaries.py` | enforces the one-way Hdl package boundary: `lib/` may not import `Hdl.*`, `hdl/src` imports only `Hdl.*` and std modules, `Hdl.*` consumers outside `hdl/` are in `examples/`, `bench/` or `drafts/`, and no committed `hdl/` file names `../` or `.lake` | `ci.yml` (`docs_style`), `--self-test` |
 | `check-repro.sh` | builds `Tests/ReproPaths` under two absolute paths with different environment and byte-compares the artifacts; `--compiler` also builds the compiler twice | `ci.yml`, `pre-commit.sh --full` |
 | `check-stc.sh` | the STC metatheory gate: builds `STC` and `STC.Prototype.Totality`, requires an `.olean` for every `STC/**.lean`, rejects `sorry`/`admit`/`axiom`; `self-check` runs the two deliberate breaks (each must fail) | `ci.yml` (`stc`) |
-| `ci.py` | helpers for `ci.yml`: `matrix`, `plan`, `changes`, `check-shards`, `balance`, `summary`, `baseline`, `check-skips` | `.github/workflows/ci.yml`, `pre-commit.sh --fast` (skip lint) |
+| `ci.py` | helpers for `ci.yml`: `matrix`, `plan`, `changes`, `check-shards`, `check-ci-shaped`, `balance`, `summary`, `baseline`, `timings`, `check-skips` | `.github/workflows/ci.yml`, `pre-commit.sh --fast` (skip lint) |
 | `check-shards.py` | the shard plan's totality gate: every group in a shard or in `.github/test-shard-exclusions.json` (reason and owner), no stale exclusion, and every skip-allowlist entry matches a case; `--self-test`, `--groups FILE` (a captured `tests --list`), `--json` | `.github/workflows/ci.yml` through `ci.py check-shards`; by hand for a review |
 | `host-unsafe-ledger.py` | checks `.github/host-unsafe.tsv` against the `unsafe`/`extern`/`implemented_by` uses in host Lean; `--print` writes rows | `ci.yml`, `pre-commit.sh --fast`, `Tests/host-unsafe-ledger/run.sh` |
 | `trust-ledger.sh` | runs the test driver's `--trust-ledger` gate over `lib/` (check, print, update); needs `lake build wiz tests` | `ci.yml`, `pre-commit.sh --full`; the gate itself is in `Tests/Native.lean` |
@@ -51,7 +51,8 @@ commit or a push.
 | `test-runtime.sh` | compiles `runtime/wiz_rt.h` plus `runtime/rt_*.inc` in both ABI modes (`WIZ_API=` and `WIZ_API=static`) | `ci.yml` |
 | `test-perf-dashboard.sh` | end-to-end check of `perf-dashboard.py` on `fixtures/perf/` (no network, no toolchain) | docs only (`docs/stages/15-performance.md`) |
 | `flaky.py` | reruns failing test cases, classifies them, and maintains the expiring quarantine | `flaky-ci.sh`, by hand |
-| `checks-ledger.py` | records the light checks that ran on each commit in the gitignored, untrusted `.checks/` ledger (`run`, `status`, `warn`, `--self-test`); keyed by commit + name, so an amend invalidates | `.githooks/pre-push`; by hand |
+| `checks-ledger.py` | records the light checks that ran on each commit in the gitignored, untrusted `.checks/` ledger (`run`, `record`, `status`, `warn`, `require`, `audit`, `--self-test`); keyed by commit + name, so an amend invalidates; `require` refuses a push to `refs/heads/integration/*` without a clean `heavy:lake` build record for that sha | `.githooks/pre-push`; `heavy` (`record`); by hand |
+| `touched-derivations.sh` | `BASE [HEAD]`: selects the derivations whose `drvPath` changed (or that fail to evaluate at HEAD) through `.github/ci-shaped.nix`, then builds each one through `heavy`; `--select-only`, `--json` | by hand before a push (Guard B) |
 
 ## Local check ledger (advisory, not a gate)
 
@@ -69,7 +70,20 @@ start of the run; the record also keeps `dirty_after`, so an update script that
 writes a file shows as a clean start followed by a change (commit or discard its
 output). `--self-test` builds a throwaway repository and proves the behaviours
 (no record warns, a clean run stops the warning, a dirty run does not count, a
-new SHA warns again).
+new SHA warns again, `require` refuses a push to `integration/*` without a clean
+build record for that sha and accepts one with it, `audit` logs a remote tip no
+record explains).
+
+The ledger also holds **build** records, which are not advisory: `heavy`
+(`/workspace/wiz-tools/heavy`) calls `record --name heavy:lake --commit SHA
+--exit RC --clean|--dirty -- CMD` when its Slurm job ends, and
+`require --pre-push --name heavy:lake --for 'refs/heads/integration/*'` makes
+`.githooks/pre-push` refuse a push whose sha has no clean record from a command
+containing `build`. A dirty tree never counts (the rsync copies the working
+tree), and a merge commit is a new sha, so the merge result has to be built.
+Every other ref is unchecked, `git push --no-verify` still bypasses it (a local
+guard against mistakes, not a security gate), and `audit [--fetch]` lists the
+remote-tracking tips this worktree's ledger cannot explain.
 
 `.checks/` is gitignored and **untrusted by design**: any process can write it,
 nothing signs it, and CI does not read it. Treat the warning as a fast-fail

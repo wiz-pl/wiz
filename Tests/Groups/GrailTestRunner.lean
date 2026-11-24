@@ -234,6 +234,22 @@ def testRunnerGroup : Group where
           let (code, out) ← run args unset
           checkEq 3 code
           check ((out.splitOn "skipped (fixture reason)").length > 1) out },
+    -- The effective-value line (`Tests.reportEffectiveValue`), which every anti-vacuity
+    -- case reads back: each of the three sources is spelled out, so a line that loses
+    -- its source (or says the wrong one) is caught here, without a toolchain.
+    { name := "an effective-value line names its source: flag, env and build", run := fun _ => do
+        let self ← IO.appPath
+        for source in ["flag", "env", "build"] do
+          let o ← IO.Process.output
+            { cmd := self.toString, args := #["--selfhost-override-probe", source] }
+          checkEq 0 o.exitCode
+          let want := s!"selfhost-override compiler source={source} path=/tmp/selfhost-override-probe"
+          check ((o.stderr.splitOn want).length > 1)
+            s!"no `{want}` in the probe's stderr:\n{o.stderr}"
+        -- a sidecar is named when there is one, and `-` when there is not
+        let o ← IO.Process.output
+          { cmd := self.toString, args := #["--selfhost-override-probe", "flag"] }
+        check ((o.stderr.splitOn "id=abc").length > 1) s!"the flag source hid its id:\n{o.stderr}" },
     -- `--jobs N` runs an opted-in group's cases in a bounded pool; its log is the
     -- sequential log but for the times (the cases are printed in case order, whether
     -- they finished in that order or not)

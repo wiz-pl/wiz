@@ -78,6 +78,31 @@
                                      the prefix stops before the subset hashes, so a
                                      later run restores its own subset's previous
                                      entry and recompiles what changed.
+  scripts/ci.py check-ci-shaped [--self-test] [CI_YML] [CI_SHAPED]
+                                     every `lib.` call in ci.yml has a row in
+                                     .github/ci-shaped.nix, the expression set
+                                     `scripts/touched-derivations.sh` selects from:
+                                     CI calls `lib.selfhostWith { wiz; tests; }` and
+                                     `lib.towerWith wiz`, and evaluating `.#X` never
+                                     touches that path, so a row per call site is what
+                                     makes "the derivation changed" visible to the
+                                     selector. A call with no row is an error (the
+                                     selector would silently not look), a row whose
+                                     call ci.yml no longer makes is a warning
+                                     (`lib.withLakeCache` is scripts/lake-cache.sh's and
+                                     has no ci.yml call on purpose). `--self-test`
+                                     checks the rule on a synthetic pair of files
+  scripts/ci.py timings [--warn-ratio F] [--max-ratio F] LOG|JSONL..
+                                     the effective timeout of every case line the test
+                                     driver prints (`[n/f/t] ✓ name (12.3 s / limit
+                                     300 s)`) and of every `--timings` record
+                                     ("limit"), and a warning per case that used more
+                                     than F (default 0.8) of its limit: a raised
+                                     timeout that never took effect (an option after
+                                     the subcommand) is then a visible no-op, not a
+                                     reflex. Exits 1 with --max-ratio FRACTION when a
+                                     case is over FRACTION of its limit (the gate);
+                                     the 80 % warning alone does not fail
   scripts/ci.py summary TITLE FILE.. a Markdown summary for $GITHUB_STEP_SUMMARY of
                                      `lake test` logs (*.log: pass/fail, failing cases)
                                      and `--timings` files (*.jsonl: a table of every
@@ -169,6 +194,8 @@ TIMINGS = os.path.join(ROOT, ".github", "test-timings.json")
 SKIPS = os.path.join(ROOT, ".github", "skip-allowlist.json")
 EXCLUSIONS = os.path.join(ROOT, ".github", "test-shard-exclusions.json")
 REPO_SUBSETS = os.path.join(ROOT, ".github", "repo-subsets.json")
+WORKFLOW = os.path.join(ROOT, ".github", "workflows", "ci.yml")
+CI_SHAPED = os.path.join(ROOT, ".github", "ci-shaped.nix")
 DEFAULT_BIN = os.path.join(ROOT, ".lake/build/bin/tests")
 NOTE_USES = "uses "
 NOTE_BUILT = "built "
@@ -1178,11 +1205,17 @@ def changes(args):
 
 GROUP = re.compile(r"^── (.*?) \((.*)\)$")
 # a case line starts with its position in the run (`[n/failed/total] `, or `[n/total] ` in
-# older logs; both accepted)
+# older logs; both accepted).  The trailing `(SECONDS s / limit N s)` is the harness's
+# effective timeout (Tests/Harness.lean `renderResult`); `limit none` means no limit, and
+# older logs have no ` / limit` at all.
 POS = r"(?:\[\d+/(?:\d+/)?\d+\] )?"
-PASS = re.compile(rf"^{POS}  ✓ (.*?)(?: \([\d.]+ s\))?$")
-FAIL = re.compile(rf"^{POS}  ✗ (.*?)(?: \([\d.]+ s\))?$")
-SKIP = re.compile(rf"^{POS}  ⊘ (.*?)(?: \([\d.]+ s\))?$")
+LIMIT = r"(?: / limit (?:(?P<limit_s>\d+) s|(?P<limit_none>none)))?"
+WHEN = rf"(?: \([\d.]+ s{LIMIT}\))?"
+PASS = re.compile(rf"^{POS}  ✓ (.*?){WHEN}$")
+FAIL = re.compile(rf"^{POS}  ✗ (.*?){WHEN}$")
+SKIP = re.compile(rf"^{POS}  ⊘ (.*?){WHEN}$")
+# the same line, with the elapsed time and the limit it ran under (`limit none`: none)
+CASE_TIME = re.compile(rf"^{POS}  [✓✗⊘] (.*?) \(([\d.]+) s{LIMIT}\)$")
 TIME = re.compile(r"^  \((.*): ([\d.]+) s(?:;.*)?\)$")
 TOTAL = re.compile(r"^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?$")
 
@@ -2259,6 +2292,206 @@ def rebalance(args):
     return 0
 
 
+# --- The expression set Guard B selects from (`check-ci-shaped`) ---------------------
+
+# A `lib.` call in ci.yml.  CI's seeded builds write it as `f.lib."$sys".selfhostWith`
+# inside a shell string (so the quotes are backslash-escaped there) or as
+# `lib.towerWith`; the call is the last dotted component, which skips the system part.
+LIB_CALL = re.compile(
+    r'\blib\.(?:\\?"[^"\\]*\\?"|[A-Za-z0-9_-]+)(?:\.(?:\\?"[^"\\]*\\?"|[A-Za-z0-9_-]+))*')
+# A row of ci-shaped.nix: `"lib-<call>-<what>" = …;`
+CI_SHAPED_ROW = re.compile(r'"lib-([A-Za-z0-9_-]+)"\s*=')
+# the other scripts that call `flake.lib` (their rows are not stale in ci-shaped.nix)
+OTHER_CALL_FILES = [os.path.join(ROOT, "scripts", "lake-cache.sh")]
+
+
+def lib_calls(text):
+    """The `lib.NAME` call names in a fragment of ci.yml, with their line numbers."""
+    out = []
+    for m in LIB_CALL.finditer(text):
+        parts = [p.strip('\\"') for p in m.group(0).split(".")[1:]]
+        if parts:
+            out.append((text[:m.start()].count("\n") + 1, parts[-1]))
+    return out
+
+
+def ci_shaped_rows(text):
+    """The `lib-<call>-<what>` row names of ci-shaped.nix (one row per CI call site)."""
+    return [m.group(1) for m in CI_SHAPED_ROW.finditer(text)]
+
+
+def check_ci_shaped(workflow=None, shaped=None):
+    """Every `lib.` call in ci.yml has a row in ci-shaped.nix: the selector
+    `scripts/touched-derivations.sh` evaluates what this file names, so a call site
+    with no row would be invisible to it -- a silent hole, not a failure.
+    A row whose call no checkout script calls is stale and warned about (not an error:
+    `lib.withLakeCache` is scripts/lake-cache.sh's, `lib.empty-lake` is an argument and
+    not a derivation, so neither needs a ci.yml row)."""
+    workflow = workflow or WORKFLOW
+    shaped = shaped or CI_SHAPED
+    try:
+        calls = lib_calls(open(workflow, encoding="utf-8").read())
+    except OSError as e:
+        error(f"cannot read {workflow}: {e}", "ci-shaped")
+        return 1
+    try:
+        rows = ci_shaped_rows(open(shaped, encoding="utf-8").read())
+    except OSError as e:
+        error(f"cannot read {shaped}: {e}", "ci-shaped")
+        return 1
+    called = sorted({name for _, name in calls})
+    missing = [name for name in called if not any(row.startswith(name + "-") for row in rows)]
+    # The other call sites in this repo, so a row for one of them is not `stale`.
+    known = set(called)
+    for path in OTHER_CALL_FILES:
+        try:
+            known |= {name for _, name in lib_calls(open(path, encoding="utf-8").read())}
+        except OSError:
+            pass
+    stale = [row for row in rows if not any(row.startswith(name + "-") for name in known)]
+    for name in missing:
+        where = ", ".join(f"ci.yml:{line}" for line, n in calls if n == name)
+        error(f"the `lib.{name}` call at {where} has no row in .github/ci-shaped.nix;"
+              f" add one (`\"lib-{name}-<what>\" = (lib.{name} …);`) or the touched-derivations"
+              f" selector will never look at it", "ci-shaped")
+    if stale:
+        warn(f"ci-shaped.nix rows no call site names: {', '.join(stale)}", "ci-shaped")
+    if not missing:
+        print(f"ci-shaped: {len(called)} `lib.` call(s) in ci.yml, {len(rows)} row(s) in"
+              f" .github/ci-shaped.nix — every call has a row")
+    return 1 if missing else 0
+
+
+def check_ci_shaped_self_test():
+    """The rule on a synthetic pair of files: a row per call passes, a new call without
+    one fails, and a row ci.yml no longer calls only warns."""
+    import tempfile
+    workflow = """.github/workflows/ci.yml synthetic
+      - run: |
+          expr="let f = builtins.getFlake \\"$PWD\\"; in f.lib.\\"$sys\\".selfhostWith { wiz = x; tests = y; }"
+          other=$(nix build --expr "f.lib.\\"$sys\\".towerWith (builtins.storePath \\"$W\\")")
+          nix build .\\#wiz
+"""
+    shaped_ok = """{ flake, system }:
+  {
+    "lib-selfhostWith-compiler" = (flake.lib.${system}.selfhostWith {}).compiler;
+    "lib-towerWith-wiz" = flake.lib.${system}.towerWith flake.packages.${system}.wiz;
+  }
+"""
+    shaped_new = """{ flake, system }:
+  {
+    "lib-selfhostWith-compiler" = (flake.lib.${system}.selfhostWith {}).compiler;
+    "lib-towerWith-wiz" = flake.lib.${system}.towerWith flake.packages.${system}.wiz;
+    "lib-withLakeCache-lake-seed" = 1;
+  }
+"""
+    shaped_missing = """{ flake, system }:
+  {
+    "lib-selfhostWith-compiler" = (flake.lib.${system}.selfhostWith {}).compiler;
+  }
+"""
+    cases = [
+        ("both calls have a row", shaped_ok, 0),
+        ("the withLakeCache row is extra, not an error", shaped_new, 0),
+        ("a call with no row fails", shaped_missing, 1),
+    ]
+    with tempfile.TemporaryDirectory(prefix="ci-shaped-selftest-") as tmp:
+        wf = os.path.join(tmp, "ci.yml")
+        with open(wf, "w", encoding="utf-8") as f:
+            f.write(workflow)
+        for label, text, want in cases:
+            path = os.path.join(tmp, "ci-shaped.nix")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            rc = check_ci_shaped(wf, path)
+            if rc != want:
+                print(f"ci-shaped self-test FAILED: {label}: exit {rc}, wanted {want}",
+                      file=sys.stderr)
+                return 1
+            print(f"ci-shaped self-test ok: {label}")
+    print("ci-shaped self-test passed")
+    return 0
+
+
+# --- Effective limits (`timings`) ---------------------------------------------------
+
+def case_times(files):
+    """[(shard, group, case, seconds, limit or None)] from `lake test` logs (the case
+    line's `(12.3 s / limit 300 s)`) and `--timings` records ("limit", nullable)."""
+    out = []
+    for path in files:
+        if path.endswith(".jsonl"):
+            try:
+                records = read_timings([path])
+            except OSError as e:
+                warn(f"cannot read {path}: {e}", "Test time limit")
+                continue
+            for r in records:
+                limit = r.get("limit")
+                out.append((r.get("shard", "") or "", r.get("group", ""), r.get("case", ""),
+                            float(r.get("seconds") or 0), limit))
+            continue
+        group = ""
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except OSError as e:
+            warn(f"cannot read {path}: {e}", "Test time limit")
+            continue
+        for line in text.split("\n"):
+            if m := GROUP.match(line):
+                group = m.group(1)
+            elif m := CASE_TIME.match(line):
+                limit = int(m.group("limit_s")) if m.group("limit_s") else None
+                out.append((os.path.basename(path), group, m.group(1),
+                            float(m.group(2)), limit))
+    return out
+
+
+def timings(files, warn_ratio=0.8, max_ratio=None):
+    """The effective timeout of every case, and a warning for each case that used more
+    than `warn_ratio` of it.  `max_ratio` makes that a gate (exit 1).
+
+    This is the anti-reflex half of Guard C: a timeout raised where it never takes
+    effect (an option after the subcommand -- the hdl case, 9ee24e52b) leaves this
+    ratio at 100 %, so the no-op is visible instead of looking like a fix."""
+    rows = case_times(files)
+    with_limit = [r for r in rows if r[4]]
+    no_limit = [r for r in rows if not r[4]]
+    if not rows:
+        print("timings: no case lines with a time in these files")
+        return 0
+    hot = []
+    for shard, group, case, seconds, limit in with_limit:
+        ratio = seconds / limit if limit else 0.0
+        if ratio >= warn_ratio:
+            hot.append((ratio, shard, group, case, seconds, limit))
+    hot.sort(reverse=True)
+    for ratio, shard, group, case, seconds, limit in hot:
+        msg = (f"{group}: {case}" if group else case) + (
+            f" used {seconds:.1f} s of its {limit} s limit ({ratio * 100:.0f} %)")
+        warn(msg, "Test time limit")
+    print(f"timings: {len(rows)} case(s); {len(with_limit)} under a limit,"
+          f" {len(no_limit)} without one; {len(hot)} at or over {warn_ratio * 100:.0f} %")
+    if with_limit:
+        print("| % of limit | seconds | limit | group | case |")
+        print("|---:|---:|---:|---|---|")
+        for shard, group, case, seconds, limit in sorted(
+                with_limit, key=lambda r: -(r[3] / r[4]))[:25]:
+            print(f"| {seconds / limit * 100:.0f} % | {seconds:.1f} | {limit}"
+                  f" | {md(group)} | {md(case)} |")
+    if no_limit:
+        print(f"timings: {len(no_limit)} case(s) ran with no limit (pass `--test-timeout N` to"
+              f" the driver); a timeout that never took effect cannot be seen for them")
+    if max_ratio is not None:
+        over = [(r, s, g, c, sec, lim) for r, s, g, c, sec, lim in hot if r > max_ratio]
+        for ratio, _, group, case, seconds, limit in over:
+            error(f"{group}: {case} used {seconds:.1f} s of its {limit} s limit"
+                  f" ({ratio * 100:.0f} %, over the gate of {max_ratio * 100:.0f} %)",
+                  "Test time limit")
+        return 1 if over else 0
+    return 0
+
+
 def _main(args):
     if args[:2] == ["matrix", "--only"] and len(args) >= 3:
         matrix(args[3] if len(args) > 3 else DEFAULT_BIN, set(json.loads(args[2])))
@@ -2284,6 +2517,26 @@ def _main(args):
         return check_shards(binary)
     if args[:1] == ["check-skips"]:
         return check_skips(args[1:])
+    if args[:2] == ["check-ci-shaped", "--self-test"]:
+        return check_ci_shaped_self_test()
+    if args[:1] == ["check-ci-shaped"]:
+        rest = args[1:]
+        if len(rest) > 2:
+            print("usage: ci.py check-ci-shaped [CI_YML] [CI_SHAPED]", file=sys.stderr)
+            return 2
+        return check_ci_shaped(rest[0] if rest else None, rest[1] if len(rest) > 1 else None)
+    if args[:1] == ["timings"]:
+        rest, warn_ratio, max_ratio = args[1:], 0.8, None
+        paths = []
+        it = iter(rest)
+        for a in it:
+            if a == "--warn-ratio":
+                warn_ratio = float(next(it))
+            elif a == "--max-ratio":
+                max_ratio = float(next(it))
+            else:
+                paths.append(a)
+        return timings(paths, warn_ratio, max_ratio)
     if args[:1] == ["summary"] and len(args) >= 2:
         return summary(args[1], args[2:])
     if args[:1] == ["balance"]:

@@ -4591,6 +4591,65 @@ def echoStub (dir : System.FilePath) : IO System.FilePath := do
   unless c.exitCode == 0 do throw (IO.userError s!"chmod failed: {c.stderr}")
   pure p
 
+/-- The line `reportEffectiveValue` (`Tests/Elab.lean`) writes on stderr:
+`selfhost-override compiler source=env path=/tmp/…/echo-stub id=- pid=7`. -/
+def overrideMarker : String := "selfhost-override "
+
+/-- One effective-value line from a child's stderr. -/
+structure OverrideLine where
+  program : String
+  source : String
+  path : String
+  sidecar : String
+  deriving Repr
+
+/-- The `selfhost-override` lines of a child's stderr, parsed. -/
+def parseOverrideLines (stderr : String) : List OverrideLine :=
+  (stderr.splitOn "\n").filterMap fun raw =>
+    let l := raw.trimAscii.toString
+    if !l.startsWith overrideMarker then none
+    else match (l.drop overrideMarker.length).toString.splitOn " " with
+      | [] => none
+      | program :: fields =>
+        let field (k : String) : String :=
+          ((fields.find? (·.startsWith (k ++ "="))).map
+            fun f => (f.drop (k.length + 1)).toString).getD ""
+        some { program, source := field "source", path := field "path",
+               sidecar := field "id" }
+
+/-- The verdict on one child's stderr, as text: `none` when every `selfhost-override`
+line names the injected stub (by environment), or the reason the injection is not
+proven.  `source=none path=none` is a child that never reached the pipeline. -/
+def injectionProblem (stub stderr : String) : Option String :=
+  match parseOverrideLines stderr with
+  | [] => some ("source=none path=none (no `selfhost-override` line: the case never" ++
+      " reached the self-hosted pipeline, so it cannot witness the stub)")
+  | lines =>
+    (lines.find? fun l => !(l.source == "env" && l.path == stub)).map fun l =>
+      s!"source={l.source} path={l.path} id={l.sidecar} for the {l.program}," ++
+        s!" but this case injected source=env path={stub}" ++
+        " (a flag wins over the environment: see `selfhostBinaryOverride`), so it is vacuous"
+
+/-- Assert that a child ran the program this case **injected**, not another one:
+every `selfhost-override` line on its stderr must read `source=env path=<stub>`.
+Returns how many lines it checked.
+
+This is the rule for every anti-vacuity or meta case: prove the fault was injected,
+then prove it was detected.  The stub meta-case below failed exactly here -- it set
+`WIZ_SELFHOST_*` but forwarded the driver's `--selfhost-compiler`/`-checker` flags,
+which win, so its children ran the real compiler and all 211 passed (run 45285555908);
+nothing read the children's stderr to notice.  With this assertion the same mistake
+fails the sweep in seconds: `fault not injected: source=flag path=/nix/store/…`.
+
+The environment variable `WIZ_SELFHOST_STUB_MUTATION` turns that into a runnable
+mutation self-test: `env` makes the variable name the *real* programs instead of the
+stub, and `flag` passes them as flags (which beat the environment), and the case must
+fail with this message. -/
+def checkInjection (what stub stderr : String) : IO Nat := do
+  if let some why := injectionProblem stub stderr then
+    throw (IO.userError s!"fault not injected: {why} ({what})")
+  return (parseOverrideLines stderr).length
+
 /-- The cases that run the **Lean host** toolchain only: they compile Wiz sources with the
 Lean compiler, or they are in-process probes of the Lean kernel (their "and both kernels
 agree below" counterpart is the `selfhost` case that runs the Wiz program). They are not
@@ -4640,6 +4699,30 @@ def selfHostHostGroup : Group where
           "(.app (.ann (.lam (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star)))) (piW .qty (.descr (ln 0) (.unit (ln 1))))) (.app (.var 0) .star)) .star)))"
         ioRun (kernel ++ "\n" ++ verdict ++ s!"def main : IO Unit := do\n  IO.println (verdict {p7a});\n  IO.println (verdict {p15b})\n")
           "ok\nerror\n" },
+    -- The meta-case's detector, on synthetic stderr: an injected child (env + the stub
+    -- path) is accepted, and every way a child can have run something else is refused
+    -- with "fault not injected".  This is the mutation self-test's fast half (the full
+    -- one is `WIZ_SELFHOST_STUB_MUTATION=env|flag` on the case below, with the real
+    -- compiler).
+    { name := "the injection assertion rejects a child that did not run the stub (the stub meta-case's mutation self-test)", run := fun _ => do
+        let stub := "/tmp/selfhost-stub/echo-stub"
+        let injected := s!"selfhost-override compiler source=env path={stub} id=- pid=41\n" ++
+          s!"selfhost-cache source=env dir=/tmp/selfhost-stub pid=41\n"
+        let n ← checkInjection "the injected child" stub injected
+        unless n == 1 do throw (IO.userError s!"expected one override line, counted {n}")
+        -- the mutations: the real programs (by flag, by the environment naming another
+        -- path, or by a build), and the child that never reached the pipeline at all
+        let mutations :=
+          [ s!"selfhost-override compiler source=flag path=/nix/store/x/bin/compiler id=abc pid=7\n",
+            s!"selfhost-override checker source=env path=/tmp/wiz-selfhost-1234/checker id=- pid=8\n",
+            s!"selfhost-override compiler source=build path=/tmp/wiz-selfhost-1/compiler id=- pid=9\n",
+            "" ]
+        for bad in mutations do
+          let some why := injectionProblem stub bad
+            | throw (IO.userError s!"the injection assertion accepted a non-injected child:\n{bad}")
+          unless why.startsWith "source=" do
+            throw (IO.userError s!"the refusal does not read `source=…`:\n{why}")
+        note "3 mutations refused, 1 injected child accepted" },
     -- The anti-vacuity case: the pipeline group must fail when its compiler/checker is a
     -- stub that echoes `input.wiz`. It runs each case of `selfhost` in a child process
     -- with `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER` set (the override in
@@ -4651,13 +4734,54 @@ def selfHostHostGroup : Group where
     -- the sweep forever (the `=selfhost-host#3` hang: no child, no CPU). A case that does
     -- not terminate is reported by name and index, never as a hang, and the sweep fails
     -- at its own budget (45 min) rather than at the job's.
+    --
+    -- It also proves the injection: every child's stderr must carry a
+    -- `selfhost-override … source=env path=<stub>` line (`checkInjection`), or this case
+    -- fails at once with "fault not injected". Run 45285555908 is why: the flags this
+    -- sweep forwards used to win over the environment, every child ran the real
+    -- compiler, and 211 of 211 passed -- the guard was vacuous itself. The environment
+    -- variable `WIZ_SELFHOST_STUB_MUTATION` runs the counterfactual, `env` (the variable
+    -- names the real programs) or `flag` (the real programs as flags: the exact
+    -- pre-2a3cfb3ba precedence), and this case must fail with "fault not injected".
     { name := "an echoing stub compiler and checker fail every =selfhost case (the pipeline group is not vacuous)", run := fun _ => do
         let dir ← IO.FS.createTempDir
         let stub ← echoStub dir
         let self ← IO.appPath
+        -- The mutation self-tests (never set in a normal run or in CI).  The stub can
+        -- fail to take effect in two ways, and both must be caught:
+        --   "env"  the environment names the *real* programs instead of the stub;
+        --   "flag" the real programs arrive as flags, which beat the environment --
+        --          exactly the pre-2a3cfb3ba precedence that made this case vacuous.
+        let mutation := (← IO.getEnv "WIZ_SELFHOST_STUB_MUTATION").getD ""
+        let real? ← if mutation == "" then pure none
+          else match ← selfhostCompiler, ← selfhostChecker with
+            | .ok c, .ok k => pure (some (c.toString, k.toString))
+            | .error e, _ => throw (IO.userError s!"the mutation needs a real compiler: {e}")
+            | _, .error e => throw (IO.userError s!"the mutation needs a real checker: {e}")
+        let (injected, checkerInjected) :=
+          match mutation, real? with
+          | "env", some (c, k) => (c, k)
+          | _, _ => (stub.toString, stub.toString)
         let env : Array (String × Option String) :=
-          #[("WIZ_SELFHOST_COMPILER", some stub.toString), ("WIZ_SELFHOST_CHECKER", some stub.toString)]
-        let flags := (← flagsRef.get).toArray
+          #[("WIZ_SELFHOST_COMPILER", some injected), ("WIZ_SELFHOST_CHECKER", some checkerInjected)]
+        -- The stub must reach the children as an OVERRIDE, so the driver flags that name
+        -- the real self-hosted programs have to be dropped here: the flag wins over the
+        -- environment (`selfhostBinaryOverride`), and CI passes both flags to every shard,
+        -- so without this the children run the REAL compiler and the sweep is vacuous
+        -- (run 45285555908: 211/211 stub children exited 0). `checkInjection` below is
+        -- what catches a regression of exactly that.   -- (train13 branched before
+        -- 2a3cfb3ba, which made this change on train12; the code is the same.)
+        let rec stripSelfhostFlags : List String → List String
+          | "--selfhost-compiler" :: _ :: rest => stripSelfhostFlags rest
+          | "--selfhost-checker" :: _ :: rest => stripSelfhostFlags rest
+          | f :: rest => f :: stripSelfhostFlags rest
+          | [] => []
+        let stripped := (stripSelfhostFlags (← flagsRef.get)).toArray
+        let flags :=
+          match mutation, real? with
+          | "flag", some (c, k) =>
+            #["--selfhost-compiler", c, "--selfhost-checker", k] ++ stripped
+          | _, _ => stripped
         let caseBound := 600
         let sweepBound := 2700
         let began ← IO.monoMsNow
@@ -4692,13 +4816,20 @@ def selfHostHostGroup : Group where
           let line := s!"{i}: {showMs ms} s, exit {out.exitCode}: {c.name}"
           log := log ++ line ++ "\n"
           progress s!"stub {i + 1}/{selfHostGroup.cases.length}: {line}"
-          if out.exitCode == 124 || out.exitCode == 137 then
-            hung := hung.push s!"{line}\n{(stderrText ++ stdoutText).trimAscii.toString.take 2000}"
           -- (a case that skipped did not demonstrate the pipeline, but it did not pass
           -- either: only an exit 0 without a `skipped` note is a vacuous case; both the
           -- note and the older printed `(skipped: …)` form count)
           let skipped := (stdoutText.splitOn "\n").any fun l =>
             l.startsWith (noteMarker ++ "skipped ") || l.trimAscii.toString.startsWith "(skipped: "
+          -- The injection, before the outcome: every child that reached the pipeline must
+          -- say it used the stub, from the environment.  A child that used anything else
+          -- makes the whole sweep vacuous, so it fails here, at the first such child --
+          -- in seconds, not at the sweep budget.  (A skipped child never reached the
+          -- pipeline; it is not counted as a pass either, so there is nothing to prove.)
+          unless skipped do
+            let _ ← checkInjection s!"case {i} ({c.name})" stub.toString stderrText
+          if out.exitCode == 124 || out.exitCode == 137 then
+            hung := hung.push s!"{line}\n{(stderrText ++ stdoutText).trimAscii.toString.take 2000}"
           if out.exitCode == 0 && !skipped then passed := passed.push s!"{i}: {c.name}"
         unless hung.isEmpty do
           throw (IO.userError s!"{hung.size} of {selfHostGroup.cases.length} =selfhost cases did not terminate under the stub (bound {caseBound} s; a case that cannot finish cannot be shown to reach the pipeline):\n{"\n\n".intercalate hung.toList}\n{log}")
