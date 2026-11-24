@@ -3655,15 +3655,13 @@ mutual
 -- because it looks names up in a table; here there is no table to cycle back into).
 -- An axiom has no value to look through: a `μ` over one is rejected, as a valueless
 -- (axiom or opaque) constant is on the host side. The host's third route, an unknown
--- name, does not exist here. The arms that differ from the host are `letq` and `split`:
--- this term language has a separate `letq` (its `letE` carries no quantity) and a `split`
--- with no binder names, and the walk looks through both, so a `let` or a pair match cannot
--- hide a recursive field. The host's walk has no `letq` (its `letE` carries the quantity)
--- and no `split` arm at all, so a `split`-headed description is walked here and falls
--- through to `_ => .true` (accepted) on the host. Keep the difference: the two copies have
--- drifted, and step 2 (walking the evaluated description) is where they converge, not by
--- deleting these arms. The neutral-head arm (`_ => .true`) matches the host's, and is the
--- decision D-9 half of the fix.
+-- name, does not exist here. `letq` and `split` are written differently on the two sides
+-- (this term language has a separate `letq` — its `letE` carries no quantity — and a
+-- `split` with no binder names), but both walks look through them: the host walks a pair
+-- match's scrutinee, motive and body as this arm does, so a `let` or a pair match cannot
+-- hide a recursive field on either side. Keep these arms; deleting them to "match" the
+-- host would leave the pair match unwalked here. The neutral-head arm (`_ => .true`)
+-- matches the host's, and is the decision D-9 half of the fix.
 def descGuarded (guarded : Bool) : Tm → Bool
   | .darg _ _ E => descGuarded .true E
   | .drec _ _ E => Bool.and guarded (descGuarded guarded E)
