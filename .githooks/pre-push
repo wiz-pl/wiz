@@ -10,6 +10,28 @@
 #    new sha, so the merge result has to be built.  Other refs are not checked:
 #    agent branches keep pushing freely.
 #
+# The record names are the three `heavy` writes (`heavy:lake` for `lake ...`,
+# `heavy:nix-build:<attr>` for `nix build .#X`, `heavy:nix` for a nix command
+# named by hand); what counts as a build is decided from the record's argv by
+# `require` (see `build_evidence` in scripts/checks-ledger.py), so a bare
+# `heavy:lake` pattern would miss every `nix build` and refuse a push the
+# message itself told the user to build.
+#
+# The ledger is per-worktree, but the records are read from every worktree of
+# this checkout (and every /workspace/wt/* checkout), keyed by commit: a lane
+# builds in its own tree and the train is pushed from another one, and a sha is
+# a sha once `dirty` is false.
+#
+# Exit status (deliberate, not incidental):
+#   0  every pushed integration sha has a clean build record, or
+#   1  a red record: a pushed integration sha has no clean build for this exact
+#      commit.  That blocks.
+#   *  any other status means `require` could not answer (2 = an unreadable
+#      ledger, git failing, a bad invocation; anything else is a crash).
+#      "Cannot answer" is a migration state, not a verdict: it warns loudly and
+#      lets the push through, because a guard that blocks when it is broken is a
+#      guard people learn to pass `--no-verify`.
+#
 # It cannot block the other way: `git push --no-verify` is git's own escape
 # hatch and skips this hook entirely.  A bypass leaves no trace here at the
 # moment it happens; `audit` reports it later, from the remote-tracking refs
@@ -38,5 +60,18 @@ python3 "$root/scripts/checks-ledger.py" warn --pre-push < "$tmp" || true
 # a remote tip with no record is a push that skipped this hook (`--no-verify`)
 python3 "$root/scripts/checks-ledger.py" audit --for 'refs/heads/integration/*' >/dev/null 2>&1 || true
 python3 "$root/scripts/checks-ledger.py" require --pre-push \
-  --name 'heavy:lake' --for 'refs/heads/integration/*' < "$tmp"
-exit $?
+  --name 'heavy:lake' \
+  --name 'heavy:nix-build:*' \
+  --name 'heavy:nix' \
+  --for 'refs/heads/integration/*' < "$tmp"
+rc=$?
+case "$rc" in
+  0) exit 0 ;;
+  1) exit 1 ;;
+esac
+echo "checks-ledger: WARNING: could not answer whether the pushed sha has a clean" >&2
+echo "  build record (checks-ledger exited $rc), so the push is allowed.  Run:" >&2
+echo "    python3 scripts/checks-ledger.py status" >&2
+echo "    python3 scripts/checks-ledger.py audit" >&2
+echo "  A red record still blocks; this is an unreadable ledger or a broken tool." >&2
+exit 0

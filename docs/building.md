@@ -1752,23 +1752,50 @@ sha.
 `heavy` now records every job it runs in the worktree's `.checks/` ledger
 (`scripts/checks-ledger.py record`): the commit, whether the tree was clean at submit,
 the command and its exit status. And `.githooks/pre-push` runs
-`checks-ledger.py require --pre-push --name heavy:lake --for 'refs/heads/integration/*'`,
-which **refuses** a push to an integration branch whose sha has no clean `heavy:lake`
-record for a command containing `build` -- it prints the sha and why (`missing`, `dirty`,
-`failed`, `stale@COMMIT`, `not-a-build`). Other refs are not checked.
+`checks-ledger.py require --pre-push --name heavy:lake --name 'heavy:nix-build:*'
+--name heavy:nix --for 'refs/heads/integration/*'`, which **refuses** a push to an
+integration branch whose sha has no clean build record for this exact commit -- it
+prints the sha and why (`missing`, `dirty`, `failed`, `stale@COMMIT`, `not-a-build`,
+`partial-build`). Other refs are not checked.
+
+`heavy` names a record after the program it runs (`heavy:lake`, `heavy:nix-build:.#wiz`,
+`heavy:nix`), so all three names are required: the `nix build` the message recommends
+writes `heavy:nix-build:<attr>`, and a `heavy:lake`-only guard refused it.
 
 ```sh
 heavy --rsync -- lake build wiz tests      # writes the record for this sha
+heavy --sshfs -- lake test                 # also a build: it compiles, then runs
+heavy --sshfs -- nix build .#wiz .#tests --no-link
 python3 scripts/checks-ledger.py status    # what HEAD has (heavy:* rows included)
 ```
 
+What counts is the record's argv, not its name: a bare `lake build` (the default build),
+`lake build` with both `wiz` and `tests`, `lake test`, or `nix build`. A single target
+(`lake build Wiz.Lexer`) is a partial build and is refused, and `nix eval` is not a
+build at all. A `bash -c '...'` wrapper is refused too -- `heavy` names it `heavy:bash`,
+the element after `-c` is one string, and a shell script can run anything. Run the build
+directly; if a wrapper passes the words through as separate arguments, name the record
+yourself with `HEAVY_LEDGER_NAME=heavy:lake`.
+
+The ledger is per-worktree, but a sha is a sha: `require` reads the records of every
+worktree of the checkout (`git worktree list`) and of every sibling lane checkout on
+this host (the `wt` directory beside the main clone), keyed by commit. A lane builds in
+its own tree and the train is pushed from another one, and that must not be refused.
+
 A dirty tree never counts: `heavy --rsync` copies the working tree, so a dirty run built
-something that is not the commit. `git push --no-verify` still bypasses the hook (this is
-a guard against mistakes, not a security gate); `checks-ledger.py audit [--fetch]` lists
-the `origin/integration/*` tips that this worktree's ledger cannot explain and logs each
-once to `.checks/bypass.log` -- a lead to check, not a verdict: `.checks/` is
-per-worktree, so another checkout may hold that sha's record. Enable the hook once per
-clone with `git config core.hooksPath .githooks`.
+something that is not the commit. "Dirty" includes untracked files, so a stray log or
+probe file is enough -- the refusal names the paths (`git status --porcelain`, including
+`??` entries) and says to commit, stash or `.gitignore` them. `git push --no-verify`
+still bypasses the hook (this is a guard against mistakes, not a security gate);
+`checks-ledger.py audit [--fetch]` lists the `origin/integration/*` tips that no
+worktree's ledger can explain and logs each once to `.checks/bypass.log` -- a lead to
+check, not a verdict: another machine may hold that sha's record. Enable the hook once
+per clone with `git config core.hooksPath .githooks`.
+
+`require` exits 1 for a red record, and that blocks. It exits 2 when it cannot answer
+(an unreadable `.checks`, git failing); the hook turns that into a loud warning and
+allows the push, because cannot-answer is a migration state, not a verdict -- a guard
+that blocks when it is broken teaches people `--no-verify`.
 
 ### `lib.*With` and the derivations a diff changes
 
