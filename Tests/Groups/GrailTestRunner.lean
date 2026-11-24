@@ -164,7 +164,11 @@ def testRunnerGroup : Group where
         -- whose output is the messages of checking the file (none here), not stdout - run
         -- 45354517903 said exactly that.
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
-          ("tests/slow.wiz", "import Prelude\ndef n : Nat := 1\n"),
+          -- `run` + a 3 s sleep: the case must take longer than the 1 s limit, or the limit
+          -- has nothing to kill and the flag's effect is invisible (the previous `check`
+          -- fixture on a one-line file finished in milliseconds, so both runs passed and the
+          -- case proved nothing - run 45376147953).
+          ("tests/slow.wiz", "-- test: run\nimport Prelude\ndef main : IO Unit := Clock.sleep 3000000000\n"),
           ("tests/slow.expected", "")]
         -- (i) the same invocation with a limit the case cannot reach must SUCCEED: that half
         -- is what stops this test being vacuous. Without it, any failure of `Grail.main` in a
