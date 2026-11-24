@@ -47,6 +47,12 @@ def propIndGroup : Group where
 
 builtin_initialize registerGroup propIndGroup
 
+/-- A source that defines `D0` as `head` and then a 17-step alias chain `D1 … D17`, each
+referring to the previous name: longer than the depth bound the check used to have. -/
+def aliasChain (head : String) : String :=
+  "\n" ++ head ++ "\n" ++
+  String.join ((List.range 17).map fun k => s!"def D{k + 1} : Desc Unit := D{k}\n")
+
 def inductiveGroup : Group where
   name := "inductive"
   exercise := "Exercise 4.21"
@@ -73,6 +79,14 @@ def inductiveGroup : Group where
         fails "def Bad : Type := μ (Desc.rec 1 () (Desc.ret ()) : Desc Unit) ()" "unguarded recursive description" },
     { name := "… also when the description is a definition (the check looks through it)", run := fun _ =>
         fails "def D : Desc Unit := Desc.rec 1 () (Desc.ret ())\ndef Bad : Type := μ D ()" "unguarded recursive description" },
+    { name := "an unguarded description behind a 17-step alias chain is rejected (no depth bound)", run := fun _ =>
+        fails (aliasChain "def D0 : Desc Unit := Desc.rec 1 () (Desc.ret ())" ++ "def Bad : Type := μ D17 ()")
+          "unguarded recursive description" },
+    { name := "a μ over an axiom's description is rejected (no value to look through)", run := fun _ =>
+        fails "axiom D : Desc Unit\ndef Bad : Type := μ D ()" "unguarded recursive description" },
+    { name := "a guarded description behind the same 17-step chain is still accepted", run := fun _ =>
+        ok (aliasChain "def D0 : Desc Unit := Desc.arg 1 Unit (fun _ => Desc.rec 1 () (Desc.ret ()))" ++
+          "def Good : Type := μ D17 ()") },
     { name := "a size variable that escapes its binder is rejected", run := fun _ =>
         fails (indPrelude ++ "def bad : Type := (Nat)^i") "unknown identifier" },
     { name := "a size must be a Size (a data variable is rejected)", run := fun _ =>
