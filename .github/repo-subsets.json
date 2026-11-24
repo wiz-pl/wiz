@@ -11,7 +11,7 @@
         "AGENTS.md",
         ".github/**"
       ],
-      "sha256": "3b6881bb5e14b529bca6f9431e53904337fc37188e67ae83c1d742413c4c5d62"
+      "sha256": "bb78d9a8244279dc479c1f2f7c46fbed7f3be6db17ada09d772105903d645dcd"
     },
     "lean": {
       "files": 167,
@@ -30,13 +30,13 @@
       "sha256": "c56ad960192050ef8aa39bc07d3eedb54007aa0bac3e542f8199e5bc9f9502d2"
     },
     "packages": {
-      "files": 928,
+      "files": 929,
       "paths": [
         "scry/**",
         "hdl/**",
         "tower/**"
       ],
-      "sha256": "4da5cff5f9f3edeb8a22fdb874b43487f757b7a8f1db73c8428eae8cde45092c"
+      "sha256": "543f2a1010caed834d21e9e7826527e0194d90d62baad484bfa1c615d5a8adc5"
     },
     "runtime": {
       "files": 11,

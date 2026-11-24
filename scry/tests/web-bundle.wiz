@@ -28,6 +28,14 @@ structure Res where
   out : String
   err : String
 
+/-- `scry web` creates its `--out` directory but not its parents (`FS.createDir`, one
+level), so the test makes `build/` first, as `tests/report.wiz` and `tests/emit.wiz` do. -/
+def ensureBuild : EIO Unit := do
+  ok ← EIO.lift (FS.exists "build");
+  match ok with
+  | .true => EIO.pure ()
+  | .false => FS.createDir "build"
+
 def run (args : List String) : EIO Res := do
   r ← Process.output ".grail/bin/scry" args "";
   let code := match r.status with
@@ -78,6 +86,7 @@ def main : IO Unit := EIO.toIO (do
   match bin with
   | .false => EIO.lift (IO.println "web bundle: skip (.grail/bin/scry absent)")
   | .true => do
+    ensureBuild;
     r ← run ["web", "tests/fixtures/report", "--out", "build/web-bundle-golden",
       "--assets", "../web"];
     check "web bundle: exit 0" (Nat.beq r.code 0);
