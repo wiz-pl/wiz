@@ -830,7 +830,7 @@ EOF
             buildPhase = ''
               runHook preBuild
               export HOME=$TMPDIR
-              mkdir -p site web
+              mkdir -p site site-web
               # the API pages come from #docs-lib: `wiz doc --lib` is its own derivation
               # now, so a site-only change does not re-render 245 modules
               cp -R --no-preserve=mode ${docs-lib}/docs site/docs
@@ -842,12 +842,19 @@ EOF
               # docs-truth lane; masked because the docs job never ran while `lean` was
               # red). The island's first paint needs `wiz`; the module itself is
               # #wiz-landing-ui.
-              cp -R --no-preserve=mode ${web-bundle}/. web/
-              WIZ=${wiz}/bin/wiz sh web/build-landing.sh web
-              mkdir -p web/landing
-              cp -R --no-preserve=mode ${wiz-landing-ui}/. web/landing/
+              #
+              # WEB is an explicit output directory (`#web-bundle` is "the site's
+              # web/out"), not the checkout's `web/`: `build-landing.sh` writes the page
+              # to `OUT/landing` and copies the template's `landing.css`, `carousel.js`
+              # and `app.js` into it, so an OUT that *is* the template directory copies
+              # `landing.css` onto itself and `cp` refuses
+              # ("... landing.css and ... landing.css are the same file").
+              cp -R --no-preserve=mode ${web-bundle}/. site-web/
+              WIZ=${wiz}/bin/wiz sh web/build-landing.sh site-web
+              mkdir -p site-web/landing
+              cp -R --no-preserve=mode ${wiz-landing-ui}/. site-web/landing/
               WIZ_SOURCE_URL=${lib.escapeShellArg sourceUrl} \
-                sh web/build-site.sh site web
+                sh web/build-site.sh site site-web
               runHook postBuild
             '';
             installPhase = ''
