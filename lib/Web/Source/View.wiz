@@ -113,7 +113,7 @@ def Source.View.clipSpan (start stop : Nat) (x : Source.Span) : Option Source.Sp
   | .false => .none
 
 /-- The spans of `xs` clipped to the line, dropping the ones that miss it. -/
-partial def Source.View.clipSpans (start stop : Nat) : List Source.Span → List Source.Span
+def Source.View.clipSpans (start stop : Nat) : List Source.Span → List Source.Span
   | .nil => []
   | .cons x rest => match Source.View.clipSpan start stop x with
     | .some s => List.cons s (Source.View.clipSpans start stop rest)
