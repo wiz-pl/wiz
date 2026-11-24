@@ -24,12 +24,13 @@
 #
 # Exit status (deliberate, not incidental):
 #   0  every pushed integration sha has a clean build record, or
-#   2  `require` could not answer (an unreadable ledger, git failing, a bad
-#      invocation).  "Cannot answer" is a migration state, not a verdict: it
-#      warns loudly and lets the push through, because a guard that blocks when
-#      it is broken is a guard people learn to pass `--no-verify`.
 #   1  a red record: a pushed integration sha has no clean build for this exact
 #      commit.  That blocks.
+#   *  any other status means `require` could not answer (2 = an unreadable
+#      ledger, git failing, a bad invocation; anything else is a crash).
+#      "Cannot answer" is a migration state, not a verdict: it warns loudly and
+#      lets the push through, because a guard that blocks when it is broken is a
+#      guard people learn to pass `--no-verify`.
 #
 # It cannot block the other way: `git push --no-verify` is git's own escape
 # hatch and skips this hook entirely.  A bypass leaves no trace here at the
@@ -64,12 +65,13 @@ python3 "$root/scripts/checks-ledger.py" require --pre-push \
   --name 'heavy:nix' \
   --for 'refs/heads/integration/*' < "$tmp"
 rc=$?
-if [ "$rc" -eq 2 ]; then
-  echo "checks-ledger: WARNING: could not answer whether the pushed sha has a clean" >&2
-  echo "  build record (checks-ledger exited 2), so the push is allowed.  Run:" >&2
-  echo "    python3 scripts/checks-ledger.py status" >&2
-  echo "    python3 scripts/checks-ledger.py audit" >&2
-  echo "  A red record still blocks; this is an unreadable ledger or a broken tool." >&2
-  exit 0
-fi
-exit "$rc"
+case "$rc" in
+  0) exit 0 ;;
+  1) exit 1 ;;
+esac
+echo "checks-ledger: WARNING: could not answer whether the pushed sha has a clean" >&2
+echo "  build record (checks-ledger exited $rc), so the push is allowed.  Run:" >&2
+echo "    python3 scripts/checks-ledger.py status" >&2
+echo "    python3 scripts/checks-ledger.py audit" >&2
+echo "  A red record still blocks; this is an unreadable ledger or a broken tool." >&2
+exit 0

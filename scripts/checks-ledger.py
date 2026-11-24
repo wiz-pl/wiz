@@ -730,8 +730,8 @@ def pushed_refs(root: Path, patterns: list[str]) -> list[tuple[str, str]]:
     return targets
 
 
-def dirty_paths(record: dict, limit: int = 8) -> str:
-    """The uncommitted paths of the tree a `dirty` record came from (R4).
+def dirty_detail(record: dict, limit: int = 8) -> str:
+    """The message for a `dirty` record: which paths, and what to do (R4).
 
     `dirty` is any `git status --porcelain` output, which includes untracked files:
     a stray log or a probe file turns a real build of HEAD into a refusal.  Naming
@@ -739,10 +739,10 @@ def dirty_paths(record: dict, limit: int = 8) -> str:
     a `--no-verify`)."""
     tree = record.get("_worktree") or ""
     if not tree:
-        return ""
+        return "checks-ledger: the record's tree was dirty when the build started"
     proc = git(Path(tree), "status", "--porcelain")
     if proc.returncode != 0:
-        return f"\n  (could not read `git status` in {tree})"
+        return f"checks-ledger: could not read `git status` in {tree}"
     paths = []
     for line in proc.stdout.splitlines():
         if not line.strip():
@@ -752,12 +752,15 @@ def dirty_paths(record: dict, limit: int = 8) -> str:
             path = path.split(" -> ", 1)[1]
         paths.append(path)
     if not paths:
-        return f"\n  {tree} is clean now; rebuild there to record a clean build"
-    shown = ", ".join(paths[:limit])
-    more = "" if len(paths) <= limit else f" (+{len(paths) - limit} more)"
+        return f"checks-ledger: {tree} is clean now; rebuild there to record a clean build"
+    shown = "\n".join(f"  {path}" for path in paths[:limit])
+    more = "" if len(paths) <= limit else f"\n  (+{len(paths) - limit} more)"
     return (
-        f"\n  {tree}: {shown}{more}"
-        "\n  commit, stash or .gitignore them, then rebuild (a dirty build is not of the commit)"
+        f"checks-ledger: {tree} had uncommitted changes when the build started"
+        " (untracked files count):"
+        f"\n{shown}{more}"
+        "\n  commit, stash or .gitignore them, then rebuild (a dirty build is not"
+        " of the commit)"
     )
 
 
@@ -798,7 +801,7 @@ def require_refs(root: Path, names: list[str], ref_globs: list[str]) -> int:
             file=sys.stderr,
         )
         if detail == "dirty" and record is not None:
-            print(f"checks-ledger:{dirty_paths(record)}", file=sys.stderr)
+            print(dirty_detail(record), file=sys.stderr)
     print(
         "checks-ledger: this exact sha has no clean build record, and evaluation is not"
         " a build (`nix eval` never runs the builder).  From a clean tree (no"
