@@ -20,7 +20,8 @@ import Std.Sync.Channel
 `wiz lsp` speaks the Language Server Protocol over stdin/stdout: JSON-RPC messages with
 `Content-Length` headers. It keeps every open document's text and a query engine
 (`Query.lean`), so after an edit only the commands from the edit on are elaborated
-again. Supported: diagnostics (`publishDiagnostics`), hover (the type of the identifier
+again. Supported: diagnostics (`publishDiagnostics`, with the document's version, and the
+pull model's `textDocument/diagnostic`/`resultId`), hover (the type of the identifier
 under the cursor), go to definition (also into libraries), completion of global names,
 and the infoview's requests (`wiz/plainGoal`, `wiz/interactiveGoals`, …; the protocol is
 in `wiz-notes/infoview-protocol.md`): goals and expected types read from the info tree,
@@ -288,11 +289,26 @@ def diagnostic (srv : Server) (doc : Doc) (m : Msg) : Json :=
                ("severity", (match m.severity with | .error => 1 | .warning => 2 | .info => 3 : Nat)),
                ("source", "wiz"), ("message", m.text)] ++ code)
 
+/-- The document's diagnostics, in order (the state's messages): a `WIZ_WIDGET:` display
+value (`#plot`) is an infoview widget, not a diagnostic. -/
+def diagnosticItems (srv : Server) (doc : Doc) : Array Json :=
+  (doc.state.messages.filter (fun m => !m.text.startsWith "WIZ_WIDGET:")).map (diagnostic srv doc)
+
+/-- (pull diagnostics) The identity of a document's diagnostic report: the text and the
+diagnostics it was made from. `textDocument/diagnostic` returns it as `resultId` and, when
+the client sends the same one back as `previousResultId`, answers `unchanged`. -/
+def diagnosticResultId (doc : Doc) (items : Array Json) : String :=
+  let ds := String.join (items.map (·.compress)).toList
+  s!"{mixHash (hash doc.text) (hash ds)}"
+
 def diagnostics (srv : Server) (uri : String) (doc : Doc) : Json :=
-  -- a `WIZ_WIDGET:` display value (`#plot`) is an infoview widget, not a diagnostic
-  let ds := (doc.state.messages.toList.filter (fun m => !m.text.startsWith "WIZ_WIDGET:")).map (diagnostic srv doc)
+  let ds := diagnosticItems srv doc
+  -- the document's version, so a client can drop an out-of-order publish (LSP 3.17)
+  let version := match doc.version with
+    | some v => [("version", Json.num v)]
+    | none => []
   Json.mkObj [("jsonrpc", "2.0"), ("method", "textDocument/publishDiagnostics"),
-              ("params", Json.mkObj [("uri", uri), ("diagnostics", Json.arr ds.toArray)])]
+              ("params", Json.mkObj ([("uri", Json.str uri)] ++ version ++ [("diagnostics", Json.arr ds)]))]
 
 /-! ## Formatting (`wiz fmt`, stage 11aa) -/
 
@@ -346,6 +362,10 @@ def capabilities : Json :=
                                            ("full", true)]),
     ("documentSymbolProvider", true), ("workspaceSymbolProvider", true), ("foldingRangeProvider", true),
     ("documentFormattingProvider", true), ("documentRangeFormattingProvider", true),
+    -- (pull diagnostics: `textDocument/diagnostic`) the diagnostics of a document are
+    -- the state's messages, so they also depend on its `include_str` files and imports
+    ("diagnosticProvider", Json.mkObj [("identifier", "wiz"), ("interFileDependencies", true),
+                                       ("workspaceDiagnostics", false)]),
     ("codeActionProvider", Json.mkObj [("codeActionKinds", Json.arr #["quickfix", "refactor.rewrite"]),
                                        ("resolveProvider", true)]),
     ("experimental", Json.mkObj [("wizInfoview", Json.mkObj [("version", (1 : Nat)),
@@ -880,6 +900,19 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
     pure ({ srv with docs := srv.docs.insert uri doc, sessions := session },
      #[diagnostics srv uri doc] ++ (if srv.elaboratedNotes then #[note] else #[]))
   | "textDocument/didClose" => pure ({ srv with docs := srv.docs.erase uri }, #[])
+  | "textDocument/diagnostic" =>
+    -- (pull diagnostics) the same list the last `publishDiagnostics` carried; the
+    -- `resultId` covers the text and the diagnostics, so a client that sends back the
+    -- one it has is told `unchanged` instead of being sent the list again
+    let some doc := srv.docs.get? uri | return (srv, #[replyError (-32602) s!"unknown document {uri}"])
+    let items := diagnosticItems srv doc
+    let resultId := diagnosticResultId doc items
+    let previous := getStr msg ["params", "previousResultId"]
+    if !previous.isEmpty && previous == resultId then
+      pure (srv, #[reply (Json.mkObj [("kind", "unchanged"), ("resultId", Json.str resultId)])])
+    else
+      pure (srv, #[reply (Json.mkObj [("kind", "full"), ("resultId", Json.str resultId),
+                                       ("items", Json.arr items)])])
   | "textDocument/formatting" | "textDocument/rangeFormatting" =>
     let some doc := srv.docs.get? uri | return (srv, #[reply (Json.arr #[])])
     -- `wiz fmt` indents with spaces: a tab counts as one column to the parser, so

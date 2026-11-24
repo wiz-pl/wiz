@@ -486,7 +486,12 @@ clicking one selects its range. An empty array clears the list and the underline
 diagnostic's `range` may have no `end`, an empty `end`, or span lines: the editor
 underlines the token at its start for the first two and one span per line for the last.
 A publish whose `version` is older than the one already stored for the URI is ignored;
-a server that sends no version keeps last-arrival order. `code`/`data` (the code-action
+a server that sends no version keeps last-arrival order. `wiz lsp` sends the document's
+`version`, and it also serves the pull model: `diagnosticProvider` (with
+`interFileDependencies`, so a change to an `include_str` sibling or an imported module
+matters) and `textDocument/diagnostic`, which answers `{kind: "full", resultId, items}`
+or `{kind: "unchanged", resultId}` when the client's `previousResultId` is still current.
+The playground itself uses push. `code`/`data` (the code-action
 machinery) are not used by the playground.
 
 ## Errors and timeouts
