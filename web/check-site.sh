@@ -110,9 +110,10 @@ if [ -f "$landing_page" ]; then
   done
 fi
 
-# The source reader, when the site has one. A publishing build sets SITE_REQUIRE_SOURCE=1
-# (web/build-site.sh refused to build without a bundle then), so the page and both halves
-# of its runtime are part of the artifact; a docs-only tree may omit the directory.
+# The source reader, when the site has one. `.#pages` and the `docs check` job set
+# SITE_REQUIRE_SOURCE=1 for this script (the artifact always has `/source/` then), so
+# the page and both halves of its runtime are part of the tree; a docs-only tree may
+# omit the directory.
 if [ -d "$SITE/source" ] || [ "${SITE_REQUIRE_SOURCE:-0}" = 1 ]; then
   need source/index.html
   need source/app.js

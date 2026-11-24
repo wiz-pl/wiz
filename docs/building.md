@@ -29,12 +29,12 @@ kept under `/tmp`, unless the run is handed them as flags — the three below).
 programs (`selfhost/*.wiz` checked and built by this toolchain) and runs them in the
 `selfhost` and differential-sweep cases: the *compiler* and the *checker*. Three flags
 decide where they come from, and each wins over the `WIZ_SELFHOST_*` environment
-variable of the same name (which stays only for the case that sets one on a child
-process):
+variable of the same name (the `_COMPILER`/`_CHECKER` variables stay for the case that
+sets one on a child process; `WIZ_SELFHOST_CACHE` is a general fallback):
 
-* `--selfhost-cache DIR` builds and keeps them in `DIR` instead of the system temp
-  directory (`WIZ_SELFHOST_CACHE`). The value is passed on to every case's process, so a
-  run cannot end up with cases using different caches.
+* `--selfhost-cache DIR` builds and keeps them in `DIR` instead of `/tmp`
+  (`WIZ_SELFHOST_CACHE`). The value is passed on to every case's process, so a run
+  cannot end up with cases using different caches.
 * `--selfhost-compiler PATH` / `--selfhost-checker PATH` use that binary instead of
   building one (`WIZ_SELFHOST_COMPILER`/`_CHECKER`). The path is a *store path* the
   caller promised exists: a path that is not there is an error naming it, not a case
@@ -44,11 +44,13 @@ process):
   cannot call Lean, so `.#selfhost-compiler`/`.#selfhost-checker` build exactly what it
   prints.
 
-The flags are the reason CI builds the two programs once: the `lean` job runs
-`nix build .#selfhost-compiler .#selfhost-checker` and passes the store paths to every
-shard as `--selfhost-compiler`/`--selfhost-checker`, instead of each fresh runner
-rebuilding them in `/tmp` (9,257 s, 9.8 % of a suite run; perf H2). A local run can do
-the same: `lake test -- --selfhost-compiler "$(nix build .#selfhost-compiler
+The flags are the reason CI builds the two programs once: the `lean` job builds them
+(`nix build .#selfhost-compiler .#selfhost-checker` on a master push;
+`lib.selfhostWith { wiz; tests; }` over its seeded build on a pull request or an
+integration push) and passes the store paths to every shard as
+`--selfhost-compiler`/`--selfhost-checker`, instead of each fresh runner rebuilding them
+in `/tmp` (9,257 s, 9.8 % of a suite run; perf H2). A local run can do the same:
+`lake test -- --selfhost-compiler "$(nix build .#selfhost-compiler
 --no-link --print-out-paths)/bin/compiler" --selfhost-checker "$(nix build
 .#selfhost-checker --no-link --print-out-paths)/bin/checker"`.
 
@@ -910,8 +912,8 @@ not invalidate the others:
 | `.#wasm-fixtures` | the `wasm-fixtures` programs under `scripts/` compiled with `wiz build --target wasm`, the host `web/wasm-host.mjs`, and each module's expected stdout; the check runs every module under Node | the `wasm-fixtures` directory under `scripts/`, `web/wasm-host.mjs` |
 | `.#wiz-web`, `.#wiz-playground`, `.#wiz-playground-ui`, `.#wiz-source-ui` | the Emscripten page modules, each with its own page files (unchanged) | each script's own fileset |
 | `.#web-bundle` | the three page-module outputs merged into one directory (the site's `web/out`) | `wiz-web` + `wiz-playground` + `wiz-playground-ui` |
-| `.#docs-lib` | the standard library's API pages: `wiz doc --lib --jobs 4` over `lib/`, plus `.#reference`'s `index.md` as `docs/reference.md` | `lib/`, the docs tooling in `siteAssetFiles`, `wiz`, `reference`, `web-bundle` |
-| `.#docs-site` | the site's chrome over `.#docs-lib`'s pages: the landing page, guide, benchmark page, playground and licences; `/source/` is absent | `docs/`, `bench/`, `examples/`, `tools/`, `editors/`, `drafts/`, `scry/`, the site scripts under `web/`, `wiz`, `reference`, `web-bundle` |
+| `.#docs-lib` | the standard library's API pages: `wiz doc --lib --jobs 4` over `lib/`, plus `.#reference`'s `index.md` as `docs/reference.md` | `docsSiteSource` (all of `docs/`, `bench/`, `examples/`, `tools/`, `editors/`, `drafts/`, `scry/` and README/ROADMAP/CHANGELOG, plus the docs tooling in `siteAssetFiles` — not only `lib/`), `wiz`, `reference`, `web-bundle` |
+| `.#docs-site` | the site's chrome over `.#docs-lib`'s pages: the landing page, guide, benchmark page, playground and licences; `/source/` is absent | `docsSiteSource` (the same source as `.#docs-lib`, including `web/build-landing.sh` and `web/build-site.sh` through `siteAssetFiles`), `docs-lib`, `web-bundle`, `wiz-landing-ui`, `wiz`; `reference` reaches it through `docs-lib` |
 | `.#pages` | the exact `doc-site` tree the `deploy-docs` job uploads: `docs-site` plus the `scry` source reader under `/source/` | `docs-site`, `scry` (the `.#scry` derivation), `web/source-*` and `web/framework/`, `wiz-source-ui`, `tree-sitter-c-sharp` |
 | `.#scry` | the analysis CLI, `grail build scry` as a store path (`bin/scry`); `.#pages` builds the `/source/` bundle with it, while `packages (scry)` and `scry.yml` still run that build in-tree | `scry/`, `lib/`, `wiz`, `tree-sitter-c-sharp` |
 | `.#selfhost-compiler`, `.#selfhost-checker` | the self-hosted frontend's compiler and checker as binaries, composed by `Wiz/Selfhost.lean` and printed by `tests --selfhost-source`; the `lean` job builds them once and the shards take the store paths | `selfhost/`, `lib/`, `wiz`, `tests` |
@@ -1056,9 +1058,9 @@ recomputing the derivation. Pushes, the merge queue and the release workflows ke
 pure `nix build`: the trusted cache and every release artifact name the pure derivation,
 and nothing in the release path reads `withLakeCache`.
 
-`.#reference` (the standard library's reference manual, made with the cached `wiz`) is an
-input of `.#docs-lib`, so the `docs` job's `nix build .#pages` builds it, off the
-shards' critical path.
+`.#reference` (the standard library's reference manual, made with the pure `wiz`, the
+cached one on a master push) is an input of `.#docs-lib`, so the `docs` job's
+`nix build .#pages` builds it, off the shards' critical path.
 Every job pulls from Cachix through `cachix-action`, which is set up for substitution
 only (`skipPush: true`); on a pull request it reads the trusted cache anonymously, and
 the jobs that substitute this commit's store paths (the test shards, `trust-ledger`,
@@ -1560,9 +1562,11 @@ the generated reference manual (`result/index.md`, and `result/site`).
   programs between runs: the elaboration cache (`tests --cache ~/.cache/wiz …`),
   `.grail`, and — the fallback only — the self-hosted checker and compiler that the
   tests compile into `/tmp/wiz-selfhost-*`. In CI the `lean` job builds them once
-  (`nix build .#selfhost-compiler .#selfhost-checker`) and the shard passes the store
-  paths as `--selfhost-compiler`/`--selfhost-checker`, so this cache stays cold unless
-  the realisation failed (the shard warns) or the run is a local one. The cache key
+  (`nix build .#selfhost-compiler .#selfhost-checker` on a master push;
+  `lib.selfhostWith { wiz; tests; }` over its seeded build on a pull request or an
+  integration push) and the shard passes the store paths as
+  `--selfhost-compiler`/`--selfhost-checker`, so this cache stays cold unless the
+  realisation failed (the shard warns) or the run is a local one. The cache key
   starts with a hash of everything the compiler
   is made of (the `.lean` files, Lean, `flake.lock`), and partial hits only come from the
   same compiler (the elaboration cache's own keys include the wiz binary's hash, but the
@@ -1804,9 +1808,11 @@ notebook pages' `.md` links, so `/notebooks/tour.html` points at `/guide/docs/�
 `wiz doc --lib` elaborates the whole library when its cache is cold, and that is the bulk
 of the work. It happens inside `.#docs-lib`, which is a derivation: the result has a store
 path, so the job substitutes it instead of redoing the elaboration, and Cachix is its
-cache (not an Actions entry — there is no `.wiz-doc-cache` layer any more). It reruns only
-when `lib/`, `wiz` or `web-bundle` changes (or the docs tooling in `siteAssetFiles`); any
-other change is a Cachix hit. The packaged `wiz` still reads its own
+cache (not an Actions entry — there is no `.wiz-doc-cache` layer any more). Its source is
+`docsSiteSource` (`flake.nix`): the docs, bench, examples, tools, editors, drafts and scry
+trees plus README/ROADMAP/CHANGELOG and `siteAssetFiles` — so a prose edit there **also
+re-renders the whole library**. `wiz`, `reference` and `web-bundle` are inputs too; only a
+change outside all of them is a Cachix hit. The packaged `wiz` still reads its own
 `share/wiz/cache` (the wrapper's default `--cache-ro`), which is what makes a
 `lib/`-changing build replay most of the library.
 
@@ -1822,7 +1828,9 @@ runtime module, `wiz-playground-ui.mjs`). The `web` job builds and tests it;
 page has no static fallback: a missing runtime module is a playground that cannot start.
 The `.#wiz-playground` derivation runs both scripts, so one store path carries the engine
 and the page; `.#web-bundle` merges it with the other module outputs, and `.#docs-site`
-copies that bundle (`web/build-site.sh`), so the docs job runs no Emscripten build.
+copies that bundle (`web/build-site.sh`), so on a master push the docs job runs no
+Emscripten build. On a seeded run the pure modules are not in any cache the run wrote,
+so the docs job may build them.
 
 | path | what it is |
 |---|---|
