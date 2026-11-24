@@ -168,7 +168,7 @@ def testRunnerGroup : Group where
           -- has nothing to kill and the flag's effect is invisible (the previous `check`
           -- fixture on a one-line file finished in milliseconds, so both runs passed and the
           -- case proved nothing - run 45376147953).
-          ("tests/slow.wiz", "-- test: run\nimport Prelude\ndef main : IO Unit := Clock.sleep 3000000000\n"),
+          ("tests/slow.wiz", "-- test: run\nimport Sys\ndef main : IO Unit := Clock.sleep 3000000000\n"),
           ("tests/slow.expected", "")]
         -- (i) the same invocation with a limit the case cannot reach must SUCCEED: that half
         -- is what stops this test being vacuous. Without it, any failure of `Grail.main` in a
