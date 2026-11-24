@@ -41,6 +41,15 @@ in
     "lib-selfhostWith-checker" = (lib.selfhostWith seeded).checker;
     # `nix build (…lib."$sys".towerWith (builtins.storePath <wiz>))`
     "lib-towerWith-wiz" = lib.towerWith pkgs.wiz;
+    # `nix build --expr (…lib."$sys".webWith (builtins.storePath <wiz>)).<attr>` - the four
+    # web packages the `wasm` job builds with the seeded compiler (ci.yml, the
+    # pull_request branch of "nix build (wiz-web, …)"). Without these rows the
+    # touched-derivations selector never inspects them, so a change that would rebuild a
+    # web package could be skipped.
+    "lib-webWith-wiz-web" = (lib.webWith pkgs.wiz).wiz-web;
+    "lib-webWith-wiz-playground" = (lib.webWith pkgs.wiz).wiz-playground;
+    "lib-webWith-wiz-playground-ui" = (lib.webWith pkgs.wiz).wiz-playground-ui;
+    "lib-webWith-wiz-source-ui" = (lib.webWith pkgs.wiz).wiz-source-ui;
     # scripts/lake-cache.sh: the trusted Lake seed, `(lib.withLakeCache empty-lake).unwrapped.lake`
     "lib-withLakeCache-lake-seed" = (lib.withLakeCache lib.empty-lake).unwrapped.lake;
   }

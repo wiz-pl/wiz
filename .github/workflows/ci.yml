@@ -1452,21 +1452,36 @@ jobs:
           # not fit a 16 GB runner). `--max-jobs 1`: one at a time, for the same reason.
           # `wiz` and emscripten are substitutes.
           if [ "${{ github.event_name }}" = pull_request ]; then
-            # a pull request: build from the seed (its own lean subset cache first, the
-            # base commit's substituted store path second, else empty) so `wiz` is this
-            # branch's seeded build, not a cold rebuild. `wiz-source-ui` is built the
-            # same way, so it uses the seeded compiler too (a pure `.#wiz-source-ui`
-            # would drag in a cold pure `.#wiz`).
-            seed=$(scripts/lake-cache.sh choose .subset-cache/lean \
-              "${{ steps.lake-trusted.outputs.seed }}")
-            echo "seed: $seed"
-            LAKE_CACHE_NIX_ARGS='--max-jobs 1' \
-              scripts/lake-cache.sh build "$seed" wiz-web wiz-playground wiz-playground-ui wiz-source-ui \
-              | tee web-paths
-            web=$(sed -n 's/^wiz-web=//p' web-paths)
-            playground=$(sed -n 's/^wiz-playground=//p' web-paths)
-            ui=$(sed -n 's/^wiz-playground-ui=//p' web-paths)
-            source_ui=$(sed -n 's/^wiz-source-ui=//p' web-paths)
+            # A pull request builds the four web packages **with the lean job's seeded
+            # compiler**, through `lib.webWith (builtins.storePath <wiz>)`. Without it
+            # every derivation falls back to the pure `.#wiz`, which instantiates
+            # `wiz-unwrapped`: run 45433827374 spent 31 minutes on
+            # `wiz-unwrapped-0.1.0.drv` (17:26:10-17:57:23), started `wiz-0.1.0.drv` at
+            # 17:57:23, and the job was killed at the 75-minute wall before it finished.
+            # The seeded path is a store input, so Nix substitutes it instead.
+            wiz='${{ needs.lean.outputs.wiz }}'
+            if [ -z "$wiz" ]; then
+              echo "::error title=wasm::the lean job produced no wiz store path"
+              exit 1
+            fi
+            if ! nix build --no-link "$wiz" --option max-jobs 0; then
+              echo "::error title=wasm::the seeded wiz $wiz is not substitutable; refusing a cold build"
+              exit 1
+            fi
+            sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+            expr="let f = builtins.getFlake \"$PWD\"; in f.lib.\"$sys\".webWith (builtins.storePath \"$wiz\")"
+            # Prove on the derivation graph that none of the four builds a `wiz`, before
+            # building any of them (the same guard `packages` uses for tower).
+            for attr in wiz-web wiz-playground wiz-playground-ui wiz-source-ui; do
+              drv=$(nix eval --impure --raw --expr "($expr).$attr.drvPath")
+              nix derivation show "$drv" > "$RUNNER_TEMP/$attr.json"
+              python3 scripts/check-seeded-wiz.py "$RUNNER_TEMP/$attr.json" "$wiz"
+            done
+            out=$(nix build --impure --no-link --print-out-paths --max-jobs 1 -L --expr "$expr")
+            web=$(echo "$out" | sed -n 1p)
+            playground=$(echo "$out" | sed -n 2p)
+            ui=$(echo "$out" | sed -n 3p)
+            source_ui=$(echo "$out" | sed -n 4p)
           else
             nix build .#wiz-web .#wiz-playground .#wiz-playground-ui .#wiz-source-ui --no-link -L --max-jobs 1
             web=$(nix path-info .#wiz-web)
