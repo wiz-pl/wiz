@@ -34,7 +34,11 @@ function call(name, ...args) {
     return typeof a === "number" ? big(a) : a;
   });
   try {
-    const next = wasm["_" + name](app.state(), ...rest);
+    // The state is a Wiz value: a BigInt straight from `wiz_loom_init`, or — once a step has
+    // gone through `wiz_step` — the low 32 bits as an unsigned Number. The i64 entry points
+    // need the BigInt form, so convert exactly as `driver.js`'s `bigState()` does.
+    // (`TypeError: Cannot convert 67561856 to a BigInt`, `web` job on train13.)
+    const next = wasm["_" + name](big(app.state()), ...rest);
     app.setState(next);
     return next;
   } finally {
