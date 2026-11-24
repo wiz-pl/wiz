@@ -873,6 +873,14 @@ def expandAliases (g : Globals R) (x : Name) : Name :=
   | (a, M) :: _ => M ++ (x.drop a.length).toString
   | [] => x
 
+/-- `List.eraseDups` keeping insertion order, in one pass: `eraseDups` is O(n²) and the
+candidate list is one name plus one per `open`, so it repeats exactly when two `open`s name
+the same namespace. -/
+def dedupNames (xs : List Name) : List Name :=
+  let step : Std.HashSet Name × List Name → Name → Std.HashSet Name × List Name :=
+    fun (seen, out) x => if seen.contains x then (seen, out) else (seen.insert x, x :: out)
+  (xs.foldl step ({}, [])).2.reverse
+
 /-- (13t) What the identifier `x` as written denotes in the module being elaborated.
 
 * A **qualified** name (`A.x`) is resolved as written, after an `open … as` alias maps
@@ -907,7 +915,7 @@ def resolveName (g : Globals R) (x : Name) : Except String Name :=
       ++ [x] ++ g.opens.map (· ++ "." ++ x)).filterMap fun n =>
         let k := g.resolve n
         if g.decls.contains k && (g.privateTo? k).isNone then some k else none
-    match found.eraseDups with   -- complexity: ok (one name plus at most its opens)
+    match dedupNames found with
     | [] => .ok (g.resolve x)
     | [n] => .ok n
     | ns =>
@@ -922,7 +930,7 @@ then the root, then each `open`), so that `broken` inside `namespace A` finds th
 def failedDecl? (g : Globals R) (x : Name) : Option FailedDecl :=
   let cands := (if g.namespacePrefix.isEmpty then [] else [g.namespacePrefix ++ "." ++ x])
     ++ [x] ++ g.opens.map (· ++ "." ++ x)
-  (cands.eraseDups.filterMap fun n => g.failedDecls[n]?).head?
+  ((dedupNames cands).filterMap (fun n => g.failedDecls[n]?)).head?
 
 end Globals
 
