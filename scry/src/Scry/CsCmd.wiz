@@ -683,6 +683,15 @@ def Scry.Cs.insertAstKey (k : Nat × Nat) : List (Nat × Nat) → List (Nat × N
     | .true => List.cons k (List.cons x rest)
     | .false => List.cons x (Scry.Cs.insertAstKey k rest)
 
+/-- A node's `depth` as the cap's sort key. `1000000` (a sort key past any real tree's
+depth, and what `astFactOf` writes as the row's `depth`) when the 512-level walk gives up:
+`none` is not a depth, and reading it as `0` would sort the node to the root and let the
+cap drop the file's own skeleton first - the one thing the cap must keep. -/
+def Scry.Cs.astDepthOf (store : Scry.CstStore) (i : Nat) : Nat :=
+  match Scry.Cs.nodeDepth store i with
+  | .some d => d
+  | .none => 1000000
+
 /-- `factsOf`'s row builder: each kept node's `ast` row, in the tree's order. -/
 partial def Scry.Cs.astRowsGo (store : Scry.CstStore) (text fileId : String) (base : Nat) :
     List (Nat × Nat) → List Source.FactRow
@@ -698,10 +707,7 @@ def Scry.Cs.factsOf (store : Scry.CstStore) (text fileId : String) (base : Nat) 
     List Source.FactRow × Nat :=
   let keys := List.foldl (fun acc i =>
       match Scry.Cs.astFactOf store text fileId base i with
-      | .some _ => Scry.Cs.insertAstKey
-          (match Scry.Cs.nodeDepth store i with
-           | .some d => d
-           | .none => 0, i) acc
+      | .some _ => Scry.Cs.insertAstKey (Scry.Cs.astDepthOf store i, i) acc
       | .none => acc) (.nil : List (Nat × Nat)) (Scry.range (Scry.CstStore.nodeCount store));
   let rows : List Source.FactRow := Scry.Cs.astRowsGo store text fileId base keys;
   let kept := List.take Scry.Cs.astFactCap rows;
@@ -716,6 +722,58 @@ def Scry.Cs.sinkOriginOf (m : Scry.OriginMap) (rel : String) (f : Scry.RuleFindi
   match Scry.originAt m f.func f.sink with
   | .some o => o
   | .none => Scry.Origin.mk rel 0 0 0 0
+
+/-- The sink step of a finding's path: the last node whose point is the finding's sink
+program point. That is the call itself (`Process.Start(cmd)`), and its located origin is
+the span a reader underlines; `f.sink`'s origin alone is often the statement, which can
+start a line earlier than the call and is not the same mark.
+
+`none` when the analysis did not record the sink as a path node; the caller then falls
+back to the sink program point's own origin. -/
+def Scry.Cs.sinkStepOf (f : Scry.RuleFinding) : Option Scry.PathNode :=
+  match List.find (fun p => Nat.beq p.point f.sink) (List.reverse f.path) with
+  | .some p => .some p
+  | .none => .none
+
+/-- A finding's sink as the reader's span: the call's own origin when the path has the
+sink step (the same node id and span the step's `flow` row would carry, so the sink row is
+still the one the path's last step points at), else the sink program point's origin,
+else `none`-located. The `flow` walk drops the step whose span equals this one, so the
+info view shows the call once. -/
+def Scry.Cs.findingSinkOf (m : Scry.OriginMap) (rel : String) (f : Scry.RuleFinding) :
+    Scry.Origin :=
+  match Scry.Cs.sinkStepOf f with
+  | .some p => match Scry.originAt m p.func p.point with
+    | .some o => o
+    | .none => Scry.Cs.sinkOriginOf m rel f
+  | .none => Scry.Cs.sinkOriginOf m rel f
+
+/-- Whether finding `f` belongs to the file at `rel`: the file its sink's origin names.
+The bundle hands every file its own findings only; a finding that landed in a file's JSON
+because the file was analysed, not because the finding is there, would draw a finding whose
+span points into another file's text. A sink with no origin is left to the analysis's own
+`findingFile` (an empty name matches no file, and a file with an unlocated finding still
+shows it under its own sink line of 0). -/
+def Scry.Cs.findingIn (m : Scry.OriginMap) (rel : String) (f : Scry.RuleFinding) : Bool :=
+  let file := match Scry.originAt m f.func f.sink with
+    | .some o => o.uri
+    | .none => rel;
+  String.eq (Scry.normPath file) (Scry.normPath rel)
+
+/-- The pairs `p.1` carries already have one member per `f` in order (`Scry.zipFindings`
+walks both lists together); only the pair is a constructor with two fields, which this
+dialect's `match` cannot take apart, so each field is read with its own accessor. -/
+def Scry.Cs.pairFinding (p : Scry.RuleFinding × Bool) : Scry.RuleFinding := p.1
+
+def Scry.Cs.pairChecked (p : Scry.RuleFinding × Bool) : Bool := p.2
+
+/-- `raw`'s findings in `rel`, each with its `checked` flag: the analysis's pairs, kept
+only for the file they belong to. `List.filter` would drop the flags of the findings it
+keeps; the flag is per finding, so the filter carries the pair. -/
+def Scry.Cs.zipFindingsIn (m : Scry.OriginMap) (rel : String) (raw : List Scry.RuleFinding)
+    (checks : List Bool) : List (Scry.RuleFinding × Bool) :=
+  List.filter (fun p => Scry.Cs.findingIn m rel (Scry.Cs.pairFinding p))
+    (Scry.zipFindings raw checks)
 
 /-- An empty `List Scry.RejectedOrigin`, spelled as a name so the walk's tuple components
 have a type where a bare `[]` literal would leave the element type unconstrained. -/
@@ -769,19 +827,21 @@ def Scry.Cs.placedOf (text findId : String) (f : Scry.RuleFinding) (m : Scry.Ori
   let placed := Scry.Cs.placedGo i findId steps 0;
   (steps, placed.2.1, placed.2.2)
 
-/-- One file's `Scry.ReportFile` and its `ast` facts for the reader: the report's findings
-in the analysis's order (the bundle sorts them by semantic id), each with its sink's
-located origin and its placed path, plus `ast` rows starting at fact node `base`. The
-page's facts are built by `Scry.bundleModelOf` from this, so C# and C share the `sink`
-and `flow` shapes; the `ast` rows are this front end's own. -/
+/-- One file's `Scry.ReportFile` and its `ast` facts for the reader: **this file's**
+findings of `raw` in the analysis's order (the bundle sorts them by semantic id), each with
+its sink call's located span and its placed path, plus `ast` rows starting at fact node
+`base`. The page's facts are built by `Scry.bundleModelOf` from this, so C# and C share the
+`sink` and `flow` shapes; the `ast` rows are this front end's own. -/
 def Scry.Cs.reportFileOf (r : Scry.Cs.FileResult) (raw : List Scry.RuleFinding)
     (checks : List Bool) (m : Scry.OriginMap) (base : Nat) :
     Scry.ReportFile × List Source.FactRow × Nat × Nat :=
   let rel := r.path;
-  let pairs := Scry.zipFindings raw checks;
+  -- Only this file's findings: `raw` is the whole program's, and a file's JSON must not
+  -- carry a finding whose sink is in another file's text.
+  let pairs := Scry.Cs.zipFindingsIn m rel raw checks;
   let pages := List.map (fun p =>
     let f := p.1;
-    let sink := Scry.Cs.sinkOriginOf m rel f;
+    let sink := Scry.Cs.findingSinkOf m rel f;
     let placed := Scry.Cs.placedOf r.text (Scry.wfId "cs" f rel) f m;
     let id := Scry.wfId "cs" f rel;
     { Scry.reportFindingOf rel m f p.2 .none with
@@ -796,7 +856,8 @@ def Scry.Cs.reportFileOf (r : Scry.Cs.FileResult) (raw : List Scry.RuleFinding)
   | .none => (rf, [], base, 0)
 
 /-- The reader's models of every file (the C# half of `Scry.webModelsGo`): findings,
-`sink`/`flow` rows and `ast` rows, in the walk's order. A file's fact node ids count one
+`sink`/`flow` rows and `ast` rows, in the walk's order. Each file's `ReportFile` carries its
+own findings (`Scry.Cs.reportFileOf` filters `raw`), and its fact node ids count one
 sequence (its findings first, then its `ast` rows), so a rebuild numbers them the same
 way. The fourth list is `(file, rows the cap left out)`, for the manifest. -/
 partial def Scry.Cs.bundleModelsGo (raw : List Scry.RuleFinding) (checks : List Bool)
@@ -954,7 +1015,7 @@ def Scry.Cs.writeBundle (assetsOpt uiOpt : Option String) (out : String) (t : Sc
     (Scry.Cs.bundleExtra t r truncated filesWithAst);
   _copied ← match uiOpt with
     | .none => EIO.pure (.false : Bool)
-    | .some src => Scry.webCopy src (String.append out "/wiz-source-ui.mjs");
+    | .some src => Scry.webCopyUi src out;
   -- The interactive reader, not a listing: `bundleIndexHtml` wraps the Loom runtime's
   -- SSR in `<div id="app" data-wiz-mode="static">` and `app.js` mounts on it, so the page
   -- shows the source with an infoview and its findings are walkable - the same page

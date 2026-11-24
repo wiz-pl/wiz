@@ -401,7 +401,7 @@ def Scry.webRun (o : Scry.WebOpts) : EIO Nat := do
         ["mount.js", "driver.js", "runtime.js", "adopt.js"]);
   runtimeCopied ← (match o.ui with
     | .none => EIO.pure Bool.false
-    | .some src => Scry.webCopy src (String.append out "/wiz-source-ui.mjs"));
+    | .some src => Scry.webCopyUi src out);
   -- Data files.
   Scry.bundleWriteData out tool bundleFiles bundleFindings bundleFacts hostCopied
     frameworkCopied runtimeCopied [];

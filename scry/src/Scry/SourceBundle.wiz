@@ -388,11 +388,17 @@ def Scry.bundleFindingsJson (files : List Source.File) (findings : List Source.F
 
 /-- One `data/f/<id>.json` (`scry.source.file/1`): the source, the file's findings and
 its facts (in that order: node ids count the findings first). -/
+/-- One file's `data/f/<id>.json` (`scry.source.file/1`). `facts` are the findings' rows
+(`sink`, `flow`) and `ast` the tree the file's parse produced, kept as its own list: the
+reader draws the two panels from different shapes, and a file whose `ast` is empty says
+"no tree" by an empty array rather than by a missing key. -/
 def Scry.bundleFileJson (f : Source.File) (findings : List Source.Finding)
     (facts : List Source.FactRow) : Json :=
   let i := EditorModel.index f.text;
   let own := List.filter (fun x => String.eq x.fileId f.id) findings;
   let fs := List.filter (fun r => String.eq r.fileId f.id) facts;
+  let trees := List.filter (fun r => Bool.and (String.eq r.fileId f.id)
+      (String.eq r.kind "ast")) facts;
   Json.mkObj
     [ ("schema", Json.mkStr "scry.source.file/1")
     , ("id", Json.mkStr f.id)
@@ -402,6 +408,7 @@ def Scry.bundleFileJson (f : Source.File) (findings : List Source.Finding)
     , ("lines", Json.ofNat f.lines)
     , ("findings", Json.mkArr (List.map (Scry.webFindingJson i) own))
     , ("facts", Json.mkArr (List.map (Scry.webFactJson i) fs))
+    , ("ast", Json.mkArr (List.map (Scry.webFactJson i) trees))
     ]
 
 /-- Create `p` when it does not exist (one level: the caller makes the parents). -/
@@ -518,6 +525,18 @@ partial def Scry.bundleWarnLarge : List Source.File → EIO Unit
           " characters; the Wasm reader's JSON parser can overflow its stack on a single string of about 50 KB, so this bundle may not mount")))))
     | .false => EIO.pure ();
     Scry.bundleWarnLarge rest
+
+/-- Copy the Loom runtime into a bundle: `--ui` names the `.mjs`, and Emscripten fetches its
+`.wasm` **beside it** (`wiz-source-ui.wasm`). Copying only the module makes the browser fetch a
+missing `.wasm`, receive the 404 page's `text/html`, and abort with "Response has unsupported
+MIME type 'text/html;charset=utf-8' expected 'application/wasm'". The wasm is optional (a
+module built without one), so a miss is not an error. -/
+def Scry.webCopyUi (src out : String) : EIO Bool := do
+  m ← Scry.webCopy src (String.append out "/wiz-source-ui.mjs");
+  -- `src` ends in `.mjs`; the wasm is the same stem.
+  let wasm := String.append (String.dropEnd 4 src) ".wasm";
+  _copiedWasm ← Scry.webCopy wasm (String.append out "/wiz-source-ui.wasm");
+  EIO.pure m
 
 /-- The reader's page. The first paint is the reader's SSR; `app.js` mounts the Loom
 runtime on it. A missing runtime leaves the SSR in place and one plain reason, never a
