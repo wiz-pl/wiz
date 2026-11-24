@@ -798,9 +798,41 @@ def Scry.htmlEsc (s : String) : String :=
     | _, _, .true => "&amp;"
     | _, _, _ => String.mk [c]) (String.chars s))
 
-/-- The bundle page without the Loom runtime: what the data holds, one row per file and
-one per finding. Every path here is the bundle's own (`data/…`, or a source path relative
-to the target). -/
+-- ## `--bundle`: the manifest's C# footer
+
+/-- The manifest footer `scry cs --bundle` adds (the front end's own facts, so the
+manifest says what the reader should expect without a second schema): `language`, the
+fact `kind`s the export writes, whether a tree came with the data, the `ast` object
+(`cap`, and every file the cap truncated with its lost row count), the target's `kind`
+and the analysis counts. A C bundle has no footer (`[]`), so its manifest is the one it
+always was. -/
+def Scry.Cs.bundleExtra (t : Scry.Cs.Target) (r : Scry.Cs.Report) (truncated : List (String × Nat))
+    (filesWithAst : Nat) : List (String × Json) :=
+  let trees := Json.mkBool (Nat.lt 0 filesWithAst);
+  [ ("language", Json.mkStr "csharp")
+  , ("factKinds", Json.mkArr [Json.mkStr "sink", Json.mkStr "flow", Json.mkStr "ast"])
+  , ("target", Json.mkStr t.kind)
+  , ("ast", Json.mkObj
+      [ ("cap", Json.ofNat Scry.Cs.astFactCap)
+      , ("trees", Json.ofNat filesWithAst)
+      , ("truncated", Json.mkArr (List.map (fun p => Json.mkObj
+          [("path", Json.mkStr p.1), ("leftOut", Json.ofNat p.2)]) truncated))
+      ])
+  , ("counts", Json.mkObj
+      [ ("parsed", Json.ofNat r.parsed)
+      , ("lowered", Json.ofNat r.lowered)
+      , ("failed", Json.ofNat r.failed)
+      ])
+  ]
+
+-- ## `--bundle`: the page
+
+/-- The page a C# bundle gets in place of the reader's SSR. `scry cs` links no Loom
+runtime (the wasm host is the reader's), so `app.js` and `app.css` are not written; a
+page that pointed at them would mount nothing. It lists what `data/` holds instead,
+pointing at the reader: the same bundle served by `scry web`'s host (copy `web/`'s
+`index.html` route, or serve `data/` from any page that loads `source-app.js`) draws it.
+A path or a rule is escaped, so a source's markup never becomes the page's. -/
 def Scry.Cs.bundlePage (files : List Source.File) (findings : List Source.Finding) : String :=
   let row : Source.File → String := fun f =>
     "<li><code>" ++ Scry.htmlEsc f.path ++ "</code> — " ++ Nat.repr f.lines
@@ -812,11 +844,13 @@ def Scry.Cs.bundlePage (files : List Source.File) (findings : List Source.Findin
     | .nil => ""
     | _ => "<h2>findings</h2>\n<ul>\n" ++ String.join (List.map frow findings) ++ "</ul>\n";
   "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
-  ++ "<title>scry source</title></head><body><h1>scry source</h1>\n<p>"
-  ++ Nat.repr (List.length files) ++ " file(s), " ++ Nat.repr (List.length findings)
-  ++ " finding(s) — the data is in <code>data/</code>; the reader that draws it is the "
-  ++ "one <code>scry web</code> serves.</p>\n<ul>\n"
-  ++ String.join (List.map row files) ++ "</ul>\n" ++ findingSection
+  ++ "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+  ++ "<title>scry source</title></head><body><h1>scry source</h1>\n"
+  ++ "<p>This is <code>scry cs --bundle</code>'s listing, not the reader: this command "
+  ++ "writes the data the reader decodes, and the reader itself is "
+  ++ "<code>scry web</code>'s host. " ++ Nat.repr (List.length files) ++ " file(s), "
+  ++ Nat.repr (List.length findings) ++ " finding(s); the data is in <code>data/</code>.</p>\n"
+  ++ "<ul>\n" ++ String.join (List.map row files) ++ "</ul>\n" ++ findingSection
   ++ "</body></html>\n"
 
 /-- `scry cs --bundle DIR`: write the reader's bundle for the analysed tree. The models

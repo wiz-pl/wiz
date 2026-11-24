@@ -4,8 +4,14 @@ import Sys
 import Json
 import Text
 -- The C# half of the static source reader: `scry cs --bundle DIR` writes the bundle
--- `scry web` writes for C, over `tests/fixtures/report-cs` (four files: two tainted, one
--- safe, one whose tree overflows the AST cap).
+-- `scry web` writes for C, over `tests/fixtures/report-cs` (five files: three tainted, one
+-- safe, one whose tree overflows the AST cap, one non-ASCII).
+--
+-- **Units.** tree-sitter spans are UTF-8 bytes and the reader's `Source.Span` is UTF-16
+-- code units, so every bound here is the file's unit count (`EditorModel.index`), never
+-- `String.length` (which counts characters). `Unicode.cs` is the case where the three
+-- disagree — mixing them moves its sink 27 units (bytes) or 3 units (code points) — and
+-- its finding's span is pinned exactly below, not merely bounded.
 --
 -- What this pins (the `gs_*` lines are the golden's subject; every `check` line is an
 -- assertion that must be `: ok`):
@@ -83,6 +89,42 @@ def readJson (path : String) : EIO Json := do
   | .error e => do
     check ("cs bundle: " ++ path ++ " parses (" ++ e ++ ")") .false;
     EIO.pure Json.mkNull
+
+/-- A file's length in **UTF-16 code units**: the bound a `Source.Span` must fit and the
+unit the bundle's `bytes` field counts (the export's `Scry.webUtf8Size`). `String.length`
+counts characters, so it is the wrong bound for any non-ASCII file and would pass a
+byte/unit mix-up that lands past the real end. A character outside the BMP is 2 units. -/
+partial def unitsGo : List Char → Nat → Nat
+  | .nil, n => n
+  | .cons c rest, n => unitsGo rest (Nat.add n (match Nat.lt 0xFFFF (Char.code c) with
+      | .true => 2
+      | .false => 1))
+
+def units (s : String) : Nat := unitsGo (String.chars s) 0
+
+/-- Pad `seed` to `n` copies: the cap's case needs a tree larger than
+`Scry.Cs.astFactCap`, and the seed is short. `n` is read from the manifest's `ast.cap`, so
+the fixture grows with the cap instead of silently stopping to overflow one. The padding
+is a suffix (each copy its own string literal), so the seed's first lines — and the
+sink the path checks pin — keep their offsets. -/
+partial def padGo (seed : String) : Nat → String → String
+  | 0, acc => acc
+  | Nat.succ k, acc => padGo seed k (String.append acc seed)
+
+def padded (seed : String) (n : Nat) : String := padGo seed (Nat.sub n 1) seed
+
+def copyPadded (src dst : String) (n : Nat) : EIO Unit := do
+  text ← FS.readFile src;
+  FS.writeFile dst (padded text n)
+
+/-- Copy `from` to `to` (the mixed-directory case's two sources). -/
+def copyIn (src dst : String) : EIO Unit := do
+  text ← FS.readFile src;
+  FS.writeFile dst text
+
+/-- A message's lines joined by ` | `, so a multi-line refusal stays one golden line. -/
+def trimLines (s : String) : String :=
+  String.intercalate " | " (List.map String.trim (String.splitOn s "\n"))
 
 /-- A path that would bind the bundle to this checkout: absolute, or climbing out. -/
 def relative (p : String) : Bool :=
@@ -177,7 +219,7 @@ def main : IO Unit := EIO.toIO (do
         | .false => List.any (fun y => String.eq (jStr y ["node"])
             (column x "parent")) astRows) astRows);
     check "cs bundle: every ast span fits its file"
-      (let len := String.length (jStr sh ["source"]);
+      (let len := units (jStr sh ["source"]);
        List.all (fun x => Bool.and (Nat.le (jNat x ["span", "start"])
          (jNat x ["span", "stop"])) (Nat.le (jNat x ["span", "stop"]) len)) astRows);
     check "cs bundle: every ast row has a depth and an order"
@@ -192,7 +234,7 @@ def main : IO Unit := EIO.toIO (do
       | .none => EIO.pure .false
       | .some meta => do
         d ← readFile id;
-        let len := String.length (jStr d ["source"]);
+        let len := units (jStr d ["source"]);
         let inJson := List.any (fun g => String.eq (jStr g ["id"]) (jStr f ["id"]))
           (jList d ["findings"]);
         EIO.pure (Bool.and (Bool.and (Nat.lt (jNat f ["span", "start"])
@@ -200,15 +242,104 @@ def main : IO Unit := EIO.toIO (do
     bounds ← List.mapM boundOf findings;
     check "cs bundle: every finding's span is inside its file, listed in its file's JSON"
       (List.all (fun b => b) bounds);
-    -- Huge.cs: the cap holds, and the manifest names it.
+    -- Unicode.cs: the byte/UTF-16 case. Its sink is `Process.Start(cmd);` — 19 units at
+    -- 1274..1293. Bytes would give 1301..1320, code points 1271..1290, so the pinned span
+    -- is what tells the correct conversion from the two plausible ones.
+    un ← readFile (idOf files "Unicode.cs");
+    let unFinding : Option Json := List.find (fun f => String.eq (jStr f ["rule"])
+      "command-injection") (jList un ["findings"]);
+    match unFinding with
+    | .none => check "cs bundle: Unicode.cs has its command-injection finding" .false
+    | .some f => do
+      say ("unicode: sink span=" ++ Nat.repr (jNat f ["span", "start"]) ++ ".."
+        ++ Nat.repr (jNat f ["span", "stop"]) ++ " text=" ++ jStr f ["spanText"]);
+      check "cs bundle: Unicode.cs's sink is at the UTF-16 span of Process.Start(cmd);"
+        (Bool.and (Nat.beq (jNat f ["span", "start"]) 1274)
+          (Nat.beq (jNat f ["span", "stop"]) 1293));
+      check "cs bundle: Unicode.cs's span is text in the UTF-16 index"
+        (Bool.and (Nat.beq (jNat f ["column"]) 9) (Nat.beq (jNat f ["line"]) 28));
+      -- Every `ast` row of the same file: each must slice text the parse actually made
+      -- (a skew would cut a character in half), and the tree's root is the whole file.
+      let len := units (jStr un ["source"]);
+      let unAst := List.filter (isKind "ast") (jList un ["facts"]);
+      check "cs bundle: Unicode.cs's every ast span is inside its UTF-16 length"
+        (Bool.and (Nat.lt 0 (List.length unAst))
+          (List.all (fun x => Bool.and (Nat.le (jNat x ["span", "start"])
+            (jNat x ["span", "stop"])) (Nat.le (jNat x ["span", "stop"]) len)) unAst));
+      let root := List.filter (fun x => String.eq (column x "parent") "") unAst;
+      check "cs bundle: Unicode.cs's ast root spans the whole file, in units"
+        (match root with
+          | .cons r _ => Bool.and (Nat.beq (jNat r ["span", "start"]) 0)
+              (Nat.beq (jNat r ["span", "stop"]) len)
+          | .nil => .false);
+      check "cs bundle: Unicode.cs's ast titles keep their non-ASCII text"
+        (List.any (fun x => String.contains (column x "title") "→") unAst);
+    -- Huge.cs: the cap holds, and the manifest names it. The row count alone is a weak
+    -- assertion (a cap of 2,000 rows against a 1,300-node file would pass it by accident);
+    -- the lost count in the manifest must add up instead: `leftOut` is the file's tree
+    -- minus the rows written.
     huge ← readFile (idOf files "Huge.cs");
     let hugeAst := List.length (List.filter (isKind "ast") (jList huge ["facts"]));
-    say ("huge: ast=" ++ Nat.repr hugeAst ++ " cap=" ++ Nat.repr (jNat m ["ast", "cap"]));
-    check "cs bundle: Huge.cs is capped at the manifest's cap"
-      (Nat.beq hugeAst (jNat m ["ast", "cap"]));
+    let cap := jNat m ["ast", "cap"];
+    let leftOutOf (name : String) : Nat :=
+      match List.find (fun t => String.endsWith (jStr t ["path"]) name)
+          (jList m ["ast", "truncated"]) with
+      | .some t => jNat t ["leftOut"]
+      | .none => 0;
+    let leftOut := leftOutOf "Huge.cs";
+    say ("huge: ast=" ++ Nat.repr hugeAst ++ " cap=" ++ Nat.repr cap
+      ++ " leftOut=" ++ Nat.repr leftOut);
+    check "cs bundle: Huge.cs keeps the manifest's cap and no more"
+      (Bool.and (Nat.le hugeAst cap) (Nat.lt 0 hugeAst));
+    check "cs bundle: the manifest's leftOut is the rows the cap left out"
+      (Bool.and (Nat.lt 0 leftOut) (Nat.beq (Nat.add hugeAst leftOut) cap));
     check "cs bundle: the manifest names the truncated file"
       (List.any (fun t => String.endsWith (jStr t ["path"]) "Huge.cs")
         (jList m ["ast", "truncated"]));
+    check "cs bundle: a file under the cap is not named as truncated"
+      (Bool.not (List.any (fun t => String.endsWith (jStr t ["path"]) "Shell.cs")
+        (jList m ["ast", "truncated"])));
+    -- The cap, on a tree that really overflows it: one seed file padded to just over the
+    -- manifest's own cap. Huge.cs's size is not pinned, so the truncation above is only
+    -- "capped, and adds up"; this is the case where the cap is the binding constraint.
+    capDir ← EIO.lift (FS.exists "build/cs-cap");
+    match capDir with
+    | .true => EIO.pure ()
+    | .false => FS.createDir "build/cs-cap";
+    -- The seed is a few dozen nodes (one loop body and a call); `cap / 4 + 8` copies is a
+    -- tree several times the cap, and the last copy's nodes fall to the cap.
+    let copies := Nat.add (Nat.div cap 4) 8;
+    copyPadded "tests/fixtures/report-cs/cap/Overflow.cs" "build/cs-cap/Overflow.cs" copies;
+    rc ← run ["cs", "build/cs-cap", "--bundle", "build/web-bundle-cs-cap",
+      "--assets", "../web"];
+    check "cs bundle: the padded cap fixture exports" (Nat.beq rc.code 0);
+    fc ← readJson "build/web-bundle-cs-cap/data/files.json";
+    capf ← readJson ("build/web-bundle-cs-cap/data/f/" ++ idOf (jList fc ["files"])
+      "Overflow.cs" ++ ".json");
+    let capRows := List.length (List.filter (isKind "ast") (jList capf ["facts"]));
+    mc ← readJson "build/web-bundle-cs-cap/data/manifest.json";
+    let capLeft := match List.find (fun t => String.endsWith (jStr t ["path"])
+        "Overflow.cs") (jList mc ["ast", "truncated"]) with
+      | .some t => jNat t ["leftOut"]
+      | .none => 0;
+    say ("cap fixture: ast=" ++ Nat.repr capRows ++ " leftOut=" ++ Nat.repr capLeft
+      ++ " cap=" ++ Nat.repr cap);
+    check ("cs bundle: an overflowing tree writes the cap's rows (" ++ Nat.repr capRows
+      ++ " of " ++ Nat.repr (Nat.add capRows capLeft) ++ " nodes)")
+      (Bool.and (Nat.beq capRows cap) (Nat.lt 0 capLeft));
+    -- Two copies alone are under the cap (the seed is dozens of nodes, not thousands),
+    -- so the whole tree is written: the truncation all comes from the extra copies.
+    copyPadded "tests/fixtures/report-cs/cap/Overflow.cs" "build/cs-cap/Overflow.cs" 2;
+    r2c ← run ["cs", "build/cs-cap", "--bundle", "build/web-bundle-cs-cap2",
+      "--assets", "../web"];
+    check "cs bundle: the two-copy cap fixture exports" (Nat.beq r2c.code 0);
+    fc2 ← readJson "build/web-bundle-cs-cap2/data/files.json";
+    mc2 ← readJson "build/web-bundle-cs-cap2/data/manifest.json";
+    let twoLeft := match List.find (fun t => String.endsWith (jStr t ["path"])
+        "Overflow.cs") (jList mc2 ["ast", "truncated"]) with
+      | .some t => jNat t ["leftOut"]
+      | .none => 0;
+    check "cs bundle: two copies are under the cap and lose no node" (Nat.beq twoLeft 0);
     -- Determinism.
     r2 ← run ["cs", target, "--bundle", "build/web-bundle-cs2", "--assets", "../web"];
     check "cs bundle: the second export exits 0" (Nat.beq r2.code 0);
@@ -227,5 +358,35 @@ def main : IO Unit := EIO.toIO (do
     say ("web refusal: exit " ++ Nat.repr w.code ++ ": " ++ String.trim w.err);
     check "web refusal names scry cs" (String.contains w.err "scry cs");
     there ← EIO.lift (FS.exists "build/web-bundle-cs-refused/data/manifest.json");
-    check "web refusal writes no bundle" (Bool.not there)
+    check "web refusal writes no bundle" (Bool.not there);
+    -- `scry report` on the same tree: the same refusal (the walk it shares), and an
+    -- empty directory is its own message, never an empty report that reads as clean.
+    rp ← run ["report", target, "--out", "build/web-bundle-cs-report.html"];
+    check "report refuses a C#-only tree (non-zero exit)" (Bool.not (Nat.beq rp.code 0));
+    say ("report refusal: exit " ++ Nat.repr rp.code ++ ": " ++ trimLines rp.err);
+    check "report refusal names scry cs" (String.contains rp.err "scry cs");
+    empty ← EIO.lift (FS.exists "build/cs-empty-dir");
+    match empty with
+    | .true => EIO.pure ()
+    | .false => FS.createDir "build/cs-empty-dir";
+    we ← run ["web", "build/cs-empty-dir", "--out", "build/web-bundle-cs-empty"];
+    check "web refuses an empty directory (non-zero exit)" (Bool.not (Nat.beq we.code 0));
+    say ("web empty-dir refusal: exit " ++ Nat.repr we.code ++ ": " ++ trimLines we.err);
+    check "the empty-directory refusal is not the C# one"
+      (Bool.and (String.contains we.err "no *.c file") (Bool.not (String.contains we.err
+        "has no *.c file, but")));
+    -- A directory with both languages: `scry web` works (it is a C tree) and says which
+    -- C# files it did not read; `scry cs --bundle` works too, on the same directory.
+    mixed ← EIO.lift (FS.exists "build/cs-mixed");
+    match mixed with
+    | .true => EIO.pure ()
+    | .false => FS.createDir "build/cs-mixed";
+    copyIn "tests/fixtures/report/safe.c" "build/cs-mixed/safe.c";
+    copyIn "tests/fixtures/report-cs/taint/Safe.cs" "build/cs-mixed/Safe.cs";
+    wm ← run ["web", "build/cs-mixed", "--out", "build/web-bundle-cs-mixed"];
+    check "web accepts a directory with *.c and *.cs" (Nat.beq wm.code 0);
+    say ("mixed note: " ++ trimLines wm.err);
+    check "the mixed directory's note counts the C# files it did not read"
+      (Bool.and (String.contains wm.err "also has 1 *.cs file(s)")
+        (String.contains wm.err "scry cs --bundle"))
   )

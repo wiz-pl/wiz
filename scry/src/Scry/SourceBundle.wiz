@@ -20,8 +20,8 @@ and C# lowering — writes data the same reader decodes.
 
 **One pipeline per file.** `Scry.reportFileOf` (C, through `Scry.analyzeFile`) and
 `Scry.Cs.reportFileOf` (C#, through `Scry.CsLower` and the rule pack) both build an
-`Scry.ReportFile`; `Scry.bundleModelsOf` turns any list of them into the reader's three
-tables. Findings, spans, fact rows and node numbering are therefore the same code for
+`Scry.ReportFile`; `Scry.bundleModelOf` (one file) and `Scry.bundleWriteData` (the
+tables) turn them into the reader's data. Findings, spans, fact rows and node numbering are therefore the same code for
 both languages (`Scry.webFactsOf`'s `sink` and `flow` rows), and a fact kind is data,
 not a branch: the C# export adds `ast` rows for the infotree, and the info view renders
 them through the same `columns` list a `sink` row uses.
@@ -188,10 +188,11 @@ def Scry.bundleModelOf (rf : Scry.ReportFile) (facts : List Source.FactRow) (aft
   let built := Scry.bundleFindingsOf rf i after;
   (file, built.1, List.append built.2.1 facts)
 
-/-- A path step with its location replaced (a `Scry.ReindexedOrigin`'s `fixed` span). -/
+/-- A path step with its location replaced (a `Scry.ReindexedOrigin`'s `fixed` span,
+which is `(startLine, startColumn, stopLine, stopColumn)`). -/
 def Scry.reindexStep (s : Scry.ReportStep) (r : Scry.ReindexedOrigin) : Scry.ReportStep :=
-  { s with line := r.fixed.1, column := r.fixed.2
-  , endLine := r.fixed.2.1, endColumn := r.fixed.2.2 }
+  { s with line := r.fixed.1, column := r.fixed.2.1
+  , endLine := r.fixed.2.2.1, endColumn := r.fixed.2.2.2 }
 
 /-- A finding's path steps as the reader places them: `pathSteps` when the front end
 supplied located points (C#), else the page's own `steps`; `reindexed` locations applied
@@ -417,10 +418,16 @@ def Scry.bundleDirs (out : String) : EIO Unit := do
   Scry.bundleEnsureDir (String.append out "/data/f");
   Scry.bundleEnsureDir (String.append out "/framework")
 
-/-- Write the three index files and one `data/f/<id>.json` per file. -/
+/-- Write the three index files and one `data/f/<id>.json` per file.
+
+The findings are put in **semantic-id order here**, not by the caller: the tables, each
+file's own JSON and the reader's list therefore agree whichever front end built them, and
+a C# bundle (whose findings come from the rule pack in its own order) reads the same as a
+C one. It is a stable insertion sort over equal ids. -/
 def Scry.bundleWriteData (out tool : String) (files : List Source.File)
-    (findings : List Source.Finding) (facts : List Source.FactRow)
+    (findings0 : List Source.Finding) (facts : List Source.FactRow)
     (host framework : List String) (runtime : Bool) (extra : List (String × Json)) : EIO Unit := do
+  let findings := Scry.webSortById findings0;
   let manifest := Scry.bundleManifestJson tool (Scry.bundleRevision tool files) files
     findings host framework runtime extra;
   FS.writeFile (String.append out "/data/manifest.json")
