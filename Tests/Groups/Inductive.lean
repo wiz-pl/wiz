@@ -1,6 +1,8 @@
 import Tests.Elab
+import Tests.Reject
 
 open Wiz
+open Tests.Reject
 
 -- Closed terms are normally evaluated at program start-up; that would execute
 -- unimplemented `sorry`s before any test runs.
@@ -47,12 +49,6 @@ def propIndGroup : Group where
 
 builtin_initialize registerGroup propIndGroup
 
-/-- A source that defines `D0` as `head` and then a 17-step alias chain `D1 … D17`, each
-referring to the previous name: longer than the depth bound the check used to have. -/
-def aliasChain (head : String) : String :=
-  "\n" ++ head ++ "\n" ++
-  String.join ((List.range 17).map fun k => s!"def D{k + 1} : Desc Unit := D{k}\n")
-
 def inductiveGroup : Group where
   name := "inductive"
   exercise := "Exercise 4.21"
@@ -87,6 +83,20 @@ def inductiveGroup : Group where
     { name := "a guarded description behind the same 17-step chain is still accepted", run := fun _ =>
         ok (aliasChain "def D0 : Desc Unit := Desc.arg 1 Unit (fun _ => Desc.rec 1 () (Desc.ret ()))" ++
           "def Good : Type := μ D17 ()") },
+    { name := "P1b: an alias inside a darg keeps the guard (it survives the unfold)", run := fun _ =>
+        ok "def T : Desc Unit := Desc.rec 1 () (Desc.ret ())\ndef G : Desc Unit := Desc.arg 1 Unit (fun _ => T)\ndef Good : Type := μ G ()" },
+    { name := "seen is per path: two ecase branches that share one alias are not a cycle", run := fun _ =>
+        ok "def T : Desc Unit := Desc.ret ()\ndef G : Desc Unit := Desc.arg 1 (Enum [nil, cons]) (fun t => ecase t [T, T])\ndef Good : Type := μ G ()" },
+    -- (the two fail-closed routes that no surface program can reach: a cycle needs a global
+    -- whose value names itself, which no declaration can have, and an unknown name is
+    -- rejected by the `check ctx D (.desc l vI)` before the guard runs. They are covered by
+    -- reading, not by a case; the valueless-binding route is F4 above.)
+    xfail "F2 (TT-06 step 2): a μ over the application `idD (Desc.rec …)` is not rejected yet"
+      "def idD (x : Desc Unit) : Desc Unit := x\ndef Bad : Type := μ (idD (Desc.rec 1 () (Desc.ret ()))) ()"
+      "task 74 step 2 (owner: the evaluated-description walk; expiry 2026-12-08). The head is an `.app`, which the syntactic walk leaves alone (D-9): only step 2, walking `whnf (ctx.eval D)`, sees the `Desc.rec` inside",
+    xfail "F3 (TT-06 step 2): a μ over a projection of a description is not rejected yet"
+      "def Bad : Type := μ (((Desc.rec 1 () (Desc.ret ())), ()) : (Desc Unit) × Unit).1 ()"
+      "task 74 step 2 (owner: the evaluated-description walk; expiry 2026-12-08). The head is a `.fst`, a neutral head the syntactic walk accepts (D-9); step 2's `whnf` reduces it to the `Desc.rec`",
     { name := "a size variable that escapes its binder is rejected", run := fun _ =>
         fails (indPrelude ++ "def bad : Type := (Nat)^i") "unknown identifier" },
     { name := "a size must be a Size (a data variable is rejected)", run := fun _ =>

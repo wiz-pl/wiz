@@ -685,10 +685,12 @@ revisit is a cycle, and a cycle (like depth alone used to be) is *not* guarded: 
 fails closed rather than guessing. A constant with no value (an axiom or an opaque
 definition) and a name with no declaration are left unjudged by the walk and so are
 rejected too: `μ` over a description whose spine the kernel cannot see is refused, not
-accepted. The check is conservative: it only rejects a `rec`/`hrec` it can see at the
-head of a constructor spine, and it is a step on the way to checking the evaluated
-description; a head that is not a term constructor (a variable, an application, a
-projection) is still accepted, which is the neutral-head policy (D-9). -/
+accepted. A pair match is looked through on all three of its parts (the scrutinee, the
+motive and the body), as `Kernel.wiz` does, so `match (D, ()) with | (d, _) => d` cannot
+hide an unguarded description. The check is conservative: it only rejects a `rec`/`hrec`
+it can see at the head of a constructor spine, and it is a step on the way to checking the
+evaluated description; a head that is not a term constructor (a variable, an application,
+a projection) is still accepted, which is the neutral-head policy (D-9). -/
 partial def descGuarded (g : Globals R) (seen : Std.HashSet Name) (guarded : Bool) :
     Term R → Bool
   | .darg _ _ E => descGuarded g seen true E
@@ -698,6 +700,12 @@ partial def descGuarded (g : Globals R) (seen : Std.HashSet Name) (guarded : Boo
   | .ann t _ => descGuarded g seen guarded t
   | .ecase _ _ _ bs => bs.all (descGuarded g seen guarded)
   | .letE _ _ _ _ b => descGuarded g seen guarded b
+  -- a pair match: any of the scrutinee, the motive and the body may be (or contain, at
+  -- a head this walks) the description the `μ` is over. The self-hosted kernel walks the
+  -- same three (`split` there has no binder names)
+  | .split _ s _ m _ _ b =>
+    descGuarded g seen guarded s && descGuarded g seen guarded m &&
+      descGuarded g seen guarded b
   | .const n _ =>
     if seen.contains n then false
     else match g.find? n with

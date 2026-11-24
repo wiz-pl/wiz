@@ -1620,15 +1620,17 @@ never type-checks them, and their Π/Σ types carry hand-written component sorts
   the `arg`/`rec`/`hrec` spine (and the branches of an `ecase` in it), and a head that is
   not a term constructor (a variable, an application, a projection) is still accepted:
   that is the neutral-head policy (D-9), which step 2 of this fix replaces by walking the
-  evaluated description. `Kernel.wiz` has the same function and verdicts (`=selfhost`).
-  The two copies have drifted, and the drift is kept rather than papered over: the
-  self-hosted walk has `letq` (its `letE` carries no quantity) and `split` arms, so a
-  `split`-headed description is walked there; the host has no `letq` (`letE` carries the
-  quantity) and no `split` arm, so a `split`-headed description falls through to the
-  neutral-head arm and is accepted. The self-hosted kernel also rejects `.axiomC` where
-  the host rejects a valueless (axiom or opaque) constant: the same verdict on a different
-  representation, since the self-hosted terms carry values inline and there is no table
-  to have an unknown name in.
+  evaluated description. A pair match is walked on its scrutinee, motive and body, so
+  `match (D, ()) with | (d, _) => d` cannot hide it either. `Kernel.wiz` has the same
+  function and verdicts (`=selfhost`): the same spine, the same pair-match arms, and a
+  valueless binding is rejected there too. The two *terms* differ, not the verdicts: the
+  self-hosted walk has a `letq` arm (its `letE` carries no quantity) and no visited set
+  (values are carried inline, so a chain is finite by construction and there is no name
+  table to revisit into), and it rejects `.axiomC` where the host rejects a valueless
+  (axiom or opaque) constant: one verdict on two representations. The self-hosted walk
+  also walks a `split`'s scrutinee and motive, which the host does as well; a scrutinee
+  that is a pair of the description and a value is not inspected past its head on either
+  side (the `pair` head is the neutral-head arm).
 * The method's usage is scaled by ω (`QRig.many?`) because the method may run once per
   node (§5.3; Status.md, Q2).
 * `x` is checked against `μ^∞`; a value of a smaller size is accepted by subtyping.

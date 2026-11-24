@@ -975,13 +975,25 @@ and to accept a constant with no value (an axiom or an opaque definition) and a 
 no declaration. It now unfolds by a **visited set of names** instead of a depth: an alias
 chain is acyclic (a global's value refers only to earlier globals), so a 17-step chain is
 looked through, and a revisited name is a cycle. A revisited name, a valueless constant
-and an unknown name are **rejected**, not accepted. The head that is neither a term
-constructor nor a constant (a variable, an application, a projection) is still accepted:
-that is the neutral-head policy (D-9), which step 2 replaces by walking the evaluated
-description. Both kernels changed in one patch (`Kernel.wiz` keeps its `letq`/`split` arms,
-and rejects `.axiomC` where the host rejects a valueless constant, since it has no name
-table). Tests: the `inductive` group (a 17-alias unguarded chain, an axiom-headed `μ`, and
-the same long chain over a guarded description), `MTm.muSize` in the differential samples.
+and an unknown name are **rejected**, not accepted. A pair match is walked on its
+scrutinee, motive and body, so `match (D, ()) with | (d, _) => d` cannot hide a
+description either. The head that is neither a term constructor nor a constant (a
+variable, an application, a projection) is still accepted: that is the neutral-head policy
+(D-9), which step 2 replaces by walking the evaluated description. Both kernels changed in
+one patch and now agree on which programs are types: the self-hosted walk has a `letq` arm
+where the host's `letE` carries the quantity, it needs no visited set (values are carried
+inline, so a chain is finite by construction), and it rejects `.axiomC` where the host
+rejects a valueless constant. Two routes cannot be reached from the surface (a cycle needs
+a global whose value names itself; an unknown name fails the `Desc` check first) and are
+covered by reading only.
+
+Tests: the `inductive` group — a 17-alias unguarded chain, an axiom-headed `μ`, the same
+long chain over a guarded description, an alias inside a `darg` kept guarded, and two
+`ecase` branches sharing one alias (so `seen` is per path) — plus F2 (an application head)
+and F3 (a projection head) as **`xfail`**, owner task 74 step 2, expiry 2026-12-08,
+because they need the evaluated-description walk; `MTm.muSize` in the differential
+samples; and the `selfhost` group's `selfhostAgrees` case that runs F1, F4, P1 and P1b
+through both kernels.
 
 ### Q1 / R1. Projections drop linear components — **fixed**: projections need an unrestricted pair (lin-proj; both kernels)
 

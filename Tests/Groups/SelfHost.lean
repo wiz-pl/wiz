@@ -3156,6 +3156,13 @@ def selfHostGroup : Group where
           ("inductive Bad where\n  | mk (f : Bad → Prop)\n", false),
           ("inductive Bad where\n  | mk (f : (Bad → Prop) → Prop)\n", false),
           ("inductive Bad where\n  | mk (xs : List Bad)\n", false)] },
+    { name := "the kernel's μ guard: a 17-alias chain, an axiom head and the guarded forms, as in the Lean kernel (TT-06 step 1)", run := fun _ =>
+        selfhostAgrees "" [
+          (aliasChain "def D0 : Desc Unit := Desc.rec 1 () (Desc.ret ())" ++ "def Bad : Type := μ D17 ()\n", false),
+          ("axiom D : Desc Unit\ndef Bad : Type := μ D ()\n", false),
+          (aliasChain "def D0 : Desc Unit := Desc.arg 1 Unit (fun _ => Desc.rec 1 () (Desc.ret ()))" ++
+            "def Good : Type := μ D17 ()\n", true),
+          ("def T : Desc Unit := Desc.rec 1 () (Desc.ret ())\ndef G : Desc Unit := Desc.arg 1 Unit (fun _ => T)\ndef Good : Type := μ G ()\n", true)] },
     { name := "the self-hosted frontend: constructor parameters from the expected type (21j)", run := fun _ =>
         selfhostAgrees ("def Code : Bool → Type\n  | .true => Nat\n  | .false => Bool\n" ++
           "structure Tagged (b : Bool) where\n  val : Code b\n")

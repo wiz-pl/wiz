@@ -811,6 +811,14 @@ inductive MTm where
   | prf (l : MLvl) (t : MTm)
   deriving Inhabited
 
+/-- A source that defines `D0` as `head` and then a 17-step alias chain `D1 … D17`, each
+name referring to the previous one: longer than the depth bound the `μ` guard used to have
+(`descGuarded`, TT-06 step 1). Shared by the `inductive` group and the selfhost
+differential, so both run the same chain. -/
+def aliasChain (head : String) : String :=
+  "\n" ++ head ++ "\n" ++
+  String.join ((List.range 17).map fun k => s!"def D{k + 1} : Desc Unit := D{k}\n")
+
 namespace MTm
 
 /-- The global definitions (or axioms, without a value) the differential test uses, in
