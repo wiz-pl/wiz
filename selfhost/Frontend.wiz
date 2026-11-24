@@ -5484,7 +5484,19 @@ def inferTransp (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp : Option SpT
 -- frontend's `inferData?`/`checkData?`: an unshadowed identifier applied to its arguments
 -- (`builtinApp?`). `cocon` is what a non-corecursive copattern definition builds, and
 -- `T.mk` is a `cocon`; `coit` is what a corecursive one builds.
-def builtinNames3 : List String := .cons "ν" (.cons "out" (.cons "coit" (.cons "cocon" .nil)))
+--
+-- **TT-06: the data primitives that need a type.** `Desc I`, `μ D i`, `Desc.ret i`,
+-- `Desc.arg q S D`, `Desc.rec q j D` and `Desc.hrec q H j D` are the `Desc` half of the
+-- Lean frontend's `builtinNames` (`Elab/Term.lean`), and are read exactly as its
+-- `inferData?`/`checkData?` read them: `Desc I` has no `<` conflict with `μ` and `ν`
+-- (a `μ` is checked against `Desc`, and a description is the one form that is checked
+-- against `μ`'s own argument type, which `μ`'s rule reads off the description it inferred).
+-- The guardedness walk is the kernel's (`Kernel.wiz` `descGuarded` in the `μ` rule), so
+-- `μ X. X` is rejected on both sides.
+def builtinNames3 : List String := .cons "Desc" (.cons "Desc.ret" (.cons "Desc.arg"
+  (.cons "Desc.rec" (.cons "Desc.hrec" (.cons "Desc.elim" (.cons "Desc.interp"
+  (.cons "Desc.All" (.cons "μ" (.cons "ν" (.cons "con" (.cons "ind" (.cons "out"
+  (.cons "coit" (.cons "cocon" (.cons "scofix" .nil)))))))))))))))
 def builtinName : List String → String → Bool
   | .nil, _ => .false
   | .cons x xs, n => match strEq x n with
@@ -5501,9 +5513,105 @@ def builtinApp (gs : Globals) (cx : Cx) (s : Syntax) : Option BApp :=
         | .none => .true) with
       | .true => .some (.mk n (kids (kid s 1)))
       | .false => .none
+-- the written quantity of a primitive's field: a literal, or `bad` (a quantity *term* is
+-- not read here, as in `checkData?`)
+def builtinQ : Syntax → QW
+  | .ident q => match strEq q "ω" with
+    | .true => .is .qw
+    | .false => .bad
+  | .num _ => qtyNode (kid q 0)
+  | s => match strEq (kindOf s) "term.num" with
+    | .true => qtyNode (kid s 0)
+    | .false => match strEq (kindOf s) "term.paren" with
+      | .true => builtinQ (kid s 1)
+      | .false => .bad
+-- `Desc I` is the universe it describes one step down: `I : Sort (l+1)`, `Desc I : Sort (l+2)`
+def inferDesc (gs : Globals) (es : ES) (cx : Cx) (args : List Syntax) : TE :=
+  let d := Cx.lvl cx;
+  match args with
+  | .cons I .nil => match inferT gs es cx I .none with
+    | .err m => .err m
+    | .ok I0 Ity es1 => match whnf (force es1 Ity) with
+      | .vsort lI => .ok (.descr lI I0) (.vsort (lsucc (lsucc lI))) es1
+      | v => .err (String.append "Desc takes an index type, but this one's type is "
+          (show (scopeNames (Cx.sc cx)) d (quote d v)))
+    | e => e
+  | _ => .err "Desc takes one index type"
+-- `μ D i` and `ν D i`: the description's type is `Desc l I`, the index is an `I`, the
+-- data type is in `Sort (l+1)` (`ν`'s by subtyping at the sized families, as for any
+-- inferred form) — the Lean frontend's `inferData?`
+def inferMuNu (gs : Globals) (es : ES) (cx : Cx) (isMu : Bool) (args : List Syntax) : TE :=
+  let d := Cx.lvl cx;
+  match args with
+  | .cons D (.cons i .nil) => match inferT gs es cx D .none with
+    | .err m => .err m
+    | .ok D0 dty es1 => match whnf (force es1 dty) with
+      | .vdesc l Iv => match checkT gs es1 cx i Iv .none with
+        | .ok i0 _ es2 => .ok (if isMu then .mu l (quote d Iv) D0 i0
+            else .nu l (quote d Iv) D0 i0 .szInf) (.vsort (lsucc l)) es2
+        | e => e
+      | v => .err (String.append (String.append (if isMu then "μ" else "ν")
+          " expects a description, got ") (show (scopeNames (Cx.sc cx)) d (quote d v)))
+    | e => e
+  | _ => .err (String.append (if isMu then "μ" else "ν") " takes a description and an index")
+-- `Desc.ret i`, the last field of a description: `i : I`
+def inferDescRet (gs : Globals) (es : ES) (cx : Cx) (args : List Syntax) : TE :=
+  let d := Cx.lvl cx;
+  match args with
+  | .cons i .nil => match inferT gs es cx i .none with
+    | .err m => .err m
+    | .ok i0 ity es1 => match whnf (force es1 ity) with
+      | .vdesc l Iv => match checkT gs es1 cx i0 Iv .none with
+        | .ok _ _ es2 => .ok (.dret i0) (.vdesc l Iv) es2
+        | e => e
+      | v => .err (String.append "Desc.ret's index must be in a description's index type (write (Desc.ret (i : I) : Desc I)), but it is "
+          (show (scopeNames (Cx.sc cx)) d (quote d v)))
+    | e => e
+  | _ => .err "Desc.ret takes one index"
+-- `Desc.arg q S D`: a non-recursive field of type `S` in the universe one step down, then
+-- the rest of the description under it, `(s : S) → Desc l I`. Its type must be written
+-- (`(Desc.arg q S D : Desc I)`), so that the rest of the description can be checked here
+-- (with a metavariable as `I` the branch below could not infer the rest's argument type).
+def checkDescArg (gs : Globals) (es : ES) (cx : Cx) (args : List Syntax) (ty : Val) : TE :=
+  let d := Cx.lvl cx;
+  match whnf (force es ty) with
+  | .vdesc l Iv => match args with
+    | .cons qs (.cons S (.cons D .nil)) => match builtinQ qs with
+      | .bad => .err qtyErr
+      | .is q => match inferT gs es cx S .none with
+        | .err m => .err m
+        | .ok S0 Sty es1 => match whnf (force es1 Sty) with
+          | .vsort lS => match lvlEquiv lS (lsucc l) with
+            | .false => .err "a description's field type must be in its universe (lift it with ULift)"
+            | .true =>
+              let vS := eval (TCtx.env (Cx.c cx)) S0;
+              match checkT gs es1 cx D (.vpi .qw (lsucc l) (lsucc (lsucc l)) vS (.cons Iv .nil) (.descr l (.var 1))) .none with
+              | .ok D0 _ es2 => .ok (.darg (.qlit q) S0 D0) ty es2
+              | e => e
+          | v => .err (String.append "a description's field type must be a type, but it is in "
+              (show (scopeNames (Cx.sc cx)) d (quote d v)))
+        | e => e
+    | _ => .err "Desc.arg takes a quantity, a field type and the rest of the description"
+  | _ => .err "Desc.arg builds a description, but the expected type is not one (write (Desc.arg q S D : Desc I))"
+-- `Desc.rec q j D`: a recursive field at index `j`, then the rest of the description
+def checkDescRec (gs : Globals) (es : ES) (cx : Cx) (args : List Syntax) (ty : Val) : TE :=
+  let d := Cx.lvl cx;
+  match whnf (force es ty) with
+  | .vdesc l Iv => match args with
+    | .cons qs (.cons j (.cons D .nil)) => match builtinQ qs with
+      | .bad => .err qtyErr
+      | .is q => match checkT gs es cx j Iv .none with
+        | .err m => .err m
+        | .ok j0 _ es1 => match checkT gs es1 cx D ty .none with
+          | .ok D0 _ es2 => .ok (.drec (.qlit q) j0 D0) ty es2
+          | e => e
+    | _ => .err "Desc.rec takes a quantity, an index and the rest of the description"
+  | _ => .err "Desc.rec builds a description, but the expected type is not one (write (Desc.rec q j D : Desc I))"
 def inferBuiltin (gs : Globals) (es : ES) (cx : Cx) (n : String) (args : List Syntax) : TE :=
   let d := Cx.lvl cx;
-  if strEq n "ν" then match args with
+  if strEq n "Desc" then inferDesc gs es cx args
+  else if strEq n "μ" then inferMuNu gs es cx .true args
+  else if strEq n "ν" then match args with
     | .cons D (.cons i .nil) => match inferT gs es cx D .none with
       | .err m => .err m
       | .ok D0 dty es1 => match whnf (force es1 dty) with
