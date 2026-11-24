@@ -11,9 +11,12 @@ resolver is total and fail-closed:
 2. the provider's set must be enabled (core entries are always enabled), or
    `<kind>-not-enabled` refuses;
 3. the entry's ABI must be the one this consumer reads, or `unsupported-<kind>` refuses;
-4. the invocation's needs must be a subset of the entry's declared capabilities, or
+4. an entry may declare only the capabilities its kind allows (`Kind.capabilities`), or
+   `invalid-<kind>-capability` refuses — for example a lint rule cannot `emit` and a
+   backend cannot read a lint view;
+5. the invocation's needs must be a subset of the entry's declared capabilities, or
    `<kind>-capability` refuses;
-5. a payload this toolchain cannot serve is `entry-unsupported`.
+6. a payload this toolchain cannot serve is `entry-unsupported`.
 
 Nothing runs before the entry is returned, so a refusal cannot have written an artifact
 and a duplicate cannot have silently replaced a provider. The codes are data
@@ -74,6 +77,9 @@ def Table.register (t : Table) (e : Entry) : Except Diagnostic Table := do
     throw { code := s!"invalid-{k}-name", message := s!"{k}: '{e.name}' is not a valid entry name" }
   if e.abi.isEmpty then
     throw { code := s!"invalid-{k}-abi", message := s!"{k} {e.name}: the entry declares no ABI" }
+  if let some c := e.invalidCapability? then
+    throw { code := s!"invalid-{k}-capability",
+            message := s!"{k} {e.name}: a {e.kind.describe} cannot declare the capability '{c.key}'" }
   if e.override && e.kind != .docLanguage then
     throw { code := s!"invalid-{k}-override",
             message := s!"{k} {e.name}: only a doc language may override a built-in" }
@@ -130,6 +136,9 @@ def Table.resolve (t : Table) (k : Kind) (n : String) (needs : List Capability :
     else if !abi.isEmpty && e.abi != abi then
       throw { code := s!"unsupported-{k.key}",
               message := s!"{k.key} {e.name}: this toolchain reads {abi}, the entry declares {e.abi}" }
+    else if let some c := e.invalidCapability? then
+      throw { code := s!"invalid-{k.key}-capability",
+              message := s!"{k.key} {e.name}: a {e.kind.describe} cannot declare the capability '{c.key}'" }
     else match needs.find? (fun c => !e.caps.contains c) with
       | some c =>
         throw { code := s!"{k.key}-capability",

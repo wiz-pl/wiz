@@ -206,7 +206,77 @@ def extGroup : Group where
         let src ← IO.FS.readFile "Main.lean"
         check ((src.splitOn "target == \"").length == 1) "Main.lean compares a target name"
         check ((src.splitOn "targets.contains").length == 1) "Main.lean still has the target list"
-        check ((src.splitOn "def targets : List String").length == 1) "Main.lean still declares the target list" }
+        check ((src.splitOn "def targets : List String").length == 1) "Main.lean still declares the target list" },
+    { name := "capabilities are kind-scoped: a lint rule cannot emit, a backend cannot read a lint view", run := fun _ => do
+        let refute (e : Wiz.Ext.Entry) (code : String) : IO Unit :=
+          expectRefusal code (Wiz.Ext.Table.ofEntries [e])
+        refute { kind := .backend, name := "demo", abi := "wiz-backend/1",
+                 caps := [.emit, .decl], payload := .process "demo-backend" }
+          "invalid-target-capability"
+        refute { kind := .lintRule, name := "W101", abi := "wiz-lint/1",
+                 caps := [.emit], payload := .data }
+          "invalid-lint-rule-capability"
+        refute { kind := .lintSet, name := "demo", abi := "wiz-lint/1",
+                 caps := [.run], payload := .data }
+          "invalid-lint-set-capability"
+        refute { kind := .deriver, name := "BEq", abi := "wiz-meta/1",
+                 caps := [.elabTactic], payload := .wizRule "deriveBEq" }
+          "invalid-deriver-capability"
+        refute { kind := .termElab, name := "term.tau", abi := "wiz-meta/1",
+                 caps := [.elabTerm, .emit], payload := .wizRule "tauElab" }
+          "invalid-term-elab-capability"
+        refute { kind := .docLanguage, name := "demo", abi := "wiz.doc.languages/1",
+                 caps := [.emit], payload := .data }
+          "invalid-doc-language-capability"
+        -- and the allowed lists are what the table accepts
+        let allowed : List Wiz.Ext.Entry := [
+          { kind := .lintRule, name := "W101", abi := "wiz-lint/1",
+            caps := [.decl, .spans], payload := .data },
+          { kind := .lintSet, name := "demo", abi := "wiz-lint/1",
+            caps := [.facts, .elabLint], payload := .data },
+          { kind := .termElab, name := "term.tau", abi := "wiz-meta/1",
+            caps := [.elabTerm], payload := .wizRule "tauElab" },
+          { kind := .tactic, name := "tac.tau", abi := "wiz-meta/1",
+            caps := [.elabTactic], payload := .wizRule "tauTac" },
+          { kind := .macro, name := "mac.tau", abi := "wiz-meta/1",
+            caps := [.elabMacro], payload := .wizRule "tauMacro" },
+          { kind := .backend, name := "demo", abi := "wiz-backend/1",
+            caps := [.emit, .check], payload := .process "demo-backend" } ]
+        match Wiz.Ext.Table.ofEntries allowed with
+        | .ok t => checkEq 6 t.entries.length
+        | .error d => throw (IO.userError s!"allowed capabilities refused: {d.code}: {d.message}") },
+    { name := "an elaboration entry resolves through the same table: not-enabled, capability, ABI, duplicate", run := fun _ => do
+        let tau : Wiz.Ext.Entry :=
+          { kind := .termElab, name := "term.tau", provider := "demo-pkg", set := "demo-set",
+            abi := "wiz-meta/1", caps := [.elabTerm], payload := .wizRule "tauElab" }
+        let t ← match Wiz.Ext.Table.ofEntries [tau] with
+          | .ok t => pure t
+          | .error d => throw (IO.userError d.message)
+        expectRefusal "term-elab-not-enabled" (t.resolve .termElab "term.tau" [.elabTerm])
+        match t.resolve .termElab "term.tau" [.elabTerm] (enabledSets := ["demo-set"]) with
+        | .ok e => checkEq "term.tau" e.name
+        | .error d => throw (IO.userError s!"the enabled term elaborator did not resolve: {d.code}: {d.message}")
+        expectRefusal "term-elab-capability"
+          (t.resolve .termElab "term.tau" [.elabTactic] (enabledSets := ["demo-set"]))
+        expectRefusal "unsupported-term-elab"
+          (t.resolve .termElab "term.tau" (enabledSets := ["demo-set"]) (abi := "wiz-meta/2"))
+        -- an entry declaring no elaboration capability cannot be run as one
+        let noCap : Wiz.Ext.Entry :=
+          { kind := .termElab, name := "term.none", provider := "demo-pkg", set := "demo-set",
+            abi := "wiz-meta/1", payload := .wizRule "noElab" }
+        let t2 ← match Wiz.Ext.Table.ofEntries [noCap] with
+          | .ok t => pure t
+          | .error d => throw (IO.userError d.message)
+        expectRefusal "term-elab-capability"
+          (t2.resolve .termElab "term.none" [.elabTerm] (enabledSets := ["demo-set"]))
+        -- two providers for one elaboration kind name both
+        let other : Wiz.Ext.Entry := { tau with provider := "demo-other" }
+        match Wiz.Ext.Table.ofEntries [tau, other] with
+        | .error d => do
+          checkEq "duplicate-term-elab" d.code
+          check (d.message.contains "demo-pkg" && d.message.contains "demo-other")
+            s!"providers missing: {d.message}"
+        | .ok _ => throw (IO.userError "two term elaborators for one kind were registered") }
   ]
 
 builtin_initialize registerGroup extGroup

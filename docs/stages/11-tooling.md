@@ -1201,3 +1201,15 @@ declaration called `deriveBEq` is refused with `entry-unsupported` rather than r
 the frontend's built-in `BEq` body. Package backends are not wired: `grail.wiz`'s
 `Package.command` is a build-graph node, not a registry row (see
 `wiz-notes/ext-registry.md` §4).
+
+Capabilities are kind-scoped (`Kind.capabilities`): a backend may declare the build
+operations (`emit`, `check`, `link`, `run`, `attest`, `library`, `split`, `repl`), a lint
+set or rule the stable views (`decl`, `spans`, `imports`, `globals`, `messages`, `facts`)
+and, for a code rule, `elab.lint`, each elaboration kind exactly its own stage
+(`elab.term`, `elab.tactic`, `elab.macro`, `elab.deriver`), and a doc language none.
+`Table.register` refuses any other capability with `invalid-<kind>-capability` before the
+entry enters the table, and `Table.resolve` re-checks, so a hand-built table cannot grant
+`emit` to a lint rule or a lint view to a backend. The elaboration kinds use the same
+`Table.resolve`, so `term-elab-not-enabled`, `term-elab-capability` and
+`duplicate-term-elab` already exist as data; wiring the attribute handlers to that front
+door is the remaining registration work (language-gaps G1).
