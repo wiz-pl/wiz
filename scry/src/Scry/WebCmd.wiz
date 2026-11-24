@@ -351,7 +351,8 @@ many C# files it is not reading. -/
 def Scry.webRun (o : Scry.WebOpts) : EIO Nat := do
   w ← Scry.reportWalkOf o.path;
   match w.files with
-  | .nil => match Nat.lt 0 w.cs with
+  | .nil =>
+    match Nat.lt 0 w.cs with
     | .true => EIO.fail (String.append (Scry.refuseCsOnly "web" o.path w)
         " For a bundle of the C#, run `scry cs --bundle DIR " ++ o.path ++ "`.")
     | .false => EIO.fail ("scry web: no *.c file under " ++ o.path
@@ -359,11 +360,12 @@ def Scry.webRun (o : Scry.WebOpts) : EIO Nat := do
         ++ " Nothing was written; name a C tree, or C# with `scry cs --bundle DIR " ++ o.path
         ++ "`.")
   | _ => EIO.pure ()
-  match Nat.lt 0 w.cs with
-  | .true => EIO.lift (IO.ePrintln ("note: " ++ o.path ++ " also has "
-      ++ Nat.repr w.cs ++ " *.cs file(s), which this bundle does not read "
-      ++ "(only *.c; use `scry cs --bundle DIR` for those)"))
-  | .false => EIO.pure ();
+  let note : EIO Unit := match Nat.lt 0 w.cs with
+    | .true => EIO.lift (IO.ePrintln ("note: " ++ o.path ++ " also has "
+        ++ Nat.repr w.cs ++ " *.cs file(s), which this bundle does not read "
+        ++ "(only *.c; use `scry cs --bundle DIR` for those)"))
+    | .false => EIO.pure ();
+  note;
   let files := w.files;
   models ← Scry.webModelsGo o files;
   sources ← Scry.webSourcesGo o.sources ([] : List String);
@@ -385,7 +387,7 @@ def Scry.webRun (o : Scry.WebOpts) : EIO Nat := do
   let out := o.out;
   Scry.bundleDirs out;
   -- The host files and the framework.
-  assets ← Scry.webFindAssets o;
+  assets ← Scry.webFindAssets o.assets;
   hostCopied ← (match assets with
     | .none => EIO.pure ([] : List String)
     | .some d => Scry.webCopyHostGo d out

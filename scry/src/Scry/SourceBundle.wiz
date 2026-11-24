@@ -89,14 +89,14 @@ def Scry.webIndexOf (files : List Source.File) (id : String) :
 
 /-- Insert a finding into a list ordered by semantic id (stable for equal ids). -/
 def Scry.webInsertById (f : Source.Finding) : List Source.Finding → List Source.Finding
-  | .nil => [f]
+  | .nil => List.cons f .nil
   | .cons g rest => match String.lt f.id g.id with
     | .true => List.cons f (List.cons g rest)
     | .false => List.cons g (Scry.webInsertById f rest)
 
 /-- Findings sorted by semantic id: the bundle's order, independent of line numbers. -/
 def Scry.webSortById (fs : List Source.Finding) : List Source.Finding :=
-  List.foldl (fun acc f => Scry.webInsertById f acc) [] fs
+  List.foldl (fun acc f => Scry.webInsertById f acc) (.nil : List Source.Finding) fs
 
 /-- `[["key","value"], …]` for the JSON columns field. -/
 def Scry.webColumnsJson (cs : List (String × String)) : Json :=
@@ -172,22 +172,6 @@ def Scry.webFindingsOf (i : EditorModel.PositionIndex) (fileId path : String) :
     let tail := Scry.webFindingsOf i fileId path rest facts.2;
     (List.cons finding tail.1, List.append facts.1 tail.2.1, tail.2.2)
 
-/-- One file's reader model from its findings and its fact rows. The facts are numbered
-after the finding rows (`after`), so the file's node ids are one sequence.
-
-The findings' facts are `rf.findings`' `sink` rows plus one `flow` row per step the reader
-can place, followed by the caller's own rows (`facts`, the C# export's `ast` nodes). A
-finding whose `pathSteps` are set (the C# front end's program points) uses those, with the
-`reindexed` spans applied in order and a `rejected` one left out; otherwise the page's own
-`steps` are used, which is what `scry report` shows. -/
-def Scry.bundleModelOf (rf : Scry.ReportFile) (facts : List Source.FactRow) (after : Nat) :
-    Source.File × List Source.Finding × List Source.FactRow :=
-  let i := EditorModel.index rf.source;
-  let file := Source.File.mk rf.anchor rf.path (Scry.webLanguage rf.path) rf.source
-    (EditorModel.lineCount i);
-  let built := Scry.bundleFindingsOf rf i after;
-  (file, built.1, List.append built.2.1 facts)
-
 /-- A path step with its location replaced (a `Scry.ReindexedOrigin`'s `fixed` span,
 which is `(startLine, startColumn, stopLine, stopColumn)`). -/
 def Scry.reindexStep (s : Scry.ReportStep) (r : Scry.ReindexedOrigin) : Scry.ReportStep :=
@@ -226,13 +210,6 @@ partial def Scry.bundleFindingsGo (rf : Scry.ReportFile) (i : EditorModel.Positi
     let tail := Scry.bundleFindingsGo rf i rest facts.2;
     (List.cons finding tail.1, List.append facts.1 tail.2.1, tail.2.2)
 
-def Scry.bundleFindingsOf (rf : Scry.ReportFile) (i : EditorModel.PositionIndex)
-    (after : Nat) : List Source.Finding × List Source.FactRow × Nat :=
-  let own := Scry.bundleFindingsGo rf i rf.findings after;
-  let rejected := List.map (Scry.bundleRejectionFinding rf) (List.concat (List.map
-    (fun r => r.rejected) rf.findings));
-  (List.append own.1 rejected, own.2.1, own.2.2)
-
 /-- A `RejectedOrigin` (a report step whose origin is outside its file) as a reader
 finding: the same span rule (`Source.Span.ofOrigin` clamps it into the file), the
 severity `error`, and a message saying the step was dropped. It is a *bundle* warning,
@@ -247,9 +224,36 @@ def Scry.bundleRejectionFinding (rf : Scry.ReportFile) (r : Scry.RejectedOrigin)
     ["scry/unplaced-origin", Scry.normPath rf.path, Nat.repr r.line, Nat.repr r.column])));
   Source.Finding.mk id rf.anchor rf.path
     "scry/unplaced-origin" "error"
-    (r.reason ++ " (finding " ++ r.finding ++ ", step " ++ r.step ++ ": "
+    (r.reason ++ " (finding " ++ r.finding ++ ", step " ++ Nat.repr r.step ++ ": "
       ++ r.func ++ ":" ++ Nat.repr r.point ++ ")")
     span r.line r.column .false ""
+
+/-- The finding rows of one report file (`Scry.bundleModelOf`'s finding half); `after` is
+the number to start this file's fact nodes at (`0` when it is the only source of rows).
+A step the file's source cannot place (`rf.findings`'s `rejected`) becomes a
+`scry/unplaced-origin` warning finding rather than a silently shortened path. -/
+def Scry.bundleFindingsOf (rf : Scry.ReportFile) (i : EditorModel.PositionIndex)
+    (after : Nat) : List Source.Finding × List Source.FactRow × Nat :=
+  let own := Scry.bundleFindingsGo rf i rf.findings after;
+  let rejected := List.map (Scry.bundleRejectionFinding rf) (List.concat (List.map
+    (fun r => r.rejected) rf.findings));
+  (List.append own.1 rejected, own.2.1, own.2.2)
+
+/-- One file's reader model from its findings and its fact rows. The facts are numbered
+after the finding rows (`after`), so the file's node ids are one sequence.
+
+The findings' facts are `rf.findings`' `sink` rows plus one `flow` row per step the reader
+can place, followed by the caller's own rows (`facts`, the C# export's `ast` nodes). A
+finding whose `pathSteps` are set (the C# front end's program points) uses those, with the
+`reindexed` spans applied in order and a `rejected` one left out; otherwise the page's own
+`steps` are used, which is what `scry report` shows. -/
+def Scry.bundleModelOf (rf : Scry.ReportFile) (facts : List Source.FactRow) (after : Nat) :
+    Source.File × List Source.Finding × List Source.FactRow :=
+  let i := EditorModel.index rf.source;
+  let file := Source.File.mk rf.anchor rf.path (Scry.webLanguage rf.path) rf.source
+    (EditorModel.lineCount i);
+  let built := Scry.bundleFindingsOf rf i after;
+  (file, built.1, List.append built.2.1 facts)
 
 -- ## JSON writers
 
@@ -418,6 +422,68 @@ def Scry.bundleDirs (out : String) : EIO Unit := do
   Scry.bundleEnsureDir (String.append out "/data/f");
   Scry.bundleEnsureDir (String.append out "/framework")
 
+/-- Copy one file; `false` when the source does not exist. -/
+def Scry.webCopy (from to : String) : EIO Bool := do
+  present ← EIO.lift (FS.isFile from);
+  match present with
+  | .false => EIO.pure .false
+  | .true => do
+    text ← FS.readFile from;
+    FS.writeFile to text;
+    EIO.pure .true
+
+/-- The first `web/` directory that has the host's files, from the current directory up
+(or `--assets`). -/
+partial def Scry.webFindAssetsGo : List String → EIO (Option String)
+  | .nil => EIO.pure .none
+  | .cons d rest => do
+    present ← EIO.lift (FS.isFile (String.append d "/source-app.js"));
+    match present with
+    | .true => EIO.pure (.some d)
+    | .false => Scry.webFindAssetsGo rest
+
+def Scry.webFindAssets (assets : Option String) : EIO (Option String) :=
+  match assets with
+  | .some d => do
+    present ← EIO.lift (FS.isDir d);
+    match present with
+    | .true => EIO.pure (.some d)
+    | .false => EIO.pure .none
+  | .none => Scry.webFindAssetsGo ["web", "../web", "../../web", "../../../web"]
+
+/-- Copy the host's files (`web/source-*` to the bundle root). -/
+def Scry.webCopyHostGo (assets out : String) :
+    List (String × String) → EIO (List String)
+  | .nil => EIO.pure []
+  | .cons p rest => do
+    ok ← Scry.webCopy (String.append assets (String.append "/" p.1))
+      (String.append out (String.append "/" p.2));
+    more ← Scry.webCopyHostGo assets out rest;
+    EIO.pure (match ok with
+      | .true => List.cons p.2 more
+      | .false => more)
+
+/-- Copy the framework modules the browser half needs. -/
+def Scry.webCopyFrameworkGo (assets out : String) : List String → EIO (List String)
+  | .nil => EIO.pure []
+  | .cons n rest => do
+    ok ← Scry.webCopy (String.append assets (String.append "/framework/" n))
+      (String.append out (String.append "/framework/" n));
+    more ← Scry.webCopyFrameworkGo assets out rest;
+    EIO.pure (match ok with
+      | .true => List.cons n more
+      | .false => more)
+
+/-- Write one `data/f/<id>.json` per file. A loop in the shape `Scry.emitForStrings`
+uses: a `do` block cannot sequence a `List.foldl` of effects as its last statement. -/
+partial def Scry.bundleWriteFilesGo (out : String) (findings : List Source.Finding)
+    (facts : List Source.FactRow) : List Source.File → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons f rest => do
+    FS.writeFile (String.append out (String.append "/data/f/" (String.append f.id ".json")))
+      (String.append (Json.render (Scry.bundleFileJson f findings facts)) "\n");
+    Scry.bundleWriteFilesGo out findings facts rest
+
 /-- Write the three index files and one `data/f/<id>.json` per file.
 
 The findings are put in **semantic-id order here**, not by the caller: the tables, each
@@ -427,7 +493,7 @@ C one. It is a stable insertion sort over equal ids. -/
 def Scry.bundleWriteData (out tool : String) (files : List Source.File)
     (findings0 : List Source.Finding) (facts : List Source.FactRow)
     (host framework : List String) (runtime : Bool) (extra : List (String × Json)) : EIO Unit := do
-  let findings := Scry.webSortById findings0;
+  let findings : List Source.Finding := Scry.webSortById findings0;
   let manifest := Scry.bundleManifestJson tool (Scry.bundleRevision tool files) files
     findings host framework runtime extra;
   FS.writeFile (String.append out "/data/manifest.json")
@@ -436,11 +502,7 @@ def Scry.bundleWriteData (out tool : String) (files : List Source.File)
     (String.append (Json.render (Scry.bundleFilesJson files)) "\n");
   FS.writeFile (String.append out "/data/findings.json")
     (String.append (Json.render (Scry.bundleFindingsJson files findings)) "\n");
-  List.foldl (fun (w : EIO Unit) f => do
-    w;
-    FS.writeFile (String.append out (String.append "/data/f/"
-        (String.append f.id ".json")))
-      (String.append (Json.render (Scry.bundleFileJson f findings facts)) "\n")) () files
+  Scry.bundleWriteFilesGo out findings facts files
 
 /-- Warn (on stderr) about a file whose text is large enough that the Wasm reader's
 `Json.parse` can exhaust its stack: a single string of about 50 KB failed in a browser

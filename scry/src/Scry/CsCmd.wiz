@@ -535,10 +535,9 @@ def Scry.Cs.readerPath (root full : String) : String :=
 /-- The UTF-16 offset of the character at UTF-8 byte `b`, or `none` when `b` is not the
 start of a character of `text`. The parse's spans are UTF-8 bytes and the reader's are
 UTF-16 units, and `Web.EditorModel` is the only line table between them. -/
-def Scry.Cs.unitOfByte (text : String) (b : Nat) : Option Nat :=
-  let scan : List Char → Nat → Nat → Option Nat
-    | .nil, _, _ => .none
-    | .cons c rest, u, byte =>
+partial def Scry.Cs.unitOfByteGo (b : Nat) : List Char → Nat → Nat → Option Nat
+  | .nil, _, _ => .none
+  | .cons c rest, u, byte =>
       let n := Scry.webUtf8Len (Char.code c);
       match Nat.beq byte b with
       | .true => .some u
@@ -546,8 +545,12 @@ def Scry.Cs.unitOfByte (text : String) (b : Nat) : Option Nat :=
         let step := match n with
           | 0 => 1
           | _ => n;
-        scan rest (Nat.add u (List.length (EditorModel.unitsOf c))) (Nat.add byte step);
-  scan (String.chars text) 0 0
+        Scry.Cs.unitOfByteGo b rest (Nat.add u (List.length (EditorModel.unitsOf c)))
+          (Nat.add byte step)
+
+/-- The UTF-16 offset of the character at UTF-8 byte `b`. -/
+def Scry.Cs.unitOfByte (text : String) (b : Nat) : Option Nat :=
+  Scry.Cs.unitOfByteGo b (String.chars text) 0 0
 
 /-- The reader's span for a parse node: `some` when both ends land on characters of
 `text`. -/
@@ -595,7 +598,7 @@ def Scry.Cs.nodeSlot (store : Scry.CstStore) (p i : Nat) : Nat :=
 broken input could otherwise make this walk loop, and a depth is a display field. The
 export sorts `ast` rows by it so the cap in `Scry.Cs.factsOf` keeps the tree's skeleton
 (shallow rows) first. -/
-def Scry.Cs.nodeDepthFrom (store : Scry.CstStore) (fuel n j : Nat) : Option Nat :=
+partial def Scry.Cs.nodeDepthFrom (store : Scry.CstStore) (fuel n j : Nat) : Option Nat :=
   match fuel with
   | 0 => .none
   | _ => match Scry.CstStore.parentOf store j with
@@ -695,30 +698,17 @@ def Scry.Cs.sinkOriginOf (m : Scry.OriginMap) (rel : String) (f : Scry.RuleFindi
   | .some o => o
   | .none => Scry.Origin.mk rel 0 0 0 0
 
-/-- The finding's located path as the reader places it: `pathSteps` (the program points,
-which the page's own list shows), the `reindexed` steps whose origin `Source.Span.ofOrigin`
-re-expressed in the reader's UTF-16 index, and the `rejected` steps the file's text
-cannot name. A step's span is the one the reader will use for it, and the last step is
-often the sink's own span, which `Scry.webFlowFactsGo` already drops as a duplicate.
-
-A step whose origin the page's origin map always has (the sink, and every path point the
-front end recorded) is never "unlocated" here: `line = 0` means the run found no origin
-for it, and such a step stays a step with no mark (the same rule a C path's unlocated
-step gets). A step that has an origin but no character of this file gets a
-`Scry.RejectedOrigin`, so the bundle says so instead of dropping it. -/
-def Scry.Cs.placedOf (text findId : String) (f : Scry.RuleFinding) (m : Scry.OriginMap) :
-    List Scry.ReportStep × List Scry.ReindexedOrigin × List Scry.RejectedOrigin :=
-  let steps := List.map (Scry.reportStepOf m) f.path;
-  let i := EditorModel.index text;
-  let go : List Scry.ReportStep → Nat →
-      List Scry.ReindexedOrigin × List Scry.RejectedOrigin
-    | .nil, _ => ([], [])
-    | .cons st rest, k =>
-      let tail := go rest (Nat.succ k);
+/-- `Scry.Cs.placedOf`'s walk: `k` is the index of `sts`'s first step. -/
+partial def Scry.Cs.placedGo (i : EditorModel.PositionIndex) (findId : String) :
+    List Scry.ReportStep → Nat →
+    List Scry.ReindexedOrigin × List Scry.RejectedOrigin
+  | .nil, _ => ([], [])
+  | .cons st rest, k =>
+      let tail := Scry.Cs.placedGo i findId rest (Nat.succ k);
       -- A path point with an origin but no end has a one-unit caret, as `ofOrigin` does.
       let span := Scry.webSpanOfOrigin i st.line st.column st.endLine st.endColumn;
       match Nat.beq st.line 0 with
-      | .true => tail
+      | .true => (tail.1, tail.2.1, tail.2.2)
       | .false =>
         -- `Span.ofOrigin` clamps; a span that clamps to nothing at the start of a file
         -- that has text is not a place the reader can underline.
@@ -736,8 +726,25 @@ def Scry.Cs.placedOf (text findId : String) (f : Scry.RuleFinding) (m : Scry.Ori
              (Nat.add start.1 1, Nat.add start.2 1, Nat.add stop.1 1, Nat.add stop.2 1))
              tail.1,
            tail.2.1,
-           tail.2.2);
-  (steps, (go steps 0).1, (go steps 0).2)
+           tail.2.2)
+
+/-- The finding's located path as the reader places it: `pathSteps` (the program points,
+which the page's own list shows), the `reindexed` steps whose origin `Source.Span.ofOrigin`
+re-expressed in the reader's UTF-16 index, and the `rejected` steps the file's text
+cannot name. A step's span is the one the reader will use for it, and the last step is
+often the sink's own span, which `Scry.webFlowFactsGo` already drops as a duplicate.
+
+A step whose origin the page's origin map always has (the sink, and every path point the
+front end recorded) is never "unlocated" here: `line = 0` means the run found no origin
+for it, and such a step stays a step with no mark (the same rule a C path's unlocated
+step gets). A step that has an origin but no character of this file gets a
+`Scry.RejectedOrigin`, so the bundle says so instead of dropping it. -/
+def Scry.Cs.placedOf (text findId : String) (f : Scry.RuleFinding) (m : Scry.OriginMap) :
+    List Scry.ReportStep × List Scry.ReindexedOrigin × List Scry.RejectedOrigin :=
+  let steps := List.map (Scry.reportStepOf m) f.path;
+  let i := EditorModel.index text;
+  let placed := Scry.Cs.placedGo i findId steps 0;
+  (steps, placed.1, placed.2)
 
 /-- One file's `Scry.ReportFile` and its `ast` facts for the reader: the report's findings
 in the analysis's order (the bundle sorts them by semantic id), each with its sink's
@@ -777,7 +784,7 @@ partial def Scry.Cs.bundleModelsGo (raw : List Scry.RuleFinding) (checks : List 
   | .cons r rest => do
     let built := Scry.Cs.reportFileOf r raw checks m 0;
     let model := Scry.bundleModelOf built.1 built.2.1 0;
-    let dropped := match built.2.2 with
+    let dropped := match built.2.2.2 with
       | 0 => []
       | n => [(r.path, n)];
     more ← Scry.Cs.bundleModelsGo raw checks m rest;
@@ -797,6 +804,36 @@ def Scry.htmlEsc (s : String) : String :=
     | _, .true, _ => "&gt;"
     | _, _, .true => "&amp;"
     | _, _, _ => String.mk [c]) (String.chars s))
+
+/-- The report. `found` is the number of `.cs` files analysed; `before` is
+`found + walk.excludedCount`. -/
+structure Scry.Cs.Report where
+  target : String
+  kind : String
+  before : Nat
+  found : Nat
+  parsed : Nat
+  lowered : Nat
+  failed : Nat
+  funcs : Nat
+  excluded : Nat
+  rulesPath : Option String
+  ruleCount : Nat
+  findings : List Scry.Cs.FindingRow
+  coverage : List Scry.Cs.CoverRow
+
+/-- The taint pass's contribution to a report. The raw findings, their checked flags,
+the origin map and the rule pack are kept for `--sarif`: the human/JSON report only
+needs the aggregated rows, but SARIF names each result and its location. -/
+structure Scry.Cs.Analysis where
+  findings : List Scry.Cs.FindingRow
+  rulesPath : Option String
+  ruleCount : Nat
+  coverage : List Scry.Cs.Diag
+  raw : List Scry.RuleFinding
+  checks : List Bool
+  origins : Scry.OriginMap
+  pack : Scry.RulePack
 
 -- ## `--bundle`: the manifest's C# footer
 
@@ -871,15 +908,15 @@ def Scry.Cs.writeBundle (assetsOpt : Option String) (out : String) (t : Scry.Cs.
     | _ => .false) results);
   Scry.bundleWarnLarge files;
   Scry.bundleDirs out;
-  assets ← Scry.Cs.findAssets assetsOpt;
+  assets ← Scry.webFindAssets assetsOpt;
   host ← (match assets with
     | .none => EIO.pure []
-    | .some d => Scry.Cs.copyList d out
+    | .some d => Scry.webCopyHostGo d out
         [("source-app.js", "app.js"), ("source.css", "app.css"),
          ("source-static.js", "source-static.js")]);
   framework ← (match assets with
     | .none => EIO.pure []
-    | .some d => Scry.Cs.copyList d out
+    | .some d => Scry.webCopyHostGo d out
         [("framework/mount.js", "framework/mount.js")
         , ("framework/driver.js", "framework/driver.js")
         , ("framework/runtime.js", "framework/runtime.js")]);
@@ -980,12 +1017,13 @@ def Scry.Cs.analyseFile (rel full : String) (wantStore : Bool) : EIO Scry.Cs.Fil
   st ← Scry.Native.parse "c_sharp" text;
   let errs := Scry.Native.errorCount st;
   store ← EIO.lift (Scry.Native.toCstStoreIn "c_sharp" rel st);
-  let kept : Option (Except String Scry.CstStore) := match wantStore with
-    | .false => .none
-    | .true => .some (match Scry.Cs.storeFits store rel text with
-        | .true => .ok store
-        | .false => .error (rel ++ ": the parse's byte spans do not index this file's own text"
-            ++ " (a preprocessed file, or a CRLF difference); its AST facts were not written"));
+  let kept : Option (Except String Scry.CstStore) :=
+      match wantStore with
+      | .false => .none
+      | .true => .some (match Scry.Cs.storeFits store rel text with
+          | .true => .ok store
+          | .false => .error (rel ++ ": the parse's byte spans do not index this file's own text"
+              ++ " (a preprocessed file, or a CRLF difference); its AST facts were not written"));
   let lower := fun () => Scry.Cs.lowerCstWithModels Scry.csModels rel text
       (Scry.Cs.ofStore text store);
   match Nat.beq errs 0 with
@@ -999,7 +1037,7 @@ def Scry.Cs.analyseFile (rel full : String) (wantStore : Bool) : EIO Scry.Cs.Fil
         let pos := Scry.posOf pre sp.start;
         rel ++ ":" ++ Nat.repr pos.line ++ ":" ++ Nat.repr pos.col
           ++ " (" ++ Scry.Cs.errorKind store i ++ ")"
-      | .none => rel;
+      | .none => rel
     -- The recovery tree is not lowered as a result, but its boundary rows are the first
     -- thing the reader can say about the file: they go in as warnings beside the error.
     let warnings := List.map (Scry.Cs.diagOfWarning rel) (lower ()).warnings;
@@ -1018,7 +1056,7 @@ partial def Scry.Cs.analyseAll (wantStore : Bool) :
     let fr := match r with
       | .ok x => x
       | .error e => Scry.Cs.FileResult.mk rel .false 1 .nil "" 
-          [Scry.Cs.Diag.mk .error "unreadable file" rel e] .none;
+          [Scry.Cs.Diag.mk .error "unreadable file" rel e] .none
     rs ← Scry.Cs.analyseAll wantStore rest;
     EIO.pure (List.cons fr rs)
 
@@ -1120,35 +1158,6 @@ def Scry.Cs.originMapOf (results : List Scry.Cs.FileResult) : Scry.OriginMap :=
   List.concat (List.map (fun r =>
     Scry.originEntries r.path (Scry.TextIndex.ofString r.text) r.funcs) results)
 
-/-- The report. `found` is the number of `.cs` files analysed; `before` is
-`found + walk.excludedCount`. -/
-structure Scry.Cs.Report where
-  target : String
-  kind : String
-  before : Nat
-  found : Nat
-  parsed : Nat
-  lowered : Nat
-  failed : Nat
-  funcs : Nat
-  excluded : Nat
-  rulesPath : Option String
-  ruleCount : Nat
-  findings : List Scry.Cs.FindingRow
-  coverage : List Scry.Cs.CoverRow
-
-/-- The taint pass's contribution to a report. The raw findings, their checked flags,
-the origin map and the rule pack are kept for `--sarif`: the human/JSON report only
-needs the aggregated rows, but SARIF names each result and its location. -/
-structure Scry.Cs.Analysis where
-  findings : List Scry.Cs.FindingRow
-  rulesPath : Option String
-  ruleCount : Nat
-  coverage : List Scry.Cs.Diag
-  raw : List Scry.RuleFinding
-  checks : List Bool
-  origins : Scry.OriginMap
-  pack : Scry.RulePack
 
 def Scry.Cs.countIf {A : Type} (p : A → Bool) (xs : List A) : Nat :=
   List.length (List.filter p xs)
@@ -1413,23 +1422,24 @@ def Scry.Cs.finish (opts : Scry.Cs.Opts) (t : Scry.Cs.Target)
   let status := Scry.Cs.statusOf (.report r opts.failOn);
   match opts.json with
   | .true => Scry.Cs.say (Json.render (Scry.Cs.jsonOf r status))
-  | .false => Scry.Cs.say (Scry.Cs.render r);
+  | .false => Scry.Cs.say (Scry.Cs.render r)
   -- The bundle and the SARIF come after the report, and a failure in either is an IO
   -- failure of the run (status 2), never a silent half-write.
-  let writeSarif : EIO Nat := match opts.sarif with
-    | .none => EIO.pure status
-    | .some out => do
-      w ← Scry.Cs.attempt (FS.writeFile out (String.append
-        (Scry.renderSarifWith "cs" "scry" analysis.origins analysis.pack
-          (Scry.zipFindings analysis.raw analysis.checks) .nil) "\n"));
-      match w with
-      | .error e => do
-        Scry.Cs.sayErr ("scry cs: " ++ e);
-        EIO.pure 2
-      | .ok _ => do
-        Scry.Cs.sayErr ("wrote SARIF 2.1.0: " ++ out ++ " ("
-          ++ Nat.repr (List.length analysis.raw) ++ " result(s))");
-        EIO.pure status;
+  let writeSarif : EIO Nat :=
+      match opts.sarif with
+      | .none => EIO.pure status
+      | .some out => do
+        w ← Scry.Cs.attempt (FS.writeFile out (String.append
+          (Scry.renderSarifWith "cs" "scry" analysis.origins analysis.pack
+            (Scry.zipFindings analysis.raw analysis.checks) .nil) "\n"));
+        match w with
+        | .error e => do
+          Scry.Cs.sayErr ("scry cs: " ++ e);
+          EIO.pure 2
+        | .ok _ => do
+          Scry.Cs.sayErr ("wrote SARIF 2.1.0: " ++ out ++ " ("
+            ++ Nat.repr (List.length analysis.raw) ++ " result(s))");
+          EIO.pure status;
   match opts.bundle with
   | .none => writeSarif
   | .some out => do
@@ -1452,7 +1462,12 @@ def Scry.Cs.run (args : List String) : EIO Nat := do
       Scry.Cs.sayErr ("scry cs: " ++ e);
       EIO.pure (Scry.Cs.statusOf .usage)
     | .ok t => do
-      results ← Scry.Cs.analyseAll (match opts.bundle with | .some _ => .true | .none => .false) t.walk.files;
+      -- The CST is only kept for `--bundle` (the `ast` facts read it); plain analysis
+      -- drops it, so a 75-file tree's memory does not carry a second copy of every parse.
+      let wantStore : Bool := match opts.bundle with
+        | .some _ => .true
+        | .none => .false;
+      results ← Scry.Cs.analyseAll wantStore t.walk.files;
       pack ← match opts.taint with
         | .false => EIO.pure ((.ok .none) : Except String (Option (String × Scry.RulePack)))
         | .true => Scry.Cs.attempt (Scry.Cs.loadPack opts.rules);
