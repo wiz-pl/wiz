@@ -71,6 +71,23 @@ def package : Package := Package.new "scry"
        |> Command.arg "--json"
        |> Command.input "fixtures/broken.c"
        |> Command.stdout "build/fuzz-span.json")
+  -- The static source reader's export (web-docs-next M1.1): `scry web` over the three
+  -- public C fixtures, with the checkout's `web/` host files. One command writes the
+  -- bundle and its summary; `web/source_static_test.mjs` is the acceptance test (scry.yml
+  -- runs it on the output, and `web/test.sh`'s export gate runs it plus its negative
+  -- case). `tests/web-bundle.wiz` pins the summary; the second export's
+  -- `sha256sum data/*.json` identity is scry.yml's. `../web` is the assets directory: an
+  -- input, so editing the host or the framework reruns the export (and the fixture
+  -- directory is hashed whole, so a new or edited fixture does too).
+  |> Package.command (Command.new "web-bundle" (Tool.exe "scry")
+       |> Command.arg "web"
+       |> Command.input "tests/fixtures/report"
+       |> Command.arg "--out"
+       |> Command.outDir "build/web-bundle"
+       |> Command.arg "--assets"
+       |> Command.arg "../web"
+       |> Command.needs "../web"
+       |> Command.stdout "build/web-bundle.txt")
   -- The e-graph layer (S12): lowered Wil terms, folds/rewrites, deterministic report.
   |> Package.command (Command.new "egraph" (Tool.exe "scry")
        |> Command.arg "egraph"

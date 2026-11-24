@@ -1,0 +1,107 @@
+-- test: run timeout 900
+import Sys
+import Json
+import Text
+-- The static source reader's export (`scry web`): the same command the package's
+-- `web-bundle` target runs (scry/grail.wiz), over the three public fixtures with the
+-- checkout's `web/` host files.
+--
+-- What this pins: the summary line `scry web` prints, because its counts are the
+-- contract the bundle's own data must keep (three files, the fixtures' two findings and
+-- their facts); the manifest's schema, mode and counts; the file table's walk order; and
+-- that the table's paths are relative, so a published bundle names no checkout.
+--
+-- The bundle's *content* is `web/source_static_test.mjs`'s contract (the SSR, the
+-- answer schema, every replay of the scripted patch trace), and its negative case is
+-- `web/source_export_gate.sh`: each of that gate's three mutations must make the test
+-- fail. This case is the golden half, in the `grail test` goldens the scry workflow
+-- already runs, so a changed summary is a reviewed diff and not a silent edit.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.ePrintln (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+structure Res where
+  code : Nat
+  out : String
+  err : String
+
+def run (args : List String) : EIO Res := do
+  r ← Process.output ".grail/bin/scry" args "";
+  let code := match r.status with
+    | .exited n => n
+    | .signaled _ => 99;
+  EIO.pure (Res.mk code r.stdout r.stderr)
+
+def jAt (j : Json) (path : List String) : Json :=
+  match path with
+  | .nil => j
+  | .cons k rest => match Json.get j k with
+    | .some x => jAt x rest
+    | .none => Json.mkNull
+
+def jStr (j : Json) (path : List String) : String :=
+  match jAt j path with
+  | .str s => s
+  | _ => ""
+
+def jNat (j : Json) (path : List String) : Nat :=
+  match jAt j path with
+  | .int _ n => n
+  | _ => 0
+
+def jList (j : Json) (path : List String) : List Json :=
+  match jAt j path with
+  | .arr xs => Jsons.toList xs
+  | _ => .nil
+
+def readJson (path : String) : EIO Json := do
+  text ← FS.readFile path;
+  match Json.parse text with
+  | .ok j => EIO.pure j
+  | .error e => do
+    check (path ++ ": JSON parses (" ++ e ++ ")") .false;
+    EIO.pure Json.mkNull
+
+def firstLine (s : String) : String := match String.splitOn s "\n" with
+  | .cons l _ => l
+  | .nil => ""
+
+/-- A path that would bind the bundle to this checkout: absolute, or climbing out. -/
+def relative (p : String) : Bool :=
+  Bool.not (Bool.or (String.startsWith p "/") (String.contains p ".."))
+
+def main : IO Unit := EIO.toIO (do
+  bin ← EIO.lift (FS.exists ".grail/bin/scry");
+  match bin with
+  | .false => EIO.lift (IO.println "web bundle: skip (.grail/bin/scry absent)")
+  | .true => do
+    r ← run ["web", "tests/fixtures/report", "--out", "build/web-bundle-golden",
+      "--assets", "../web"];
+    check "web bundle: exit 0" (Nat.beq r.code 0);
+    -- The summary is the golden's subject: its counts are the bundle's contract.
+    let summary := firstLine r.out;
+    check ("web bundle: summary: " ++ summary)
+      (String.startsWith summary "wrote source bundle: build/web-bundle-golden (3 file(s)");
+    m ← readJson "build/web-bundle-golden/data/manifest.json";
+    check "web bundle: manifest names the schema"
+      (String.eq (jStr m ["schema"]) "scry.web.bundle/1");
+    check "web bundle: the export is static"
+      (String.eq (jStr m ["mode"]) "static");
+    check "web bundle: the manifest counts three files"
+      (Nat.beq (jNat m ["counts", "files"]) 3);
+    check "web bundle: the manifest counts the fixtures' two findings"
+      (Nat.beq (jNat m ["counts", "findings"]) 2);
+    -- The file table is the walk's sorted order, and the paths are the bundle's own.
+    fs ← readJson "build/web-bundle-golden/data/files.json";
+    let paths := List.map (fun f => jStr f ["path"]) (jList fs ["files"]);
+    check ("web bundle: the walk is " ++ String.intercalate ", " paths)
+      (Nat.beq (List.length paths) 3);
+    check "web bundle: every path is relative to the target"
+      (List.all relative paths);
+    check "web bundle: safe.c is the first file of the walk"
+      (match paths with
+        | .cons p _ => String.endsWith p "/safe.c"
+        | .nil => .false))

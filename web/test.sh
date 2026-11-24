@@ -13,6 +13,9 @@
 #   WIZ_WEB_FROM=DIR, WIZ_PLAYGROUND_FROM=DIR and WIZ_PLAYGROUND_UI_FROM=DIR: copy the
 #   modules a Nix build made (`nix build .#wiz-web .#wiz-playground .#wiz-playground-ui`)
 #   instead of building them, as CI does.
+#   The static source reader's export gate (`web/source_export_gate.sh`) runs here when a
+#   `scry web` bundle is available (WIZ_SOURCE_BUNDLE=DIR, or a built
+#   scry/.grail/bin/scry); it needs no Wasm and no browser, and says so when it skips.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PORT=${1:-18765}
@@ -48,6 +51,34 @@ node "$ROOT/web/source_fixture_test.mjs" "$OUT/source-fixture.json" > "$OUT/sour
 if grep -qF 'source fixture: all checks passed' "$OUT/source-fixture.txt"; then
   echo "ok (source reader fixture)"; else
   echo "FAIL (source reader fixture)"; cat "$OUT/source-fixture.txt"; exit 1; fi
+# (source reader) the export gate's negative case: `scry web`'s bundle must pass its
+# acceptance test and each of `web/source_export_gate.sh`'s three mutations must make it
+# fail, so the export's contract is not vacuous. It needs a scry binary, which this job
+# does not build: use `WIZ_SOURCE_BUNDLE=DIR` (a bundle someone exported, e.g. the site's
+# `source/`) or a worktree with `cd scry && grail build` (`grail build web-bundle` writes
+# `scry/build/web-bundle`). The export itself and its determinism are gated in scry.yml.
+GATE_BUNDLE=${WIZ_SOURCE_BUNDLE:-}
+if [ -n "$GATE_BUNDLE" ] && [ ! -d "$GATE_BUNDLE/data" ]; then
+  echo "FAIL (source export gate): WIZ_SOURCE_BUNDLE=$GATE_BUNDLE is not a scry web bundle"
+  exit 1
+fi
+if [ -z "$GATE_BUNDLE" ]; then
+  if [ -f "$ROOT/scry/.grail/bin/scry" ]; then
+    (cd "$ROOT" && "$ROOT/scry/.grail/bin/scry" web scry/tests/fixtures/report \
+      --out "$OUT/source-bundle" --assets web >/dev/null)
+    GATE_BUNDLE=$OUT/source-bundle
+  elif [ -d "$ROOT/scry/build/web-bundle" ]; then
+    GATE_BUNDLE=$ROOT/scry/build/web-bundle
+  fi
+fi
+if [ -n "$GATE_BUNDLE" ]; then
+  "$ROOT/web/source_export_gate.sh" "$GATE_BUNDLE" > "$OUT/source-gate.txt"
+  if grep -qF 'source export gate: all checks passed' "$OUT/source-gate.txt"; then
+    echo "ok (source export gate)"; else
+    echo "FAIL (source export gate)"; cat "$OUT/source-gate.txt"; exit 1; fi
+else
+  echo "ok (source export gate skipped: no scry binary; build scry or set WIZ_SOURCE_BUNDLE)"
+fi
 # (bench) the benchmark page's generator fixtures and the site check's rules for it
 "$ROOT/web/test-bench.sh" > "$OUT/bench.txt"
 grep -qF 'test-bench: ok' "$OUT/bench.txt" && echo "ok (bench page)" || {
