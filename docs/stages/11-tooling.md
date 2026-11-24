@@ -655,10 +655,10 @@ package's `lib` targets with its module roots (dependencies included), into
   documentation".
 * **CI** builds the library's documentation and publishes it: the `docs` job runs
   `nix build .#pages` on a pull request and a push alike. `.#docs-lib` renders the API
-  pages from `lib/` (source links to the commit and the Wasm module), and `.#pages` adds
-  the landing page at the site root, the static playground (11ab) under `playground/`
-  and the source reader under `source/`; the job uploads the result as the artifact
-  `wiz-docs` (3 days, for debugging). `docs check` re-checks that artifact, and
+  pages from `lib/` (source links to the commit and the Wasm module). `.#docs-site` adds
+  the landing page at the site root and the static playground (11ab) under `playground/`,
+  and `.#pages` adds the source reader under `source/`; the job uploads the result as the
+  artifact `wiz-docs` (3 days, for debugging). `docs check` re-checks that artifact, and
   `deploy-docs` deploys it to GitHub Pages from `master`. The URLs are `/` (the landing
   page), `/docs/` (the docs pages:
   `index.html`, `api.html`, `api.json`, `A.B.html`, `A.B.json`, `search.js` and the Wasm

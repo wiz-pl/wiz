@@ -534,8 +534,10 @@ jobs:
           # `packages.wiz` is the default package; `packages.tests` is the test driver,
           # from the same build.
           # No .#reference here: only `.#docs-lib` (inside the docs job's `.#pages`)
-          # reads it, and no shard waits on it. The docs job builds it from this cached
-          # wiz, off this path.
+          # reads it, and no shard waits on it. The docs job builds it inside `.#pages`
+          # from the **pure** `wiz`: the same store path as this one on a master push,
+          # and a different one when this job takes the seeded path (`USE_SEED`), where
+          # the docs job builds or substitutes the pure toolchain itself.
           if [ "$USE_SEED" = "true" ]; then
             # The seeded fast path (a pull request, or an integration push): the same
             # packages from a seeded `.lake`
@@ -1352,8 +1354,10 @@ jobs:
   # `web`'s test step (95 % of
   # its 608 s, with `wasm-opt -O2`'s 8–10 GiB peak as the tail that once reached 55 min)
   # and again in every `docs` job on a push; `web` now takes them from here through
-  # `web/modules-from-store.sh`, and `docs` takes them as `.#pages` inputs. The reader's
-  # module is also what `scry web --ui` puts in the published `/source/` bundle.
+  # `web/modules-from-store.sh`, and `docs` takes the **pure** modules as `.#pages`
+  # inputs. On a seeded run those are not the modules this job built, so the docs job
+  # builds them (or substitutes them from master's cache) itself. The reader's module is
+  # also what `scry web --ui` puts in the published `/source/` bundle.
   #
   # It is not in `lean`: a 10-minute wasm build there would sit on the shards' critical
   # path. Here it runs beside the shards. It waits for `lean` when that runs, so its
@@ -1376,13 +1380,13 @@ jobs:
     # job as "The operation was canceled." — the annotation is the timeout.
     timeout-minutes: 75
     # The paths it built (and pushed). A pull request's are *seeded* derivations:
-    # their store paths differ from `.#wiz-web` and friends, so `web`/`docs` must
-    # take these, not recompute the pure attrs (which can never match).
+    # their store paths differ from `.#wiz-web` and friends, so `web` must take these,
+    # not the pure attrs (which can never match). `docs` takes the pure attrs; see the
+    # job comment above.
     outputs:
       web: ${{ steps.nix.outputs.web }}
       playground: ${{ steps.nix.outputs.playground }}
       ui: ${{ steps.nix.outputs.ui }}
-      source_ui: ${{ steps.nix.outputs.source_ui }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
@@ -1679,16 +1683,17 @@ jobs:
   #   https://wiz-pl.github.io/wiz/docs/api.html        the API index (every declaration)
   #   https://wiz-pl.github.io/wiz/docs/Prelude.html    one page per module, plus A.B.json
   #   https://wiz-pl.github.io/wiz/playground/          the static playground (stage 11ab)
+  #   https://wiz-pl.github.io/wiz/source/              the source reader (`scry web`, #/f/<id>)
   # Every link is relative, so the same tree works at the project-site prefix above and
   # at a custom domain root.
   # A repository has ONE Pages site and every deployment replaces the whole tree, so this
   # job is the only Pages publisher. The performance site (when it lands) goes under
-  # `/perf/` in the same artifact: build it into `doc-site/perf` in the `docs` job, or
-  # add it here with a checkout, rather than enabling a second deploy job (which would
-  # delete the site). The repository's Pages source must be "GitHub Actions" once
-  # (Settings -> Pages; docs/building.md, "Documentation site"); until then this job
-  # fails and the site keeps its last published tree. It is not in `result`: a Pages
-  # outage does not fail the suite.
+  # `/perf/` in the same artifact: add it to `.#pages` (a `perf/` subtree of the
+  # derivation's output), or add it here with a checkout, rather than enabling a second
+  # deploy job (which would delete the site). The repository's Pages source must be
+  # "GitHub Actions" once (Settings -> Pages; docs/building.md, "Documentation site");
+  # until then this job fails and the site keeps its last published tree. It is not in
+  # `result`: a Pages outage does not fail the suite.
   deploy-docs:
     name: deploy docs to Pages
     needs: [docs, docs_check]

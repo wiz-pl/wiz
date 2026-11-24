@@ -816,7 +816,7 @@ EOF
               cp -R out $out
               runHook postInstall
             '';
-            passthru.subset = "lib/ + the docs tooling in siteAssetFiles + wiz + reference + web-bundle";
+            passthru.subset = "docsSiteSource (docs/ bench/ examples/ tools/ editors/ drafts/ scry/ + README/ROADMAP/CHANGELOG/LICENSE/COPYING.RUNTIME + the site scripts in siteAssetFiles) + wiz + reference + web-bundle";
             meta = {
               description = "The API documentation: `wiz doc --lib` over lib/";
               platforms = systems;
@@ -1374,12 +1374,11 @@ EOF
               platforms = systems;
             };
           };
-          # `scry`, the analysis CLI, as a derivation: the same `grail build scry` the
-          # `docs` job and `scry.yml` run today (68 imperative jobs in a job step), but
-          # with a store path as the result, so the docs job can take it as an input and a
-          # future `.#source-bundle` can depend on it. The one thing the dev shell does
-          # that this must repeat is write `grail.local.wiz` (the GMP flags), because that
-          # file is generated and not committed.
+          # `scry`, the analysis CLI, as a derivation: the same `grail build scry` that
+          # `scry.yml` and the `packages (scry)` leg run in a job step, but with a store
+          # path as the result; `.#pages` takes it as an input. The one thing the dev
+          # shell does that this must repeat is write `grail.local.wiz` (the GMP flags),
+          # because that file is generated and not committed.
           # The two self-hosted programs, as derivations. The tests build them in a
           # `/tmp` cache keyed on their source plus the *mtime of the test binary*, so
           # every fresh runner rebuilds them and concurrent cases can build twice (perf
