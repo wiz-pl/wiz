@@ -16,6 +16,18 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 
 ## [Unreleased]
 
+* extensibility (G1, shape): `Wiz/Ext` capabilities are kind-scoped. `Kind.capabilities`
+  is the only list a kind may declare — a backend performs build operations, a lint set
+  or rule reads the stable views (a code rule also asks for `elab.lint`), each
+  elaboration kind asks for exactly its own `elab.term|tactic|macro|deriver`, a doc
+  language asks for none — and `Table.register` refuses anything else with
+  `invalid-<kind>-capability` (`invalid-lint-rule-capability`, `invalid-target-capability`,
+  …). The resolver re-checks, so a hand-built table cannot grant `emit` to a lint rule.
+  The generic table already resolves the elaboration kinds: `term-elab-not-enabled`,
+  `term-elab-capability` and `duplicate-term-elab` are pinned in `=ext`. No request set,
+  payload or cache key changes; the attribute handlers are still registered in
+  `CommandState` (the remaining G1 registration work).
+
 * ci: `bootstrap-chain.yml` publishes only what passed. The `release` job now runs only
   for a CI run that concluded `success` (the `workflow_run` gate excluded `cancelled`
   and `skipped` only, so a failed run released and pushed its paths); its Cachix push

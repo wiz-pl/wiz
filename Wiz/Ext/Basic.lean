@@ -59,10 +59,17 @@ def Kind.describe : Kind → String
 
 /-- What an entry may ask for. The first group is an operation a backend (or a driver)
 performs; the second is the stable, text-shaped view a package lint rule reads
-(`docs/lint-abi.md`). `info`, `tactics`, `kernelTerm` and `sourceText` are deliberately
-absent: they are unstable host views (`Wiz/Lint/Basic.lean` refuses them for a package
-set). An invocation declares what it needs; the resolver refuses a capability the entry
-does not declare, before the payload runs. -/
+(`docs/lint-abi.md`); the third is one elaboration stage, the capability an entry needs
+to run Wiz code while a module is open. `info`, `tactics`, `kernelTerm` and `sourceText`
+are deliberately absent: they are unstable host views (`Wiz/Lint/Basic.lean` refuses them
+for a package set). An invocation declares what it needs; the resolver refuses a
+capability the entry does not declare, before the payload runs.
+
+Capabilities are **kind-scoped** (`Kind.capabilities`): a backend performs operations and
+never reads a lint view, a lint rule reads views (or, for a code rule, asks for
+`elab.lint`) and never emits an artifact, and each elaboration kind asks for exactly its
+own stage. The flat enum is the vocabulary; the per-kind list is the policy, checked when
+the table is built and again by the resolver. -/
 inductive Capability where
   /-- write the artifact -/
   | emit
@@ -92,6 +99,16 @@ inductive Capability where
   | messages
   /-- the stable lint view: facts -/
   | facts
+  /-- run a Wiz term elaborator (`[term_elab]`) -/
+  | elabTerm
+  /-- run a Wiz tactic (`[tactic]`) -/
+  | elabTactic
+  /-- run a Wiz procedure/command macro (`[macro]`) -/
+  | elabMacro
+  /-- run a Wiz deriver (`[deriver]`) -/
+  | elabDeriver
+  /-- run a Wiz lint rule's body (`callRunner`) -/
+  | elabLint
   deriving Repr, BEq, Inhabited
 
 def Capability.key : Capability → String
@@ -109,6 +126,11 @@ def Capability.key : Capability → String
   | .globals => "globals"
   | .messages => "messages"
   | .facts => "facts"
+  | .elabTerm => "elab.term"
+  | .elabTactic => "elab.tactic"
+  | .elabMacro => "elab.macro"
+  | .elabDeriver => "elab.deriver"
+  | .elabLint => "elab.lint"
 
 def Capability.describe : Capability → String
   | .emit => "emit an artifact"
@@ -125,6 +147,27 @@ def Capability.describe : Capability → String
   | .globals => "read globals"
   | .messages => "read messages"
   | .facts => "read facts"
+  | .elabTerm => "run a term elaborator"
+  | .elabTactic => "run a tactic"
+  | .elabMacro => "run a macro"
+  | .elabDeriver => "run a deriver"
+  | .elabLint => "run a lint rule"
+
+/-- The capabilities a kind may declare: the policy half of the vocabulary. A backend
+performs the build operations; a lint set or rule reads the stable views (a code rule
+also asks for `elab.lint`); an elaboration kind asks for its one stage; a doc language is
+a document and asks for nothing. Registration refuses a capability outside this list, so
+no entry can claim `emit` for a lint rule or `decl` for a backend, and the resolver
+re-checks a table that was built by hand. -/
+def Kind.capabilities : Kind → List Capability
+  | .backend => [.emit, .check, .link, .run, .attest, .library, .split, .repl]
+  | .lintSet => [.decl, .spans, .imports, .globals, .messages, .facts, .elabLint]
+  | .lintRule => [.decl, .spans, .imports, .globals, .messages, .facts, .elabLint]
+  | .deriver => [.elabDeriver]
+  | .tactic => [.elabTactic]
+  | .macro => [.elabMacro]
+  | .termElab => [.elabTerm]
+  | .docLanguage => []
 
 /-- What a backend writes. This is the shared vocabulary; a target's full artifact list
 and tool list are backend policy, not fields of this record: they live in a side table
@@ -224,6 +267,12 @@ def Entry.key (e : Entry) : String := s!"{e.kind.key}/{e.name}"
 /-- Is the entry enabled by these sets? A core entry (empty `set`) always is. -/
 def Entry.enabledBy (e : Entry) (enabledSets : List String) : Bool :=
   e.set.isEmpty || enabledSets.contains e.set
+
+/-- The first capability this entry declares that its kind does not allow, if any. The
+kind-scoped list is `Kind.capabilities`; both `Table.register` and `Table.resolve` refuse
+with this, so a table built by hand is not a way around the policy. -/
+def Entry.invalidCapability? (e : Entry) : Option Capability :=
+  e.caps.find? fun c => !e.kind.capabilities.contains c
 
 /-- A refusal is data: a stable code and a message a driver prints verbatim. Codes are
 `<kind>-<reason>`; payload failures and platform refusals use `entry-failed`,
