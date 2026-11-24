@@ -1290,13 +1290,15 @@ jobs:
           # A missing dependency is a failure (Tests.skipMissing) unless the shard is one
           # whose environment deliberately lacks an optional tool: only `library` sets
           # "allow-missing-deps" in .github/test-shards.json, for iverilog (the one Icarus
-          # case) and the tower "from source" case's Lake toolchain. The flag is the
-          # driver's `--allow-missing-deps` by another name; every skip it allows still
-          # needs an .github/skip-allowlist.json entry (`scripts/ci.py check-skips`), so it
-          # cannot hide an unexpected missing cc, node, yosys, ...
+          # case) and the tower "from source" case's Lake toolchain. The opt-out is the
+          # driver's **explicit flag** and nothing else - there is no
+          # WIZ_ALLOW_MISSING_DEPS variable any more, because a variable that can turn a
+          # failure into a skip is the same defect as a PATH that silently finds the wrong
+          # compiler. Every skip the flag allows still needs an
+          # .github/skip-allowlist.json entry (`scripts/ci.py check-skips`), so it cannot
+          # hide an unexpected missing cc, node, yosys, ...
           allow=()
           if [ "$ALLOW_MISSING_DEPS" = "true" ]; then
-            export WIZ_ALLOW_MISSING_DEPS=1
             allow=(--allow-missing-deps)
           fi
           echo "allow-missing-deps: ${ALLOW_MISSING_DEPS:-false}"

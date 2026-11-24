@@ -7,10 +7,10 @@
                                      selectors are joined by newlines, "heavy"
                                      says whether it may use the self-hosted runner, and
                                      "jobs" how many cases it runs at a time (`--jobs`);
-                                     and "allow-missing-deps": whether the test step sets
-                                     WIZ_ALLOW_MISSING_DEPS (a shard whose environment
-                                     deliberately lacks an optional tool; see
-                                     check-skips). With --only ["NAME",…], only those
+                                     and "allow-missing-deps": whether the test step passes
+                                     the explicit --allow-missing-deps flag (a shard whose
+                                     environment deliberately lacks an optional tool; there
+                                     is no environment variable; see check-skips). With --only ["NAME",…], only those
                                      shards (and
                                      their parts) A shard with
                                      "split": N becomes N shards NAME-1 … NAME-N, its

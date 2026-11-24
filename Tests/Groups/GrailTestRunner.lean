@@ -246,10 +246,11 @@ def testRunnerGroup : Group where
           let (code, out) ← run bad
           check (code == 2) s!"tests {" ".intercalate bad.toList}: exit code {code}, not 2:\n{out}" },
     -- The missing-dependency policy (`Tests.skipMissing`): by default a case whose
-    -- dependency is absent FAILS, naming it; `--allow-missing-deps` (or the shard driver's
-    -- `WIZ_ALLOW_MISSING_DEPS=1`) reports it as a skip; a declared skip is a skip either
-    -- way. The driver's own fixture, so it needs neither a toolchain nor a build.
-    { name := "a missing dependency fails by default, skips with --allow-missing-deps / WIZ_ALLOW_MISSING_DEPS, and a declared skip still skips", run := fun _ => do
+    -- dependency is absent FAILS, naming it; the explicit `--allow-missing-deps` reports it
+    -- as a skip; a declared skip is a skip either way. **The environment cannot do it**: the
+    -- variable is gone, and setting it must change nothing. The driver's own fixture, so it
+    -- needs neither a toolchain nor a build.
+    { name := "a missing dependency fails by default, skips only with --allow-missing-deps (never from the environment), and a declared skip still skips", run := fun _ => do
         let self ← IO.appPath
         let run (args : Array String) (env : Array (String × Option String)) : IO (UInt32 × String) := do
           let o ← IO.Process.output { cmd := self.toString, args, env }
@@ -267,10 +268,11 @@ def testRunnerGroup : Group where
         check ((out.splitOn "⊘ fixture: missing dependency").length > 1) out
         check ((out.splitOn "skipped (no fixture-dep on PATH)").length > 1) out
         check ((out.splitOn "SKIPPED").length > 1) out
-        -- the shard driver's environment equivalent
+        -- the environment is NOT an equivalent: setting the old variable must still fail
         let (code, out) ← run #["--run", "driver-fixtures", "4"] #[("WIZ_ALLOW_MISSING_DEPS", some "1")]
-        checkEq 3 code
-        check ((out.splitOn "SKIPPED (no fixture-dep on PATH)").length > 1) out
+        checkEq 1 code
+        check ((out.splitOn "missing dependency: no fixture-dep on PATH").length > 1) out
+        check ((out.splitOn "SKIPPED").length > 1) (out ++ "\n<<the environment turned a failure into a skip>>")
         -- a declared skip is unaffected by either spelling
         for args in [#["--run", "driver-fixtures", "2"], #["--allow-missing-deps", "--run", "driver-fixtures", "2"]] do
           let (code, out) ← run args unset

@@ -209,7 +209,8 @@ def skip (reason : String) : IO Unit := note s!"skipped {reason}"
 
 /-- Whether a missing dependency may be reported as a skip rather than a failure. Set by
 `Tests/Main.lean` from `--allow-missing-deps` or the environment variable
-`WIZ_ALLOW_MISSING_DEPS`; both are explicit, and neither is on by default. -/
+`--allow-missing-deps` only: it is explicit, visible in the argv of the run that used it,
+and off by default. There is no environment variable. -/
 initialize allowMissingDepsRef : IO.Ref Bool ← IO.mkRef false
 
 def setAllowMissingDeps (on : Bool) : IO Unit := allowMissingDepsRef.set on
@@ -227,16 +228,18 @@ def missingDepMarker : String := "missing-dep "
 /-- A case that cannot run because a dependency is absent (no `cc`, GMP, Boehm GC,
 `node`, `yosys`, `iverilog`, `z3`, `llc`, a `wiz`/`grail` binary, a self-host toolchain,
 ...). By default this **fails**, naming the dependency: a green suite must not be green
-because the machine could not run the test. `--allow-missing-deps` (or
-`WIZ_ALLOW_MISSING_DEPS=1`) turns it into a reported skip --- the shard driver sets that
-only for a shard whose environment lacks a documented optional tool, and the skip lint
-still requires an allow-list entry for it. A declared gap stays `skip`, not this. -/
+because the machine could not run the test. The explicit `--allow-missing-deps` flag turns
+it into a reported skip --- the shard driver sets that only for a shard whose environment
+lacks a documented optional tool, and the skip lint still requires an allow-list entry for
+it. There is no environment variable: a variable that can turn a failure into a skip is the
+same defect as a `PATH` that silently finds the wrong compiler. A declared gap stays
+`skip`, not this. -/
 def skipMissing (reason : String) : IO Unit := do
   if ← allowMissingDeps then
     note s!"skipped {reason}"
     note (missingDepMarker ++ reason)
   else
-    throw (IO.userError s!"missing dependency: {reason}\n      this case cannot run without it; install it, or pass --allow-missing-deps (or set WIZ_ALLOW_MISSING_DEPS=1) to report it as a skip")
+    throw (IO.userError s!"missing dependency: {reason}\n      this case cannot run without it; install it, or pass --allow-missing-deps to report it as a skip")
 
 /-- The reason a passing case's process gave for skipping: its `skipped` note, or a line
 in the old style (`(skipped: REASON)`, `(no X: skipped)`) that a case printed itself. -/
@@ -359,7 +362,15 @@ def caseResult (c : Case) (index : Nat) (exitCode : UInt32) (stdout stderr : Str
   let lines := stdout.splitOn "\n"
   let notes := lines.filterMap fun l => if l.startsWith noteMarker then some (l.drop noteMarker.length).toString else none
   let stdoutText := "\n".intercalate (lines.filter (!·.startsWith noteMarker))
-  let skipped := if exitCode == 0 then skipReason notes stdoutText else none
+  -- A skip is only ever a case that **passed and declared it**. Two guards, because an
+  -- environment skip must not be able to absorb a real failure:
+  --  * a non-zero exit is a failure, whatever it said about skipping;
+  --  * a case that reported an error on stderr cannot be recorded as skipped, even with
+  --    `--allow-missing-deps` - `selfhost-2` reported `unknown identifier Desc` and was
+  --    still counted as a missing-dependency skip, which reads as "the environment could
+  --    not run it" when the truth was "the code does not compile".
+  let reportedError := (stderr ++ stdoutText).contains "error:"
+  let skipped := if exitCode == 0 && !reportedError then skipReason notes stdoutText else none
   let output := if exitCode == 0 then "" else
     if (stderr ++ stdoutText).contains "executed 'sorry'" then
       "not implemented yet (hit a `sorry`)"
@@ -553,7 +564,7 @@ def driverFixtures : Group where
     { name := "fixture: skips", run := fun _ => skip "fixture reason" },
     { name := "fixture: skips (old style)", run := fun _ => IO.println "    (skipped: old fixture reason)" },
     -- the environment-skip policy: a missing dependency fails by default and is a
-    -- reported skip only under `--allow-missing-deps` / `WIZ_ALLOW_MISSING_DEPS`
+    -- reported skip only under the explicit `--allow-missing-deps` flag
     { name := "fixture: missing dependency", run := fun _ => skipMissing "no fixture-dep on PATH" }
   ]
 

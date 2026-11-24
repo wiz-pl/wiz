@@ -45,12 +45,11 @@ def toolchainGroup : Group where
   cases := [
     { name := "wiz, grail and the test driver read no environment variables", run := fun _ => do
         -- Every input to `wiz`/`grail` is a flag (Stage 23a): the compiler reads no WIZ_*
-        -- variable, so a build's result cannot change with the shell it runs in. The test
-        -- driver is the one exception, and it is the harness's explicit opt-out rather
-        -- than a compiler input: `WIZ_ALLOW_MISSING_DEPS` is `--allow-missing-deps` by
-        -- another name (the shard driver sets it), and only turns a missing dependency
-        -- from a failure into a reported skip. The driver's own cases check both forms
-        -- (`=testrunner`), and the flag is the form to prefer.
+        -- variable, so a build's result cannot change with the shell it runs in. **Nor does
+        -- the test driver any more**: `--allow-missing-deps` is a flag, and the environment
+        -- variable that used to be its equivalent is gone, because a variable that can turn
+        -- a failure into a skip is the same defect as a `PATH` that silently finds the wrong
+        -- compiler. So the allowed set is empty for every file, including `Tests/Main.lean`.
         let files := (← leanFiles "Wiz") ++ (← leanFiles "Grail") ++ #[System.FilePath.mk "Main.lean", "Tests/Main.lean"]
         for f in files do
           let text ← IO.FS.readFile f
@@ -59,8 +58,7 @@ def toolchainGroup : Group where
             match s.splitOn "\"" with
             | v :: _ => "WIZ" ++ v
             | [] => "WIZ?"
-          let allowed := if f.toString == "Tests/Main.lean" then ["WIZ_ALLOW_MISSING_DEPS"] else []
-          checkEq allowed reads },
+          checkEq ([] : List String) reads },
     { name := "wiz: an unknown flag or command is an error (exit 2), the usage alone is not", run := fun _ => do
         let wiz := ".lake/build/bin/wiz"
         let run (args : Array String) := IO.Process.output { cmd := wiz, args }

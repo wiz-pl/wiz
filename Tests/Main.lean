@@ -199,9 +199,9 @@ exits with its result (`runOne`). A selector that picks nothing, a case index th
 lacks and an unknown flag are errors. A skip the case declares (`Tests.skip`: a
 documented gap, a `-- test: skip` marker) shows as `⊘` and is counted apart. A case that
 cannot run because a dependency is missing (`Tests.skipMissing`) is a **failure** that
-names the dependency, unless `--allow-missing-deps` (or `WIZ_ALLOW_MISSING_DEPS=1`, the
-shard driver's equivalent) is given, in which case it is a reported skip and the summary
-counts it. `--stats` prints the core evaluator's counters (`Wiz.Core.Stats`) on stderr at
+names the dependency, unless the explicit `--allow-missing-deps` flag is given, in which
+case it is a reported skip and the summary counts it. The flag is the only way: a case that
+reported an error is a failure even with the flag, and there is no environment variable. `--stats` prints the core evaluator's counters (`Wiz.Core.Stats`) on stderr at
 exit, for the driver and for each case's process; it is diagnostics only, and no term,
 cache key or output depends on it. `--timings FILE` appends one line of JSON per case to
 FILE (its group, index, name, wall time in seconds, whether it passed, and its notes:
@@ -237,13 +237,12 @@ def mainImpl (args : List String) : IO UInt32 := do
   -- a `panic!` fails the case that hits it (each case runs in its own process), as it
   -- fails `wiz check`; `--panic-probe continue` turns it off again
   Wiz.exitOnPanic
-  -- A missing dependency is a failure unless this explicit opt-out is given, and the
-  -- environment variable is its equivalent for the shard driver (CI sets it from
-  -- `.github/test-shards.json`'s `allow-missing-deps`, never by default). It is taken off
-  -- before the toolchain flags and passed to each case's process, which strips it again.
-  let (allowArg, args) := takeSwitch "--allow-missing-deps" args
-  let allowEnv ← IO.getEnv "WIZ_ALLOW_MISSING_DEPS"
-  let allowMissing := allowArg || allowEnv.isSome
+  -- A missing dependency is a failure unless the **explicit flag** is given. There is no
+  -- environment variable: an environment that could silently turn a failure into a skip is
+  -- the same defect as a PATH that silently finds the wrong compiler. `--allow-missing-deps`
+  -- is visible in the argv of the run that used it, and CI passes it only for the shards
+  -- whose `allow-missing-deps` is declared in `.github/test-shards.json`.
+  let (allowMissing, args) := takeSwitch "--allow-missing-deps" args
   setAllowMissingDeps allowMissing
   -- `--stats` enables the core counters in this process and in each case's process (the
   -- counter output is diagnostics on stderr; a case's result never depends on it)
@@ -458,7 +457,7 @@ def mainImpl (args : List String) : IO UInt32 := do
     -- the environment skips a job allowed with `--allow-missing-deps` are counted, never
     -- silent. Without the flag these cases are failures, so this line is empty.
     if missingDeps > 0 then
-      IO.println s!"{missingDeps} case(s) skipped for a missing dependency (--allow-missing-deps / WIZ_ALLOW_MISSING_DEPS=1)"
+      IO.println s!"{missingDeps} case(s) skipped for a missing dependency (--allow-missing-deps)"
     pure (if failed == 0 then 0 else 1)
 
 /-- The driver: `--stats` makes each case's process report the core counters (and the
