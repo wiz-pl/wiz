@@ -350,16 +350,16 @@ for a clean one. A directory that does hold `*.c` files but also `*.cs` files sa
 many C# files it is not reading. -/
 def Scry.webRun (o : Scry.WebOpts) : EIO Nat := do
   w ← Scry.reportWalkOf o.path;
-  match w.files with
-  | .nil =>
-    match Nat.lt 0 w.cs with
-    | .true => EIO.fail (String.append (Scry.refuseCsOnly "web" o.path w)
-        " For a bundle of the C#, run `scry cs --bundle DIR " ++ o.path ++ "`.")
-    | .false => EIO.fail ("scry web: no *.c file under " ++ o.path
-        ++ " (no files at all were visible: an empty directory, or only hidden entries)."
-        ++ " Nothing was written; name a C tree, or C# with `scry cs --bundle DIR " ++ o.path
-        ++ "`.")
-  | _ => EIO.pure ()
+  let _guard := match w.files with
+    | .nil => match Nat.lt 0 w.cs with
+      | .true => EIO.fail (String.append (Scry.refuseCsOnly "web" o.path w)
+          " For a bundle of the C#, run `scry cs --bundle DIR " ++ o.path ++ "`.")
+      | .false => EIO.fail ("scry web: no *.c file under " ++ o.path
+          ++ " (no files at all were visible: an empty directory, or only hidden entries)."
+          ++ " Nothing was written; name a C tree, or C# with `scry cs --bundle DIR " ++ o.path
+          ++ "`.")
+    | _ => EIO.pure ();
+  _guard;
   let note : EIO Unit := match Nat.lt 0 w.cs with
     | .true => EIO.lift (IO.ePrintln ("note: " ++ o.path ++ " also has "
         ++ Nat.repr w.cs ++ " *.cs file(s), which this bundle does not read "

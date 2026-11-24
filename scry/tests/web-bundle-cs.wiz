@@ -34,6 +34,14 @@ import Text
 -- patch trace) is `web/source_static_test.mjs`'s contract, run on this bundle by
 -- `web/source_cs_gate.sh`, whose mutations are the negative half.
 
+/-- `Option`-filtering map: the library has no `List.filter_map`, and this is the shape
+`corpus-parse.wiz` defines for itself. -/
+def filterMap {A B : Type} (f : A → Option B) : List A → List B
+  | .nil => []
+  | .cons x rest => match f x with
+    | .some y => List.cons y (filterMap f rest)
+    | .none => filterMap f rest
+
 def check (label : String) (ok : Bool) : EIO Unit :=
   EIO.lift (match ok with
     | .true => IO.println (label ++ ": ok")
@@ -145,7 +153,7 @@ def column (r : Json) (k : String) : String :=
         | _ => .none
       | _ => .none
     | _ => .none;
-  match List.filterMap pairOf (jList r ["columns"]) with
+  match filterMap pairOf (jList r ["columns"]) with
   | .cons t _ => t
   | .nil => ""
 
