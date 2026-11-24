@@ -403,6 +403,12 @@ EOF
               fileset = fs.unions [
                 # the program it compiles (`link_c "js.c"` is resolved beside Web.wiz)
                 ./web/build.sh ./web/Web.wiz ./web/js.c
+                # `web/infoview-ui.wiz` also links `step.c` (the browser ABI's i32 word
+                # entry, `wiz_step`); it was in the checkout but not in this fileset, so
+                # `.#wiz-web` failed with "link_c: no file step.c" on train13 (wasm
+                # modules, run 45385863852) - the same class as siteAssetFiles missing
+                # web/landing_highlight.py.
+                ./web/step.c
                 # the page files the script copies into OUT
                 ./web/infoview.html ./web/infoview.js ./web/playground-lsp.js
                 ./web/lsp-client.js ./web/widgets.js ./web/widgets.css
@@ -463,6 +469,10 @@ EOF
                 # app, the FFI it links and the library modules it imports. The rest of
                 # lib/ resolves from the packaged toolchain's own library.
                 ./web/build-playground-ui.sh ./web/playground-ui.wiz ./web/js.c
+                # the same program also links `step.c` (the browser ABI's i32 word
+                # entry); leaving it out fails the derivation with
+                # "link_c: no file step.c" - the class of the siteAssetFiles bug.
+                ./web/step.c
                 ./lib/Web/Loom.wiz ./lib/Web/Editor.wiz ./lib/Web/EditorModel.wiz
                 ./lib/Web/Playground.wiz ./lib/Web/Examples.wiz
                 ./lib/Web/Goals.wiz ./lib/Web/Hover.wiz
@@ -507,6 +517,8 @@ EOF
               root = ./.;
               fileset = fs.unions [
                 ./web/build-playground-ui.sh ./web/playground-ui.wiz ./web/js.c
+                # this program links `step.c` too (the browser ABI's i32 word entry).
+                ./web/step.c
                 ./web/framework/driver.js ./web/framework/runtime.js
                 ./web/framework/adopt.js ./web/framework/mount.js
                 ./lib
@@ -541,6 +553,10 @@ EOF
               root = ./.;
               fileset = fs.unions [
                 ./web/build-landing-ui.sh ./web/landing_ui.wiz ./web/js.c
+                # the same program also links `step.c` (the browser ABI's i32 word
+                # entry); leaving it out fails the derivation with
+                # "link_c: no file step.c" - the class of the siteAssetFiles bug.
+                ./web/step.c
                 ./web/framework/driver.js ./web/framework/runtime.js
                 ./web/framework/adopt.js ./web/framework/mount.js
                 ./lib
@@ -580,6 +596,8 @@ EOF
               root = ./.;
               fileset = fs.unions [
                 ./web/build-source-ui.sh ./web/source-ui.wiz ./web/js.c
+                # this program links `step.c` too (the browser ABI's i32 word entry).
+                ./web/step.c
                 ./lib
               ];
             };
