@@ -41,12 +41,14 @@ on:
         type: boolean
         default: false
 
-# Concurrency: one group per ref, except that a push to master carries its commit sha
-# (and a manual run its id) so no run ever cancels or replaces another:
-#   * pull_request: a newer commit on the same PR supersedes the old head, and the old
-#     head can no longer merge, so cancelling it is genuinely safe (and shortens the
-#     single-runner queue). Merging master into the branch restarts the run: that is the
-#     one case where in-flight work is discarded.
+# Concurrency: one group per ref, except that a pull request carries its RUN id, a push to
+# master its commit sha (and a manual run its id), so no run ever cancels or replaces
+# another:
+#   * pull_request: the run id, not the ref. A PR run has 43 jobs and takes over an hour;
+#     a newer head used to cancel it, and a cancelled shard's verdict is a wasted hour of
+#     runner time (three runs tonight ended that way, one of them mid-`web`). The old head
+#     can no longer merge, so nothing is lost by letting it finish: the `changes` job and
+#     `CI result` still report per-run, and `gh pr checks` shows the newest run.
 #   * push to master: NOT cancelled. Every master commit needs its own complete run:
 #     nightly.yml moves `nightly` only to a commit whose CI passed, and release.yml
 #     publishes a snapshot for every commit (review ci-04/ci-06). The sha in the group
@@ -56,7 +58,7 @@ on:
 #   * schedule: the weekly fixpoint has its own group (`-fixpoint`) and is never cancelled
 #     by a merge.
 concurrency:
-  group: ci-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.sha }}-${{ github.event_name == 'schedule' && 'fixpoint' || 'checks' }}${{ github.event_name == 'workflow_dispatch' && format('-dispatch-{0}', github.run_id) || '' }}
+  group: ci-${{ github.ref }}-${{ github.event_name == 'pull_request' && format('run-{0}', github.run_id) || github.sha }}-${{ github.event_name == 'schedule' && 'fixpoint' || 'checks' }}${{ github.event_name == 'workflow_dispatch' && format('-dispatch-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/integration/') }}
 
 # Least privilege: this workflow only reads the repository. The Cachix push uses the

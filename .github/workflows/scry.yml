@@ -79,7 +79,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: scry-${{ github.ref }}
+  # A pull request's run is its own group (the run id), not the ref: these goldens take
+  # ~1h15m and a newer head used to cancel them mid-run, which throws the whole hour
+  # away. A master push still groups by sha, so a commit's run is never replaced.
+  group: scry-${{ github.ref }}-${{ github.event_name == 'pull_request' && format('run-{0}', github.run_id) || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
