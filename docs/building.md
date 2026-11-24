@@ -912,7 +912,7 @@ not invalidate the others:
 | `.#wasm-fixtures` | the `wasm-fixtures` programs under `scripts/` compiled with `wiz build --target wasm`, the host `web/wasm-host.mjs`, and each module's expected stdout; the check runs every module under Node | the `wasm-fixtures` directory under `scripts/`, `web/wasm-host.mjs` |
 | `.#wiz-web`, `.#wiz-playground`, `.#wiz-playground-ui`, `.#wiz-source-ui` | the Emscripten page modules, each with its own page files (unchanged) | each script's own fileset |
 | `.#web-bundle` | the three page-module outputs merged into one directory (the site's `web/out`) | `wiz-web` + `wiz-playground` + `wiz-playground-ui` |
-| `.#docs-lib` | the standard library's API pages: `wiz doc --lib --jobs 4` over `lib/`, plus `.#reference`'s `index.md` as `docs/reference.md` | `docsSiteSource` (all of `docs/`, `bench/`, `examples/`, `tools/`, `editors/`, `drafts/`, `scry/` and README/ROADMAP/CHANGELOG, plus the docs tooling in `siteAssetFiles` — not only `lib/`), `wiz`, `reference`, `web-bundle` |
+| `.#docs-lib` | the standard library's API pages: `wiz doc --lib --jobs 4` over the `lib/` **bundled in `wiz`**, plus `.#reference`'s `index.md` as `docs/reference.md` | `wiz` (whose `share/wiz/lib` is what is documented), `reference`, `web-bundle`. Its `src` is `docsSiteSource`, which is declared but **unread**: the tool documents the library beside the binary and takes every asset from `--web $web-bundle`, so a prose edit changes the derivation without changing the pages (narrowing that `src` is an open item) |
 | `.#docs-site` | the site's chrome over `.#docs-lib`'s pages: the landing page, guide, benchmark page, playground and licences; `/source/` is absent | `docsSiteSource` (the same source as `.#docs-lib`, including `web/build-landing.sh` and `web/build-site.sh` through `siteAssetFiles`), `docs-lib`, `web-bundle`, `wiz-landing-ui`, `wiz`; `reference` reaches it through `docs-lib` |
 | `.#pages` | the exact `doc-site` tree the `deploy-docs` job uploads: `docs-site` plus the `scry` source reader under `/source/` | `docs-site`, `scry` (the `.#scry` derivation), `web/source-*` and `web/framework/`, `wiz-source-ui`, `tree-sitter-c-sharp` |
 | `.#scry` | the analysis CLI, `grail build scry` as a store path (`bin/scry`); `.#pages` builds the `/source/` bundle with it, while `packages (scry)` and `scry.yml` still run that build in-tree | `scry/`, `lib/`, `wiz`, `tree-sitter-c-sharp` |
@@ -1854,6 +1854,12 @@ so the docs job may build them.
 | `playground/wiz-playground-ui.mjs` | the playground's runtime (the whole page as a Loom app), from `web/build-playground-ui.sh`; required |
 
 To build the site locally from a checkout (after `nix develop` and `lake build wiz`):
+
+`wiz doc --lib` documents the library **bundled with the binary it runs**
+(`Module.toolchainLib`: `<dir>/lib` beside the binary, and the `$out/bin/wiz` wrapper
+execs `$out/share/wiz/.lake/build/bin/wiz`), not the working tree's `lib/`. So a change
+to `lib/` does not appear in the local pages until `wiz` is rebuilt - if the page you
+are reading disagrees with the source, check the binary's date before the doc comment.
 
 ```sh
 sh web/build.sh web/out                         # the web module, the infoview page, scroll assets
