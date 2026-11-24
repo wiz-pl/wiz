@@ -1,0 +1,6 @@
+import IO
+
+-- The kernel, elaborator and compiler are written in Wiz itself, and a program
+-- leaves through C or LLVM as a native executable.
+def main : IO Unit :=
+  IO.println "Wiz: dependently typed, quantitative, self-hosted."

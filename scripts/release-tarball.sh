@@ -142,7 +142,7 @@ if [ -n "$webdir" ]; then
     if [ -f "$webdir/$f" ]; then cp "$webdir/$f" "$top/share/wiz/web/$f"; fi
   done
   mkdir -p "$top/share/wiz/web/framework"
-  for f in mount.js driver.js runtime.js editor-text.js; do
+  for f in mount.js driver.js runtime.js editor-text.js adopt.js; do
     if [ -f "$webdir/framework/$f" ]; then cp "$webdir/framework/$f" "$top/share/wiz/web/framework/$f"; fi
   done
 fi

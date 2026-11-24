@@ -9,11 +9,15 @@
 <link rel="stylesheet" href="widgets.css">
 </head>
 <body>
-<!-- One page, one runtime: web/playground.js mounts the whole page from
-     wiz-playground-ui.mjs (web/playground-ui.wiz, one Loom app) on the body. There is no
-     static markup to fall back to; if the runtime cannot start, the body says so in
-     plain text (web/playground.js, `cannotStart`). -->
-<noscript>This playground needs JavaScript: the self-hosted checker runs in the page.</noscript>
+<!-- Static-complete by default, interactive when JavaScript is on. `#app` is the island:
+     web/playground_static_gen.wiz renders Page.initial (the header, toolbar, editor, panes
+     and footer) and its hash, and web/build-playground.sh fills the two placeholders below.
+     The runtime mounts #app; when its `wiz_loom_ssr_hash` matches `data-wiz-ssr` it adopts
+     the server tree without touching a node, and a mismatch replaces it (never a partial
+     adopt). With scripts disabled the same tree is the whole page: the controls are inert
+     but readable, and the noscript line says why. `resync` is the JS-on reload. -->
+<div id="app" data-wiz-island="loom/1" data-wiz-ssr="<!--wiz-ssr-->"><!--wiz-static--></div>
+<noscript>This playground needs JavaScript: the self-hosted checker runs in the page. The page above is the complete static form; Run and the examples menu do nothing without JavaScript.</noscript>
 <script type="module">
   import { startPage } from "./playground.js";
   startPage();

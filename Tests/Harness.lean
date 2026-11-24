@@ -15,6 +15,18 @@ namespace Tests
 initialize toolchainRef : IO.Ref Wiz.Toolchain ← IO.mkRef {}
 /-- The toolchain flags, given again to each case's process. -/
 initialize flagsRef : IO.Ref (List String) ← IO.mkRef []
+
+/-- `--selfhost-cache DIR`: where the self-hosted compiler/checker are built and kept.
+A flag rather than an environment variable, and the value is forwarded to each case's
+process with the other driver flags, so a run that gives it keeps every case on the same
+cache. Default: the system temp directory (`/tmp`). -/
+initialize selfhostCacheRef : IO.Ref (Option System.FilePath) ← IO.mkRef none
+
+/-- `--selfhost-compiler PATH` / `--selfhost-checker PATH`: use this binary instead of
+building one. The flag wins over the `WIZ_SELFHOST_*` environment variables, which are
+kept for the stub-compiler case that sets them for a child process. -/
+initialize selfhostCompilerRef : IO.Ref (Option System.FilePath) ← IO.mkRef none
+initialize selfhostCheckerRef : IO.Ref (Option System.FilePath) ← IO.mkRef none
 /-- The driver's `--jobs N`, for a case that runs alone (a group that did not opt in to
 `Group.parallel`): such a case may use up to N workers of its own (`=selfhost-libdiff`
 checks its files N at a time). `Group.run` passes it to each case's process; the cases
@@ -237,11 +249,14 @@ structure CaseResult where
   skipped : Option String := none
   output : String := ""
 
-/-- A case's result as the suite prints it: its position `[n/total]` among the cases this
-run selected, then `✓` passed, `✗` failed (with its output), or `⊘` skipped (with the
-reason). -/
-def renderResult (r : CaseResult) (n total : Nat) : String :=
-  let num := s!"[{n}/{total}] "
+/-- A case's result as the suite prints it: its position `[n/failed/total]` among the
+cases this run selected - the case number, how many have failed so far in this
+invocation (this case included when it is the failure), and the size of the selection -
+then `✓` passed, `✗` failed (with its output), or `⊘` skipped (with the reason). The
+middle number is what makes a long shard readable while it runs: it says whether the run
+is currently losing cases without waiting for the final count. -/
+def renderResult (r : CaseResult) (n failed total : Nat) : String :=
+  let num := s!"[{n}/{failed}/{total}] "
   if let some why := r.skipped then
     s!"{num}  ⊘ {r.name} ({showMs r.ms} s)\n      skipped ({why})"
   else if r.ok then
@@ -276,7 +291,7 @@ def forwardGuessLines (g : Group) (index : Nat) (stderr : String) : IO Unit := d
 
 /-- Run each case in a child process (`<self> --run-case <group> <index>`), because an
 executed `sorry` aborts the whole process; `only` restricts the run to the cases with
-these indices. Prints each case with its position in the run (`[n/total]`) and wall time
+these indices. Prints each case with its position in the run (`[n/failed/total]`) and wall time
 (`✓` passed, `✗` failed, with its output, `⊘` skipped, with the reason) and gives its
 result to `onResult` as soon as it finishes. `start` is the first case's position in the
 whole invocation's selection (the driver runs several groups) and `total` that selection's
@@ -301,6 +316,8 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
   let partArgs := if part.isEmpty then #[] else #["--part", part]
   let mut results := #[]
   let mut n := start
+  -- failures printed so far (skips are not failures: a skip is a pass with a reason)
+  let mut failed := 0
   for c in g.cases, i in [0:g.cases.length] do
     if let some ixs := only then
       unless ixs.contains i do continue
@@ -317,8 +334,10 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
     let err ← IO.ofExcept errT.get
     forwardGuessLines g i err
     let r := caseResult c i code out err ms
-    IO.println (renderResult r n total)
+    let failedNow := if r.ok then failed else failed + 1
+    IO.println (renderResult r n failedNow total)
     stdout.flush
+    failed := failedNow
     onResult r
     results := results.push r
     n := n + 1
@@ -357,7 +376,7 @@ private def startCase (self : System.FilePath) (g : Group) (i : Nat) (flags : Ar
 
 /-- Run the cases of `g` that `only` picks with a bounded pool of `jobs` child processes
 at a time, printing each case's result (and calling `onResult`) in the group's case
-order, so the log is deterministic; the `[n/total]` position is assigned when the
+order, so the log is deterministic; the `[n/failed/total]` position is assigned when the
 result is printed (not in the child), so parallel cases cannot interleave numbers.
 `start` and `total` are the whole invocation's first position and size, as in
 `Group.run`. A group must opt in with `parallel := true`.
@@ -379,6 +398,8 @@ def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
   let pending ← IO.mkRef todo
   let live ← IO.mkRef ([] : List Live)
   let results ← IO.mkRef ([] : List CaseResult)
+  -- failures among the results printed so far (the pool prints in case order)
+  let failedRef ← IO.mkRef 0
   -- start the next case off `pending`, unless the pool is full
   let rec fill : Nat → IO Unit
     | 0 => pure ()
@@ -409,7 +430,9 @@ def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
         -- numbers just before this one; numbering here (not in the child) keeps the
         -- pool's parallel processes from interleaving numbers
         let n := start + (← results.get).length
-        IO.println (renderResult r n total)
+        let failedNow ← if r.ok then failedRef.get else do
+          failedRef.modify (· + 1); failedRef.get
+        IO.println (renderResult r n failedNow total)
         (← IO.getStdout).flush
         results.modify (· ++ [r])
         onResult r

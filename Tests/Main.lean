@@ -262,6 +262,18 @@ def mainImpl (args : List String) : IO UInt32 := do
     | IO.eprintln "--jobs needs a count of at least 1"; return 2
   caseJobsRef.set jobs
   caseJobsSetRef.set jobsArg.isSome
+  -- `--selfhost-cache DIR`: the directory the self-hosted compiler and checker are built
+  -- in and kept (default: the system temp directory). A flag, not an environment
+  -- variable, so a run states where its cache lives and every case's process inherits it.
+  let (cacheArg, args) := takeFlag "--selfhost-cache" args
+  selfhostCacheRef.set (cacheArg.map System.FilePath.mk)
+  -- `--selfhost-compiler PATH` / `--selfhost-checker PATH`: use these binaries instead of
+  -- building them (they win over `WIZ_SELFHOST_COMPILER`/`_CHECKER`, which stay as the
+  -- stub-compiler escape hatch for a child process).
+  let (compilerArg, args) := takeFlag "--selfhost-compiler" args
+  selfhostCompilerRef.set (compilerArg.map System.FilePath.mk)
+  let (checkerArg, args) := takeFlag "--selfhost-checker" args
+  selfhostCheckerRef.set (checkerArg.map System.FilePath.mk)
   -- `--part i/n`: the part of a split sweep to run (`=selfhost-libdiff`), passed on to
   -- each case's process; not given, a case runs the whole sweep (`1/1`)
   let (partArg, args) := takeFlag "--part" args
@@ -274,13 +286,29 @@ def mainImpl (args : List String) : IO UInt32 := do
   toolchainRef.set tc
   flagsRef.set (tc.toFlags ++ (if traceGuesses then ["--trace-guess-fallback"] else [])
     ++ (if statsArg then ["--stats"] else [])
-    ++ (if allowMissing then ["--allow-missing-deps"] else []))
+    ++ (if allowMissing then ["--allow-missing-deps"] else [])
+    ++ (match cacheArg with | some d => ["--selfhost-cache", d] | none => [])
+    ++ (match compilerArg with | some p => ["--selfhost-compiler", p] | none => [])
+    ++ (match checkerArg with | some p => ["--selfhost-checker", p] | none => []))
   match args' with
   -- one case in this process: what `Group.run` starts for each case
   | ["--run-case", group, ix] =>
     match (← findGroup group) >>= fun g => ix.toNat? >>= (g.cases[·]?) with
     | some c => c.runHere
     | none => do IO.eprintln s!"no such case: {group} #{ix}"; pure 2
+  -- The composed self-hosted program as source, for the Nix derivations that build
+  -- `.#selfhost-compiler`/`.#selfhost-checker` (`Wiz/Selfhost.lean` holds the
+  -- composition; a derivation cannot call Lean, so the driver prints it).
+  | ["--selfhost-source", name] =>
+    let (files, render) ← match name with
+      | "compiler" => pure (Wiz.Selfhost.compilerFiles, Wiz.Selfhost.compilerSource)
+      | "checker" => pure (Wiz.Selfhost.checkerFiles, Wiz.Selfhost.checkerSource)
+      | _ => do
+        IO.eprintln s!"--selfhost-source: 'compiler' or 'checker', not '{name}'"
+        return 2
+    let srcs ← files.mapM (fun (f : String) => IO.FS.readFile f)
+    IO.print (render srcs)
+    pure 0
   | "--run" :: rest => runOne rest
   -- (D1) check a file with the given regularity mode, in a child process that the test
   -- can time out: `Elab.checkDiverges`

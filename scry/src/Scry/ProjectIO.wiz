@@ -37,7 +37,10 @@ The outer key covers the source path/text, the unit's flags, `--allow-errors` an
 an edited header or macro is a miss rather than a stale hit. The entry also names its
 format and frontend stamp, and records a digest of every CST column (recomputed on load),
 so a lossy spill round trip is a miss; a corrupt or truncated entry is recomputed and
-rewritten.
+rewritten. The same opt-in also caches each unit's lowered `Scry.TU`, keyed by the full
+CST digest, the lowerer identity, the preprocessing digest, the unit target and the
+original file/text digests; a cold run writes it, a warm run reconstructs the identical
+TU (see the lowering-cache section of `Scry.ProjectCache`).
 `--skip-broken` records a TU whose preprocessor/parse fails and continues with the rest;
 without it the first failure aborts the project.
 
@@ -181,6 +184,25 @@ def Scry.ProjectIO.saveIfMiss (cache : Scry.CacheOpts) (hit : Bool) (stats : Scr
     Scry.cacheSave dir key pre errors digest cst;
     EIO.pure (Scry.CacheStats.writeOne stats)
 
+/-- Reuse or compute one TU's lowering under the lowering cache: a hit returns the cached
+`Scry.TU` (no lowering runs), a miss lowers once, records it and writes one atomic entry.
+With the cache off this is exactly one `Scry.lowerTU` and no extra hashing. -/
+def Scry.ProjectIO.lowerUnit (allowErrors : Bool) (cache : Scry.CacheOpts)
+    (cst : Scry.Cst) (dg target : String) (errors : Nat) (pre : Scry.Preprocessed)
+    (stats : Scry.CacheStats) : EIO (Scry.TU × Scry.CacheStats) :=
+  match cache.enabled with
+  | .false => EIO.pure (Scry.lowerTU target cst, stats)
+  | .true => do
+    let lpd := Scry.lowerPreDigest pre;
+    let lkey := Scry.lowerCacheKey dg lpd target pre.paths pre.texts allowErrors;
+    lowerFound ← Scry.lowerCacheLoad cache.dir lkey dg lpd target errors pre.paths pre.texts;
+    match lowerFound with
+    | .ok tu => EIO.pure (tu, Scry.CacheStats.lowerHitOne stats)
+    | .error r => do
+      let tu := Scry.lowerTU target cst;
+      Scry.lowerCacheSave cache.dir lkey dg lpd target errors tu;
+      EIO.pure (tu, Scry.CacheStats.lowerWriteOne (Scry.CacheStats.lowerMissOne stats r))
+
 /-- Build one translation unit: preprocess with `cmd.flags`, reuse or create a cached
 parse, line-map and lower. Returns the unit and the cache counters after this TU. -/
 def Scry.ProjectIO.buildUnit (cc : String) (allowErrors : Bool) (keepSystem : Bool)
@@ -230,7 +252,9 @@ def Scry.ProjectIO.buildUnit (cc : String) (allowErrors : Bool) (keepSystem : Bo
     let dg := Scry.cstFullDigest store;
     stats2 ← Scry.ProjectIO.saveIfMiss cache hit stats1 cache.dir key pd
       (Nat.repr errors) dg (Scry.CstStore.render store);
-    EIO.pure (Scry.unitOfPre (Scry.normalisePath cmd.file) pre cst errors store, stats2)
+    let target := Scry.normalisePath cmd.file;
+    tuStats ← Scry.ProjectIO.lowerUnit allowErrors cache cst dg target errors pre stats2;
+    EIO.pure (Scry.ProjectUnit.mk target pre cst tuStats.1 errors store, tuStats.2)
 
 /-- The units built so far, the cache counters and the TUs skipped by `--skip-broken`. -/
 structure Scry.BuildUnits where

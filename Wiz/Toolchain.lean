@@ -24,6 +24,11 @@ structure Toolchain where
   /-- the Boehm collector, for the self-hosted runtime -/
   gcCflags : List String := []
   gcLdflags : List String := []
+  /-- (`--target`) the canonical name of the resolved backend entry (`c` when no
+  `--target` was given). It is set from the entry the resolver returned, never from the
+  argv spelling, and it enters `targetTag`: a cached module from one target must not be
+  served to a run that selected another. -/
+  backend : String := "c"
   /-- the elaboration cache that is also written (none: no writes) -/
   cacheDir : Option System.FilePath := none
   /-- (23c) read-only elaboration caches, searched in order after `cacheDir` and never
@@ -66,13 +71,15 @@ namespace Toolchain
 
 def words (s : String) : List String := (s.splitOn " ").filter (· ≠ "")
 
-/-- The host target's strong name: the platform triple and pointer width. It is a SHA-256
-digest (not the 64-bit `id`) because it names a namespace: two data layouts must never
-share cache entries. A future `--target` replaces the triple and width. -/
-def targetTag (_t : Toolchain) : String :=
+/-- The host target's strong name: the platform triple, pointer width, and the
+`--target` entry this run selected. It is a SHA-256 digest (not the 64-bit `id`) because
+it names a namespace: two data layouts must never share cache entries. `backend` is the
+canonical entry name (not the argv spelling: `ebpf` and `bpf` are one target); a cached
+module from another target is therefore a miss. -/
+def targetTag (t : Toolchain) : String :=
   let triple := System.Platform.target
   Smt.Sha256.hexFramed "wiz-target-id-v1" [if triple.isEmpty then "unknown" else triple,
-    toString System.Platform.numBits]
+    toString System.Platform.numBits, t.backend]
 
 /-- What identifies the generated code, as a SHA-256 digest of the target and the
 compilers/flags (not the cache or roots). `id` remains the fast 64-bit index for in-memory
@@ -83,10 +90,11 @@ def tag (t : Toolchain) : String :=
       " ".intercalate t.libs, t.llc, " ".intercalate t.gmp,
       " ".intercalate t.gcCflags, " ".intercalate t.gcLdflags])
 
-/-- What identifies the generated code: compilers and flags (not the cache or roots).
-Fast (64-bit) and for indexing only; `tag` is the SHA-256 namespace used by the cache. -/
+/-- What identifies the generated code: the selected backend, compilers and flags (not
+the cache or roots). Fast (64-bit) and for indexing only; `tag` is the SHA-256 namespace
+used by the cache. -/
 def id (t : Toolchain) : UInt64 :=
-  hash (toString [t.cc, " ".intercalate t.cflags, " ".intercalate t.ldflags, " ".intercalate t.libs, t.llc, " ".intercalate t.gmp,
+  hash (toString [t.backend, t.cc, " ".intercalate t.cflags, " ".intercalate t.ldflags, " ".intercalate t.libs, t.llc, " ".intercalate t.gmp,
     " ".intercalate t.gcCflags, " ".intercalate t.gcLdflags])
 
 /-- Is `d` one of the read-only caches served although its manifests are unauthenticated? -/

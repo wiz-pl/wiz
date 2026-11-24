@@ -2041,7 +2041,24 @@ def selfhostDerivingNeg : String :=
   "mutual\ninductive A where\n  | a\ninductive B where\n  | b (x : A)\n  deriving BEq\nend\n"
 
 def selfhostDerivingNegExpected : String :=
-  "Inhabited : (x0 : U0) → U0\nInhabited.default : (x0 :0 U0) → (x1 : (Inhabited x0)) → x0\nBEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nRepr : (x0 : U0) → U0\nRepr.reprPrec : (x0 :0 U0) → (x1 : (Repr x0)) → (x2 : x0) → (x3 : Nat) → String\nDecidableEq : (x0 : U0) → U0\nDecidableEq.decide : (x0 :0 U0) → (x1 : (DecidableEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nOrdering : U0\nCompare : (x0 : U0) → U0\nCompare.compare : (x0 :0 U0) → (x1 : (Compare x0)) → (x2 : x0) → (x3 : x0) → Ordering\ninstInhabited : (Inhabited Nat)\ninstInhabited1 : (Inhabited Bool)\nBool.beqE : (x0 : Bool) → (x1 : Bool) → Bool\ninstBEq : (BEq Nat)\ninstBEq1 : (BEq Bool)\ninstDecidableEq : (DecidableEq Nat)\ninstDecidableEq1 : (DecidableEq Bool)\ninstRepr : (Repr Nat)\ninstRepr1 : (Repr Bool)\nNat.compare : (x0 : Nat) → (x1 : Nat) → Ordering\ninstCompare : (Compare Nat)\nBool.cmp : (x0 : Bool) → (x1 : Bool) → Ordering\ninstCompare1 : (Compare Bool)\nSize : (x0 : U0) → U0\nSize.size : (x0 :0 U0) → (x1 : (Size x0)) → (x2 : x0) → Nat\nerror: no deriver for Size (register one with `attribute [deriver Size] f`)\nerror: deriving BEq for Vec: indexed families are not supported\nerror: deriving DecidableEq for L: DecidableEq is derived for an enumeration or a single-constructor record only, and L\nerror: deriving Inhabited for R: every constructor of R is recursive or has a proof field\nmyD : (x0 : String) → (x1 : String) → String\nerror: myD is not a deriver: it takes 2 arguments, expected one (String → MacroM (List Syntax))\nBar : (x0 : U0) → U0\nBar.bar : (x0 :0 U0) → (x1 : (Bar x0)) → (x2 : x0) → Nat\nmyDeriver : (x0 : String) → String\nerror: deriving Bar for Nat: the deriver myDeriver cannot be run (this frontend has no elaboration-time evaluator; the derivers it runs are deriveInhabited, deriveBEq, deriveRepr, deriveDecidableEq and deriveCompare)\nerror: deriving BEq for B: a mutual inductive is not supported (the host derives for the joint family, an indexed family); derive each member's instances by hand\n"
+  "Inhabited : (x0 : U0) → U0\nInhabited.default : (x0 :0 U0) → (x1 : (Inhabited x0)) → x0\nBEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nRepr : (x0 : U0) → U0\nRepr.reprPrec : (x0 :0 U0) → (x1 : (Repr x0)) → (x2 : x0) → (x3 : Nat) → String\nDecidableEq : (x0 : U0) → U0\nDecidableEq.decide : (x0 :0 U0) → (x1 : (DecidableEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nOrdering : U0\nCompare : (x0 : U0) → U0\nCompare.compare : (x0 :0 U0) → (x1 : (Compare x0)) → (x2 : x0) → (x3 : x0) → Ordering\ninstInhabited : (Inhabited Nat)\ninstInhabited1 : (Inhabited Bool)\nBool.beqE : (x0 : Bool) → (x1 : Bool) → Bool\ninstBEq : (BEq Nat)\ninstBEq1 : (BEq Bool)\ninstDecidableEq : (DecidableEq Nat)\ninstDecidableEq1 : (DecidableEq Bool)\ninstRepr : (Repr Nat)\ninstRepr1 : (Repr Bool)\nNat.compare : (x0 : Nat) → (x1 : Nat) → Ordering\ninstCompare : (Compare Nat)\nBool.cmp : (x0 : Bool) → (x1 : Bool) → Ordering\ninstCompare1 : (Compare Bool)\nSize : (x0 : U0) → U0\nSize.size : (x0 :0 U0) → (x1 : (Size x0)) → (x2 : x0) → Nat\nerror: no deriver for Size (register one with `attribute [deriver Size] f`)\nerror: deriving BEq for Vec: indexed families are not supported\nerror: deriving DecidableEq for L: DecidableEq is derived for an enumeration or a single-constructor record only, and L\nerror: deriving Inhabited for R: every constructor of R is recursive or has a proof field\nmyD : (x0 : String) → (x1 : String) → String\nerror: myD is not a deriver: it takes 2 arguments, expected one (String → MacroM (List Syntax))\nBar : (x0 : U0) → U0\nBar.bar : (x0 :0 U0) → (x1 : (Bar x0)) → (x2 : x0) → Nat\nmyDeriver : (x0 : String) → String\nerror: deriving Bar for Nat: entry-unsupported: the deriver myDeriver is a user declaration; this frontend has no elaboration-time evaluator (SH-2.1), so it cannot run it (the built-in derivers are deriveInhabited, deriveBEq, deriveRepr, deriveDecidableEq and deriveCompare)\nerror: deriving BEq for B: a mutual inductive is not supported (the host derives for the joint family, an indexed family); derive each member's instances by hand\n"
+
+/-- (A11, D1) A user declaration whose *name* is a built-in deriver's spelling. The
+registry stores the declaration (`DeriverRef.user`), so `deriving BEq` must refuse with
+`entry-unsupported`; it must not run the frontend's built-in `deriveBEq` body. The second
+half is the note's `myBEq` case (a user declaration that is not a built-in spelling). -/
+def selfhostDeriverUser : String :=
+  "import Prelude\n" ++ derivingSelfHeader ++
+  "def deriveBEq (T : String) : String := \"user\"\n" ++
+  "attribute [deriver BEq] deriveBEq\n" ++
+  "structure Hijack where\n  a : Nat\n  deriving BEq\n" ++
+  "def myBEq (T : String) : String := \"user\"\n" ++
+  "attribute [deriver Repr] myBEq\n" ++
+  "structure Hijack2 where\n  a : Nat\n  deriving Repr\n"
+
+/-- (A11, D1) The user-deriver refusal: a code, and no derived instance. -/
+def selfhostDeriverUserExpected : String :=
+  "error: deriving BEq for Hijack: entry-unsupported: the deriver deriveBEq is a user declaration"
 
 /-- (A11, D6) The self-hosted driver's `check` reports a refused derivation at the
 command's position, in the host's message shape. -/
@@ -3836,6 +3853,17 @@ def selfHostGroup : Group where
         selfhostCheckFile selfhostDerivingTable selfhostDerivingTableExpected },
     { name := "(A11) the deriver table's errors: no deriver, an indexed family, a recursive field, a wrong arity, an unrunnable deriver, a mutual block", run := fun _ =>
         selfhostCheckFile selfhostDerivingNeg selfhostDerivingNegExpected },
+    { name := "(A11, D1) a user deriver named like a built-in is refused with entry-unsupported, not run as the built-in", run := fun _ => do
+        let some out ← selfhostOutput selfhostDeriverUser | return
+        check ((out.splitOn selfhostDeriverUserExpected).length > 1)
+          s!"the user deriver was not refused with the code:\n{out}"
+        check ((out.splitOn "entry-unsupported: the deriver myBEq is a user declaration").length > 1)
+          s!"the note's myBEq case was not refused:\n{out}"
+        -- the hijack: the built-in `deriveBEq` body would have produced this instance
+        check ((out.splitOn "BEq Hijack").length == 1)
+          s!"the built-in BEq body ran for a user declaration called deriveBEq:\n{out}"
+        check ((out.splitOn "Repr Hijack2").length == 1)
+          s!"the built-in Repr body ran for the user declaration myBEq:\n{out}" },
     { name := "(A11) deriving: the Lean host and the self-hosted frontend agree on every form", run := fun _ =>
         derivingAgrees derivingSelfHeader [
           -- (pinned difference) indexed `BEq` is derived by the host (a dependent motive)
@@ -4599,7 +4627,17 @@ def selfHostHostGroup : Group where
         let self ← IO.appPath
         let env : Array (String × Option String) :=
           #[("WIZ_SELFHOST_COMPILER", some stub.toString), ("WIZ_SELFHOST_CHECKER", some stub.toString)]
-        let flags := (← flagsRef.get).toArray
+        -- The stub must reach the children as an OVERRIDE, so the driver flags that name
+        -- the real self-hosted programs have to be dropped here: the flag wins over the
+        -- environment (`selfhostBinaryOverride`), and CI passes both flags to every shard,
+        -- so without this the children ran the REAL compiler and the sweep was vacuous
+        -- (run 45285555908: 211/211 stub children exited 0).
+        let rec stripSelfhostFlags : List String → List String
+          | "--selfhost-compiler" :: _ :: rest => stripSelfhostFlags rest
+          | "--selfhost-checker" :: _ :: rest => stripSelfhostFlags rest
+          | f :: rest => f :: stripSelfhostFlags rest
+          | [] => []
+        let flags := (stripSelfhostFlags (← flagsRef.get)).toArray
         let caseBound := 600
         let sweepBound := 2700
         let began ← IO.monoMsNow

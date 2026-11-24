@@ -12,7 +12,9 @@ The built-in entries here are the ones the language already had. `[inline]` and 
 `pp.notation`/`pp.all` options go through the registry (their old dedicated parser and
 match arm are gone); the others are still written in their own parser forms, but they are
 listed so that `register_attribute`/`register_option` reject a duplicate and an unknown
-name gets a useful message.
+name gets a useful message. `[term_elab]` (B1) is new: the generic `command.attr` form
+parses it, its action runs a Wiz `TermElab` in the elaborator's interpreter, and the
+registry is the only table that knows the name.
 
 `register_attribute` registers a user no-op attribute: it validates the target and
 records the application (`CommandState.attrUses`), which is observable in the state and,
@@ -49,6 +51,8 @@ inductive AttrAction where
   | binop
   | deriver
   | unexpander
+  /-- (B1) `[term_elab k] f`: `f : TermElab` elaborates the term syntax `k` -/
+  | termElab
   /-- `[simp]`: the default rewrite set (`command.attrSimp`; dedicated parser) -/
   | simp
   /-- `[hint]`: the `auto` hint set (`command.attrHint`/`attrHintKind`; dedicated parser) -/
@@ -70,6 +74,7 @@ def builtinAttributes : List AttributeDecl :=
   , { name := "default_instance", payload := .nameOptNat, action := .defaultInstance }
   , { name := "binop", payload := .flag, action := .binop }
   , { name := "deriver", payload := .name, action := .deriver }
+  , { name := "term_elab", payload := .name, action := .termElab }
   , { name := "app_unexpander", payload := .name, action := .unexpander }
   , { name := "simp", payload := .nameOptNat, action := .simp }
   , { name := "hint", payload := .nameOptNat, action := .hint } ]

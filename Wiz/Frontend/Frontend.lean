@@ -91,8 +91,9 @@ partial def isoKey (base : CommandState R) (m : Name) : Option UInt64 := do
     base.trustNative, base.nativeFuel)
   let settings := mixHash settings (hash (g.assumed, g.quoteErasesProofs, g.pushCalls, g.strictPrivacy, g.module,
     g.pp.useNotation, ppKeys (g.pp.unexpanders.toList.map (·.1)), ppKeys (g.pp.formats.toList.map (·.1))))
-  -- (TT-04) a caller may start from a state with extra attributes/options
-  let registry := toString (repr (base.attrDecls, base.optDecls,
+  -- (TT-04) a caller may start from a state with extra attributes/options; (B1) a term
+  -- elaborator registration also decides how a module's terms elaborate
+  let registry := toString (repr (base.attrDecls, base.optDecls, base.termElabs,
     base.optValues.toList.mergeSort fun a b => decide (a.1 ≤ b.1)))
   let settings := mixHash settings (hash registry)
   let (k, _) ← go [] m {}

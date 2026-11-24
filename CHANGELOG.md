@@ -12,7 +12,7 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 `scripts/trust-counts.py --write` and checked by `scripts/trust-counts.py --check` (the
 `native` group runs the check), so this file cannot drift from the ledger.
 
-<!-- trust-counts: rows=841 partial=251 axiom_rows=260 builtin_rows=254 native_rows=76 implemented_by=71 repr=5 extern_declarations=226 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=551 shared_reasons=290 legacy=0 expired=0 -->
+<!-- trust-counts: rows=858 partial=254 axiom_rows=267 builtin_rows=261 native_rows=76 implemented_by=71 repr=5 extern_declarations=233 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=559 shared_reasons=299 legacy=0 expired=0 -->
 
 ## [Unreleased]
 
@@ -26,6 +26,18 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   archive and runs the binaries under `env -i` with only glibc. The CI jobs consume the
   new outputs (`wiz-notes/nix-artifacts.md` is the handover note; `.github/workflows`
   is unchanged here).
+
+* extensibility (B1): `attribute [term_elab kind] f` registers a Wiz term elaborator
+  (`TermElab := Syntax → TacticM Unit`, `lib/Prelude.wiz`) for a term syntax kind; it runs
+  in the elaborator's interpreter with one goal (the expected type, or a fresh type
+  metavariable in `infer`) and builds the term with the existing `TacticM`/`Expr`
+  requests. An unknown kind is refused (`unknown-syntax`), and the registration is not
+  `local` (like `[tactic]`). The data-primitive spellings are now data:
+  `builtin unit|empty|qty|size` rename the kernel formers (the old names are fallbacks),
+  and a string literal is `builtin string`'s `mk` applied to a list of `builtin char` in
+  `builtin list` (`String.mk (List Char)` by default), so a library with its own
+  `MyChar`/`List`/`String` can define its literal encoding; a mismatch is reported at the
+  literal, not left to the kernel (`tests =elab`, `=reject`).
 
 * ci: a pull request's `build` job starts from a `.lake` a **cold** derivation saved
   (`flake.nix`'s `withLakeCache`, keyed by `flake.lock`, `lean-toolchain`, the

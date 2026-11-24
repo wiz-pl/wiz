@@ -11,17 +11,46 @@ lake test -- '=selfhost#0,3'          # only cases 0 and 3 of the group "selfhos
 lake test -- --list                   # the group names
 lake test -- --list-cases =selfhost   # the selected cases: GROUP<tab>INDEX<tab>NAME
 lake test -- --timings t.jsonl rig    # also append each case's time to t.jsonl
+lake test -- --selfhost-cache /tmp/wiz-selfhost   # where the self-hosted programs are built
+lake test -- --selfhost-compiler P --selfhost-checker P  # use these instead of building them
 .lake/build/bin/tests --run selfhost 3  # one case (also selfhost#3): exit 0 passed, 1 failed, 3 skipped
 ```
 
-Every case prints its position among the cases the invocation selected and its wall time
-(`[3/42]   ✓ name (12.345 s)`; a shard's total spans its groups), and every group its
-total.
+Every case prints its position among the cases the invocation selected, how many have
+failed so far and the size of the selection, with its wall time (`[3/0/42]   ✓ name
+(12.345 s)`; a shard's total spans its groups), and every group its total.
 `--timings FILE` (with `--shard NAME` as a label) appends one line of JSON per case:
 `shard`, `group`, `index`, `case`, `seconds`, `ok`, and `notes`, which say which shared
 programs the case used and built (`Tests.note`: `uses checker`, `built checker 331.2`;
 the self-hosted checker and compiler are built by the first case that needs them and
-kept under `/tmp`).
+kept under `/tmp`, unless the run is handed them as flags — the three below).
+
+**The self-hosted programs.** The suite composes the self-hosted frontend into two
+programs (`selfhost/*.wiz` checked and built by this toolchain) and runs them in the
+`selfhost` and differential-sweep cases: the *compiler* and the *checker*. Three flags
+decide where they come from, and each wins over the `WIZ_SELFHOST_*` environment
+variable of the same name (which stays only for the case that sets one on a child
+process):
+
+* `--selfhost-cache DIR` builds and keeps them in `DIR` instead of the system temp
+  directory (`WIZ_SELFHOST_CACHE`). The value is passed on to every case's process, so a
+  run cannot end up with cases using different caches.
+* `--selfhost-compiler PATH` / `--selfhost-checker PATH` use that binary instead of
+  building one (`WIZ_SELFHOST_COMPILER`/`_CHECKER`). The path is a *store path* the
+  caller promised exists: a path that is not there is an error naming it, not a case
+  that "could not run".
+* `--selfhost-source compiler|checker` is the driver's own mode, not a test selection:
+  it prints the composed program as source and exits. It exists because a derivation
+  cannot call Lean, so `.#selfhost-compiler`/`.#selfhost-checker` build exactly what it
+  prints.
+
+The flags are the reason CI builds the two programs once: the `lean` job runs
+`nix build .#selfhost-compiler .#selfhost-checker` and passes the store paths to every
+shard as `--selfhost-compiler`/`--selfhost-checker`, instead of each fresh runner
+rebuilding them in `/tmp` (9,257 s, 9.8 % of a suite run; perf H2). A local run can do
+the same: `lake test -- --selfhost-compiler "$(nix build .#selfhost-compiler
+--no-link --print-out-paths)/bin/compiler" --selfhost-checker "$(nix build
+.#selfhost-checker --no-link --print-out-paths)/bin/checker"`.
 
 An unimplemented exercise shows up as `✗ ... not implemented yet (hit a sorry)`. A case
 that cannot run here because a dependency is absent (no C toolchain, no `nix`, …) calls
@@ -881,13 +910,16 @@ not invalidate the others:
 | `.#wasm-fixtures` | the `wasm-fixtures` programs under `scripts/` compiled with `wiz build --target wasm`, the host `web/wasm-host.mjs`, and each module's expected stdout; the check runs every module under Node | the `wasm-fixtures` directory under `scripts/`, `web/wasm-host.mjs` |
 | `.#wiz-web`, `.#wiz-playground`, `.#wiz-playground-ui`, `.#wiz-source-ui` | the Emscripten page modules, each with its own page files (unchanged) | each script's own fileset |
 | `.#web-bundle` | the three page-module outputs merged into one directory (the site's `web/out`) | `wiz-web` + `wiz-playground` + `wiz-playground-ui` |
-| `.#docs-site` | `wiz doc --lib` plus the landing page, guide, benchmark page, playground and licences; `/source/` is absent | `docs/`, `bench/`, `examples/`, `tools/`, `editors/`, `drafts/`, `scry/`, the site scripts under `web/`, `wiz`, `reference`, `web-bundle` |
-| `.#pages` | the exact `doc-site` tree the `deploy-docs` job uploads: `docs-site` plus the `scry` source reader under `/source/` | `docs-site`, `scry/`, `web/source-*` and `web/framework/`, `wiz-source-ui`, `tree-sitter-c-sharp` |
+| `.#docs-lib` | the standard library's API pages: `wiz doc --lib --jobs 4` over `lib/`, plus `.#reference`'s `index.md` as `docs/reference.md` | `lib/`, the docs tooling in `siteAssetFiles`, `wiz`, `reference`, `web-bundle` |
+| `.#docs-site` | the site's chrome over `.#docs-lib`'s pages: the landing page, guide, benchmark page, playground and licences; `/source/` is absent | `docs/`, `bench/`, `examples/`, `tools/`, `editors/`, `drafts/`, `scry/`, the site scripts under `web/`, `wiz`, `reference`, `web-bundle` |
+| `.#pages` | the exact `doc-site` tree the `deploy-docs` job uploads: `docs-site` plus the `scry` source reader under `/source/` | `docs-site`, `scry` (the `.#scry` derivation), `web/source-*` and `web/framework/`, `wiz-source-ui`, `tree-sitter-c-sharp` |
+| `.#scry` | the analysis CLI, `grail build scry` as a store path (`bin/scry`); `.#pages` builds the `/source/` bundle with it, while `packages (scry)` and `scry.yml` still run that build in-tree | `scry/`, `lib/`, `wiz`, `tree-sitter-c-sharp` |
+| `.#selfhost-compiler`, `.#selfhost-checker` | the self-hosted frontend's compiler and checker as binaries, composed by `Wiz/Selfhost.lean` and printed by `tests --selfhost-source`; the `lean` job builds them once and the shards take the store paths | `selfhost/`, `lib/`, `wiz`, `tests` |
 | `.#release-bin` | the binary release tarball (`wiz-<arch>-linux.tar.gz` and `.sha256`): portable `wiz`/`grail`/`tower`, `lib/`, `editors/`, licences and the infoview module (`wiz-web`) | `lib/`, `editors/`, the `release-licenses` directory under `scripts/`, the licence files, `web/wasm-host.mjs`, `release-unwrapped`, `release-tower`, `wiz-web` |
 | `.#release-tarball` / `.#source-tarball` | the deterministic source tarball, manifest and SBOM (unchanged) | the source tree |
 
 ```sh
-nix build .#wasm-fixtures .#web-bundle .#docs-site .#pages .#release-bin
+nix build .#wasm-fixtures .#web-bundle .#docs-lib .#docs-site .#pages .#scry .#release-bin
 ```
 
 The release archive's metadata is the flake's commit time (`RELEASE_SOURCE_DATE_EPOCH`,
@@ -1024,17 +1056,19 @@ recomputing the derivation. Pushes, the merge queue and the release workflows ke
 pure `nix build`: the trusted cache and every release artifact name the pure derivation,
 and nothing in the release path reads `withLakeCache`.
 
-The `docs` job builds `.#reference` (the standard library's
-reference manual, made with the cached `wiz`) on a push, off the shards' critical path.
+`.#reference` (the standard library's reference manual, made with the cached `wiz`) is an
+input of `.#docs-lib`, so the `docs` job's `nix build .#pages` builds it, off the
+shards' critical path.
 Every job pulls from Cachix through `cachix-action`, which is set up for substitution
 only (`skipPush: true`); on a pull request it reads the trusted cache anonymously, and
 the jobs that substitute this commit's store paths (the test shards, `trust-ledger`,
-`web`, `wasm`, `lean` and `packages`) also add the PR cache as an extra substituter for
-that job only. No job on the critical path runs `lake build` directly, and the `.lake`
+`web`, `wasm`, `docs`, `lean` and `packages`) also add the PR cache as an extra
+substituter for that job only. No job on the critical path runs `lake build` directly,
+and the `.lake`
 Actions caches are the `lake_seed` job's cold seed, a pull request's restore of it, and
 the per-subset caches in [ci-runner.md](ci-runner.md) (a PR's `lean`
 `.subset-cache/lean`, a shard's Wiz caches,
-and the docs/package caches); a failed job writes none of them. The shards run the
+and the package cache); a failed job writes none of them. The shards run the
 Nix-built test driver
 (`packages.tests`), not
 `lake test`, and symlink the store `wiz`
@@ -1147,18 +1181,19 @@ setup action keeps the elan cache for those
   `docs_examples`, `lean` in the `lean` job), and the checker keys its entries
   internally by the compiler and the snippet text, so a docs-only run is seconds and a
   toolchain change invalidates the changed blocks.
-* **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
-  only (not a pull request, the weekly run or a manual run), `docs` copies the two Wasm
-  modules that `wasm` built (`wiz-web`, `wiz-playground`), the standard library's
-  pages with
-  `wiz doc --lib` (source links to the commit; a restored elaboration cache makes this
-  a replay, "Documentation site" below) into `doc-site/docs`, and the landing page
-  and the static playground around them (`web/build-site.sh`); `web/check-site.sh`
-  checks that `/`, `/docs/` and `/playground/` exist and that the landing page's local
-  links resolve. It uploads the tree as the artifact `wiz-docs` (3 days, for debugging),
-  and `deploy-docs` publishes it to GitHub Pages. `deploy-docs` is not a required
-  check, so a Pages outage does not fail the suite; `docs` itself is required on a push.
-  See "Documentation site" below.
+* **The documentation site** (the `docs`, `docs check` and `deploy-docs` jobs): on every
+  event but the weekly schedule, `docs` runs `nix build .#pages` and uploads the result as
+  the artifact `wiz-docs` (3 days, for debugging); `docs check` re-runs the site contract
+  (`web/check-site.sh`) and the Chromium reader test on that artifact. `.#pages` is the
+  derivation chain `.#docs-lib` → `.#docs-site` → `.#pages` ("Nix artifacts for CI and
+  releases"), so the job runs no build command of its own. It can still compile, though:
+  on a pull request `.#docs-lib` names the pure `wiz`, not the seeded build the PR's
+  `lean` job made, so that chain is a cold build there (the timeout is sized for it) until
+  a seeded `pagesWith` lands. `deploy-docs` is the one master-push-only
+  step: it publishes the same artifact to GitHub Pages, and it is not a required check, so
+  a Pages outage does not fail the suite. `CI result` requires `docs` and `docs check`
+  together whenever code and web changed (the job needs `lean` and `wasm`, which gate the
+  same condition). See "Documentation site" below.
 * **The playground and the site's JavaScript** (the `web` job): on a pull request that
   changes `web/**` (and on a push), `web/test.sh` runs with `WIZ_WEB_NO_BROWSER=1`. The
   three Wasm modules (`web/build.sh`, `web/build-playground.sh` and the playground's Loom
@@ -1203,16 +1238,23 @@ setup action keeps the elan cache for those
   list of `=GROUP#I,J,…` selectors. `scripts/ci.py` balances the parts with the case
   times in `.github/test-timings.json`: the cases that use the same shared program (the
   self-hosted checker or compiler, which the first case that needs it builds) stay in
-  one part, so each program is built once, and the other cases fill the parts up. A new
-  case counts as its group's median, with the programs most of its group uses.
+  one part, so each program is built once, and the other cases fill the parts up. In CI
+  the programs come from `lean` as `--selfhost-compiler/--selfhost-checker` store paths,
+  so a part usually builds nothing; the rule is what keeps the `/tmp` fallback and local
+  runs from building the same program twice.
+  A new case counts as its group's median, with the programs most of its group uses.
   `"split-cases": true` gives up that first rule for a shard whose cases are siblings
   over disjoint inputs (the four parts of `selfhost-libdiff`, one file range each), where
   spreading them over the jobs is worth a build per part; `part_cost` charges each part
-  that build. The baseline holds only the split shards' cases, one per line
-  (`selfhost`, `library`, `scaling`, `selfhost-libdiff`; the last is split into four cases
-  over `lib/` and `scry/` by file index). `scripts/ci.py plan` shows the parts and their
-  estimates. The heavy groups have shards of their own (`hdl`, `semantics`), so adding a
-  slow case there does not unbalance `library`.
+  that build. The baseline holds every shard's cases, one per line; the split shards'
+  entries (`selfhost`, `library`, `selfhost-libdiff`) are the ones `partition` balances,
+  and an unsplit shard's entries (`scaling` after its merge, `hdl`, `semantics`) price
+  `plan`, `matrix` and the shard budget. `selfhost-libdiff` is split into four cases
+  over `lib/` and `scry/` by file index. `scripts/ci.py plan` shows the parts and their
+  estimates, then the longest predicted job wall, the 75-minute shard budget and the
+  margins to it and to the 120-minute job timeout; it exits 1 when a part is over the
+  budget (`docs/ci-runner.md`, "The shard budget"). The heavy groups have shards of their
+  own (`hdl`, `semantics`), so adding a slow case there does not unbalance `library`.
   To refresh the baseline from a CI run:
   `gh run download RUN -n test-timings && scripts/ci.py baseline timings.jsonl > .github/test-timings.json`.
 * **`"parts"`.** A shard with `"parts": N` splits one case's *work*, not a set of cases:
@@ -1241,8 +1283,10 @@ setup action keeps the elan cache for those
   ```
 
   A case's time is its median over the runs, and each part's prediction is scaled by
-  its shard's measured wall time over its case sum (`"jobs"` overlaps cases: `library`
-  runs at about 0.86 of its case sum). The split counts grow a part at a time, to the
+  its shard's measured wall time over its case sum (`"jobs"` overlaps cases: on the
+  2026-11-23 five-run refresh `library` ran at 0.60 of its case sum and `scaling` at
+  0.47). `--write` puts that ratio in the shard's `"wall-ratio"`, the static model
+  `plan` and `matrix` use. The split counts grow a part at a time, to the
   shard with the longest part, until the job budget (`--jobs`, default the current
   number of test jobs) is used or another part would not shorten the longest one; a
   long job that cannot be split does not stop it. It exits with an error if the parts
@@ -1261,35 +1305,43 @@ setup action keeps the elan cache for those
   CPU count, and the sweep's cost is per file, so the lever is fewer files per job — the
   split.) A shard of one long case (`grail-selfhost`, `hdl-verified`) and the shards that
   build a shared program (`selfhost`) keep 1. A case's `seconds` stays its own
-  process's time, so shard balance is unaffected.
+  process's time, so shard balance is unaffected. A shard with `"jobs"` also carries a
+  `"wall-ratio"`: the measured fraction of its case sum its job wall takes (`library`
+  0.60, `scaling` 0.47). `plan` and `matrix` multiply by it, and the shard budget is
+  checked on the result; without it a parallel shard's serial case sum would look over
+  the budget while its wall is well under it.
 * **Shard order.** `scripts/ci.py matrix` lists the shards longest first, by the same
-  estimated case times the split uses (a shard that selects no case goes last, by name).
+  predicted job wall the split uses: the estimated case times times the shard's
+  `"wall-ratio"` (a shard that selects no case goes last, by name).
   GitHub starts a matrix in the listed order and its 20-concurrent-job cap
   leaves the tail waiting: in run 44333554608 `test (prop)` started 16 minutes after the
-  wave did, so the long shards must be at the front. Only the split shards' cases are in
-  the baseline, so a non-split shard is estimated from the cases it selects (a new case
-  counts its group's median, 1 s when the group is unknown); the shards that are one
-  long case without an entry (`grail-selfhost`, `semantics`, `hdl-verified`) therefore
-  estimate low and sort late, and giving them entries in `.github/test-timings.json`
-  would refine the order.
+  wave did, so the long shards must be at the front. Every shard's cases are in the
+  baseline, so a non-split shard (`scaling`, `hdl`, `semantics`) is priced from its own
+  entries; a case with no entry (a new one) counts its group's median, 1 s when the
+  group is unknown. A shard with no entries at all still estimates low and sorts late,
+  so give a new long case an entry by refreshing the baseline.
 * **Shard balance.** CI's wall time is its longest job, so the invariant is that **no
   test shard's job wall is over 1.5× the median shard's job wall**. Every split shard's
   cases have an entry in `.github/test-timings.json`, and no shared program is built by
   two parts of one split shard (a `"split-cases": true` shard excepted: its parts each
-  build it by design, and the estimates charge for it). It is tracked in two places:
+  build it by design, and the estimates charge for it). It is tracked in three places:
   * `scripts/ci.py check-shards` (the `lean` job) warns when a split shard has cases
-    that are not in the baseline.
+    that are not in the baseline, and fails when a job's predicted wall is over the
+    75-minute shard budget (`docs/ci-runner.md`, "The shard budget").
+  * `scripts/ci.py plan` (also in the `lean` job) prints the longest predicted job and
+    its margins to the budget and the 120-minute timeout, and fails on the same budget.
   * `scripts/ci.py balance` (the `CI result` job) takes the run's job list from the API
     and compares each `tests --` step's wall, so a shard that runs cases in parallel
     (`"jobs": N`) is judged on its wall, not on its summed case seconds (which it also
     reports; the two differ by the shard's `--jobs` factor). It adds a "Shard balance"
     table to the run summary and an annotation for each violation.
 
-  Both warn on pull requests; a push to `master` is strict. A new case has no time until
-  a CI run has measured it, so a master run with a split-shard case missing from the
-  baseline is red until the baseline is refreshed (below). That is deliberate: as a
-  warning, the baseline went stale for three current runs while every shard stayed over
-  the limit.
+  `check-shards` and `plan` fail the `lean` job on any run, before the matrix starts;
+  `balance` warns on pull requests, and a push to `master` is strict. A new case has
+  no time until a CI run has measured it, so a master run with a split-shard case
+  missing from the baseline is red until the baseline is refreshed (below). That is
+  deliberate: as a warning, the baseline went stale for three current runs while every
+  shard stayed over the limit.
 
   On a master push whose tests all passed and whose balance drifted, the `CI result`
   job uploads the regenerated baseline as the `test-timings-baseline` artifact (also when
@@ -1494,8 +1546,12 @@ the generated reference manual (`result/index.md`, and `result/site`).
   the write cache as usual.
 * **The Wiz build caches.** Each test shard keeps what the suite builds from Wiz
   programs between runs: the elaboration cache (`tests --cache ~/.cache/wiz …`),
-  `.grail`, and the self-hosted checker and compiler that the tests compile
-  (`/tmp/wiz-selfhost-*`). The cache key starts with a hash of everything the compiler
+  `.grail`, and — the fallback only — the self-hosted checker and compiler that the
+  tests compile into `/tmp/wiz-selfhost-*`. In CI the `lean` job builds them once
+  (`nix build .#selfhost-compiler .#selfhost-checker`) and the shard passes the store
+  paths as `--selfhost-compiler`/`--selfhost-checker`, so this cache stays cold unless
+  the realisation failed (the shard warns) or the run is a local one. The cache key
+  starts with a hash of everything the compiler
   is made of (the `.lean` files, Lean, `flake.lock`), and partial hits only come from the
   same compiler (the elaboration cache's own keys include the wiz binary's hash, but the
   test driver's grail runs use a fixed binary id and the `/tmp` programs a timestamp).
@@ -1703,20 +1759,20 @@ domain root) works either way:
 | `/bench/` | standard-library timings and the Scry taint corpus | `bench/*.json`, `scry/bench/baseline.json`, `web/build-bench.py` |
 | `/playground/` | the static playground (stage 11ab) | `web/playground.*`, `web/build-playground.sh` |
 
-The `docs` job copies the two Wasm modules that `wasm` built from Cachix
-(`web/build.sh` for the documentation's interactive signatures,
-`web/build-playground.sh` for the playground; the scripts only copy in that mode),
-runs `wiz doc
---lib -o doc-site/docs --web web/out` (source links to the commit), copies the
-reference manual's Markdown from the flake's `reference` package (`nix build
-.#reference`, a Cachix hit when the `lean` job already built it) to
-`doc-site/docs/reference.md`, assembles the
-landing page, the benchmark page, the playground and the guide with `web/build-site.sh
-doc-site web/out`, checks the result with `web/check-site.sh doc-site` (the five entry
-points exist; `web/check-links.py` then crawls every page and fails on a Markdown link,
-an internal link that does not resolve — fragment included — or a module, guide or
-notebook page with no source link), and uploads `doc-site` as the artifact `wiz-docs` (3 days, for
-debugging). `deploy-docs` then publishes that artifact.
+The site is three derivations, and the `docs` job runs the outermost one:
+`nix build .#pages`. `.#docs-lib` is `wiz doc --lib` over `lib/` (the API pages, with
+source links to the commit) plus `.#reference`'s Markdown; `.#docs-site` assembles the
+site's chrome around those pages — the landing page, the guide, the benchmark page, the
+playground from `.#web-bundle`, the licences — with `web/build-site.sh`, and checks the
+result with `web/check-site.sh`; `.#pages` adds `/source/`, a `scry web` bundle built
+with `.#scry` and the reader's module `.#wiz-source-ui`, and checks the whole tree again
+with `SITE_REQUIRE_SOURCE=1 sh web/check-site.sh` (the five entry points exist;
+`web/check-links.py` then crawls every page and fails on a Markdown link, an internal
+link that does not resolve — fragment included — or a module, guide or notebook page
+with no source link). The job uploads `.#pages` as the
+artifact `wiz-docs` (3 days, for debugging); `deploy-docs` publishes that artifact, and
+`docs check` downloads it and re-runs the contract, then loads the reader in headless
+Chromium.
 
 The guide exists because the site must not link a reader to a repository Markdown file:
 a link on the site resolves to a rendered page, and a rendered page may link to its
@@ -1729,26 +1785,13 @@ notebook pages' `.md` links, so `/notebooks/tour.html` points at `/guide/docs/�
 (`git rev-parse HEAD`); `WIZ_SOURCE_URL` overrides the prefix.
 
 `wiz doc --lib` elaborates the whole library when its cache is cold, and that is the bulk
-of the docs job (10-19 min in recent runs). The job therefore restores `wiz`'s
-elaboration cache from the Actions cache into `.wiz-doc-cache/ro` and passes it with
-`--cache-ro`, a layer `wiz` only ever reads: the job cannot corrupt the published layer,
-and this run's misses go to `.wiz-doc-cache/write`. A run that missed publishes its
-write cache as the next run's layer; a hit publishes nothing. The key is
-`wiz-doc-v1-<os>-<SHA-256 of the wiz binary>-<git tree of lib/>`. The first half is the
-cache's own namespace (an entry is named by `binaryId`, a hash of the running binary, and
-manifests carry its SHA-256), so an identical build of the same source hits and a changed
-compiler misses by construction; the second half only decides when a new snapshot is
-saved, and the restore prefix (`wiz-doc-v1-<os>-<binary hash>-`) still serves the modules
-a `lib/` change did not touch. `--cache-verify off` is deliberate. The layer is published
-by a job that runs with it off, so the layer carries no manifests; with verification on
-(the default, `warn`) an entry that no manifest lists is a miss, and a read-only layer is
-only read through its manifests — the restored layer would be ignored. The entries are
-content-keyed and namespaced by the binary's hash anyway (each module's text is in the
-key), and a manifest would also bind each entry to the toolchain's tag, which includes
-the `cc` and `llc` paths (`Wiz/Toolchain.lean`): a rebuild of the same ELF against a
-different store path would throw its entries away. A miss costs one cold elaboration
-(10-19 min on the runner); a hit replays the entries in about 2-4 min. The toolchain's
-own `share/wiz/cache` is read as well (the wrapper's default `--cache-ro`).
+of the work. It happens inside `.#docs-lib`, which is a derivation: the result has a store
+path, so the job substitutes it instead of redoing the elaboration, and Cachix is its
+cache (not an Actions entry — there is no `.wiz-doc-cache` layer any more). It reruns only
+when `lib/`, `wiz` or `web-bundle` changes (or the docs tooling in `siteAssetFiles`); any
+other change is a Cachix hit. The packaged `wiz` still reads its own
+`share/wiz/cache` (the wrapper's default `--cache-ro`), which is what makes a
+`lib/`-changing build replay most of the library.
 
 The benchmark page is **generated, not written**: `web/build-bench.py` renders
 `web/bench/index.html` from the JSON, and `web/build-site.sh` runs its `--check` mode
@@ -1761,7 +1804,8 @@ runtime module, `wiz-playground-ui.mjs`). The `web` job builds and tests it;
 `web/build-site.sh` requires it beside `web/build-playground.sh`'s engine, because the
 page has no static fallback: a missing runtime module is a playground that cannot start.
 The `.#wiz-playground` derivation runs both scripts, so one store path carries the engine
-and the page, and the `docs` job's `build-playground.sh --from` copies both.
+and the page; `.#web-bundle` merges it with the other module outputs, and `.#docs-site`
+copies that bundle (`web/build-site.sh`), so the docs job runs no Emscripten build.
 
 | path | what it is |
 |---|---|
@@ -1866,7 +1910,8 @@ thread-owned counts change atomically too. `scripts/test-runtime.sh` checks all 
 `scripts/rc-cost-bench.sh` times them against each other (the single-thread cost of
 thread-safe counts). Without
 `--source-url`, the local documentation's source links are plain paths. `docs` and
-`deploy-docs` run only on `push` (`workflow_dispatch` runs do not publish). The artifact
+`docs check` run on every event but the weekly schedule (a `workflow_dispatch` run
+included); only `deploy-docs` publishes, and only on a push to `master`. The artifact
 stays for 3 days for debugging; the site keeps the newest deployed tree until the next
 successful deployment, and `deploy-docs` serialises deployments (`concurrency: pages`,
 `cancel-in-progress: false`) so the site ends at the newest commit.

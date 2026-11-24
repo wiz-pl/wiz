@@ -1,11 +1,11 @@
 #!/bin/sh
-# The three page-module derivations for this checkout, for the `web` and `docs` jobs.
+# The three page-module derivations for this checkout, for the `web` job.
 #
-# `web_modules` builds `.#wiz-web`, `.#wiz-playground` and `.#wiz-playground-ui` once per
-# run and publishes them to Cachix; this step realises the same paths from there, so
-# neither job runs Emscripten (the playground engine was ~10 min of a `web` run, with
-# `wasm-opt`'s multi-GiB peak as the tail, and the `docs` job used to repeat the builds on
-# every push).
+# `wasm` builds `.#wiz-web`, `.#wiz-playground` and `.#wiz-playground-ui` once per
+# run and publishes them to Cachix; this step realises the same paths from there, so the
+# job runs no Emscripten (the playground engine was ~10 min of a `web` run, with
+# `wasm-opt`'s multi-GiB peak as the tail). The `docs` job does not call this script: it
+# takes the modules as inputs of `.#pages`, the derivation that is the published site.
 #
 # A miss is a bug in the workflow — the job that owns them did not run, or this
 # checkout's derivations are not the ones it published — so it fails rather than quietly
@@ -15,8 +15,9 @@
 #
 # Writes `web=…`, `playground=…` and `ui=…` (store paths) to $GITHUB_OUTPUT.
 set -eu
-# One bundle for all three module sets (`nix build .#web-bundle`): the `web` job can set
-# WIZ_WEB_BUNDLE=1 (or a store path) and export the same directory for each `--from`.
+# One bundle for all three module sets (`nix build .#web-bundle`): a *local* run may set
+# WIZ_WEB_BUNDLE=1 (or a store path) and export the same directory for each `--from`; the
+# `web` job does not set it, so a CI run takes the three paths from the producer below.
 if [ -n "${WIZ_WEB_BUNDLE:-}" ]; then
   bundle=$WIZ_WEB_BUNDLE
   if [ ! -d "$bundle" ]; then
@@ -47,7 +48,7 @@ elif [ "${GITHUB_EVENT_NAME:-}" = pull_request ] && [ -z "${CACHIX_AUTH_TOKEN:-}
   echo "::warning title=Cachix::a fork pull request has no token: building .#wiz-web, .#wiz-playground and .#wiz-playground-ui in this job"
   paths=$(nix build $ids --no-link --print-out-paths -L)
 else
-  echo "::error title=Cachix::.#wiz-web/.#wiz-playground/.#wiz-playground-ui are not in the cache: the web_modules job must build and publish them"
+  echo "::error title=Cachix::.#wiz-web/.#wiz-playground/.#wiz-playground-ui are not in the cache: the wasm job must build and publish them"
   # again, without the discarded stderr: the error names what is missing and why
   nix build $ids --no-link --print-out-paths --max-jobs 0
   exit 1

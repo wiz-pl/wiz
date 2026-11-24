@@ -1,0 +1,94 @@
+import IO
+/-!
+# Host
+
+The capability boundary for a program that runs in a host (a browser page, a worker, a
+Node process). A capability is a function the *host* provides and the program may call:
+it is declared here, as Wiz data, and resolved on the host against a registry the page
+installs before `main` runs.
+
+An `extern "host.NAME"` is a capability, not an arbitrary global. The JavaScript backend
+treats the `host.` prefix as a capability name, and its generated module checks that every
+capability a program reaches is registered before any user code runs — a missing one is a
+startup diagnostic (`WIZ_HOST_MISSING: fs.open`), not a trap from inside a call. The
+WebAssembly backend refuses a `host.` extern at compile time and the C backend has no
+binding for one, so a capability is a JavaScript-target feature today; making the three
+agree (an import on Wasm, a mangled or diagnosed name on C) is open.
+`extern "js.path"` remains for page-specific glue (a DOM hook); a capability that a
+package ships goes through `host.`.
+
+The model mirrors the two registries that already exist: `Wiz.Ext.Entry` (a descriptor
+with a stable name, a schema and declared capabilities) and the Loom wire's rule that an
+unregistered channel is an error, not a fallback (`docs/notes/loom-wire-protocol.md`).
+`docs/notes/loom-wire-protocol.md` is canonical for the wire; this module is canonical
+for the host capabilities below.
+
+## Files (`fs`)
+
+`fs` is one capability with a *synchronous* file API and an *asynchronous* prologue.
+That split is forced by the platform, not a choice: OPFS's `FileSystemSyncAccessHandle`
+is worker-only and exclusive, while resolving or creating a path (`getFileHandle`) is a
+promise. So a host mounts its tree before `main` (`Host.mount`, `Host.reserve`), and the
+program then opens a *mounted* name synchronously. A `mem` backend (a map) is fully
+synchronous and needs no mount; `opfs` needs one.
+
+The operations are the runtime's (`runtime/rt_sys.inc`); they return 0 or an errno, and
+the caller (`File`, `FS`) keeps the error channel. A host handler throws a JS `Error`
+only for a capability that is missing or a platform failure it cannot map to an errno.
+-/
+
+/-- One host capability. `name` is the word after `host.` in an `extern`; `params` and
+`result` are the marshalling letters of the extern key (`s` String, `n` Nat, `u` UInt64,
+`f` Float64, `b` Bool, `v` Unit), for a host that validates its registry against the
+program's declarations. `required` capabilities are checked at startup; an optional one
+may be absent and the program handles that itself. -/
+structure Host.Capability where
+  name : String
+  params : List String
+  result : String
+  io : Bool
+  required : Bool
+
+/-- The `fs` capability: what a program may ask a filesystem host for. `mount` and
+`reserve` are the async prologue (they are the only ones that may resolve a path); the
+rest are the synchronous file API. -/
+def Host.fs : List Host.Capability :=
+  [ Host.Capability.mk "fs.mount" ["s"] "n" Bool.true Bool.true
+  , Host.Capability.mk "fs.reserve" ["s", "s"] "n" Bool.true Bool.true
+  , Host.Capability.mk "fs.open" ["s", "s"] "n" Bool.true Bool.true
+  , Host.Capability.mk "fs.read" ["n", "n"] "s" Bool.true Bool.true
+  , Host.Capability.mk "fs.write" ["n", "s"] "n" Bool.true Bool.true
+  , Host.Capability.mk "fs.seek" ["n", "n", "n", "b"] "n" Bool.true Bool.true
+  , Host.Capability.mk "fs.close" ["n"] "n" Bool.true Bool.true ]
+
+/-- Every capability this module declares. A package adds its own list; the generator
+that writes the host's descriptor table reads these, so there is no second table to
+keep in step. -/
+def Host.capabilities : List Host.Capability := Host.fs
+
+/-- The name of a capability, for a diagnostic. -/
+def Host.Capability.key (c : Host.Capability) : String := c.name
+
+-- The declarations. The `extern` type is the schema the compiler marshals; the
+-- `Host.Capability` above is the declaration the host registry checks.
+
+/-- Mount a directory of the host's store ("" is its root). Async in the host, and it
+runs before `main`: the answer is 0, or an errno. A `mem` host needs no mount and
+returns 0. -/
+extern "host.fs.mount" Host.mount : String → IO Nat
+/-- Make a file the program will open by name (create it if it is not there). The async
+half of `open`; a host that cannot create files returns EROFS. -/
+extern "host.fs.reserve" Host.reserve : String → String → IO Nat
+/-- Open a *mounted* file; `mode` as for `fopen` ("r", "w", "a", "r+"). A descriptor,
+or 0 with `Sys.errno` set. -/
+extern "host.fs.open" Host.open : String → String → IO Nat
+/-- Up to `n` bytes as text; fewer only at the end. (Binary data needs the `y` kind,
+which the JS marshaller does not have yet: `wiz-notes/wasm-filesystem-2026-11-23.md`.) -/
+extern "host.fs.read" Host.read : Nat → Nat → IO String
+/-- Write text at the handle's position; 0 or an errno. -/
+extern "host.fs.write" Host.write : Nat → String → IO Nat
+/-- Move: whence 0 from the start, 1 from here, 2 from the end; `back` makes the offset
+negative (the runtime's `wiz_sys_file_seek` shape); the new position. -/
+extern "host.fs.seek" Host.seek : Nat → Nat → Nat → Bool → IO Nat
+/-- Close the handle; 0 or an errno. -/
+extern "host.fs.close" Host.close : Nat → IO Nat

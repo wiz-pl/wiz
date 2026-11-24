@@ -538,8 +538,10 @@ Lean toolchain prints it), and `attribute [inline] f` is checked as in the Lean 
 to the Lean compiler. `[inline]` now parses in the host's generic `command.attr` form
 (TT-04), so this frontend also reports the host's `unknown attribute '<a>' (registered:
 …)` for a name the registry does not know, and `attribute '[inline]' takes no arguments`
-for a payload. Not checked here: a second `attribute [inline]` of the same name (an
-error in the Lean frontend).
+for a payload. Its table is the host's pre-`[term_elab]` built-ins: a `[term_elab]`
+registration is unknown here (the frontend has no evaluator to run the handler), so a
+library that uses one is host-only until FeEval. Not checked here: a second
+`attribute [inline]` of the same name (an error in the Lean frontend).
 
 **Tests** (group `selfhost`): 10 Σ/∀ declarations with the same verdicts in both
 frontends; `#eval` and `attribute [inline]` (5 verdicts and one output).

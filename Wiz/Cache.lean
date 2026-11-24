@@ -348,8 +348,10 @@ def Effect.whose : Option String → String
 def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
   -- a builtin key is registered once (`command.builtin`); a replayed registration (a
   -- module that was elaborated on its own) must not get around that. (Other keys,
-  -- `extern:…`, `repr:…`, `inline`, are per constant.)
-  let once (k : Name) : Bool := k == "nat" || k.startsWith "nat." || k == "string" || k == "memo"
+  -- `extern:…`, `repr:…`, `inline`, are per constant.) The data-primitive spellings
+  -- (B1) are registered once too: they name what a literal means.
+  let once (k : Name) : Bool := k == "nat" || k.startsWith "nat." || k == "string" || k == "memo" ||
+    k == "unit" || k == "empty" || k == "qty" || k == "size" || k == "char" || k == "list"
   let clash := e.builtins.filter fun (k, n) => once k && (s.globals.builtinOf? k).any (· != n)
   if let (k, n) :: _ := clash then
     let was := (s.globals.builtinOf? k).getD "?"
@@ -1068,7 +1070,7 @@ structure ModuleManifest where
   toolchain : String := ""
   /-- the strong toolchain namespace (`Toolchain.tag`: target, compiler, flags) -/
   toolchainTag : String := ""
-  /-- the strong target namespace (`Toolchain.targetTag`: triple and word width) -/
+  /-- the strong target namespace (`Toolchain.targetTag`: triple, word width and the selected backend entry) -/
   targetTag : String := ""
   /-- the rig the region was saved for (`RigTag.tag`) -/
   rig : String := ""
@@ -1388,6 +1390,10 @@ def ManifestStore.isRead (m : ManifestStore) (dir : System.FilePath) : Bool :=
 def ManifestStore.isUnsigned (m : ManifestStore) (dir : System.FilePath) : Bool :=
   m.unsignedReads.any (·.toString == dir.toString)
 
+/-- May `dir` be served? The write layer always; a read-only layer only if it opted in. -/
+def ManifestStore.trusted (m : ManifestStore) (dir : System.FilePath) : Bool :=
+  !m.isRead dir || m.isUnsigned dir
+
 /-- A layer's generation expiry (Unix seconds, `0` for none), read once. -/
 def ManifestStore.expiryOf (m : ManifestStore) (dir : System.FilePath) : IO Nat := do
   let key := dir.toString
@@ -1424,10 +1430,12 @@ def ManifestStore.bump (m : ManifestStore) (f : VerifyCounts → VerifyCounts) :
 def ManifestStore.inWrite (m : ManifestStore) (dir : System.FilePath) : Bool :=
   some dir.toString == m.write.map (·.toString)
 
-/-- Index the region entry a layer just wrote, replacing that layer's previous entry for
-the key. A rewritten region may differ byte-for-byte from the old one (the image is not
-canonical), so keeping the old entry first would read the new file against the old
-digest, drop it, and lose the repair. -/
+/-- (K1) Index the region entry a layer just wrote, replacing that layer's previous entry
+for the key. A rewritten region may differ byte-for-byte from the old one (the image is not
+canonical), so keeping the old entry first would read the new file against the old digest,
+drop it, and lose the repair. Read-layer entries for the key are kept: they may answer
+another layer, and they are tried before or after this one without changing the artifact
+the key selects. -/
 def ManifestStore.setRegion (m : ManifestStore) (id : String) (e : ManifestEntry)
     (dir : System.FilePath) : IO Unit :=
   m.regions.modify fun mp =>
@@ -1958,7 +1966,12 @@ def Store.layeredCore (write : Option System.FilePath) (reads : List System.File
       | none => pure ()
     seen := fun k => do
       if (← seenInMemory.get).contains (Key.id k) then return true
-      for dir in dirs do
+      -- (only layers that may be served: a refused read-only layer's marker says nothing
+      -- this process may rely on — C1)
+      let usable := match manifests with
+        | some ms => dirs.filter ms.trusted
+        | none => dirs        -- `--cache-verify off`: the explicit unverified mode
+      for dir in usable do
         if ← (dir / s!"{markerName k}.wizm").pathExists then return true
       pure false
     markSeen := fun k m => match write with
@@ -2066,6 +2079,13 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
             { a with binary := binary, textSalt := salt, rig := opts.rig }
           for ent in e.toList do
             let id := Key.id key
+            -- (K1) replace the write layer's entries for this id: the failed old entry
+            -- and the fresh one name the same file, and the post-pass `getRegion` walks
+            -- the list old-first. Read-layer entries are kept (they may answer other
+            -- layers), but the write layer must not leave its own stale entry ahead of
+            -- the bytes it just wrote. `setRegion` (this side of the merge) is that
+            -- repair, factored: it drops the write layer's entry for the key and adds
+            -- the fresh one, so neither the old digest nor a deleted repair survives.
             ms.setRegion id ent dir
           pure e
         catch _ => pure none

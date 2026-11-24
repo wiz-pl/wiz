@@ -40,13 +40,35 @@ cp "$ROOT/web/bench/index.html" "$SITE/bench/index.html"
 
 # The landing page, at the site root. Its links are relative (docs/, bench/,
 # playground/), so the tree works at a domain root and under a project site's prefix
-# alike.
-cp "$ROOT/web/landing/index.html" "$SITE/index.html"
-cp "$ROOT/web/landing/landing.css" "$SITE/landing.css"
+# alike. The *generated* page is published, not the template: web/build-landing.sh
+# fills the carousel from the snippet files and the island from the Loom first paint,
+# so publishing the template would ship placeholders and an empty quantity section.
+if [ ! -f "$WEB/landing/index.html" ]; then
+  echo "build-site: $WEB/landing/index.html is missing: run web/build-landing.sh $WEB first" >&2
+  exit 1
+fi
+cp "$WEB/landing/index.html" "$SITE/index.html"
+cp "$WEB/landing/landing.css" "$SITE/landing.css"
+mkdir -p "$SITE/landing"
+for f in carousel.js app.js wiz-landing-ui.mjs wiz-landing-ui.wasm; do
+  [ -f "$WEB/landing/$f" ] && cp "$WEB/landing/$f" "$SITE/landing/$f"
+done
+if [ -d "$WEB/landing/framework" ]; then
+  mkdir -p "$SITE/landing/framework"
+  cp "$WEB/landing/framework/"*.js "$SITE/landing/framework/"
+fi
 
 # The playground page is index.html, so /playground/ is a directory index; its own
-# links (playground.css, playground.js, wiz-playground.mjs) are relative to it.
-cp "$ROOT/web/playground.html" "$SITE/playground/index.html"
+# links (playground.css, playground.js, wiz-playground.mjs) are relative to it. The
+# page in WEB is the **static-complete** one `web/build-playground.sh` generated: its
+# `#app` island holds the Loom first paint and `data-wiz-ssr` is the hash the runtime
+# exports. The source `web/playground.html` is only the template (two placeholders), so
+# publishing it directly would ship an empty shell.
+if [ ! -f "$WEB/playground.html" ]; then
+  echo "build-site: $WEB/playground.html is missing: run web/build-playground.sh $WEB first" >&2
+  exit 1
+fi
+cp "$WEB/playground.html" "$SITE/playground/index.html"
 for f in playground.js playground.css overlays.css widgets.css \
          lsp-client.js widgets.js playground-lsp.js hover.js selfhost-lsp-shim.js \
          playground-engine.js squiggles.js completions.js; do

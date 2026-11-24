@@ -323,6 +323,12 @@ and the only one that needs no evaluator. **Recommendation:** decouple `CORE-3.3
 `SH-2.1` in `roadmap/program-next.md`; the selfhost may refuse non-core entries by name
 until FeEval, which is fail-closed.
 
+**Implemented** on `agent/ext-registry`: `Wiz/Ext/Basic.lean` + `Wiz/Ext/Resolve.lean`,
+`--target` as five rows/six spellings, the D1 selfhost fix, and the cache-key change.
+`wiz-notes/ext-registry.md` records what is data, what is still a Lean branch, the exact
+refusal codes and the manifest gap (`Package.command` is a build-graph node, not a
+backend entry).
+
 ### Item 2 — Term elaborators and the data-primitive table
 
 **Change.** Add `[term_elab k]` (`TermElab := Syntax → TacticM Unit`) dispatched in
@@ -546,3 +552,104 @@ those lines, not taken from the audit):
 * `docs/design/README.md` — the Lean-extensibility policy sentence.
 * `docs/lint-abi.md` — the stable view, as shipped.
 * `docs/stages/30-selfhost-typeclasses.md` §30b — the Inhabited port.
+
+---
+
+## 8. Item 2 as implemented (`agent/ext-term-elab`)
+
+**Status.** Implemented on `agent/ext-term-elab` from `integration/train12` `6e5924cd8`;
+this section is the branch's record. §1–§7 describe the research tree (`25c503002`).
+
+### 8.1 `[term_elab k]`: dispatch point and ABI
+
+`TermElab := Syntax → TacticM Unit` is declared in `lib/Prelude.wiz`, next to `Tactic`.
+`attribute [term_elab k] f` is a registry entry — `AttrAction.termElab`, payload `.name`
+— parsed by the existing generic `command.attr` rule, so no parser rule and no new
+`elabCommand` kind. The command refuses a `k` that is not a declared syntax kind
+(`unknown-syntax`: ``attribute [term_elab term.nope]: unknown syntax kind 'term.nope'
+(declare it with `syntax … : term`)``) and a target whose type is not `TermElab`
+(`… is not a term elaborator: …`). A registration prepends `(k, f)` to
+`CommandState.termElabs` (latest first), is threaded through `runElab`/`ElabState`, and
+adds `f` to the interpreter roots (`mkMetaCode`).
+
+Dispatch:
+
+* `check ctx stx expected`: after `expand?` and before `checkData?`/`checkOther`'s
+  built-in kind switch (`Wiz/Elab/Term.lean`). A handler registered for a built-in kind
+  therefore wins over it; the note's "before the built-in kinds" is literal.
+* `infer ctx stx`: after `expand?`, with a fresh type metavariable (`freshTypeMeta`), so
+  an un-ascribed `#check τ` works instead of failing.
+
+`elabTermElab?` makes one goal — a fresh meta of `expected` (`infer`: of the fresh type
+meta) — runs `f stx` through `TacticM.run` in the interpreter, and then applies
+`elabBy`'s end checks: every goal it leaves must be solved, and an `assign` whose term
+still had holes is type-checked once they are solved. The result is the goal's meta.
+The handler uses the existing `Tac`/`TacticM` requests (`mainGoal`, `elabInfer`,
+`assign`, `newGoal`, `exact`, …) and `Expr` (`Expr.const`, `Expr.mkApp`, …); it must not
+re-elaborate its own node (`TacticM.exact g` of the same `τ` recurses, exactly as a
+tactic that `evalTactic`s itself does).
+
+### 8.2 `local` and the cache `Effect`
+
+* **`local`: refused, allow-list unchanged.** `Command.lean`'s `command.local` admits
+  only no-op attributes; `termElab` is semantic like `[tactic]`/`[deriver]`, so
+  `local attribute [term_elab k] f` gets the existing "only a no-op attribute can be
+  `local`; 'term_elab' has an effect that outlives its module". No `localTermElabs`
+  list exists.
+* **Cache `Effect`: no new field.** `attribute` is deliberately absent from
+  `Cache.cacheable`, so a module's registration is replayed (re-elaborated) before its
+  cacheable declaration effects, as `[tactic]`/`[macro]` are; a cached declaration is
+  never replayed under a different term-elaborator table. The registration is in the
+  per-command content-hash chain (`Wiz/Query.lean`), and the isolated-module key
+  (`Frontend.isoKey`) now includes the starting `termElabs` with `attrDecls`/`optDecls`,
+  so a custom initial state cannot reuse a module elaborated under another one. The
+  registration is re-run in the replay path, which is what makes that key sound. **If
+  `attribute` ever becomes cacheable, `Effect` needs `termElabs` (and a region-format
+  bump)**, or the importer's table would be applied to cached declarations. Being
+  non-cacheable is what keeps it correct, not "no effect".
+
+### 8.3 The data-primitive spellings
+
+`builtin` now accepts `unit`, `empty`, `qty`, `size`, `char`, `list`
+(`command.builtin`/`builtinShapeError`). The elaborator reads them:
+
+* `infer`'s ident case: `Unit`/`Empty`/`Qty`/`Size` are the fallbacks; a registered
+  spelling is accepted with or without `.{l}`. The kernel formers
+  (`.unit`/`.empty`/`.qty`/`.size`) are untouched.
+* `mkStringLit`: `S.mk (L.cons C (C.mk n) … L.nil C)` with `S`/`C`/`L` from
+  `builtin string`/`char`/`list` (fallbacks `String`/`Char`/`List`).
+* the pretty printer (`Wiz/Core/Pretty.lean`) follows the table, so `#check` shows
+  `MyUnit`/`MyQty`/…, not the old spellings.
+* `unit`/`empty`/`qty`/`size` need no declaration (`Unit` has none); `char`/`list` must
+  name inductive types (a parameterized former, as `List` is, is peeled through its `Π`
+  type and `λ` value to the sort and the `μ`) and `list` must have `nil`/`cons`. None is
+  an axiom (`assumed`): no unfolding is claimed, unlike `builtin nat.*`.
+
+`builtin char := MyChar` is supported where the definitional-equality layer allows it:
+the literal's type is `MyString.mk (List MyChar)` when the `builtin string` type's `mk`
+takes `List MyChar`. With the default `String` (`mk : List Char → String`) there is no
+coercion between `List MyChar` and `List Char`, so the literal reports it at the
+literal: ``string literals: String.mk takes List Char, but `builtin char`/`builtin list`
+build a list of MyChar with List; register a `builtin string` whose constructor takes the
+same (there is no coercion)``.
+
+The six keys are **not** registered by `lib/Prelude.wiz`: the old spellings stay as the
+elaborator's fallbacks, so a library may register its own (`builtin char := MyChar`
+would otherwise be "already registered"), and `string` stays one-shot for the native
+readback (`Wiz/Compiler/Run.lean`). A package with its own prelude registers its own.
+Each key is registered **once per import chain**, like `builtin string`/`nat`: two
+modules that both register `char` with different types make the importer reject the
+second, fail-closed rather than silently picking one.
+
+### 8.4 What remains hard-coded
+
+* `True`/`False` (level-0 aliases of `Unit`/`Empty`) keep fixed spellings; no keys were
+  added for them.
+* `builtinNames` (`Term.lean`) is still the fixed `Desc`/`μ`/`ν`/`con`/… list. Those
+  are syntax forms with kernel meaning, not data primitives, and are outside this item.
+* `builtin nat` and the numeral path, `Qty`/`Size`'s kernel formers, and the `Bool`/
+  `Int`/`UInt64`/`Float64` library types are unchanged.
+* The self-hosted frontend does not know `[term_elab]`: its `attrStep` is a fixed
+  `inline` case plus the host's built-in names, and its `runMacroTac` is the
+  five-request loop. A library that registers one is host-only until FeEval (Item 4);
+  the selfhost's refusal is fail-closed with the rest of the unknown attributes.

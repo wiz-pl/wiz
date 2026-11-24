@@ -10,10 +10,11 @@ the [soundness ledger](../Status.md), which use the same issue names.
 not a feature-for-feature copy of Lean 4. It is the four *interfaces* that let a library
 extend the language without a kernel change: data-driven term elaborators, user-extensible
 `deriving` handlers, hygienic macros, and `simp only`-style explicit lemma sets. The reason
-is concrete: a hard-coded name switch (today `Unit`/`Empty`/`Qty`/`Size`, the
-`Desc`/`μ`/`ν` table and the string-literal encoding) makes every new data primitive a
-compiler change (`wiz-notes/audit-kernel.md` #6), so adding features faster than these
-seams entrenches the switch. The registry shape that `wiz-notes/targets-ext.md` describes
+is concrete: a hard-coded name switch (today the `Desc`/`μ`/`ν` table and `True`/`False`;
+the `Unit`/`Empty`/`Qty`/`Size` spellings are `builtin` keys with the old names as
+fallbacks, and the string-literal encoding reads `builtin string`/`char`/`list`) makes
+every new data primitive a compiler change (`wiz-notes/audit-kernel.md` #6), so adding
+features faster than these seams entrenches the switch. The registry shape that `wiz-notes/targets-ext.md` describes
 for targets — one `Entry` record, a table resolved by the consumer,
 `Wiz/Lint/Basic.lean:49` as the only registry-shaped ABI in the tree — is the same shape
 the elaborator needs. No new mechanism is proposed here: this paragraph is the policy

@@ -30,6 +30,7 @@ import Wiz.Elab.Tactic
 import Wiz.Elab.Reflect
 import Wiz.Elab.Command
 import Wiz.Lint
+import Wiz.Ext.Resolve
 import Wiz.Frontend.Frontend
 import Wiz.Compiler.Erase
 import Wiz.Compiler.Inline

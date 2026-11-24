@@ -1331,6 +1331,20 @@ that checks everything. Wiz's situation:
   not model quantities). Weakening and substitution are proved for its fragments T0 and
   T1; validity and subject reduction are stated, not proved. It models #40's `Desc`/`μ`
   rules; #123's rules have been in it since #135. Its review found D2 (§4).
+  The marking bridge and the open switches are tested, not assumed (group *meta*, "D3
+  (marking bridge)" and "D6 (open switches)"). The kernel checks the **marked** term and
+  WizMeta the **unmarked** one; marking preserves the kernel's verdict on the 533
+  differential terms inside the spec's fragment (of 635; the 102 outside it are not
+  evaluated by the bridge, and one of them reaches a kernel `panic!`,
+  `wiz-notes/kernel-assurance.md` §11), with a `fun` at a proposition as the negative
+  control (rejected unmarked, accepted after `Mark.infer`, accepted by WizMeta unmarked).
+  For the 216 declaration types, `Mark.type`'s level is the kernel's `checkType` level;
+  the marked type is a type at the same level, `Mark.type` is idempotent, and
+  `Mark.inferCore` computes the kernel's type. Each open rule choice now has a
+  distinguishing term —
+  `EqTyCross` vs `EqTyLevelled`, payload kernel/stuck/uniform, `kernelEqFormation`, and
+  quantities at a propositional Π/Σ (the kernel ignores them in `convTy`, WizMeta compares
+  them) — so a silent change to either side flips a case.
 * **Differential test** (group *selfhost*, "the Wiz kernel agrees with the Lean kernel (400
   random terms)", and "… declarations at symbolic levels like the Lean kernel"): the
   hand-picked `MTm.samples` (including the F1 and F2 attacks) and 400 random terms,
@@ -1417,12 +1431,12 @@ outside the kernel (`docs/Status.md` §7.0).
 
 ## 8. Testing evidence
 
-* **Negative tests**: the `elab` group (`Tests/Groups/Elab.lean`) has 43 cases and 24
+* **Negative tests**: the `elab` group (`Tests/Groups/Elab.lean`) has 51 cases and 26
   checks that must be *rejected* (`grep -c -E '^\s+\{ name :='` and
-  `grep -c -E '\bfails(Lib|LibW|Libs|LibsWithin)? '`; counted 2026-11-22), plus the
+  `grep -c -E '\bfails(Lib|LibW|Libs|LibsWithin)? '`; counted 2026-11-23), plus the
   quantity and structural cases in `Tests/Check.lean` (e.g. "linear variable used twice
   is rejected", "linear pair projected twice is rejected", "Type : Type is rejected").
-  Across `Tests/Groups/*.lean` the same two patterns count 1,986 case entries and 457
+  Across `Tests/Groups/*.lean` the same two patterns count 2,118 case entries and 487
   rejection checks (`grep -rhc … | awk '{s+=$1} END {print s}'`).
 * **Attacks that are regression tests**: F1 and F2 above (both kernels), and every
   fixed item of §3 since (F3–F14, T1), with the probe files of

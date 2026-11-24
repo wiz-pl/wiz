@@ -32,19 +32,47 @@
     <h1 id="hero-title">A small language with <em>big ideas</em>.</h1>
     <p class="lede">
       Wiz is a dependently typed programming language with quantitative types,
-      observational equality and data described by its own theory. Its kernel,
-      elaborator and compiler are written in Wiz itself, and it compiles to native
-      code through C and LLVM.
+      observational equality, and a self-hosted compiler that reaches native code
+      through C and LLVM.
     </p>
     <p class="hero-actions">
-      <a class="button primary" href="guide/docs/index.html">Read the docs</a>
+      <a class="button primary" href="guide/docs/index.html">Read the guide</a>
       <a class="button" href="playground/">Try the playground</a>
     </p>
-    <pre class="hero-code" tabindex="0" aria-label="Example: the identity function"><code><span class="tok-keyword">def</span> id {<span class="tok-number">0</span> A : Type} (<span class="tok-number">1</span> x : A) : A := x</code></pre>
-    <p class="hero-note">
-      The <code>0</code> says <code>A</code> is erased at run time; the <code>1</code>
-      says <code>x</code> is used exactly once.
+    <div class="install-quick">
+      <h2 class="install-title">Install a toolchain</h2>
+      <pre tabindex="0"><code>curl -sSfL -o tower-init.sh https://raw.githubusercontent.com/wiz-pl/wiz/master/scripts/tower-init.sh
+echo 'ad9c3a25a846f0316947e1529799dce9c6eccd4bd57fc8c7440a9e3ec371133c  tower-init.sh' | sha256sum -c -
+sh tower-init.sh
+export PATH="$HOME/.tower/bin:$PATH"
+tower default nightly</code></pre>
+      <p class="small">
+        Or with Nix: <code>nix profile install github:wiz-pl/wiz#tower</code>.
+        More in the <a href="guide/docs/install.html">installation guide</a>.
+      </p>
+    </div>
+  </section>
+
+  <section id="snippets" class="section" aria-labelledby="snippets-title">
+    <h2 id="snippets-title">See it in code</h2>
+    <p class="section-lede">
+      Four programs from the guide. Each one is a checked Wiz file, compiled by the
+      test suite and shown here with the documentation's own highlighter.
     </p>
+    <!--wiz-carousel-->
+  </section>
+
+  <section id="quantity" class="section" aria-labelledby="quantity-title">
+    <h2 id="quantity-title">What a quantity buys you</h2>
+    <p class="section-lede">
+      A binder's quantity is part of its type, and the checker counts every use. Pick
+      one to see what it permits; the three panels are the same program under each.
+    </p>
+    <!--wiz-island-->
+    <noscript>
+      <p class="small">JavaScript only switches between the three panels; all three are
+        shown above without it.</p>
+    </noscript>
   </section>
 
   <section id="features" class="section" aria-labelledby="features-title">
@@ -58,7 +86,8 @@
       <li class="card">
         <h3>Quantitative types</h3>
         <p>Quantities <code>0</code>, <code>1</code> and <code>ω</code> on binders, with
-          quantity polymorphism. Erased arguments cost nothing at run time.</p>
+          quantity polymorphism. Erased arguments cost nothing at run time, and a linear
+          value is used exactly once.</p>
       </li>
       <li class="card">
         <h3>Observational equality</h3>
@@ -72,23 +101,10 @@
           mutual and indexed families, sized types and codata.</p>
       </li>
       <li class="card">
-        <h3>Self-hosted</h3>
-        <p>The kernel, frontend and compiler in <code>selfhost/*.wiz</code> check and
-          compile themselves; the bootstrap reaches a fixpoint (stage-1 C equals
-          stage-2 C).</p>
-      </li>
-      <li class="card">
-        <h3>Native code</h3>
-        <p>Erasure to an IR with Perceus reference counting and reuse, C and LLVM
-          backends, a C FFI with header import, and machine integers and bit
-          vectors.</p>
-      </li>
-      <li class="card">
-        <h3>Tools that know the language</h3>
-        <p>A language server with an infoview (terminal and browser clients), a
-          content-addressed elaboration cache, and
-          <a href="guide/docs/stages/23-grail.html">grail</a>,
-          a build tool and test runner configured in Wiz.</p>
+        <h3>Self-hosted, native</h3>
+        <p>The kernel, frontend and compiler check and compile themselves; erasure to an
+          IR with reference counting, C and LLVM backends, and a C FFI with header
+          import.</p>
       </li>
     </ul>
   </section>
@@ -216,5 +232,7 @@ lake test           # the test suite (`lake test -- --list` for the groups)</cod
   </nav>
   <p class="small">No cookies, no analytics, no third-party scripts.</p>
 </footer>
+<script src="landing/carousel.js" defer></script>
+<script type="module" src="landing/app.js"></script>
 </body>
 </html>
