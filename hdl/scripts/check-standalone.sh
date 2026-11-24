@@ -35,10 +35,10 @@ cd "$pkg"
 echo "hdl standalone: $pkg"
 echo "grail: $("$grail" --version 2>/dev/null | head -n 1)"
 "$grail" build
-# The temporal UART example is a slow simulation; the 300 s grail default is too
-# tight (it timed out at exactly 300 s in CI). The option must come BEFORE the
-# subcommand: `grail` takes `--test-timeout` out of the leading arguments, so
-# `grail test --test-timeout 900` left the default in place - which is why the
-# packages (hdl) leg timed out at 300 s again after the train11 fix.
+# The temporal UART example is a slow simulation (222 s recorded on a fast runner);
+# the 300 s grail default is too tight for a shared CI machine. Both positions of the
+# flag work since `test` seeds its options from the leading ones, and the flag after
+# the subcommand wins; before that fix the leading `--test-timeout 900` was parsed and
+# then discarded, so the packages (hdl) leg timed out at exactly 300 s twice.
 "$grail" --test-timeout 900 test
 echo "hdl standalone: ok ($pkg: build + test)"
