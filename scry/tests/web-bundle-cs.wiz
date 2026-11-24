@@ -4,29 +4,31 @@ import Sys
 import Json
 import Text
 -- The C# half of the static source reader: `scry cs --bundle DIR` writes the bundle
--- `scry web` writes for C, over `tests/fixtures/report-cs` (five files: three tainted, one
--- safe, one whose tree overflows the AST cap, one non-ASCII).
+-- `scry web` writes for C, over `tests/fixtures/report-cs/taint` (five files: three
+-- tainted, one safe, one large, one non-ASCII), plus a padded `fixtures/report-cs/cap`
+-- target for the AST cap's own case.
 --
 -- **Units.** tree-sitter spans are UTF-8 bytes and the reader's `Source.Span` is UTF-16
--- code units, so every bound here is the file's unit count (`EditorModel.index`), never
+-- code units, so every bound here is the file's unit count (`units` below), never
 -- `String.length` (which counts characters). `Unicode.cs` is the case where the three
 -- disagree — mixing them moves its sink 27 units (bytes) or 3 units (code points) — and
--- its finding's span is pinned exactly below, not merely bounded.
+-- its finding's span is pinned exactly, not merely bounded.
 --
 -- What this pins (the `gs_*` lines are the golden's subject; every `check` line is an
 -- assertion that must be `: ok`):
 --
--- * the bundle's shape: four files in the walk's order, the manifest's schema, mode,
+-- * the bundle's shape: five files in the walk's order, the manifest's schema, mode,
 --   counts and `language: csharp` footer, and relative paths only;
 -- * every tainted file has its finding, with a UTF-16 span inside its own file, the
 --   `command-injection` rule, and the reader's facts at the sink;
 -- * `sink`/`flow` rows keep the C bundle's shape, and the `ast` rows carry the tree for
 --   the infotree: a parent id, a depth, a sibling order;
--- * the AST cap: `Huge.cs` is truncated to `Scry.Cs.astFactCap` rows and the manifest
---   names it;
+-- * the AST cap: a tree larger than `ast.cap` writes exactly the cap's rows and reports
+--   the rest, and a file that is large but under the cap loses nothing;
 -- * two exports are byte-identical (no timestamp, stable ids and order);
--- * `scry web` refuses a C#-only tree instead of writing an empty bundle, and names
---   `scry cs`.
+-- * `scry web` and `scry report` refuse a C#-only tree instead of writing an empty
+--   bundle, name `scry cs`; an empty directory gets its own message; a directory with
+--   both languages is read as C, with a note naming the C# files it did not read.
 --
 -- The bundle's own content (the reader's first paint, the answer schema, the scripted
 -- patch trace) is `web/source_static_test.mjs`'s contract, run on this bundle by
