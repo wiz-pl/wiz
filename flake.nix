@@ -889,13 +889,8 @@ EOF
             root = ./.;
             fileset = fs.unions [
               ./scry
-              # `scry web --assets web` copies five host files, not three: the live host
-              # (`source-live.js`, and `lsp-client.js` which it imports) is what answers
-              # hover and definition with `?lsp=`. `scry web` skips a file it cannot
-              # read, but `web/source-bundle.sh`'s `need` loop then refuses the bundle
-              # ("scry web wrote no source-live.js"), so both are build inputs.
               ./web/source-bundle.sh ./web/source-app.js ./web/source.css
-              ./web/source-static.js ./web/source-live.js ./web/lsp-client.js
+              ./web/source-static.js
               ./web/framework/mount.js ./web/framework/driver.js
               ./web/framework/runtime.js ./web/framework/adopt.js
             ];
