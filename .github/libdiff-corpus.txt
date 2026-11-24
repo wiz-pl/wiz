@@ -209,6 +209,7 @@ scry/src/Scry/RuleTaint.wiz
 scry/src/Scry/Rules.wiz
 scry/src/Scry/Sarif.wiz
 scry/src/Scry/Schema.wiz
+scry/src/Scry/SourceBundle.wiz
 scry/src/Scry/Store.wiz
 scry/src/Scry/Taint.wiz
 scry/src/Scry/TaintCmd.wiz
@@ -255,6 +256,7 @@ scry/tests/schema-index.wiz
 scry/tests/schema.wiz
 scry/tests/taint.wiz
 scry/tests/uaf.wiz
+scry/tests/web-bundle-cs.wiz
 scry/tests/web-bundle.wiz
 scry/tests/workflow-e2e.wiz
 scry/tests/workflow-records.wiz

@@ -151,27 +151,13 @@ def Scry.reportFindingOf (file : String) (m : Scry.OriginMap) (f : Scry.RuleFind
     | .none => 0
     | .some h => h.line;
   let id := Scry.wfId "c" f file;
-  Scry.ReportFinding.mk
-    id                              -- anchor; `renderReport` disambiguates a collision
-    id
-    file
-    f.rule
-    (Scry.Severity.show f.severity)
-    (Scry.reportCwe f.rule)
-    (Scry.wfCweTier f.rule)
-    f.message
-    f.func
-    f.name
-    f.arg
-    sink.line
-    sink.column
-    checked
-    (List.map (Scry.reportStepOf m) f.path)
-    shown
-    matchedBy
-    diffLine
-    sink.endLine
-    sink.endColumn
+  { anchor := id, id := id, file := file, rule := f.rule
+  , severity := Scry.Severity.show f.severity, cwe := Scry.reportCwe f.rule
+  , tier := Scry.wfCweTier f.rule, message := f.message, func := f.func, callee := f.name
+  , arg := f.arg, sinkLine := sink.line, sinkColumn := sink.column, checked := checked
+  , steps := List.map (Scry.reportStepOf m) f.path, shown := shown
+  , diffMatchedBy := matchedBy, diffLine := diffLine, endLine := sink.endLine
+  , endColumn := sink.endColumn, pathSteps := [], reindexed := [], rejected := [] }
 
 def Scry.reportWarningOf (w : Scry.BoundaryFinding) (hit : Option Scry.DiffHit) :
     Scry.ReportWarning :=
@@ -255,20 +241,54 @@ def Scry.reportFileOf (o : Scry.ReportOpts) (file : String) : EIO Scry.ReportFil
 
 -- ## Discovery and the command
 
+/-- What a `*.c` walk found, and what it saw but cannot analyse. `cs` is the number of
+`*.cs` files the walk passed over (0 for a file target). -/
+structure Scry.ReportWalk where
+  files : List String
+  links : List String
+  cs : Nat
+
 /-- One file, or every `*.c` under a directory (recursive, hidden directories skipped),
-sorted so a directory report is byte-stable. The second list is the symbolic links the
-walk refused to follow. -/
-def Scry.reportFilesOf (path : String) : EIO (List String × List String) := do
+sorted so a directory report is byte-stable. The links are the symbolic links the walk
+refused to follow. A `*.cs` file is counted, never read: C# is `scry cs`'s front end
+(`Scry.refuseCsOnly` turns a non-empty `cs` with no `.c` into a refusal). -/
+def Scry.reportWalkOf (path : String) : EIO Scry.ReportWalk := do
   present ← EIO.lift (FS.exists path);
   match present with
   | .false => EIO.fail (path ++ ": no such file or directory")
   | .true => do
     isDir ← EIO.lift (FS.isDir path);
     match isDir with
-    | .false => EIO.pure (List.cons path .nil, (.nil : List String))
+    | .false =>
+      let cs := match String.endsWith path ".cs" with
+        | .true => 1
+        | .false => 0;
+      EIO.pure (Scry.ReportWalk.mk (List.cons path .nil) (.nil : List String) cs)
     | .true => do
       w ← Scry.ProjectIO.walkGo path;
-      EIO.pure (Scry.sortStrings w.files, w.links)
+      -- A walk that saw no `*.cs` needs no second pass over the names.
+      c ← match w.skipped with
+        | 0 => EIO.pure 0
+        | _ => Scry.ProjectIO.countCs path;
+      EIO.pure (Scry.ReportWalk.mk (Scry.sortStrings w.files) w.links
+        (Nat.add w.skipped c))
+
+/-- The C# refusal, shared by `scry web` and `scry report`: a target with no `*.c` but
+some `*.cs` is a miss, not an empty report. Both commands read `*.c` only, so before
+this check a C# tree produced an empty bundle and exit 0 — indistinguishable from a
+clean project. The message names the command that does analyse it. -/
+def Scry.refuseCsOnly (cmd : String) (target : String) (w : Scry.ReportWalk) : String :=
+  "scry " ++ cmd ++ ": " ++ target ++ " has no *.c file, but " ++ Nat.repr w.cs
+  ++ " *.cs file(s); this command analyses C only. Use `scry cs " ++ target
+  ++ "` for C# (or point it at a C tree)."
+
+/-- Analyse a path's `*.c` files (`Scry.reportWalkOf`), refusing a C#-only tree. The
+second list is the symbolic links the walk refused to follow. -/
+def Scry.reportFilesOf (path : String) : EIO (List String × List String) := do
+  w ← Scry.reportWalkOf path;
+  match Bool.and (String.eq w.files.length 0) (Nat.lt 0 w.cs) with
+  | .true => EIO.fail (Scry.refuseCsOnly "report" path w)
+  | .false => EIO.pure (w.files, w.links)
 
 /-- `p` made absolute against the current directory and normalised (`.`, `..`). -/
 def Scry.reportAbsPath (p : String) : EIO String :=

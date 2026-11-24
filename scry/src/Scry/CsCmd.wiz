@@ -8,7 +8,11 @@ import Scry.Native
 import Scry.Rules
 import Scry.CsCst
 import Scry.CsLower
+import Scry.SourceBundle
 import Scry.TaintCmd
+import Web.EditorModel
+import Web.Source.Model
+import Web.Source.Span
 /-!
 # Scry.CsCmd: `scry cs`, the repository driver for C#
 
@@ -19,10 +23,34 @@ runs the rule pack over the merged program, and prints a summary whose **coverag
 section names every file, construct and exclusion that was not fully analysed.
 
 ```
-scry cs PATH [--json] [--fail-on error|warning|note] [--rules FILE] [--no-taint]
+scry cs PATH [--json] [--sarif OUT] [--bundle DIR] [--assets DIR]
+             [--fail-on error|warning|note] [--rules FILE] [--no-taint]
 ```
 
 `PATH` is a directory, a `.csproj`, a `.sln`/`.slnx`, or a single `.cs` file.
+
+## The reader's bundle (`--bundle DIR`)
+
+`--bundle DIR` also writes the **same static source bundle `scry web` exports for C**
+(`Scry.SourceBundle`): `data/{manifest,files,findings}.json` and one
+`data/f/<fileId>.json` per file, with the file's source, its findings in UTF-16 spans, its
+`sink`/`flow` fact rows, and one `ast` row per node of its tree-sitter parse. The reader
+(`web/source-app.js`, `Web.Source.*`) therefore shows a C# tree exactly as it shows a C
+tree — the same views, the same answer schema, no C# branch in the reader — and `scry
+web`, which reads `*.c` only, refuses a C#-only tree and names this command instead of
+writing an empty bundle. `--assets DIR` is the checkout's `web/` (default: the first
+`web/` found from here up), whose host files are copied in.
+
+The bundle is deterministic: files in the walk's order, findings sorted by semantic id,
+fact node ids counted per file (its findings first, then its `ast` rows), no timestamp
+and no absolute path. Two runs over the same tree are byte-identical.
+
+An `ast` fact's columns are `kind`, `title` (the kind, plus the text for value kinds like
+an identifier or a literal), `parent` (the parent's node id), `field`, `order` (the
+sibling slot), `depth` and `named`. At most `Scry.Cs.astFactCap` (2000) rows are written
+per file, the shallowest first, so a large file keeps its tree's skeleton; the manifest's
+`ast` object carries the cap and names every file the cap truncated, and the run prints
+the total it left out on stderr.
 
 ## Exclusions
 
@@ -95,7 +123,9 @@ structure Scry.Cs.Diag where
 
 /-- The result of one discovered file: parsed (and lowered) or failed. `funcs` and
 `text` are kept so the driver can build a program and an origin map; the pure report
-builders ignore them. -/
+builders ignore them. `store` is the tree-sitter CST the file was parsed into (empty for
+a file that could not be parsed), which `scry cs --bundle` turns into the reader's `ast`
+facts (`Scry.Cs.factsOf`). -/
 structure Scry.Cs.FileResult where
   path : String
   parseOk : Bool
@@ -103,6 +133,9 @@ structure Scry.Cs.FileResult where
   funcs : List Wil.Func
   text : String
   diags : List Scry.Cs.Diag
+  /-- `none` unless the store was asked for: `Facts`, or `Map` when the file's byte spans
+  do not index its text (the construction that pairs them checks that). -/
+  store : Option (Except String Scry.CstStore)
 
 /-- One aggregate coverage row: a construct, how many times it was seen, one example. -/
 structure Scry.Cs.CoverRow where
@@ -474,6 +507,363 @@ def Scry.Cs.discover (path : String) : EIO Scry.Cs.Target := do
 
 -- ## Lowering and results
 
+/-- `full` as the reader's bundle names it: relative to the directory the target's report
+was about, so **the same tree read two ways names one file twice**. `scry cs DIR` and
+`scry web DIR` both name `X/Y.cs` as `X/Y.cs` (not `DIR/X/Y.cs`), because the walk hands
+the bundle a path relative to the root; a caller that starts the export from the
+directory then gets the same row back. A target that is one file keeps its own spelling;
+a directory target's absolute `full` path becomes relative to the directory (as the user
+named it, so `a/../b` stays readable), and a trailing `/` on the directory is ignored, so
+`scry cs DIR/` and `scry cs DIR` write the same bundle. A file outside the directory keeps
+its path: a C# project can name a source above its own directory, and the bundle cannot
+make one up. -/
+def Scry.Cs.readerPath (root full : String) : String :=
+  match String.startsWith root "/" with
+  | .false =>
+    let r := Scry.Cs.trimSlash root;
+    let here := match String.eq r "/" with
+      | .true => root
+      | .false => r;
+    match String.startsWith full (String.append here "/") with
+    | .true => String.drop (Nat.succ (String.length here)) full
+    | .false => full
+  | .true =>
+    match String.startsWith full "/" with
+    | .true => Scry.Cs.relTo (Scry.Cs.trimSlash root) full
+    | .false => full
+
+/-- The UTF-16 offset of the character at UTF-8 byte `b`, or `none` when `b` is not the
+start of a character of `text`. The parse's spans are UTF-8 bytes and the reader's are
+UTF-16 units, and `Web.EditorModel` is the only line table between them. -/
+def Scry.Cs.unitOfByte (text : String) (b : Nat) : Option Nat :=
+  let scan : List Char → Nat → Nat → Option Nat
+    | .nil, _, _ => .none
+    | .cons c rest, u, byte =>
+      let n := Scry.webUtf8Len (Char.code c);
+      match Nat.beq byte b with
+      | .true => .some u
+      | .false =>
+        let step := match n with
+          | 0 => 1
+          | _ => n;
+        scan rest (Nat.add u (List.length (EditorModel.unitsOf c))) (Nat.add byte step);
+  scan (String.chars text) 0 0
+
+/-- The reader's span for a parse node: `some` when both ends land on characters of
+`text`. -/
+def Scry.Cs.nodeSpan (text : String) (sp : Scry.Span) : Option Source.Span :=
+  match Scry.Cs.unitOfByte text sp.start, Scry.Cs.unitOfByte text sp.stop with
+  | .some a, .some b => .some (Source.Span.make a b)
+  | _, _ => .none
+
+/-- A node's title for the infotree: its kind, plus its text when its kind holds a value
+(an identifier, a literal, an operator), so a method's row is not the whole method and a
+`local_variable_declaration` is not its initialiser. The text is sliced by UTF-16 units
+through the reader's index and clipped at 40 units: a title is a label, not a copy of the
+source. -/
+def Scry.Cs.nodeTitle (store : Scry.CstStore) (text : String) (i : Nat) : String :=
+  let kind := Scry.CstStore.kindName store i;
+  let valueKind : Bool := List.any (fun k => String.eq kind k)
+    ["identifier", "integer_literal", "real_literal", "string_literal",
+     "verbatim_string_literal", "character_literal", "operator", "predefined_type"];
+  match valueKind with
+  | .false => kind
+  | .true =>
+    match Scry.Cs.nodeSpan text (Scry.CstStore.spanOf store i) with
+    | .none => kind
+    | .some span =>
+      let t := EditorModel.slice (EditorModel.index text) span.start span.stop;
+      let clipped := match Nat.le 40 (String.length t) with
+        | .true => String.append (String.take 40 t) "..."
+        | .false => t;
+      match String.eq clipped "" with
+      | .true => kind
+      | .false => kind ++ " " ++ clipped
+
+/-- `i`'s slot among its parent's children (its index in the parent's child list): the
+tree order the info view shows a node's siblings in. -/
+def Scry.Cs.nodeSlotFrom (i : Nat) : List Nat → Nat → Nat
+  | .nil, n => n
+  | .cons j rest, n => match Nat.beq j i with
+    | .true => n
+    | .false => Scry.Cs.nodeSlotFrom i rest (Nat.succ n)
+
+def Scry.Cs.nodeSlot (store : Scry.CstStore) (p i : Nat) : Nat :=
+  Scry.Cs.nodeSlotFrom i (Scry.CstStore.childrenOf store p) 0
+
+/-- `i`'s depth (how many parents it has), or `none` past a 512-level bound: a parse of
+broken input could otherwise make this walk loop, and a depth is a display field. The
+export sorts `ast` rows by it so the cap in `Scry.Cs.factsOf` keeps the tree's skeleton
+(shallow rows) first. -/
+def Scry.Cs.nodeDepthFrom (store : Scry.CstStore) (fuel n j : Nat) : Option Nat :=
+  match fuel with
+  | 0 => .none
+  | _ => match Scry.CstStore.parentOf store j with
+    | .some p => Scry.Cs.nodeDepthFrom store (Nat.sub fuel 1) (Nat.succ n) p.n
+    | .none => .some n
+
+def Scry.Cs.nodeDepth (store : Scry.CstStore) (i : Nat) : Option Nat :=
+  Scry.Cs.nodeDepthFrom store 512 0 i
+
+-- ## The reader's facts (`--bundle`)
+
+/-- The most `ast` rows written for one file. The info view shows the rows whose span
+holds an offset and the tree is read top-down, so the shallowest rows are kept: a huge
+file keeps its skeleton (namespaces, types, members, statements) and loses the innermost
+expressions. The cap and the truncated count go in the manifest and on stderr, never
+applied silently. -/
+def Scry.Cs.astFactCap : Nat := 2000
+
+/-- An `ast` fact row for CST node `i`: its `kind` and `title`, its `parent`'s node id
+(`""` for the tree's root), its `field` on that arc, its sibling `order` and its `depth`.
+`none` when the node's byte span does not land on the reader's text (a non-ASCII byte
+before the node's end): the node is left out rather than given a wrong span.
+
+A node whose parent is also left out (its parent's own span is unplaceable, or sits in a
+file the reader does not have) gets its parent's id all the same: the reader's tree is
+walked from the root by `parent`, so a row whose parent is absent shows up under the root
+rather than disappearing, and the row still says which node it belongs to. -/
+def Scry.Cs.astFactOf (store : Scry.CstStore) (text fileId : String) (base i : Nat) :
+    Option Source.FactRow :=
+  match Scry.Cs.nodeSpan text (Scry.CstStore.spanOf store i) with
+  | .none => .none
+  | .some span =>
+    -- A depth past the walk's bound is not 0 (that would sort a deep node to the root
+    -- and let the cap drop the skeleton): it keeps its parse order at the deepest slot.
+    -- No tree is deeper than the document's node count, and `nodeDepth`'s bound (512) is
+    -- far above any real one, so this constant is only a sort key for a broken parse.
+    let deep := 1000000;
+    let parentOf := Scry.CstStore.parentOf store i;
+    let parent := match parentOf with
+      | .some p => String.append "n" (Nat.repr (Nat.add base p.n))
+      | .none => "";
+    let slot := match parentOf with
+      | .some p => Scry.Cs.nodeSlot store p i
+      | .none => 0;
+    .some (Source.FactRow.mk "ast" (String.append "n" (Nat.repr (Nat.add base i))) fileId
+      span
+      [ ("kind", Scry.CstStore.kindName store i)
+      , ("title", Scry.Cs.nodeTitle store text i)
+      , ("parent", parent)
+      , ("field", Scry.CstStore.fieldName store i)
+      , ("order", Nat.repr slot)
+      , ("depth", Nat.repr (match Scry.Cs.nodeDepth store i with
+          | .some d => d
+          | .none => deep))
+      , ("named", match Scry.CstStore.namedOf store i with
+          | .true => "named"
+          | .false => "anonymous")
+      ])
+
+/-- `a` before `b` for the AST cap: shallower first, then the parse's own node order. -/
+def Scry.Cs.astKeyBefore (a b : Nat × Nat) : Bool :=
+  match Nat.lt a.1 b.1 with
+  | .true => .true
+  | .false => match Nat.lt b.1 a.1 with
+    | .true => .false
+    | .false => Nat.lt a.2 b.2
+
+def Scry.Cs.insertAstKey (k : Nat × Nat) : List (Nat × Nat) → List (Nat × Nat)
+  | .nil => List.cons k .nil
+  | .cons x rest => match Scry.Cs.astKeyBefore k x with
+    | .true => List.cons k (List.cons x rest)
+    | .false => List.cons x (Scry.Cs.insertAstKey k rest)
+
+/-- The `ast` rows of one file's parse (the infotree's tree): every placeable node,
+shallowest first, at most `Scry.Cs.astFactCap`. The second number is how many rows the
+cap left out, which the manifest and the run report. -/
+def Scry.Cs.factsOf (store : Scry.CstStore) (text fileId : String) (base : Nat) :
+    List Source.FactRow × Nat :=
+  let keys := List.foldl (fun acc i =>
+      match Scry.Cs.astFactOf store text fileId base i with
+      | .some _ => Scry.Cs.insertAstKey
+          (match Scry.Cs.nodeDepth store i with
+           | .some d => d
+           | .none => 0, i) acc
+      | .none => acc) (.nil : List (Nat × Nat)) (Scry.range (Scry.CstStore.nodeCount store));
+  let rows := List.filterMap (fun k => Scry.Cs.astFactOf store text fileId base k.2) keys;
+  let kept := List.take Scry.Cs.astFactCap rows;
+  (kept, Nat.sub (List.length rows) (List.length kept))
+
+-- ## The reader's report (`--bundle`)
+
+/-- The origin of a finding's sink as the page sees it: `none` when the run did not
+locate it. -/
+def Scry.Cs.sinkOriginOf (m : Scry.OriginMap) (rel : String) (f : Scry.RuleFinding) :
+    Scry.Origin :=
+  match Scry.originAt m f.func f.sink with
+  | .some o => o
+  | .none => Scry.Origin.mk rel 0 0 0 0
+
+/-- The finding's located path as the reader places it: `pathSteps` (the program points,
+which the page's own list shows), the `reindexed` steps whose origin `Source.Span.ofOrigin`
+re-expressed in the reader's UTF-16 index, and the `rejected` steps the file's text
+cannot name. A step's span is the one the reader will use for it, and the last step is
+often the sink's own span, which `Scry.webFlowFactsGo` already drops as a duplicate.
+
+A step whose origin the page's origin map always has (the sink, and every path point the
+front end recorded) is never "unlocated" here: `line = 0` means the run found no origin
+for it, and such a step stays a step with no mark (the same rule a C path's unlocated
+step gets). A step that has an origin but no character of this file gets a
+`Scry.RejectedOrigin`, so the bundle says so instead of dropping it. -/
+def Scry.Cs.placedOf (text findId : String) (f : Scry.RuleFinding) (m : Scry.OriginMap) :
+    List Scry.ReportStep × List Scry.ReindexedOrigin × List Scry.RejectedOrigin :=
+  let steps := List.map (Scry.reportStepOf m) f.path;
+  let i := EditorModel.index text;
+  let go : List Scry.ReportStep → Nat →
+      List Scry.ReindexedOrigin × List Scry.RejectedOrigin
+    | .nil, _ => ([], [])
+    | .cons st rest, k =>
+      let tail := go rest (Nat.succ k);
+      -- A path point with an origin but no end has a one-unit caret, as `ofOrigin` does.
+      let span := Scry.webSpanOfOrigin i st.line st.column st.endLine st.endColumn;
+      match Nat.beq st.line 0 with
+      | .true => tail
+      | .false =>
+        -- `Span.ofOrigin` clamps; a span that clamps to nothing at the start of a file
+        -- that has text is not a place the reader can underline.
+        match Nat.beq span.start span.stop with
+        | .true =>
+          (tail.1, tail.2.1,
+           List.cons (Scry.RejectedOrigin.mk findId (Nat.add 2 k) "" 0 st.line st.column
+             st.endLine st.endColumn
+             "the path point's origin does not land on a character of this file") tail.2.2)
+        | .false =>
+          let start := Source.Span.positionOf i span.start;
+          let stop := Source.Span.positionOf i span.stop;
+          (List.cons (Scry.ReindexedOrigin.mk findId (Nat.add 2 k)
+             (st.line, st.column, st.endLine, st.endColumn)
+             (Nat.add start.1 1, Nat.add start.2 1, Nat.add stop.1 1, Nat.add stop.2 1))
+             tail.1,
+           tail.2.1,
+           tail.2.2);
+  (steps, (go steps 0).1, (go steps 0).2)
+
+/-- One file's `Scry.ReportFile` and its `ast` facts for the reader: the report's findings
+in the analysis's order (the bundle sorts them by semantic id), each with its sink's
+located origin and its placed path, plus `ast` rows starting at fact node `base`. The
+page's facts are built by `Scry.bundleModelOf` from this, so C# and C share the `sink`
+and `flow` shapes; the `ast` rows are this front end's own. -/
+def Scry.Cs.reportFileOf (r : Scry.Cs.FileResult) (raw : List Scry.RuleFinding)
+    (checks : List Bool) (m : Scry.OriginMap) (base : Nat) :
+    Scry.ReportFile × List Source.FactRow × Nat × Nat :=
+  let rel := r.path;
+  let pairs := Scry.zipFindings raw checks;
+  let pages := List.map (fun p =>
+    let f := p.1;
+    let sink := Scry.Cs.sinkOriginOf m rel f;
+    let placed := Scry.Cs.placedOf r.text (Scry.wfId "cs" f rel) f m;
+    let id := Scry.wfId "cs" f rel;
+    { Scry.reportFindingOf rel m f p.2 .none with
+        anchor := id, id := id, sinkLine := sink.line, sinkColumn := sink.column
+      , endLine := sink.endLine, endColumn := sink.endColumn
+      , pathSteps := placed.1, reindexed := placed.2.1, rejected := placed.2.2 }) pairs;
+  let rf := Scry.ReportFile.mk rel (Scry.reportFileAnchor rel) r.text pages [] [] [] [];
+  match r.store with
+  | .some (.ok store) => let f := Scry.Cs.factsOf store r.text rel base;
+    (rf, f.1, Nat.add base (Scry.CstStore.nodeCount store), f.2)
+  | .some (.error why) => (rf, [], base, 0)
+  | .none => (rf, [], base, 0)
+
+/-- The reader's models of every file (the C# half of `Scry.webModelsGo`): findings,
+`sink`/`flow` rows and `ast` rows, in the walk's order. A file's fact node ids count one
+sequence (its findings first, then its `ast` rows), so a rebuild numbers them the same
+way. The second list is `(file, rows the cap left out)`, for the manifest. -/
+partial def Scry.Cs.bundleModelsGo (raw : List Scry.RuleFinding) (checks : List Bool)
+    (m : Scry.OriginMap) :
+    List Scry.Cs.FileResult → EIO (List Source.File × List Source.Finding ×
+      List Source.FactRow × List (String × Nat))
+  | .nil => EIO.pure ([], [], [], [])
+  | .cons r rest => do
+    let built := Scry.Cs.reportFileOf r raw checks m 0;
+    let model := Scry.bundleModelOf built.1 built.2.1 0;
+    let dropped := match built.2.2 with
+      | 0 => []
+      | n => [(r.path, n)];
+    more ← Scry.Cs.bundleModelsGo raw checks m rest;
+    EIO.pure (List.cons model.1 more.1,
+      List.append model.2.1 more.2.1,
+      List.append model.2.2 more.2.2, List.append dropped more.2.2.2)
+
+-- ## `--bundle`: writing the reader's data
+
+/-- One file's row on the bundle page (no markup from the source: paths and language are
+escaped by the reader's own rules — here the page is a plain listing, so a path's `<` is
+kept out by `Scry.htmlEsc`). -/
+def Scry.htmlEsc (s : String) : String :=
+  String.join (List.map (fun c =>
+    match Char.eq c (Char.mk 60), Char.eq c (Char.mk 62), Char.eq c (Char.mk 38) with
+    | .true, _, _ => "&lt;"
+    | _, .true, _ => "&gt;"
+    | _, _, .true => "&amp;"
+    | _, _, _ => String.mk [c]) (String.chars s))
+
+/-- The bundle page without the Loom runtime: what the data holds, one row per file and
+one per finding. Every path here is the bundle's own (`data/…`, or a source path relative
+to the target). -/
+def Scry.Cs.bundlePage (files : List Source.File) (findings : List Source.Finding) : String :=
+  let row : Source.File → String := fun f =>
+    "<li><code>" ++ Scry.htmlEsc f.path ++ "</code> — " ++ Nat.repr f.lines
+    ++ " lines, " ++ Scry.htmlEsc f.language ++ "</li>\n";
+  let frow : Source.Finding → String := fun f =>
+    "<li><code>" ++ Scry.htmlEsc f.rule ++ "</code> at <code>" ++ Scry.htmlEsc f.path
+    ++ ":" ++ Nat.repr f.line ++ "</code></li>\n";
+  let findingSection := match findings with
+    | .nil => ""
+    | _ => "<h2>findings</h2>\n<ul>\n" ++ String.join (List.map frow findings) ++ "</ul>\n";
+  "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+  ++ "<title>scry source</title></head><body><h1>scry source</h1>\n<p>"
+  ++ Nat.repr (List.length files) ++ " file(s), " ++ Nat.repr (List.length findings)
+  ++ " finding(s) — the data is in <code>data/</code>; the reader that draws it is the "
+  ++ "one <code>scry web</code> serves.</p>\n<ul>\n"
+  ++ String.join (List.map row files) ++ "</ul>\n" ++ findingSection
+  ++ "</body></html>\n"
+
+/-- `scry cs --bundle DIR`: write the reader's bundle for the analysed tree. The models
+are `Scry.bundleModelOf`'s (C#'s findings and `sink`/`flow` rows) plus the `ast` rows of
+each file's parse; `Scry.bundleWriteData` writes the four data files and the per-file
+JSONs, so the shapes are the C export's. Without the Loom runtime this command does not
+link, `index.html` is a plain listing of what the data holds, never a blank page. -/
+def Scry.Cs.writeBundle (assetsOpt : Option String) (out : String) (t : Scry.Cs.Target)
+    (results : List Scry.Cs.FileResult) (analysis : Scry.Cs.Analysis)
+    (r : Scry.Cs.Report) : EIO Unit := do
+  models ← Scry.Cs.bundleModelsGo analysis.raw analysis.checks analysis.origins results;
+  let files := models.1;
+  let findings := Scry.webSortById models.2.1;
+  let facts := models.2.2.1;
+  let truncated := models.2.2.2;
+  let filesWithAst := List.length (List.filter (fun x => match x.store with
+    | .some (.ok _) => .true
+    | _ => .false) results);
+  Scry.bundleWarnLarge files;
+  Scry.bundleDirs out;
+  assets ← Scry.Cs.findAssets assetsOpt;
+  host ← (match assets with
+    | .none => EIO.pure []
+    | .some d => Scry.Cs.copyList d out
+        [("source-app.js", "app.js"), ("source.css", "app.css"),
+         ("source-static.js", "source-static.js")]);
+  framework ← (match assets with
+    | .none => EIO.pure []
+    | .some d => Scry.Cs.copyList d out
+        [("framework/mount.js", "framework/mount.js")
+        , ("framework/driver.js", "framework/driver.js")
+        , ("framework/runtime.js", "framework/runtime.js")]);
+  Scry.bundleWriteData out Scry.sourceTool files findings facts host framework .false
+    (Scry.Cs.bundleExtra t r truncated filesWithAst);
+  FS.writeFile (String.append out "/index.html") (Scry.Cs.bundlePage files findings);
+  match truncated with
+  | .nil => EIO.pure ()
+  | _ => Scry.Cs.sayErr ("note: the bundle's `ast` facts are capped at "
+      ++ Nat.repr Scry.Cs.astFactCap ++ " nodes per file; "
+      ++ Nat.repr (List.foldl (fun n p => Nat.add n p.2) 0 truncated)
+      ++ " node(s) were left out (the manifest's `ast.truncated` names each file)");
+  EIO.lift (IO.println ("wrote source bundle: " ++ out ++ " ("
+    ++ Nat.repr (List.length files) ++ " file(s), "
+    ++ Nat.repr (List.length findings) ++ " finding(s), "
+    ++ Nat.repr (List.length facts) ++ " fact(s); the reader's data/*.json, no timestamp)"))
+
+
 /-- A warning's source location. Every file is lowered on its own, so `span.file` is
 the one path the caller passed. -/
 def Scry.Cs.spanLoc (path : String) (sp : Wil.Span) : String :=
@@ -519,14 +909,15 @@ def Scry.Cs.resultOfLowered (path text : String) (l : Scry.Cs.Lowered) : Scry.Cs
   let extra := match l.funcs with
     | .nil => [Scry.Cs.Diag.mk .warning "no functions lowered" path ""]
     | _ => [];
-  Scry.Cs.FileResult.mk path .true 0 l.funcs text (List.append extra warnings)
+  { path := path, parseOk := .true, parseErrors := 0, funcs := l.funcs, text := text
+  , diags := List.append extra warnings, store := .none }
 
 /-- One spill's result (the Lean tests' path: they cannot call the native shim). -/
 def Scry.Cs.resultOfFront (path : String) (r : Scry.Cs.FrontResult) : Scry.Cs.FileResult :=
   match r with
   | .ok l => Scry.Cs.resultOfLowered path l.text l
-  | .err m => Scry.Cs.FileResult.mk path .false 1 .nil ""
-      [Scry.Cs.Diag.mk .error "parse failure" path m]
+  | .err m => { path := path, parseOk := .false, parseErrors := 1, funcs := .nil, text := ""
+  , diags := [Scry.Cs.Diag.mk .error "parse failure" path m], store := .none }
 
 /-- The kind of a store's first failing node: `ERROR`, or `MISSING <token>` (the token
 the grammar expected). Naming the node is what lets a failing file be diagnosed without a
@@ -536,18 +927,37 @@ def Scry.Cs.errorKind (s : Scry.CstStore) (i : Nat) : String :=
   | .true => "MISSING " ++ Scry.CstStore.kindName s i
   | .false => "ERROR"
 
+/-- Whether the store's byte spans index `text` exactly: it holds one file, that file is
+`rel`, and every node's span lies inside the text's UTF-8 length. The AST facts slice the
+reader's UTF-16 text by the store's byte spans, which is the same source only under this
+condition; a mismatch is reported, never guessed at. -/
+def Scry.Cs.storeFits (store : Scry.CstStore) (rel text : String) : Bool :=
+  Bool.and (String.eq (Scry.CstStore.pathName store 0) rel)
+    (List.all (fun i => let sp := Scry.CstStore.spanOf store i;
+        Bool.and (Nat.le sp.start sp.stop) (Nat.le sp.stop (Scry.webUtf8Size text)))
+      (Scry.range (Scry.CstStore.nodeCount store)))
+
 /-- Parse and lower one file. `rel` is the path the report uses; `full` is read.
 A tree with `ERROR`/`MISSING` nodes is a failure (never lowered as if recovered); the
-row's location names the first failing node's position and kind. -/
-def Scry.Cs.analyseFile (rel full : String) : EIO Scry.Cs.FileResult := do
+row's location names the first failing node's position and kind. `wantStore` asks for the
+CST to be kept (`Scry.Cs.FileResult.store`), which only `scry cs --bundle` needs. -/
+def Scry.Cs.analyseFile (rel full : String) (wantStore : Bool) : EIO Scry.Cs.FileResult := do
   text ← FS.readFile full;
   st ← Scry.Native.parse "c_sharp" text;
   let errs := Scry.Native.errorCount st;
   store ← EIO.lift (Scry.Native.toCstStoreIn "c_sharp" rel st);
+  let kept : Option (Except String Scry.CstStore) := match wantStore with
+    | .false => .none
+    | .true => .some (match Scry.Cs.storeFits store rel text with
+        | .true => .ok store
+        | .false => .error (rel ++ ": the parse's byte spans do not index this file's own text"
+            ++ " (a preprocessed file, or a CRLF difference); its AST facts were not written"));
+  let lower := fun () => Scry.Cs.lowerCstWithModels Scry.csModels rel text
+      (Scry.Cs.ofStore text store);
   match Nat.beq errs 0 with
   | .true => do
-    let l := Scry.Cs.lowerCstWithModels Scry.csModels rel text (Scry.Cs.ofStore text store);
-    EIO.pure (Scry.Cs.resultOfLowered rel text l)
+    let l := lower ();
+    EIO.pure ({ Scry.Cs.resultOfLowered rel text l with store := kept })
   | .false => do
     let pre := Scry.Preprocessed.plain rel text;
     let loc := match Scry.CstStore.firstError store with
@@ -556,19 +966,27 @@ def Scry.Cs.analyseFile (rel full : String) : EIO Scry.Cs.FileResult := do
         rel ++ ":" ++ Nat.repr pos.line ++ ":" ++ Nat.repr pos.col
           ++ " (" ++ Scry.Cs.errorKind store i ++ ")"
       | .none => rel;
-    EIO.pure (Scry.Cs.FileResult.mk rel .false errs .nil text
-      [Scry.Cs.Diag.mk .error "parse failure" loc
-        (Nat.repr errs ++ " ERROR/MISSING node(s); the file was not lowered")])
+    -- The recovery tree is not lowered as a result, but its boundary rows are the first
+    -- thing the reader can say about the file: they go in as warnings beside the error.
+    let warnings := List.map (Scry.Cs.diagOfWarning rel) (lower ()).warnings;
+    EIO.pure { path := rel, parseOk := .false, parseErrors := errs, funcs := .nil
+             , text := text, store := kept
+             , diags := List.append
+                 [Scry.Cs.Diag.mk .error "parse failure" loc
+                   (Nat.repr errs ++ " ERROR/MISSING node(s); the file was not lowered")]
+                 warnings }
 
-partial def Scry.Cs.analyseAll : List (String × String) → EIO (List Scry.Cs.FileResult)
+partial def Scry.Cs.analyseAll (wantStore : Bool) :
+    List (String × String) → EIO (List Scry.Cs.FileResult)
   | .nil => EIO.pure .nil
   | .cons (rel, full) rest => do
-    r ← Scry.Cs.attempt (Scry.Cs.analyseFile rel full);
+    r ← Scry.Cs.attempt (Scry.Cs.analyseFile rel full wantStore);
     let fr := match r with
       | .ok x => x
-      | .error e => Scry.Cs.FileResult.mk rel .false 1 .nil ""
-          [Scry.Cs.Diag.mk .error "unreadable file" rel e];
-    rs ← Scry.Cs.analyseAll rest;
+      | .error e => { path := rel, parseOk := .false, parseErrors := 1, funcs := .nil
+                    , text := "", store := .none
+                    , diags := [Scry.Cs.Diag.mk .error "unreadable file" rel e] };
+    rs ← Scry.Cs.analyseAll wantStore rest;
     EIO.pure (List.cons fr rs)
 
 -- ## Aggregation
@@ -858,14 +1276,27 @@ structure Scry.Cs.Opts where
   taint : Bool
   /-- `--sarif OUT`: write the findings as SARIF 2.1.0. -/
   sarif : Option String
+  /-- `--bundle DIR`: also write the source reader's data bundle (the same reader
+  `scry web` exports for C) into `DIR`. -/
+  bundle : Option String
+  /-- `--assets DIR`: the checkout's `web/` directory whose host files go into
+  `--bundle DIR` (default: the first `web/` found from here up, as `scry web`). -/
+  assets : Option String
 
 def Scry.Cs.usage : String :=
-  "usage: scry cs PATH [--json] [--sarif OUT] [--fail-on error|warning|note]\n"
-  ++ "                   [--rules FILE] [--no-taint]\n"
+  "usage: scry cs PATH [--json] [--sarif OUT] [--bundle DIR] [--assets DIR]\n"
+  ++ "                   [--fail-on error|warning|note] [--rules FILE] [--no-taint]\n"
   ++ "  PATH is a directory, a .csproj, a .sln/.slnx, or one .cs file.\n"
   ++ "  Walks for *.cs (excluding bin/, obj/, node_modules/, hidden dirs, *.g.cs,\n"
   ++ "  *.Designer.cs), parses and lowers each file, and reports findings plus a\n"
   ++ "  coverage section naming every construct or file that was skipped.\n"
+  ++ "  --bundle DIR  also write the source reader's bundle (data/*.json and one\n"
+  ++ "                data/f/<id>.json per file): the same reader `scry web` exports\n"
+  ++ "                for C, with findings, sink/flow facts and an `ast` fact per\n"
+  ++ "                parse node for the infotree. `scry web` refuses a C#-only tree\n"
+  ++ "                and names this command.\n"
+  ++ "  --assets DIR  the checkout's web/ directory whose host files the bundle copies\n"
+  ++ "                (default: the first web/ found from here up).\n"
   ++ "  exit: 0 clean, 1 at/above --fail-on, 2 usage/IO, 3 nothing analysed.\n"
 
 def Scry.Cs.parseFailOn (s : String) : Except String Scry.Severity :=
@@ -887,6 +1318,12 @@ partial def Scry.Cs.parseArgsGo (target : Option String) (o : Scry.Cs.Opts) :
       | .cons v r => Scry.Cs.parseArgsGo target { o with sarif := .some v } r
       | .nil => .error ("--sarif needs an OUT path\n" ++ Scry.Cs.usage)
     | "--no-taint" => Scry.Cs.parseArgsGo target { o with taint := .false } rest
+    | "--bundle" => match rest with
+      | .cons v r => Scry.Cs.parseArgsGo target { o with bundle := .some v } r
+      | .nil => .error ("--bundle needs a DIR\n" ++ Scry.Cs.usage)
+    | "--assets" => match rest with
+      | .cons v r => Scry.Cs.parseArgsGo target { o with assets := .some v } r
+      | .nil => .error ("--assets needs a DIR\n" ++ Scry.Cs.usage)
     | "--fail-on" => match rest with
       | .cons v r => match Scry.Cs.parseFailOn v with
         | .ok sev => Scry.Cs.parseArgsGo target { o with failOn := .some sev } r
@@ -903,7 +1340,7 @@ partial def Scry.Cs.parseArgsGo (target : Option String) (o : Scry.Cs.Opts) :
 
 def Scry.Cs.parseArgs (args : List String) : Except String Scry.Cs.Opts :=
   Scry.Cs.parseArgsGo .none
-    (Scry.Cs.Opts.mk "" .false .none .none .true .none) args
+    (Scry.Cs.Opts.mk "" .false .none .none .true .none .none .none) args
 
 /-- The default C# rule pack: the corpus pack first (a checkout), then an installed
 `rules/csharp.scry`. A tree with no pack still gets its coverage report. -/
@@ -944,20 +1381,31 @@ def Scry.Cs.finish (opts : Scry.Cs.Opts) (t : Scry.Cs.Target)
   match opts.json with
   | .true => Scry.Cs.say (Json.render (Scry.Cs.jsonOf r status))
   | .false => Scry.Cs.say (Scry.Cs.render r);
-  match opts.sarif with
+  -- The bundle and the SARIF come after the report, and a failure in either is an IO
+  -- failure of the run (status 2), never a silent half-write.
+  let writeSarif : EIO Nat := match opts.sarif with
+    | .none => EIO.pure status
+    | .some out => do
+      w ← Scry.Cs.attempt (FS.writeFile out (String.append
+        (Scry.renderSarifWith "cs" "scry" analysis.origins analysis.pack
+          (Scry.zipFindings analysis.raw analysis.checks) .nil) "\n"));
+      match w with
+      | .error e => do
+        Scry.Cs.sayErr ("scry cs: " ++ e);
+        EIO.pure 2
+      | .ok _ => do
+        Scry.Cs.sayErr ("wrote SARIF 2.1.0: " ++ out ++ " ("
+          ++ Nat.repr (List.length analysis.raw) ++ " result(s))");
+        EIO.pure status;
+  match opts.bundle with
+  | .none => writeSarif
   | .some out => do
-    w ← Scry.Cs.attempt (FS.writeFile out (String.append
-      (Scry.renderSarifWith "cs" "scry" analysis.origins analysis.pack
-        (Scry.zipFindings analysis.raw analysis.checks) .nil) "\n"));
+    w ← Scry.Cs.attempt (Scry.Cs.writeBundle opts.assets out t results analysis r);
     match w with
     | .error e => do
-      Scry.Cs.sayErr ("scry cs: " ++ e);
+      Scry.Cs.sayErr ("scry cs: --bundle " ++ out ++ ": " ++ e);
       EIO.pure 2
-    | .ok _ => do
-      Scry.Cs.sayErr ("wrote SARIF 2.1.0: " ++ out ++ " ("
-        ++ Nat.repr (List.length analysis.raw) ++ " result(s))");
-      EIO.pure status
-  | .none => EIO.pure status
+    | .ok _ => writeSarif
 
 def Scry.Cs.run (args : List String) : EIO Nat := do
   match Scry.Cs.parseArgs args with
@@ -971,7 +1419,7 @@ def Scry.Cs.run (args : List String) : EIO Nat := do
       Scry.Cs.sayErr ("scry cs: " ++ e);
       EIO.pure (Scry.Cs.statusOf .usage)
     | .ok t => do
-      results ← Scry.Cs.analyseAll t.walk.files;
+      results ← Scry.Cs.analyseAll (match opts.bundle with | .some _ => .true | .none => .false) t.walk.files;
       pack ← match opts.taint with
         | .false => EIO.pure ((.ok .none) : Except String (Option (String × Scry.RulePack)))
         | .true => Scry.Cs.attempt (Scry.Cs.loadPack opts.rules);

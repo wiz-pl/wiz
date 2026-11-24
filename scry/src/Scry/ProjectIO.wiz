@@ -285,10 +285,14 @@ partial def Scry.ProjectIO.buildUnits (cc : String) (allowErrors : Bool) (keepSy
 
 /-- The files a walk found and the paths it refused to follow (a symbolic link is
 reported, never descended: a repo link to an outside tree would otherwise embed those
-sources in a report, and `ln -s .. src/up` would recurse without bound). -/
+sources in a report, and `ln -s .. src/up` would recurse without bound).
+
+`skipped` counts the `.cs` files the `*.c` walk passed over, so a C# tree is reported as
+a miss instead of an empty success (see `Scry.reportWalk`). -/
 structure Scry.ProjectIO.Walk where
   files : List String
   links : List String
+  skipped : Nat
 
 /-- Whether `p` is `root` or below it (both are real paths). -/
 def Scry.ProjectIO.underRoot (root p : String) : Bool :=
@@ -299,31 +303,35 @@ def Scry.ProjectIO.underRoot (root p : String) : Bool :=
 /-- Walk `dir` for `*.c`, recursively. `root` is the real path of the directory the
 user named and `visited` the real directories already entered: a directory reached by
 another name cannot be walked twice. Symbolic links and escaping directories are
-returned in `links` and not followed. -/
+returned in `links` and not followed. A `*.cs` file is counted in `skipped` (and not
+read): `scry cs` is the front end for C#, and an empty `*.c` walk over a C# tree must
+not look like a clean run (`Scry.reportWalk`). -/
 mutual
 partial def Scry.ProjectIO.walkNames (root : String) (visited : List String) (dir : String) :
     List String → EIO Scry.ProjectIO.Walk
-  | .nil => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil)
+  | .nil => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil 0)
   | .cons name rest => do
     let full := Path.join dir name;
     st ← FS.linkStat full;
     here ← match st.kind with
-      | .symlink => EIO.pure (Scry.ProjectIO.Walk.mk .nil (List.cons full .nil))
+      | .symlink => EIO.pure (Scry.ProjectIO.Walk.mk .nil (List.cons full .nil) 0)
       | .dir => match String.startsWith name "." with
-        | .true => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil)
+        | .true => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil 0)
         | .false => do
           real ← FS.realPath full;
           match Bool.and (Scry.ProjectIO.underRoot root real)
               (Bool.not (List.any (String.eq real) visited)) with
           | .true => Scry.ProjectIO.walkDir root (List.cons real visited) full
-          | .false => EIO.pure (Scry.ProjectIO.Walk.mk .nil (List.cons full .nil))
+          | .false => EIO.pure (Scry.ProjectIO.Walk.mk .nil (List.cons full .nil) 0)
       | .file => match String.endsWith name ".c" with
-        | .true => EIO.pure (Scry.ProjectIO.Walk.mk (List.cons full .nil) .nil)
-        | .false => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil)
-      | _ => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil);
+        | .true => EIO.pure (Scry.ProjectIO.Walk.mk (List.cons full .nil) .nil 0)
+        | .false => match String.endsWith name ".cs" with
+          | .true => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil 1)
+          | .false => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil 0)
+      | _ => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil 0);
     tail ← Scry.ProjectIO.walkNames root visited dir rest;
     EIO.pure (Scry.ProjectIO.Walk.mk (List.append here.files tail.files)
-      (List.append here.links tail.links))
+      (List.append here.links tail.links) (Nat.add here.skipped tail.skipped))
 
 partial def Scry.ProjectIO.walkDir (root : String) (visited : List String)
     (dir : String) : EIO Scry.ProjectIO.Walk := do
@@ -336,6 +344,48 @@ base (a symlink the user named explicitly is theirs to follow once). -/
 def Scry.ProjectIO.walkGo (dir : String) : EIO Scry.ProjectIO.Walk := do
   real ← FS.realPath dir;
   Scry.ProjectIO.walkDir real (List.cons real .nil) dir
+
+/-- The `*.cs` files under `dir`, counted by a walk with the same roots and the same
+skips as `Scry.ProjectIO.walkNames` and reading names only. It is the honest denominator
+for an empty `*.c` walk: a directory whose only sources are C# is a miss (and
+`Scry.refuseCsOnly` says so), while a directory with no such file is a different, also
+empty, question. A `*.cs` inside a hidden directory is not counted, exactly as the `*.c`
+walk would not enter that directory. -/
+mutual
+partial def Scry.ProjectIO.countNames (root : String) (visited : List String)
+    (dir : String) : List String → EIO Nat
+  | .nil => EIO.pure 0
+  | .cons name rest => do
+    let full := Path.join dir name;
+    st ← FS.linkStat full;
+    here ← match st.kind with
+      | .symlink => EIO.pure 0
+      | .dir => match String.startsWith name "." with
+        | .true => EIO.pure 0
+        | .false => do
+          real ← FS.realPath full;
+          match Bool.and (Scry.ProjectIO.underRoot root real)
+              (Bool.not (List.any (String.eq real) visited)) with
+          | .true => Scry.ProjectIO.countDir root (List.cons real visited) full
+          | .false => EIO.pure 0
+      | .file => match String.endsWith name ".cs" with
+        | .true => EIO.pure 1
+        | .false => EIO.pure 0
+      | _ => EIO.pure 0;
+    tail ← Scry.ProjectIO.countNames root visited dir rest;
+    EIO.pure (Nat.add here tail)
+
+partial def Scry.ProjectIO.countDir (root : String) (visited : List String)
+    (dir : String) : EIO Nat := do
+  names ← FS.listDir dir;
+  Scry.ProjectIO.countNames root visited dir names
+end
+
+/-- The `*.cs` files under the directory `dir`, confined to `dir` as the `*.c` walk is
+confined to its root. -/
+def Scry.ProjectIO.countCs (dir : String) : EIO Nat := do
+  real ← FS.realPath dir;
+  Scry.ProjectIO.countDir real (.nil) dir
 
 /-- Say which links a walk skipped (on stderr, so a pipe's stdout stays a file list).
 `partial`: the recursive call sits under the effect bind, which master's equation

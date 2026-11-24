@@ -1,0 +1,231 @@
+-- test: run timeout 900
+import Scry.NativeLink
+import Sys
+import Json
+import Text
+-- The C# half of the static source reader: `scry cs --bundle DIR` writes the bundle
+-- `scry web` writes for C, over `tests/fixtures/report-cs` (four files: two tainted, one
+-- safe, one whose tree overflows the AST cap).
+--
+-- What this pins (the `gs_*` lines are the golden's subject; every `check` line is an
+-- assertion that must be `: ok`):
+--
+-- * the bundle's shape: four files in the walk's order, the manifest's schema, mode,
+--   counts and `language: csharp` footer, and relative paths only;
+-- * every tainted file has its finding, with a UTF-16 span inside its own file, the
+--   `command-injection` rule, and the reader's facts at the sink;
+-- * `sink`/`flow` rows keep the C bundle's shape, and the `ast` rows carry the tree for
+--   the infotree: a parent id, a depth, a sibling order;
+-- * the AST cap: `Huge.cs` is truncated to `Scry.Cs.astFactCap` rows and the manifest
+--   names it;
+-- * two exports are byte-identical (no timestamp, stable ids and order);
+-- * `scry web` refuses a C#-only tree instead of writing an empty bundle, and names
+--   `scry cs`.
+--
+-- The bundle's own content (the reader's first paint, the answer schema, the scripted
+-- patch trace) is `web/source_static_test.mjs`'s contract, run on this bundle by
+-- `web/source_cs_gate.sh`, whose mutations are the negative half.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.ePrintln (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+/-- A golden line that reports a value (a count) rather than passing or failing. -/
+def say (label : String) : EIO Unit :=
+  EIO.lift (IO.println ("gs_" ++ label))
+
+structure Res where
+  code : Nat
+  out : String
+  err : String
+
+def ensureBuild : EIO Unit := do
+  ok ← EIO.lift (FS.exists "build");
+  match ok with
+  | .true => EIO.pure ()
+  | .false => FS.createDir "build"
+
+def run (args : List String) : EIO Res := do
+  r ← Process.output ".grail/bin/scry" args "";
+  let code := match r.status with
+    | .exited n => n
+    | .signaled _ => 99;
+  EIO.pure (Res.mk code r.stdout r.stderr)
+
+def jAt (j : Json) (path : List String) : Json :=
+  match path with
+  | .nil => j
+  | .cons k rest => match Json.get j k with
+    | .some x => jAt x rest
+    | .none => Json.mkNull
+
+def jStr (j : Json) (path : List String) : String :=
+  match jAt j path with
+  | .str s => s
+  | _ => ""
+
+def jNat (j : Json) (path : List String) : Nat :=
+  match jAt j path with
+  | .int _ n => n
+  | _ => 0
+
+def jList (j : Json) (path : List String) : List Json :=
+  match jAt j path with
+  | .arr xs => Jsons.toList xs
+  | _ => .nil
+
+def readJson (path : String) : EIO Json := do
+  text ← FS.readFile path;
+  match Json.parse text with
+  | .ok j => EIO.pure j
+  | .error e => do
+    check ("cs bundle: " ++ path ++ " parses (" ++ e ++ ")") .false;
+    EIO.pure Json.mkNull
+
+/-- A path that would bind the bundle to this checkout: absolute, or climbing out. -/
+def relative (p : String) : Bool :=
+  Bool.not (Bool.or (String.startsWith p "/") (String.contains p ".."))
+
+/-- A fact row's column `k` (the first pair with that key). -/
+def column (r : Json) (k : String) : String :=
+  let pairOf : Json → Option String := fun p => match p with
+    | .arr xs => match Jsons.toList xs with
+      | .cons k0 (.cons v _) => match k0 with
+        | .str s => match String.eq s k with
+          | .true => match v with
+            | .str t => .some t
+            | _ => .none
+          | .false => .none
+        | _ => .none
+      | _ => .none
+    | _ => .none;
+  match List.filterMap pairOf (jList r ["columns"]) with
+  | .cons t _ => t
+  | .nil => ""
+
+def isKind (k : String) (r : Json) : Bool := String.eq (jStr r ["kind"]) k
+
+/-- A file's own `data/f/<id>.json`. -/
+def readFile (id : String) : EIO Json :=
+  readJson ("build/web-bundle-cs/data/f/" ++ id ++ ".json")
+
+def idOf (files : List Json) (suffix : String) : String :=
+  match List.find (fun f => String.endsWith (jStr f ["path"]) suffix) files with
+  | .some f => jStr f ["id"]
+  | .none => ""
+
+/-- The file row with id `id`, or `none`. -/
+def fileWith (files : List Json) (id : String) : Option Json :=
+  List.find (fun f => String.eq (jStr f ["id"]) id) files
+
+def main : IO Unit := EIO.toIO (do
+  bin ← EIO.lift (FS.exists ".grail/bin/scry");
+  match bin with
+  | .false => EIO.lift (IO.println "cs bundle: skip (.grail/bin/scry absent)")
+  | .true => do
+    ensureBuild;
+    let target := "tests/fixtures/report-cs";
+    r ← run ["cs", target, "--bundle", "build/web-bundle-cs", "--assets", "../web"];
+    check "cs bundle: exit 0" (Nat.beq r.code 0);
+    m ← readJson "build/web-bundle-cs/data/manifest.json";
+    fs ← readJson "build/web-bundle-cs/data/files.json";
+    fl ← readJson "build/web-bundle-cs/data/findings.json";
+    let files := jList fs ["files"];
+    let findings := jList fl ["findings"];
+    let nFiles := jNat m ["counts", "files"];
+    let nFindings := jNat m ["counts", "findings"];
+    say ("manifest: schema=" ++ jStr m ["schema"] ++ " mode=" ++ jStr m ["mode"]
+      ++ " language=" ++ jStr m ["language"] ++ " files=" ++ Nat.repr nFiles
+      ++ " findings=" ++ Nat.repr nFindings);
+    check "cs bundle: manifest names the bundle schema"
+      (String.eq (jStr m ["schema"]) "scry.web.bundle/1");
+    check "cs bundle: the export is static" (String.eq (jStr m ["mode"]) "static");
+    check "cs bundle: the manifest says C#" (String.eq (jStr m ["language"]) "csharp");
+    check "cs bundle: the manifest lists the fact kinds"
+      (Nat.beq (List.length (jList m ["factKinds"])) 3);
+    check "cs bundle: every path is relative to the target"
+      (List.all (fun f => relative (jStr f ["path"])) files);
+    -- Shell.cs: the sink, the path and the tree.
+    let shellId := idOf files "Shell.cs";
+    sh ← readFile shellId;
+    let shFacts := jList sh ["facts"];
+    let astRows := List.filter (isKind "ast") shFacts;
+    let sinkRows := List.filter (isKind "sink") shFacts;
+    let flowRows := List.filter (isKind "flow") shFacts;
+    say ("shell: sink=" ++ Nat.repr (List.length sinkRows) ++ " flow="
+      ++ Nat.repr (List.length flowRows) ++ " ast=" ++ Nat.repr (List.length astRows));
+    check "cs bundle: Shell.cs has its sink row" (Nat.beq (List.length sinkRows) 1);
+    check "cs bundle: the sink row names its rule"
+      (List.all (fun x => String.eq (column x "rule") "command-injection") sinkRows);
+    -- Parity with the C bundle: a `flow` row carries the same columns `Scry.webFactsOf`
+    -- writes for C (`kind`, `func`, `rule`, `finding`), so the reader shows a C# path the
+    -- same way (`web/source_static_test.mjs`'s C section asserts the C shape).
+    check "cs bundle: every flow row carries the C bundle's columns"
+      (List.all (fun x => Bool.and (Nat.lt 0 (String.length (column x "kind")))
+        (Bool.and (Nat.lt 0 (String.length (column x "finding")))
+          (String.eq (column x "rule") "command-injection"))) flowRows);
+    check "cs bundle: every ast row has a kind label"
+      (List.all (fun x => Nat.lt 0 (String.length (column x "kind"))) astRows);
+    check "cs bundle: exactly one ast root"
+      (Nat.beq (List.length (List.filter (fun x => String.eq (column x "parent") "")
+        astRows)) 1);
+    check "cs bundle: every parent id names a row of the same file"
+      (List.all (fun x => match String.eq (column x "parent") "" with
+        | .true => .true
+        | .false => List.any (fun y => String.eq (jStr y ["node"])
+            (column x "parent")) astRows) astRows);
+    check "cs bundle: every ast span fits its file"
+      (let len := String.length (jStr sh ["source"]);
+       List.all (fun x => Bool.and (Nat.le (jNat x ["span", "start"])
+         (jNat x ["span", "stop"])) (Nat.le (jNat x ["span", "stop"]) len)) astRows);
+    check "cs bundle: every ast row has a depth and an order"
+      (List.all (fun x => Bool.and (Nat.lt 0 (String.length (column x "depth")))
+        (Nat.lt 0 (String.length (column x "order")))) astRows);
+    -- Findings: the count against the manifest, all in bound, all in their file's JSON.
+    check ("cs bundle: " ++ Nat.repr (List.length findings) ++ " finding(s) match the manifest")
+      (Nat.beq (List.length findings) nFindings);
+    let boundOf : Json → EIO Bool := fun f => do
+      let id := jStr f ["fileId"];
+      match fileWith files id with
+      | .none => EIO.pure .false
+      | .some meta => do
+        d ← readFile id;
+        let len := String.length (jStr d ["source"]);
+        let inJson := List.any (fun g => String.eq (jStr g ["id"]) (jStr f ["id"]))
+          (jList d ["findings"]);
+        EIO.pure (Bool.and (Bool.and (Nat.lt (jNat f ["span", "start"])
+            (jNat f ["span", "stop"])) (Nat.le (jNat f ["span", "stop"]) len)) inJson);
+    bounds ← List.mapM boundOf findings;
+    check "cs bundle: every finding's span is inside its file, listed in its file's JSON"
+      (List.all (fun b => b) bounds);
+    -- Huge.cs: the cap holds, and the manifest names it.
+    huge ← readFile (idOf files "Huge.cs");
+    let hugeAst := List.length (List.filter (isKind "ast") (jList huge ["facts"]));
+    say ("huge: ast=" ++ Nat.repr hugeAst ++ " cap=" ++ Nat.repr (jNat m ["ast", "cap"]));
+    check "cs bundle: Huge.cs is capped at the manifest's cap"
+      (Nat.beq hugeAst (jNat m ["ast", "cap"]));
+    check "cs bundle: the manifest names the truncated file"
+      (List.any (fun t => String.endsWith (jStr t ["path"]) "Huge.cs")
+        (jList m ["ast", "truncated"]));
+    -- Determinism.
+    r2 ← run ["cs", target, "--bundle", "build/web-bundle-cs2", "--assets", "../web"];
+    check "cs bundle: the second export exits 0" (Nat.beq r2.code 0);
+    let same (p : String) : EIO Bool := do
+      a ← FS.readFile ("build/web-bundle-cs/" ++ p);
+      b ← FS.readFile ("build/web-bundle-cs2/" ++ p);
+      EIO.pure (String.eq a b);
+    check "cs bundle: two exports write the same manifest" (← same "data/manifest.json");
+    check "cs bundle: two exports write the same files" (← same "data/files.json");
+    check "cs bundle: two exports write the same findings" (← same "data/findings.json");
+    check "cs bundle: two exports write the same per-file JSON"
+      (← same ("data/f/" ++ shellId ++ ".json"));
+    -- `scry web` on the same tree: refused, the C# path named, nothing written.
+    w ← run ["web", target, "--out", "build/web-bundle-cs-refused"];
+    check "web refuses a C#-only tree (non-zero exit)" (Bool.not (Nat.beq w.code 0));
+    say ("web refusal: exit " ++ Nat.repr w.code ++ ": " ++ String.trim w.err);
+    check "web refusal names scry cs" (String.contains w.err "scry cs");
+    there ← EIO.lift (FS.exists "build/web-bundle-cs-refused/data/manifest.json");
+    check "web refusal writes no bundle" (Bool.not there)
+  )
