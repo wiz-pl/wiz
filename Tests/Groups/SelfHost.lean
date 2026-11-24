@@ -4629,7 +4629,12 @@ def selfHostHostGroup : Group where
           #[("WIZ_SELFHOST_COMPILER", some stub.toString), ("WIZ_SELFHOST_CHECKER", some stub.toString)]
         let flags := (← flagsRef.get).toArray
         let caseBound := 600
-        let sweepBound := 2700
+        -- (H1: every child re-elaborates its own closure, ~77 s a case on a CI runner,
+        -- so 36 cases do not fit 2700 s - the sweep died at 2795 s in run 45285555908
+        -- with 36/36 cases actually run. The bound is a budget for *not finishing*, not
+        -- a verdict; the job's own limit is 120 minutes and the stub path does not build
+        -- anything.)
+        let sweepBound := 4200
         let began ← IO.monoMsNow
         let mut passed := #[]
         let mut hung := #[]
