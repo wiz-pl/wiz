@@ -970,6 +970,19 @@ own positivity, and the self-hosted one now reports the Lean message. Tests:
 `MTm.muSize` (also in the differential samples), the `inductive` group, and the selfhost
 positivity case; see `wiz-notes/mu-size.md`.
 
+**Fail closed (TT-06, step 1).** The walk used to stop after 16 unfoldings of a constant
+and to accept a constant with no value (an axiom or an opaque definition) and a name with
+no declaration. It now unfolds by a **visited set of names** instead of a depth: an alias
+chain is acyclic (a global's value refers only to earlier globals), so a 17-step chain is
+looked through, and a revisited name is a cycle. A revisited name, a valueless constant
+and an unknown name are **rejected**, not accepted. The head that is neither a term
+constructor nor a constant (a variable, an application, a projection) is still accepted:
+that is the neutral-head policy (D-9), which step 2 replaces by walking the evaluated
+description. Both kernels changed in one patch (`Kernel.wiz` keeps its `letq`/`split` arms,
+and rejects `.axiomC` where the host rejects a valueless constant, since it has no name
+table). Tests: the `inductive` group (a 17-alias unguarded chain, an axiom-headed `μ`, and
+the same long chain over a guarded description), `MTm.muSize` in the differential samples.
+
 ### Q1 / R1. Projections drop linear components — **fixed**: projections need an unrestricted pair (lin-proj; both kernels)
 
 `p.2` on `p : (1 x : A) × B` uses `p` once and discards `x` (§7.1); `p.1` discards the
