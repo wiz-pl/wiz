@@ -51,7 +51,7 @@ commit or a push.
 | `test-runtime.sh` | compiles `runtime/wiz_rt.h` plus `runtime/rt_*.inc` in both ABI modes (`WIZ_API=` and `WIZ_API=static`) | `ci.yml` |
 | `test-perf-dashboard.sh` | end-to-end check of `perf-dashboard.py` on `fixtures/perf/` (no network, no toolchain) | docs only (`docs/stages/15-performance.md`) |
 | `flaky.py` | reruns failing test cases, classifies them, and maintains the expiring quarantine | `flaky-ci.sh`, by hand |
-| `checks-ledger.py` | records the light checks that ran on each commit in the gitignored, untrusted `.checks/` ledger (`run`, `record`, `status`, `warn`, `require`, `audit`, `--self-test`); keyed by commit + name, so an amend invalidates; `require` refuses a push to `refs/heads/integration/*` without a clean `heavy:lake` build record for that sha | `.githooks/pre-push`; `heavy` (`record`); by hand |
+| `checks-ledger.py` | records the light checks that ran on each commit in the gitignored, untrusted `.checks/` ledger (`run`, `record`, `status`, `warn`, `require`, `audit`, `--self-test`); keyed by commit + name, so an amend invalidates; `require` refuses a push to `refs/heads/integration/*` without a clean build record for that sha (`heavy:lake`, `heavy:nix-build:<attr>` or `heavy:nix`, and the argv must be a build of the whole tree), reading every worktree's ledger | `.githooks/pre-push`; `heavy` (`record`); by hand |
 | `touched-derivations.sh` | `BASE [HEAD]`: selects the derivations whose `drvPath` changed (or that fail to evaluate at HEAD) through `.github/ci-shaped.nix`, then builds each one through `heavy`; `--select-only`, `--json` | by hand before a push (Guard B) |
 
 ## Local check ledger (advisory, not a gate)
@@ -70,20 +70,33 @@ start of the run; the record also keeps `dirty_after`, so an update script that
 writes a file shows as a clean start followed by a change (commit or discard its
 output). `--self-test` builds a throwaway repository and proves the behaviours
 (no record warns, a clean run stops the warning, a dirty run does not count, a
-new SHA warns again, `require` refuses a push to `integration/*` without a clean
-build record for that sha and accepts one with it, `audit` logs a remote tip no
-record explains).
+new SHA warns again; `require` refuses a push to `integration/*` without a clean
+build record for that sha and accepts the shapes `heavy` writes -- `lake build
+wiz tests`, `lake test`, `nix build` under `heavy:nix-build:*` -- including a
+record in a second worktree, and refuses a single target, a `bash -c` wrapper
+and `nix eval`; the refusal names an untracked file; the hook allows a push it
+cannot answer and blocks a red one; `audit` logs a remote tip no record
+explains).
 
 The ledger also holds **build** records, which are not advisory: `heavy`
-(`/workspace/wiz-tools/heavy`) calls `record --name heavy:lake --commit SHA
---exit RC --clean|--dirty -- CMD` when its Slurm job ends, and
-`require --pre-push --name heavy:lake --for 'refs/heads/integration/*'` makes
-`.githooks/pre-push` refuse a push whose sha has no clean record from a command
-containing `build`. A dirty tree never counts (the rsync copies the working
-tree), and a merge commit is a new sha, so the merge result has to be built.
-Every other ref is unchecked, `git push --no-verify` still bypasses it (a local
-guard against mistakes, not a security gate), and `audit [--fetch]` lists the
-remote-tracking tips this worktree's ledger cannot explain.
+(`/workspace/wiz-tools/heavy`) calls `record --name NAME --commit SHA --exit RC
+--clean|--dirty -- CMD` when its Slurm job ends, naming the record after the
+program (`heavy:lake`, `heavy:nix-build:<attr>`, `heavy:nix`), and `require
+--pre-push --name heavy:lake --name 'heavy:nix-build:*' --name heavy:nix --for
+'refs/heads/integration/*'` makes `.githooks/pre-push` refuse a push whose sha
+has no clean record of a build of the whole tree. What counts is the argv
+(`build_evidence`): the default `lake build`, `lake build wiz tests`, `lake
+test`, or `nix build`; a single target is `partial-build` and `nix eval` is
+`not-a-build`, and a `bash -c` wrapper is not read as a build (run the build
+directly, or set `HEAVY_LEDGER_NAME` when a wrapper passes the words through).
+A dirty tree never counts (the rsync copies the working tree), and the refusal
+names the dirty paths. Records are read from **every worktree** of the checkout
+(`git worktree list`, plus `/workspace/wt/*`), keyed by commit, so a build in
+one tree satisfies a push from another. Every other ref is unchecked, `git push
+--no-verify` still bypasses it (a local guard against mistakes, not a security
+gate), and `audit [--fetch]` lists the remote-tracking tips no worktree's ledger
+can explain. The hook blocks on a red record (exit 1) but warns and allows when
+`require` cannot answer (exit 2: an unreadable ledger, a broken tool).
 
 `.checks/` is gitignored and **untrusted by design**: any process can write it,
 nothing signs it, and CI does not read it. Treat the warning as a fast-fail
