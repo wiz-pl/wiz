@@ -943,15 +943,15 @@ def Scry.Cs.resultOfLowered (path text : String) (l : Scry.Cs.Lowered) : Scry.Cs
   let extra := match l.funcs with
     | .nil => [Scry.Cs.Diag.mk .warning "no functions lowered" path ""]
     | _ => [];
-  { path := path, parseOk := .true, parseErrors := 0, funcs := l.funcs, text := text
-  , diags := List.append extra warnings, store := .none }
+  Scry.Cs.FileResult.mk path .true 0 l.funcs text
+    (List.append extra warnings) .none
 
 /-- One spill's result (the Lean tests' path: they cannot call the native shim). -/
 def Scry.Cs.resultOfFront (path : String) (r : Scry.Cs.FrontResult) : Scry.Cs.FileResult :=
   match r with
   | .ok l => Scry.Cs.resultOfLowered path l.text l
-  | .err m => { path := path, parseOk := .false, parseErrors := 1, funcs := .nil, text := ""
-  , diags := [Scry.Cs.Diag.mk .error "parse failure" path m], store := .none }
+  | .err m => Scry.Cs.FileResult.mk path .false 1 .nil ""
+      [Scry.Cs.Diag.mk .error "parse failure" path m] .none
 
 /-- The kind of a store's first failing node: `ERROR`, or `MISSING <token>` (the token
 the grammar expected). Naming the node is what lets a failing file be diagnosed without a
@@ -991,7 +991,7 @@ def Scry.Cs.analyseFile (rel full : String) (wantStore : Bool) : EIO Scry.Cs.Fil
   match Nat.beq errs 0 with
   | .true => do
     let l := lower ();
-    EIO.pure ({ Scry.Cs.resultOfLowered rel text l with store := kept })
+    EIO.pure { Scry.Cs.resultOfLowered rel text l with store := kept }
   | .false => do
     let pre := Scry.Preprocessed.plain rel text;
     let loc := match Scry.CstStore.firstError store with
@@ -1003,12 +1003,12 @@ def Scry.Cs.analyseFile (rel full : String) (wantStore : Bool) : EIO Scry.Cs.Fil
     -- The recovery tree is not lowered as a result, but its boundary rows are the first
     -- thing the reader can say about the file: they go in as warnings beside the error.
     let warnings := List.map (Scry.Cs.diagOfWarning rel) (lower ()).warnings;
-    EIO.pure { path := rel, parseOk := .false, parseErrors := errs, funcs := .nil
-             , text := text, store := kept
-             , diags := List.append
-                 [Scry.Cs.Diag.mk .error "parse failure" loc
-                   (Nat.repr errs ++ " ERROR/MISSING node(s); the file was not lowered")]
-                 warnings }
+    EIO.pure (Scry.Cs.FileResult.mk rel .false errs .nil text
+      (List.append
+        [Scry.Cs.Diag.mk .error "parse failure" loc
+          (Nat.repr errs ++ " ERROR/MISSING node(s); the file was not lowered")]
+        warnings)
+      kept)
 
 partial def Scry.Cs.analyseAll (wantStore : Bool) :
     List (String × String) → EIO (List Scry.Cs.FileResult)
@@ -1017,9 +1017,8 @@ partial def Scry.Cs.analyseAll (wantStore : Bool) :
     r ← Scry.Cs.attempt (Scry.Cs.analyseFile rel full wantStore);
     let fr := match r with
       | .ok x => x
-      | .error e => { path := rel, parseOk := .false, parseErrors := 1, funcs := .nil
-                    , text := "", store := .none
-                    , diags := [Scry.Cs.Diag.mk .error "unreadable file" rel e] };
+      | .error e => Scry.Cs.FileResult.mk rel .false 1 .nil "" 
+          [Scry.Cs.Diag.mk .error "unreadable file" rel e] .none;
     rs ← Scry.Cs.analyseAll wantStore rest;
     EIO.pure (List.cons fr rs)
 

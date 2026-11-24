@@ -151,13 +151,30 @@ def Scry.reportFindingOf (file : String) (m : Scry.OriginMap) (f : Scry.RuleFind
     | .none => 0
     | .some h => h.line;
   let id := Scry.wfId "c" f file;
-  { anchor := id, id := id, file := file, rule := f.rule
-  , severity := Scry.Severity.show f.severity, cwe := Scry.reportCwe f.rule
-  , tier := Scry.wfCweTier f.rule, message := f.message, func := f.func, callee := f.name
-  , arg := f.arg, sinkLine := sink.line, sinkColumn := sink.column, checked := checked
-  , steps := List.map (Scry.reportStepOf m) f.path, shown := shown
-  , diffMatchedBy := matchedBy, diffLine := diffLine, endLine := sink.endLine
-  , endColumn := sink.endColumn, pathSteps := [], reindexed := [], rejected := [] }
+  Scry.ReportFinding.mk
+    id                              -- anchor; `renderReport` disambiguates a collision
+    id
+    file
+    f.rule
+    (Scry.Severity.show f.severity)
+    (Scry.reportCwe f.rule)
+    (Scry.wfCweTier f.rule)
+    f.message
+    f.func
+    f.name
+    f.arg
+    sink.line
+    sink.column
+    checked
+    (List.map (Scry.reportStepOf m) f.path)
+    shown
+    matchedBy
+    diffLine
+    sink.endLine
+    sink.endColumn
+    []                              -- pathSteps: the page's own `steps` are its path
+    []                              -- reindexed
+    []                              -- rejected
 
 def Scry.reportWarningOf (w : Scry.BoundaryFinding) (hit : Option Scry.DiffHit) :
     Scry.ReportWarning :=
@@ -286,7 +303,7 @@ def Scry.refuseCsOnly (cmd : String) (target : String) (w : Scry.ReportWalk) : S
 second list is the symbolic links the walk refused to follow. -/
 def Scry.reportFilesOf (path : String) : EIO (List String × List String) := do
   w ← Scry.reportWalkOf path;
-  match Bool.and (String.eq w.files.length 0) (Nat.lt 0 w.cs) with
+  match Bool.and (Nat.beq w.files.length 0) (Nat.lt 0 w.cs) with
   | .true => EIO.fail (Scry.refuseCsOnly "report" path w)
   | .false => EIO.pure (w.files, w.links)
 
