@@ -303,6 +303,10 @@ structure Effect (R : Type) where
   /-- (13b) names made private, and structures made opaque, with their module -/
   privates : Array (Name × String) := #[]
   opaques : Array (Name × String) := #[]
+  /-- (diagnostics) declarations that failed to elaborate, with their command's span and
+  `line:col`: the later uses of their names are `failed-declaration`, not `unknown
+  identifier` (they are replayed with the command that failed) -/
+  failed : Array (Name × SourceInfo × String) := #[]
 
 /-- The command kinds whose effect is just the fields of `Effect`.
 
@@ -331,11 +335,16 @@ def effectOf (s s' : CommandState R) : Effect R :=
     sites := newNames.filterMap fun n => (s'.declSites.get? n).map fun (i, m) => (n, i, m)
     docs := newNames.filterMap fun n => (s'.declDocs.get? n).map fun d => (n, d)
     privates := newEntries s.globals.privates s'.globals.privates
-    opaques := newEntries s.globals.opaques s'.globals.opaques }
+    opaques := newEntries s.globals.opaques s'.globals.opaques
+    failed := newFailed s.globals.failedDecls s'.globals.failedDecls }
 where
   newEntries (old new : Std.HashMap Name String) : Array (Name × String) :=
     if old.size == new.size then #[] else
     ((new.fold (init := #[]) fun acc n m => if old.contains n then acc else acc.push (n, m)).qsort
+      (fun a b => a.1 < b.1))
+  newFailed (old new : Std.HashMap Name FailedDecl) : Array (Name × SourceInfo × String) :=
+    if old.size == new.size then #[] else
+    ((new.fold (init := #[]) fun acc n d => if old.contains n then acc else acc.push (n, d.info, d.pos)).qsort
       (fun a b => a.1 < b.1))
 
 /-- Who declared a name, for messages: a module, or the file being checked (`""`). -/
@@ -378,6 +387,8 @@ def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
                                 privates := e.privates.foldl (fun m (n, md) => m.insert n md) globals.privates,
                                 opaques := e.opaques.foldl (fun m (n, md) => m.insert n md) globals.opaques }.setBuiltins
                                 (e.builtins ++ globals.builtins)
+  let globals := { globals with failedDecls := e.failed.foldl (fun m (n, i, p) =>
+                                m.insert n { info := i, pos := p }) globals.failedDecls }
   { s with globals, messages := s.messages ++ e.messages, builtins := e.builtins ++ s.builtins,
            classes := e.classes ++ s.classes, instances := s.instances ++ e.instances,
            coinductives := s.coinductives ++ e.coinductives, foreignTypes := e.foreignTypes ++ s.foreignTypes,
@@ -497,10 +508,11 @@ def Effect.toSx (e : Effect R) : Sx :=
     list (e.sites.toList.map fun (n, i, m) => list [str n, info i, str m]),
     list (e.privates.toList.map fun (n, m) => list [str n, str m]),
     list (e.opaques.toList.map fun (n, m) => list [str n, str m]),
-    list (e.docs.toList.map fun (n, d) => list [str n, str d.kind, list (d.doc.toList.map str), names d.parent.toList, nat d.start])]
+    list (e.docs.toList.map fun (n, d) => list [str n, str d.kind, list (d.doc.toList.map str), names d.parent.toList, nat d.start]),
+    list (e.failed.toList.map fun (n, i, p) => list [str n, info i, str p])]
 
 def Effect.ofSx? (x : Sx) : Option (Effect R) := do
-  let #[ds, ms, bs, as, cs, is, cos, fts, cc, hs, ss, ps, os, dcs] ← items? x | none
+  let #[ds, ms, bs, as, cs, is, cos, fts, cc, hs, ss, ps, os, dcs, fl] ← items? x | none
   let decl (x : Sx) : Option (Decl R) := do
     let #[n, ps, ty, v, inl, im, w, tw] ← items? x | none
     pure { name := ← atom? n, levelParams := ← (← items? ps).toList.mapM atom?, type := ← dterm ty,
@@ -545,12 +557,15 @@ def Effect.ofSx? (x : Sx) : Option (Effect R) := do
     docs := (← (← items? dcs).mapM fun x => do
       let #[n, k, d, p, st] ← items? x | none
       pure (← atom? n, { kind := ← atom? k, doc := (← (← items? d).toList.mapM atom?).head?,
-                         parent := (← dnames p).head?, start := ← (← atom? st).toNat? })) }
+                         parent := (← dnames p).head?, start := ← (← atom? st).toNat? }))
+    failed := (← (← items? fl).mapM fun x => do
+      let #[n, i, p] ← items? x | none
+      pure (← atom? n, ← dinfo i, ← atom? p)) }
 
 /-- The cache's version: change it whenever the format or the elaborator's output changes.
 (The directory store also mixes in the binary's own hash, `binaryId`, so two builds of
 wiz never share entries; the salt is for invalidating by hand.) -/
-def salt : UInt64 := hash "wiz-cache-32-type-written"  -- 32: `Decl.typeWritten` (the type was written, so `#check` keeps the Π names of its ascription), so cached declarations carry it; 31: macro scopes start at the command's source position (a cache hit no longer shifts them); 30: mandatory component sorts (Π/Σ carry ⟨dom, cod⟩, ULift its content's sort), a mutual block's constructors named per type, error codes, `Info.fix`, `scase` quantity (K1), `letUnit`; 20: proof markers (P2: declarations are stored marked); 15: doc comments and declaration kinds (11s); 14: a builtin key is registered once; 13: witnesses, assumed registrations, warnings; 12: private constructors, observations, fields (13b); 11: 22i, marked structure tails; 9: private names (13b); 8: Q4
+def salt : UInt64 := hash "wiz-cache-33-failed-declaration"  -- 33: failed declarations are replayed, so a use of one says "failed to elaborate" on a warm cache too; 32: `Decl.typeWritten` (the type was written, so `#check` keeps the Π names of its ascription), so cached declarations carry it; 31: macro scopes start at the command's source position (a cache hit no longer shifts them); 30: mandatory component sorts (Π/Σ carry ⟨dom, cod⟩, ULift its content's sort), a mutual block's constructors named per type, error codes, `Info.fix`, `scase` quantity (K1), `letUnit`; 20: proof markers (P2: declarations are stored marked); 15: doc comments and declaration kinds (11s); 14: a builtin key is registered once; 13: witnesses, assumed registrations, warnings; 12: private constructors, observations, fields (13b); 11: 22i, marked structure tails; 9: private names (13b); 8: Q4
 
 /-! ## Keys and atomic writes (stage 23c)
 

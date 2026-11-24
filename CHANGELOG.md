@@ -16,7 +16,6 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 
 ## [Unreleased]
 
-<<<<<<< HEAD
 * web: the browser host ABI's step entry is **three 32-bit words**. A page runtime (a
   `Web.Loom` app built through the C backend and Emscripten) now also exports
   `wiz_step : (state : i32, payload_ptr : i32, payload_len : i32) -> i32` from
@@ -31,7 +30,6 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   (`step_test.c`) check the words and the payload's length rule on a real build, and the
   page tests' stubs still drive the `i64` entry. The word entry is the ABI's shape, not a
   measured speedup.
-=======
 * extensibility (G1, shape): `Wiz/Ext` capabilities are kind-scoped. `Kind.capabilities`
   is the only list a kind may declare — a backend performs build operations, a lint set
   or rule reads the stable views (a code rule also asks for `elab.lint`), each
@@ -43,7 +41,13 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   `term-elab-capability` and `duplicate-term-elab` are pinned in `=ext`. No request set,
   payload or cache key changes; the attribute handlers are still registered in
   `CommandState` (the remaining G1 registration work).
->>>>>>> agent/lang-gap
+* diagnostics: a declaration that fails to elaborate is no longer reported as
+  `unknown identifier` at every later use. The frontend records it (name, declaration
+  span, `line:col`) and a use is a `failed-declaration` — "'broken' failed to elaborate
+  (its declaration at 2:1 has an error; fix that one)" — at the use's own span, so one
+  root error is reported once instead of a fabricated cascade. The record is part of the
+  command's cache effect (salt 33), so a warm run says the same. `error-codes.md` lists
+  the code; `=reject` pins it (cold and warm cache, with no `unknown identifier`).
 
 * ci: `bootstrap-chain.yml` publishes only what passed. The `release` job now runs only
   for a CI run that concluded `success` (the `workflow_run` gate excluded `cancelled`

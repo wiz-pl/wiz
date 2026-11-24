@@ -12,6 +12,10 @@ namespace Wiz.ErrorCode
 
 /-- a name that is neither a local nor a global in scope -/
 def unknownIdentifier := "unknown-identifier"
+/-- a name whose own declaration failed to elaborate: its uses say so (and point at the
+declaration's error) instead of `unknown identifier`. The root error is reported once, at
+the declaration; this is the cascade guard for the later references. -/
+def failedDeclaration := "failed-declaration"
 /-- (13v) `__root__` not as the first segment of a name, or a declaration named exactly
 `__root__` (it is the root escape, not a name) -/
 def rootName := "root-name"
@@ -100,7 +104,7 @@ def nonPattern := "non-pattern"
 
 /-- The codes, as `docs/error-codes.md` lists them (`nonPattern` is internal). -/
 def all : List String :=
-  [unknownIdentifier, rootName, ambiguousName, unclosedNamespace, noSuchField, unknownConstructor, unknownModule, importCycle, moduleErrors,
+  [unknownIdentifier, failedDeclaration, rootName, ambiguousName, unclosedNamespace, noSuchField, unknownConstructor, unknownModule, importCycle, moduleErrors,
    noSuchFile, importOrder,
    missingCase, missingCopattern, missingField, typeMismatch, notDefeq, wrongArgumentCount,
    unknownParameter, namedArgument, unsolvedHole, unsolvedLevel, cannotInfer, unsolvedGoals,
