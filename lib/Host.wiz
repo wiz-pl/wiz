@@ -7,10 +7,13 @@ Node process). A capability is a function the *host* provides and the program ma
 it is declared here, as Wiz data, and resolved on the host against a registry the page
 installs before `main` runs.
 
-An `extern "host.NAME"` is a capability, not an arbitrary global. The emitter (every
-backend) treats the `host.` prefix as a capability name and the generated module checks
-that every capability a program reaches is registered, before any user code — a missing
-one is a startup diagnostic (`WIZ_HOST_MISSING: fs.open`), not a trap from inside a call.
+An `extern "host.NAME"` is a capability, not an arbitrary global. The JavaScript backend
+treats the `host.` prefix as a capability name, and its generated module checks that every
+capability a program reaches is registered before any user code runs — a missing one is a
+startup diagnostic (`WIZ_HOST_MISSING: fs.open`), not a trap from inside a call. The
+WebAssembly backend refuses a `host.` extern at compile time and the C backend has no
+binding for one, so a capability is a JavaScript-target feature today; making the three
+agree (an import on Wasm, a mangled or diagnosed name on C) is open.
 `extern "js.path"` remains for page-specific glue (a DOM hook); a capability that a
 package ships goes through `host.`.
 
