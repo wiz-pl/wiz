@@ -1568,8 +1568,7 @@ EOF
           let
             w = packagesWithNse pkgs null { wizOverride = wizPkg; };
           in {
-            inherit (w) wiz-web wiz-playground wiz-playground-ui wiz-source-ui
-              wasm-fixtures site;
+            inherit (w) wiz-web wiz-playground wiz-playground-ui wiz-source-ui;
           };
       });
 
