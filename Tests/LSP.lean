@@ -336,6 +336,23 @@ def formatEdits (srv : LSP.Server) (src : String) (range? : Option (Nat × Nat) 
   | some (.arr es) => pure (srv, es)
   | _ => pure (srv, #[])
 
+/-- A `textDocument/diagnostic` pull at `file:///t.wiz`, sending back the `resultId` the
+client already has as `previousResultId` (when it has one): the reply's `result`, or its
+`error`. -/
+def pullDiagnostics (srv : LSP.Server) (previous : Option String := none) :
+    IO (LSP.Server × Lean.Json) := do
+  let prevJson := match previous with
+    | some r => s!",\"previousResultId\":\"{r}\""
+    | none => ""
+  let (srv, out) ← LSP.handle srv (req s!"\{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"textDocument/diagnostic\",\"params\":\{\"textDocument\":\{\"uri\":\"file:///t.wiz\"}{prevJson}}}")
+  pure (srv, (out[0]!.getObjVal? "result").toOption.getD ((out[0]!.getObjVal? "error").toOption.getD Lean.Json.null))
+
+/-- A `textDocument/didChange` of `file:///t.wiz` to `src` at `version`. -/
+def changeDoc (srv : LSP.Server) (src : String) (version : Nat) : IO (LSP.Server × Array Lean.Json) :=
+  LSP.handle srv (Lean.Json.mkObj [("jsonrpc", "2.0"), ("method", "textDocument/didChange"),
+    ("params", Lean.Json.mkObj [("textDocument", Lean.Json.mkObj [("uri", "file:///t.wiz"), ("version", version)]),
+                                ("contentChanges", Lean.Json.arr #[Lean.Json.mkObj [("text", src)]])])])
+
 /-- Apply a `TextEdit` array to `src` (the edits' positions are into `src`). -/
 def applyTextEdits (src : String) (es : Array Lean.Json) : String :=
   let atPos (e : Lean.Json) (k : String) : Nat :=
@@ -664,6 +681,51 @@ def serverGroup : Group where
         let (_, out4) ← LSP.handle srv2 (req "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"textDocument/formatting\",\"params\":{\"textDocument\":{\"uri\":\"file:///t.wiz\"},\"options\":{\"tabSize\":2,\"insertSpaces\":false}}}")
         check (has out4[0]! "insertSpaces") s!"no error: {out4[0]!.compress}"
         checkEq "-32602" ((LSP.get? out4[0]! ["error", "code"]).getD Lean.Json.null).compress },
+    { name := "textDocument/diagnostic: full, resultId/unchanged, version on publish", run := fun _ => do
+        -- the capability: pull diagnostics, with inter-file dependencies (includes,
+        -- imports) and no workspace-wide pull
+        let (_, caps) ← LSP.handle (← server) (req "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
+        check (has caps[0]! "diagnosticProvider") "no diagnosticProvider"
+        check (has caps[0]! "\"identifier\":\"wiz\"") s!"diagnosticProvider: {caps[0]!.compress}"
+        check (has caps[0]! "\"interFileDependencies\":true") s!"diagnosticProvider: {caps[0]!.compress}"
+        check (has caps[0]! "\"workspaceDiagnostics\":false") s!"diagnosticProvider: {caps[0]!.compress}"
+        -- a document with one error: the publish carries its version and the error
+        let src := "import Prelude\ndef two : Nat := nope\n"
+        let (srv, out) ← openDoc src
+        checkEq "1" ((LSP.get? out[0]! ["params", "version"]).getD Lean.Json.null).compress
+        let published := match LSP.get? out[0]! ["params", "diagnostics"] with
+          | some (.arr ds) => ds
+          | _ => #[]
+        checkEq 1 published.size
+        -- no previous id: the whole report, the list the publish carried
+        let (srv, r) ← pullDiagnostics srv
+        checkEq "full" (LSP.getStr r ["kind"])
+        let rid := LSP.getStr r ["resultId"]
+        check (!rid.isEmpty) s!"no resultId: {r.compress}"
+        checkEq (Lean.Json.arr published).compress ((LSP.get? r ["items"]).getD Lean.Json.null).compress
+        -- the id the client has is still current: `unchanged`, and no list
+        let (srv, r2) ← pullDiagnostics srv (some rid)
+        checkEq "unchanged" (LSP.getStr r2 ["kind"])
+        checkEq rid (LSP.getStr r2 ["resultId"])
+        check (LSP.get? r2 ["items"]).isNone s!"items in an unchanged report: {r2.compress}"
+        -- an edit: the publish's version moves on, the old id is stale and the report is
+        -- the new list; the new id is current in turn
+        let fixed := "import Prelude\ndef two : Nat := 1\n"
+        let (srv, out2) ← changeDoc srv fixed 2
+        checkEq "2" ((LSP.get? out2[0]! ["params", "version"]).getD Lean.Json.null).compress
+        let republished := match LSP.get? out2[0]! ["params", "diagnostics"] with
+          | some (.arr ds) => ds
+          | _ => #[]
+        let (srv, r3) ← pullDiagnostics srv (some rid)
+        checkEq "full" (LSP.getStr r3 ["kind"])
+        let rid2 := LSP.getStr r3 ["resultId"]
+        check (rid2 != rid) "the resultId survived an edit"
+        checkEq (Lean.Json.arr republished).compress ((LSP.get? r3 ["items"]).getD Lean.Json.null).compress
+        let (_, r4) ← pullDiagnostics srv (some rid2)
+        checkEq "unchanged" (LSP.getStr r4 ["kind"])
+        -- a document that is not open is an error, not an empty (clean) report
+        let (_, bad) ← LSP.handle srv (req "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"textDocument/diagnostic\",\"params\":{\"textDocument\":{\"uri\":\"file:///nowhere.wiz\"}}}")
+        checkEq "-32602" ((LSP.get? bad[0]! ["error", "code"]).getD Lean.Json.null).compress },
     { name := "wiz/plainGoal and wiz/plainTermGoal", run := fun _ => do
         let src := tacticSrc ++ "def f (n : Nat) : Nat := Nat.add n _\n"
         let (srv, _) ← openDoc src

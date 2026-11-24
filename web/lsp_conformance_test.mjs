@@ -514,6 +514,7 @@ const META_PROBES = {
     "textDocument/rangeFormatting",
     { ...range([0, 0], [3, 0]), options: { tabSize: 2, insertSpaces: true } },
   ],
+  diagnosticProvider: ["textDocument/diagnostic", {}],
   codeActionProvider: ["textDocument/codeAction", { ...range([1, 0], [1, 7]), context: { diagnostics: [] } }],
 };
 
