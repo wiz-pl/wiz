@@ -186,6 +186,20 @@ groups that did not opt in, for auditing one group's isolation — not for CI. O
 runner `--jobs 4` is the useful setting; more jobs only add memory pressure (a case that
 compiles C can peak at a few hundred MB).
 
+### The wall limit of a case (`--test-timeout`)
+
+Every case's process runs under `timeout --kill-after=10 N` with `N` from
+`--test-timeout N` (default 3600 s, `0` for none), and its result line prints the limit
+it ran under: `[7/0/412]   ✓ hdl: … (509.1 s / limit 3600 s)`, or `limit none` when there
+is none (a machine without `timeout` says so rather than claiming a limit). A case that
+runs past it fails with "the case ran past its wall limit of N s" instead of holding its
+shard to the job's 120-minute timeout, and `--timings` records `"limit"`, so
+`scripts/ci.py timings LOG|JSONL..` prints the ratio of every case and warns at 80 % of
+its limit (CI's per-shard Summary step runs it; `--max-ratio F` makes it a gate). A
+timeout raised where it never takes effect -- an option placed after a subcommand, the
+hdl case `9ee24e52b` -- leaves the ratio at the old limit, so the no-op is visible
+instead of being read as a fix.
+
 ### Splitting one case into parts (`--part`)
 
 `--part i/n` (1-based) runs only the files whose index `k` in the case's sorted file list
@@ -350,6 +364,49 @@ Adding a test group touches no shared file:
 * The older modules (`Tests/Lint.lean`, `Tests/LSP.lean`, …) still list their groups
   (`groups` at their end, concatenated by `Tests/Main.lean`); a new group goes in
   `Tests/Groups/` all the same.
+
+### Anti-vacuity: prove the injection, then the detection
+
+A case that asserts an outcome must also show that the thing it computed that outcome
+from actually reached the code under test. Two cases shipped red for the lack of it: the
+stub meta-case set `WIZ_SELFHOST_COMPILER` but forwarded the driver's
+`--selfhost-compiler` flag, which wins, so its children ran the **real** compiler and 211
+of 211 "passed" (nothing checked the children's stderr); and an hdl timeout was placed
+after a subcommand, so the timeout it raised never took effect (`9ee24e52b`).
+
+The rule, for every anti-vacuity or meta case:
+
+1. **Inject** a fault that cannot pass: a stub binary, a deliberately wrong value.
+2. **Read back the effective value** and fail the case unless it is the one injected.
+   For the self-hosted pipeline that line already exists on the case's stderr:
+   `selfhost-override compiler source=env|flag|build path=… id=… pid=…`, printed once
+   per process by `Tests.reportEffectiveValue`; `Tests.checkInjection` asserts it in
+   every child of the stub sweep, in seconds ("fault not injected: source=…").
+3. **Then** assert the detection (every case failed, the wrong value was rejected).
+4. Give the case a **mutation self-test** that must fail: the stub sweep's is
+   `WIZ_SELFHOST_STUB_MUTATION=env lake test -- '=selfhost-host#<case>'` (the variable
+   names the real programs instead of the stub) or `=flag` (the real programs arrive as
+   flags, the pre-2a3cfb3ba precedence); the fast half is the synthetic-stderr case next
+   to it. A detector nobody has seen fail is not known to work.
+
+A group that turns any error into a skip does not satisfy this on its own: a skip is
+not a pass, and `scripts/ci.py check-skips` counts it.
+
+### The wall limit of a case, and what it says
+
+The driver gives every case's process a wall limit (`--test-timeout N`, default 3600 s,
+`0` for none) by running it under `timeout --kill-after=10`, so a hang fails *that case*
+with a sentence naming the limit instead of holding its shard to the job's 120 minutes.
+Every case line reports it:
+
+```
+[7/0/412]   ✓ hdl: the memory, simulation and protocol goldens (509.1 s / limit 3600 s)
+```
+
+`scripts/ci.py timings LOG..` prints the same ratio from logs and `--timings` files and
+warns when a case used 80 % or more of its limit (`--max-ratio F` makes that a failure).
+That is what makes "raise the timeout" a decision someone sees: a raised timeout whose
+case still reports the old `limit` did not take effect.
 
 ### Differential fuzzing for erasure and optimisation (`=diff-fuzz`)
 
@@ -1679,6 +1736,57 @@ What it cannot check: the test suite beyond the formatter group, generated C or 
 outside the reproducibility corpus, the docs site, the release workflow, sharding
 (`scripts/ci.py check-shards`), or behaviour on another OS or architecture. It is a
 local subset of CI, not a replacement for it.
+
+### Build before a push to `integration/*`
+
+Three reds in the night of 2026-11-23 were pushed without a build of the sha that was
+pushed; one went out three seconds before its own build started. `nix eval` is not a
+build (it never runs `buildPhase`, so a broken heredoc or a missing runtime flag passes),
+and a branch's own build is not a build of its merge commit either: a merge is a new
+sha.
+
+`heavy` now records every job it runs in the worktree's `.checks/` ledger
+(`scripts/checks-ledger.py record`): the commit, whether the tree was clean at submit,
+the command and its exit status. And `.githooks/pre-push` runs
+`checks-ledger.py require --pre-push --name heavy:lake --for 'refs/heads/integration/*'`,
+which **refuses** a push to an integration branch whose sha has no clean `heavy:lake`
+record for a command containing `build` -- it prints the sha and why (`missing`, `dirty`,
+`failed`, `stale@COMMIT`, `not-a-build`). Other refs are not checked.
+
+```sh
+heavy --rsync -- lake build wiz tests      # writes the record for this sha
+python3 scripts/checks-ledger.py status    # what HEAD has (heavy:* rows included)
+```
+
+A dirty tree never counts: `heavy --rsync` copies the working tree, so a dirty run built
+something that is not the commit. `git push --no-verify` still bypasses the hook (this is
+a guard against mistakes, not a security gate); `checks-ledger.py audit [--fetch]` lists
+the `origin/integration/*` tips that this worktree's ledger cannot explain and logs each
+once to `.checks/bypass.log` -- a lead to check, not a verdict: `.checks/` is
+per-worktree, so another checkout may hold that sha's record. Enable the hook once per
+clone with `git config core.hooksPath .githooks`.
+
+### `lib.*With` and the derivations a diff changes
+
+`nix build .#X` evaluates the `packages` path, and CI's seeded builds go through
+`lib.selfhostWith { wiz; tests; }` and `lib.towerWith wiz` instead; a `lib` call that
+reads an attribute `packages` does not export (`flake.nix:1484`, `:1504`) therefore breaks
+CI while `.#X` stays green. `.github/ci-shaped.nix` names one attribute per derivation CI
+evaluates or builds (every `packages.${system}` derivation plus each `lib.*` call as
+ci.yml writes it), and `scripts/ci.py check-ci-shaped` fails when ci.yml gains a `lib.`
+call with no row there, so the set cannot drift.
+
+```sh
+scripts/touched-derivations.sh origin/integration/train13 --select-only   # seconds: eval only
+scripts/touched-derivations.sh origin/integration/train13                 # from a clean tree at HEAD
+```
+
+It compares `drvPath` at BASE and HEAD (both evaluated as committed trees, in throwaway
+worktrees) and selects every attribute whose derivation differs, is new, or **fails to
+evaluate at HEAD** -- an eval failure is the finding; then it builds each selected one,
+smallest closure first, through `heavy`, one `heavy:nix-build:<attr>` record per build.
+Evaluation only proves selection: the build is what catches a `buildPhase` bug or a
+missing runtime flag.
 
 ### Golden diffs
 

@@ -1943,14 +1943,48 @@ def selfhostLoader : IO (Name → Option String) := do
     else if m == "Text" then some textLib
     else if m == "Std" then some stdLib else if m == "Sys" then some sysLib else none
 
+/-- Every effective-value line this process has already printed (`reportEffectiveValue`).
+A line is per process and per program, not per lookup: a run looks a program up many
+times and one line per lookup would drown the case's stderr. -/
+initialize selfhostReportedRef : IO.Ref (List String) ← IO.mkRef []
+
+/-- Print the value a multi-source override actually used, once per process:
+
+`selfhost-override <program> source=flag|env|build path=<binary> id=<sidecar or -> pid=<pid>`
+
+on **stderr**, so a case can read its own children's stderr and prove that a fault it
+injected reached the code under test.  That is the anti-vacuity rule (docs/building.md,
+`Tests/Harness.lean`): a meta-case asserts an outcome *and* its input; without this
+line the stub meta-case could not tell "every case failed under the stub" from "the
+stub never took effect" -- which is exactly what happened (run 45285555908: 211 of 211
+children exited 0, because the forwarded `--selfhost-compiler` flag won over the
+`WIZ_SELFHOST_*` the case set). -/
+def reportEffectiveValue (program source path id : String) : IO Unit := do
+  let key := program ++ "\n" ++ source ++ "\n" ++ path
+  if (← selfhostReportedRef.get).contains key then return
+  selfhostReportedRef.modify (· ++ [key])
+  IO.eprintln s!"selfhost-override {program} source={source} path={path} id={id} pid={(← IO.Process.getPID)}"
+
+/-- Whether `selfhost-cache` has already been reported in this process. -/
+initialize selfhostCacheReportedRef : IO.Ref Bool ← IO.mkRef false
+
 /-- This run's cache directory for the self-hosted programs: `--selfhost-cache DIR` when
 given, else `WIZ_SELFHOST_CACHE`, else the system temp directory. Flag first, environment
 second (the flag is forwarded to each case's process, so a run cannot end up with cases
-using different caches), and the default last. -/
+using different caches), and the default last.
+
+The choice is printed once per process as `selfhost-cache source=flag|env|default
+dir=<dir> pid=<pid>` on stderr, for the same reason as `reportEffectiveValue`: a test
+that sets `WIZ_SELFHOST_CACHE` can show that the cache it meant was the cache used. -/
 def selfhostCacheDir : IO System.FilePath := do
-  if let some d ← selfhostCacheRef.get then return d
-  if let some d ← IO.getEnv "WIZ_SELFHOST_CACHE" then return System.FilePath.mk d
-  return "/tmp"
+  let (dir, source) ←
+    if let some d ← selfhostCacheRef.get then pure (d, "flag")
+    else if let some d ← IO.getEnv "WIZ_SELFHOST_CACHE" then pure (System.FilePath.mk d, "env")
+    else pure ("/tmp", "default")
+  unless ← selfhostCacheReportedRef.get do
+    selfhostCacheReportedRef.set true
+    IO.eprintln s!"selfhost-cache source={source} dir={dir} pid={(← IO.Process.getPID)}"
+  return dir
 
 /-- A binary to use instead of building the pipeline's `name` (`compiler` or `checker`),
 from `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER`; `none` in a normal run.
@@ -1970,17 +2004,21 @@ def selfhostBinaryOverride (name identity : String) : IO (Option System.FilePath
     | "compiler" => selfhostCompilerRef.get
     | "checker"  => selfhostCheckerRef.get
     | _          => pure none
-  let (path?, var) ← match fromFlag with
-    | some p => pure (some p.toString, "--selfhost-" ++ name)
+  let (path?, var, source) ← match fromFlag with
+    | some p => pure (some p.toString, "--selfhost-" ++ name, "flag")
     | none => do
       let var := "WIZ_SELFHOST_" ++ name.toUpper
-      pure ((← IO.getEnv var), var)
+      pure ((← IO.getEnv var), var, "env")
   let some path := path? | return none
   let exe : System.FilePath := System.FilePath.mk path
   let idFile : System.FilePath := System.FilePath.mk (path ++ ".selfhost-id")
   let advertised ←
     if ← idFile.pathExists then pure ((← IO.FS.readFile idFile).trimAscii.toString)
     else pure ""
+  -- The effective value, before it is checked: this line is what the stub meta-case
+  -- reads in each child to prove the fault reached the pipeline (`source=env` with the
+  -- stub's path), and it names the sidecar, so a refusal says what it saw.
+  reportEffectiveValue name source path (if advertised.isEmpty then "-" else advertised)
   unless advertised == identity do
     throw (IO.userError (s!"{var}={path} is stale: this tree's {name} identity is " ++
       s!"{identity}, the override's {idFile} says " ++
@@ -2081,7 +2119,9 @@ def selfhostChecker : IO (Except String System.FilePath) := do
     return .ok exe
   match ← buildSelfhostProgram "checker" (Selfhost.checkerSource src) with
   | .error e => return .error e
-  | .ok (exe, _) => return .ok exe
+  | .ok (exe, _) =>
+    reportEffectiveValue "checker" "build" exe.toString "-"
+    return .ok exe
 
 /-- The self-hosted compiler (stage 21): the frontend and `Backend.wiz`, printing the C
 program for `input.wiz` (the frontend's own output as comments). -/
@@ -2092,7 +2132,9 @@ def selfhostCompiler : IO (Except String System.FilePath) := do
     return .ok exe
   match ← buildSelfhostProgram "compiler" (Selfhost.compilerSource src) with
   | .error e => return .error e
-  | .ok (exe, _) => return .ok exe
+  | .ok (exe, _) =>
+    reportEffectiveValue "compiler" "build" exe.toString "-"
+    return .ok exe
 
 /-- Check a file of commands with the whole self-hosted pipeline (compiled), and compare
 its output. -/

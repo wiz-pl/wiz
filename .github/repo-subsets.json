@@ -3,7 +3,7 @@
   "git": "unstaged",
   "subsets": {
     "docs": {
-      "files": 117,
+      "files": 118,
       "paths": [
         "docs/**",
         "README.md",
@@ -11,7 +11,7 @@
         "AGENTS.md",
         ".github/**"
       ],
-      "sha256": "c75034f4fd0259d05b1def3d53c02d5fa50508ad269b10dac6a495016ee0f710"
+      "sha256": "fd5536adcf72f6df747de7224507417487be317144c431983c15c12a0df3834d"
     },
     "lean": {
       "files": 167,
@@ -52,7 +52,7 @@
         "Tests/**",
         "web/**"
       ],
-      "sha256": "c91c6ca4c5eded4e8859388429afdf993a1fa447ec1f9319bfc662e2994ae6a5"
+      "sha256": "40be9af20c780e81b739758dcd9a178295c90732ebb6dbc6464f74d5ef772bd3"
     },
     "wizlib": {
       "files": 112,

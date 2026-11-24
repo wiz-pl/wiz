@@ -1,22 +1,42 @@
 #!/bin/sh
-# Remind the pusher which registered light checks have no clean record for the
-# commit(s) being pushed.  This is advisory: it always exits 0 and never blocks
-# a push.
+# Two checks on the commits being pushed, both against the gitignored `.checks/`
+# ledger:
 #
-# The records live in `.checks/` (gitignored, per worktree) and are written by
-# `scripts/checks-ledger.py run NAME`.  They are keyed by commit + check, so an
-# amend or rebase needs fresh runs.  `.checks/` is untrusted by design: it is a
-# fast-fail reminder, not a security gate, and CI does not read it.
+#  * `warn` (advisory) reminds the pusher which registered light checks have no
+#    clean record for the commit(s) being pushed;
+#  * `require` (blocking) refuses a push to `refs/heads/integration/*` whose sha
+#    has no clean BUILD record from `heavy`.  `nix eval` does not run a builder,
+#    so only a build of this exact sha proves it compiles; a merge commit is a
+#    new sha, so the merge result has to be built.  Other refs are not checked:
+#    agent branches keep pushing freely.
+#
+# It cannot block the other way: `git push --no-verify` is git's own escape
+# hatch and skips this hook entirely.  A bypass leaves no trace here at the
+# moment it happens; `audit` reports it later, from the remote-tracking refs
+# (`.checks/bypass.log`).  This is a local guard against mistakes, not a
+# security gate: `.checks/` is untrusted (see scripts/checks-ledger.py).
 #
 # Install the repository's hooks once per clone:
 #     git config core.hooksPath .githooks
 # (scripts/install-hooks.sh is the older per-clone alternative; it does not
-# install this warning.)
+# install this hook.)
 set -u
 
 root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 [ -f "$root/scripts/checks-ledger.py" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
-python3 "$root/scripts/checks-ledger.py" warn --pre-push || true
-exit 0
+# Both checks read git's pre-push stdin, and a stream can be read once: keep a
+# copy for the second one.  Without a temp file the push would still be checked
+# by `warn` only, which would silently drop the blocking half.
+tmp=$(mktemp 2>/dev/null) || exit 0
+trap 'rm -f "$tmp"' EXIT
+trap 'exit 1' HUP INT TERM
+cat > "$tmp"
+
+python3 "$root/scripts/checks-ledger.py" warn --pre-push < "$tmp" || true
+# a remote tip with no record is a push that skipped this hook (`--no-verify`)
+python3 "$root/scripts/checks-ledger.py" audit --for 'refs/heads/integration/*' >/dev/null 2>&1 || true
+python3 "$root/scripts/checks-ledger.py" require --pre-push \
+  --name 'heavy:lake' --for 'refs/heads/integration/*' < "$tmp"
+exit $?

@@ -146,11 +146,13 @@ def jsonStr (s : String) : String := Id.run do
         else out.push c
   return out.push '"'
 
-/-- The `--timings` record of a case: one line of JSON. -/
-def timingLine (shard group : String) (r : CaseResult) : String :=
+/-- The `--timings` record of a case: one line of JSON.  `limit` is the wall limit the
+case ran under (`--test-timeout`, or `null` for none), so `scripts/ci.py timings` can
+say how much of it a case used without re-parsing the log. -/
+def timingLine (shard group : String) (r : CaseResult) (limit : Option Nat) : String :=
   let notes := ", ".intercalate (r.notes.map jsonStr)
   s!"\{\"shard\": {jsonStr shard}, \"group\": {jsonStr group}, \"index\": {r.index}, \"case\": {jsonStr r.name}, " ++
-  s!"\"seconds\": {showMs r.ms}, \"ok\": {r.ok}, \"notes\": [{notes}]}"
+  s!"\"seconds\": {showMs r.ms}, \"limit\": {match limit with | some n => toString n | none => "null"}, \"ok\": {r.ok}, \"notes\": [{notes}]}"
 
 /-- Remove `--FLAG VALUE` from the arguments; the value, if it was there. -/
 def takeFlag (flag : String) : List String → Option String × List String
@@ -212,6 +214,12 @@ in still run one case at a time, but each of their cases is told N (`Tests.caseJ
 long sweep may use N workers inside its one process (`=selfhost-libdiff`, fewer when the
 memory or CPUs are short). `--jobs-all` also parallelizes groups that did not opt in (for
 auditing a group's isolation, not for CI).
+
+`--test-timeout N` (default 3600 s, `0` for none) is the wall limit each case's process
+is given (`Tests.caseCommand`: `timeout --kill-after=10 N`); every case line prints it
+(`(12.3 s / limit 3600 s)`, `limit none` without one), and `--timings` records it as
+`"limit"`, so `scripts/ci.py timings` can warn at 80 % of it. A case that runs past the
+limit fails with that sentence rather than holding the shard to the job timeout.
 
 `--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--ratchet FILE] [--jobs N] [--part i/n]`
 runs the self-hosted compiler and the Lean frontend over every `lib/` and `scry/` file
@@ -278,9 +286,23 @@ def mainImpl (args : List String) : IO UInt32 := do
   -- each case's process; not given, a case runs the whole sweep (`1/1`)
   let (partArg, args) := takeFlag "--part" args
   casePartRef.set (partArg.getD "")
+  -- `--test-timeout N`: the wall limit each case's process is given (`timeout`), printed
+  -- in every case line and recorded in `--timings`; 0 means no limit.  It is taken off
+  -- here, like `--jobs`, so it does not reach a case's `--run-case` child (the parent
+  -- owns the wrapper).
+  let (timeoutArg, args) := takeFlag "--test-timeout" args
+  let some timeoutLimit := (match timeoutArg with
+      | none => some (some defaultCaseTimeoutS)
+      | some s => match s.toNat? with
+        | some 0 => some none
+        | some n => some (some n)
+        | none => none)
+    | IO.eprintln s!"--test-timeout needs a number of seconds (0 for no limit), not {timeoutArg}";
+      return 2
+  setTestTimeLimit timeoutLimit
   -- the processes the suite starts get the toolchain as flags
   let child := match args with
-    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | ["--list-parallel"] | "--list-cases" :: _ | "--allocs" :: _ | "--libdiff-host" :: _ | "--part" :: _ | "--selfhost-identity" :: _ | "--selfhost-cache-probe" :: _ => true
+    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | ["--list-parallel"] | "--list-cases" :: _ | "--allocs" :: _ | "--libdiff-host" :: _ | "--part" :: _ | "--selfhost-identity" :: _ | "--selfhost-cache-probe" :: _ | "--selfhost-override-probe" :: _ => true
     | _ => false
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
@@ -359,6 +381,13 @@ def mainImpl (args : List String) : IO UInt32 := do
   -- and its lock test hook (two concurrent probes with one tag build once)
   | "--selfhost-identity" :: rest => Elab.selfhostIdentityMain (rest.headD "")
   | "--selfhost-cache-probe" :: rest => Elab.selfhostCacheProbe (rest.headD "")
+  -- The effective-value line on its own, for the unit case in `=testrunner`: the three
+  -- sources print `source=flag|env|build`, so a line that loses its source is caught
+  -- without building a self-hosted program.
+  | ["--selfhost-override-probe", source] => do
+    Elab.reportEffectiveValue "compiler" source "/tmp/selfhost-override-probe"
+      (if source == "flag" then "abc" else "-")
+    pure 0
   -- `--part` was taken off above (it is a driver flag, not a toolchain flag); give it
   -- back to the sweep's own command line, which validates it
   | "--libdiff" :: rest =>
@@ -404,7 +433,7 @@ def mainImpl (args : List String) : IO UInt32 := do
     let record (g : Group) (r : CaseResult) : IO Unit := do
       if let some file := timings then
         let h ← IO.FS.Handle.mk file .append
-        h.putStrLn (timingLine shard g.name r)
+        h.putStrLn (timingLine shard g.name r (← effectiveLimit))
     let mut passed := 0
     let mut failed := 0
     let mut skipped := 0

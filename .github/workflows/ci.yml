@@ -660,6 +660,13 @@ jobs:
         run: |
           python3 scripts/ci.py check-shards --self-test
           python3 scripts/ci.py check-shards "${{ steps.nix.outputs.tests }}/bin/tests"
+      - name: Every `lib.` call in ci.yml has a row in ci-shaped.nix
+        # The touched-derivations selector (scripts/touched-derivations.sh) only sees
+        # what .github/ci-shaped.nix names, so a new CI call site with no row would be
+        # silently unselected. This is a text check: no nix, a few milliseconds.
+        run: |
+          python3 scripts/ci.py check-ci-shaped --self-test
+          python3 scripts/ci.py check-ci-shaped
       - name: Shards
         id: shards
         run: |
@@ -1337,7 +1344,11 @@ jobs:
           [ -f "logs/${{ matrix.shard.name }}.log" ] || exit 0
           shopt -s nullglob
           python3 scripts/ci.py summary "shard ${{ matrix.shard.name }}" logs/${{ matrix.shard.name }}.log logs/${{ matrix.shard.name }}.jsonl >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+          # The cases' effective wall limits (`--timings` "limit", printed in every case
+          # line): a case at 80 % of its limit is a warning annotation, so raising a
+          # timeout that never took effect (an option after the subcommand, 9ee24e52b)
+          # is visible instead of looking like a fix.
+          python3 scripts/ci.py timings logs/${{ matrix.shard.name }}.jsonl >> "$GITHUB_STEP_SUMMARY" || true      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: test-log-${{ matrix.shard.name }}

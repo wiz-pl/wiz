@@ -6,6 +6,23 @@ import Tests.Loader
 
 Each group is tagged with the exercise it exercises. `lake test -- <group>...` runs only
 the named groups. Unimplemented `sorry`s fail at runtime with "executed 'sorry'".
+
+## Two rules for every case
+
+**Prove the injection, then the detection.** A case that asserts an outcome must also
+show that its input reached the code under test; an anti-vacuity or meta case must read
+back the effective value it injected and fail unless that is what ran
+(`Tests.checkInjection` in `Tests/Groups/SelfHost.lean` reads
+`selfhost-override … source=env path=<stub>` lines). The stub meta-case shipped vacuous
+for a night because nothing read the children's stderr: 211 of 211 children ran the real
+compiler and passed. Every such case also needs a mutation self-test that must fail
+(`WIZ_SELFHOST_STUB_MUTATION=env|flag`); docs/building.md, "Anti-vacuity".
+
+**Every case runs under a printed wall limit** (`--test-timeout`, default
+`defaultCaseTimeoutS`, `timeout --kill-after=10`), and its result line says
+`(12.3 s / limit 3600 s)` or `limit none`. A case that runs past it fails with that
+sentence; `scripts/ci.py timings` warns at 80 % of the limit. A timeout raised where it
+never takes effect is then visible as the old limit instead of looking like a fix.
 -/
 
 namespace Tests
@@ -237,6 +254,68 @@ def showMs (ms : Nat) : String :=
   let frac := toString (ms % 1000)
   s!"{ms / 1000}.{"".pushn '0' (3 - frac.length)}{frac}"
 
+/-- The default per-case wall limit, in seconds (see `testTimeLimitRef`).  3600 is above
+every case in `.github/test-timings.json` (the longest is ~1430 s), so the first thing it
+bites is a genuine hang or a case that grew far past its measured time -- not a case that
+is merely slow today. -/
+def defaultCaseTimeoutS : Nat := 3600
+
+/-- The wall limit each case's process is given, in seconds: `--test-timeout N` (default
+`3600`, `0` for no limit).  `Group.run` wraps the case in
+`timeout --kill-after=10 N`, so a case that hangs is killed and named, instead of
+holding its shard until the job's 120-minute timeout.
+
+The limit is printed in every case line (`(12.3 s / limit 3600 s)`) and recorded in
+`--timings` ("limit"), so a timeout that never takes effect -- an option after a
+subcommand (the hdl case, 9ee24e52b) -- is visible as the old limit, not assumed to
+have worked; `scripts/ci.py timings` warns at 80 % of it. -/
+initialize testTimeLimitRef : IO.Ref (Option Nat) ← IO.mkRef (some defaultCaseTimeoutS)
+
+def setTestTimeLimit (limit : Option Nat) : IO Unit := testTimeLimitRef.set limit
+
+/-- The run's wall limit per case (`none`: no limit). -/
+def testTimeLimit : IO (Option Nat) := testTimeLimitRef.get
+
+/-- Whether `timeout` is on PATH (coreutils), asked once.  Without it the limit cannot be
+enforced, and every case line says `limit none` rather than claiming one. -/
+initialize timeoutAvailableRef : IO.Ref (Option Bool) ← IO.mkRef none
+
+def timeoutAvailable : IO Bool := do
+  if let some b ← timeoutAvailableRef.get then return b
+  let b ← try
+    let o ← IO.Process.output { cmd := "timeout", args := #["--version"] }
+    pure (o.exitCode == 0)
+  catch _ => pure false
+  timeoutAvailableRef.set (some b)
+  return b
+
+/-- The limit a case's line reports: the configured one, unless this machine cannot
+enforce it. -/
+def effectiveLimit : IO (Option Nat) := do
+  if ← timeoutAvailable then testTimeLimit else pure none
+
+/-- The command and arguments that run one case: the driver under `timeout` when the
+run has a wall limit (`timeout --kill-after=10 N SELF --run-case GROUP I …`), so the
+grandchildren a case starts are killed with it. -/
+def caseCommand (self : System.FilePath) (g : Group) (i : Nat) (flags : Array String) :
+    IO (String × Array String) := do
+  let args := #["--run-case", g.name, toString i] ++ flags
+  if let some secs ← effectiveLimit then
+    return ("timeout", #["--kill-after=10", toString secs, self.toString] ++ args)
+  return (self.toString, args)
+
+/-- The exit codes `timeout` uses: 124 for the limit, 137 for the `SIGKILL` ten seconds
+after the `SIGTERM` (a case that ignores the first signal). -/
+def timedOut (code : UInt32) : Bool := code == 124 || code == 137
+
+/-- What a case that ran past its limit reports: the limit, and the two honest causes
+(a hang, or a case that got much slower), so raising it stays a decision. -/
+def limitMessage (limit : Option Nat) : String :=
+  s!"the case ran past its wall limit of {limit.getD 0} s (`timeout` killed it):" ++
+  " it hung, or it is far slower than .github/test-timings.json says." ++
+  " Check with `scripts/ci.py timings` before raising --test-timeout."
+
+
 /-- One case's result: its index in the group, its name, whether it passed (a skipped
 case did not fail: `ok`, with the reason in `skipped`), its wall time in milliseconds, the
 notes it printed (`note`), and, for a failure, its output (indented, as the suite prints
@@ -255,15 +334,23 @@ cases this run selected - the case number, how many have failed so far in this
 invocation (this case included when it is the failure), and the size of the selection -
 then `✓` passed, `✗` failed (with its output), or `⊘` skipped (with the reason). The
 middle number is what makes a long shard readable while it runs: it says whether the run
-is currently losing cases without waiting for the final count. -/
-def renderResult (r : CaseResult) (n failed total : Nat) : String :=
+is currently losing cases without waiting for the final count.
+
+`(SECONDS s / limit N s)` is the case's effective timeout (Guard C): a case run without
+one says `limit none`, so a timeout that never took effect cannot look like one that
+did. -/
+def renderResult (r : CaseResult) (n failed total : Nat) (limit : Option Nat := none) :
+    String :=
   let num := s!"[{n}/{failed}/{total}] "
+  let when := match limit with
+    | some secs => s!" ({showMs r.ms} s / limit {secs} s)"
+    | none => s!" ({showMs r.ms} s / limit none)"
   if let some why := r.skipped then
-    s!"{num}  ⊘ {r.name} ({showMs r.ms} s)\n      skipped ({why})"
+    s!"{num}  ⊘ {r.name}{when}\n      skipped ({why})"
   else if r.ok then
-    s!"{num}  ✓ {r.name} ({showMs r.ms} s)"
+    s!"{num}  ✓ {r.name}{when}"
   else
-    s!"{num}  ✗ {r.name} ({showMs r.ms} s)\n      {r.output}"
+    s!"{num}  ✗ {r.name}{when}\n      {r.output}"
 
 /-- The result of a case's process: its child's exit code and output, and the time the
 child ran for (`now` - `start`, measured in the process, not around a queue). -/
@@ -315,6 +402,7 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
   -- into it); the other cases ignore it
   let part ← casePart
   let partArgs := if part.isEmpty then #[] else #["--part", part]
+  let limit ← effectiveLimit
   let mut results := #[]
   let mut n := start
   -- failures printed so far (skips are not failures: a skip is a pass with a reason)
@@ -323,10 +411,9 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
     if let some ixs := only then
       unless ixs.contains i do continue
     let began ← IO.monoMsNow
+    let (cmd, args) ← caseCommand self g i (jobArgs ++ partArgs ++ (← flagsRef.get).toArray)
     let child ← IO.Process.spawn
-      { cmd := self.toString,
-        args := #["--run-case", g.name, toString i] ++ jobArgs ++ partArgs ++ (← flagsRef.get).toArray
-        stdin := .null, stdout := .piped, stderr := .piped }
+      { cmd, args, stdin := .null, stdout := .piped, stderr := .piped }
     let outT ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
     let errT ← IO.asTask (readCaseStderr child.stderr) Task.Priority.dedicated
     let code ← child.wait
@@ -335,8 +422,9 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
     let err ← IO.ofExcept errT.get
     forwardGuessLines g i err
     let r := caseResult c i code out err ms
+    let r := if timedOut code && !r.ok then { r with output := limitMessage limit } else r
     let failedNow := if r.ok then failed else failed + 1
-    IO.println (renderResult r n failedNow total)
+    IO.println (renderResult r n failedNow total limit)
     stdout.flush
     failed := failedNow
     onResult r
@@ -364,12 +452,13 @@ private structure Live where
 /-- Start a case's process and the tasks that collect it: one reads each pipe (so the
 child never blocks on a full pipe) and one waits for it (so its wall time does not
 include the time it waits in the pool's queue). The child stays in the driver's process
-group, as it was sequentially: `Ctrl-C` at the terminal reaches the running cases too. -/
+group, as it was sequentially: `Ctrl-C` at the terminal reaches the running cases too.
+The process is the run's `timeout` wrapper when there is a wall limit (`caseCommand`). -/
 private def startCase (self : System.FilePath) (g : Group) (i : Nat) (flags : Array String) : IO Live := do
   let start ← IO.monoMsNow
+  let (cmd, args) ← caseCommand self g i flags
   let child ← IO.Process.spawn
-    { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ flags
-      stdin := .null, stdout := .piped, stderr := .piped }
+    { cmd, args, stdin := .null, stdout := .piped, stderr := .piped }
   let out ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
   let err ← IO.asTask (readCaseStderr child.stderr) Task.Priority.dedicated
   let code ← IO.asTask (do pure (← child.wait, (← IO.monoMsNow) - start)) Task.Priority.dedicated
@@ -396,6 +485,7 @@ def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
   let flags := (if part.isEmpty then #[] else #["--part", part]) ++ (← flagsRef.get).toArray
   let todo := (List.range g.cases.length).filter fun i => only.all (·.contains i)
   let total := total.getD todo.length
+  let limit ← effectiveLimit
   let pending ← IO.mkRef todo
   let live ← IO.mkRef ([] : List Live)
   let results ← IO.mkRef ([] : List CaseResult)
@@ -427,13 +517,14 @@ def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
           | throw (IO.userError s!"no case {l.index} in {g.name}")
         forwardGuessLines g l.index stderr
         let r := caseResult c l.index code stdout stderr ms
+        let r := if timedOut code && !r.ok then { r with output := limitMessage limit } else r
         -- cases are printed in `todo` order, so the results collected so far are the
         -- numbers just before this one; numbering here (not in the child) keeps the
         -- pool's parallel processes from interleaving numbers
         let n := start + (← results.get).length
         let failedNow ← if r.ok then failedRef.get else do
           failedRef.modify (· + 1); failedRef.get
-        IO.println (renderResult r n failedNow total)
+        IO.println (renderResult r n failedNow total limit)
         (← IO.getStdout).flush
         results.modify (· ++ [r])
         onResult r
