@@ -27,7 +27,7 @@
         "lake-manifest.json",
         "lean-toolchain"
       ],
-      "sha256": "25d8d834aa1285889fb264cbeb22691c2115453285736b111aeb2a831a78dcbf"
+      "sha256": "a1ccbb0ae7c9340cca7a6b7dd85be725f4881851fd228a22870538d90533dd0c"
     },
     "packages": {
       "files": 929,
@@ -52,7 +52,7 @@
         "Tests/**",
         "web/**"
       ],
-      "sha256": "f0c98d10c709cf6d16e23812c16b5d44a51b7c60e19b5bd0564d8af50880931a"
+      "sha256": "69aeab9c09e46a619b1fc6552a3d98942dd4c0eb6bfeb2fe5f4ef14c96a2bfd5"
     },
     "wizlib": {
       "files": 112,

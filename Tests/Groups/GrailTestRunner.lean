@@ -138,6 +138,19 @@ def testRunnerGroup : Group where
           check (!slow.ok && (slow.message.splitOn "timed out").length > 1) s!"slow: {slow.message}"
           check declared.ok s!"declared: {declared.message}"
         | _, _ => throw (IO.userError s!"results: {res.toList.map (·.file)}") },
+    { name := "-- test-timeout SECS: both positions reach the runner (a leading flag was discarded)", run := fun _ => do
+        -- `grail --test-timeout 900 test` parsed 900 into the leading options, and the
+        -- `test` branch re-parsed from `{}`, so the runner kept 300 s: an example that
+        -- needs 222 s timed out at exactly 300 s *with the flag set*. `testOpts` seeds the
+        -- parse from the leading options, and the flag after the subcommand still wins.
+        let leading := ["--test-timeout", "900"]
+        let outer := (Grail.grailOpts {} leading).1
+        checkEq (some 900) (Grail.testOpts outer []).1.testTimeout
+        checkEq (some 900) (Grail.testOpts {} ["--test-timeout", "900"]).1.testTimeout
+        checkEq (some 5) (Grail.testOpts outer ["--test-timeout", "5"]).1.testTimeout
+        checkEq (some 900) (Grail.testOpts outer ["--update"]).1.testTimeout
+        -- the flag is consumed, not left in the filters
+        checkEq ["--update"] (Grail.testOpts outer ["--test-timeout", "5", "--update"]).2 },
     { name := "-- test: run compiles and runs main", run := fun _ => do
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
           ("tests/hello.wiz", "-- test: run\nimport IO\ndef main : IO Unit := IO.println \"hi\"\n"),
