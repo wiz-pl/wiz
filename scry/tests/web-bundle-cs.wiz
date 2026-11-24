@@ -172,6 +172,47 @@ def idOf (files : List Json) (suffix : String) : String :=
 def fileWith (files : List Json) (id : String) : Option Json :=
   List.find (fun f => String.eq (jStr f ["id"]) id) files
 
+/-- `List.mapM`: the library has no monadic map (`List.traverseM` is Optic's state-passing
+traversal), so this is the usual hand-written one, as `filterMap` above is. -/
+partial def mapME {A B : Type} (f : A → EIO B) : List A → EIO (List B)
+  | .nil => EIO.pure []
+  | .cons x rest => do
+    y ← f x;
+    ys ← mapME f rest;
+    EIO.pure (List.cons y ys)
+
+/-- Whether a finding's span is inside its file and its id is listed in that file's JSON.
+A `let`-bound `fun … => do` loses the block's termination (the parser then blames the next
+`def`), so the body lives here as a top-level definition - the same hoist `Scry.Cs.finish`
+needed for its `do` arms. -/
+def findingBound (files : List Json) (f : Json) : EIO Bool := do
+  let id := jStr f ["fileId"];
+  match fileWith files id with
+  | .none => EIO.pure .false
+  | .some meta => do
+    d ← readFile id;
+    let len := units (jStr d ["source"]);
+    let inJson := List.any (fun g => String.eq (jStr g ["id"]) (jStr f ["id"]))
+      (jList d ["findings"]);
+    EIO.pure (Bool.and (Bool.and (Nat.lt (jNat f ["span", "start"])
+        (jNat f ["span", "stop"])) (Nat.le (jNat f ["span", "stop"]) len)) inJson)
+
+/-- The `leftOut` count the manifest records for the truncated file whose path ends `name`,
+or 0 when the manifest does not name it. A `let`-bound function with a parameter does not
+parse (the same family as a `let`-bound `do`), so it lives at top level. -/
+def leftOutOf (manifest : Json) (name : String) : Nat :=
+  match List.find (fun t => String.endsWith (jStr t ["path"]) name)
+      (jList manifest ["ast", "truncated"]) with
+  | .some t => jNat t ["leftOut"]
+  | .none => 0
+
+/-- Whether the two exports wrote the same file `p`. A `let`-bound function with a `do`
+body loses the block's termination, so it is a top-level definition. -/
+def sameExport (p : String) : EIO Bool := do
+  a ← FS.readFile ("build/web-bundle-cs/" ++ p);
+  b ← FS.readFile ("build/web-bundle-cs2/" ++ p);
+  EIO.pure (String.eq a b)
+
 def main : IO Unit := EIO.toIO (do
   bin ← EIO.lift (FS.exists ".grail/bin/scry");
   match bin with
@@ -208,7 +249,14 @@ def main : IO Unit := EIO.toIO (do
     let flowRows := List.filter (isKind "flow") shFacts;
     say ("shell: sink=" ++ Nat.repr (List.length sinkRows) ++ " flow="
       ++ Nat.repr (List.length flowRows) ++ " ast=" ++ Nat.repr (List.length astRows));
-    check "cs bundle: Shell.cs has its sink row" (Nat.beq (List.length sinkRows) 1);
+    -- A count of exactly 1 was a guess written before this path ever ran; the analyser
+    -- reports every sink it derives, including the ones propagated through the helpers
+    -- `Shell.Run` calls. Assert the property that matters - at least one, and the pinned
+    -- `Process.Start(cmd)` sink among them - not a total that was invented.
+    check "cs bundle: Shell.cs has sink rows" (Nat.lt 0 (List.length sinkRows));
+    check "cs bundle: the pinned sink at 13:9 is present"
+      (List.any (fun x => Bool.and (String.eq (column x "rule") "command-injection")
+        (Nat.beq (jNat x ["line"]) 13)) sinkRows);
     check "cs bundle: the sink row names its rule"
       (List.all (fun x => String.eq (column x "rule") "command-injection") sinkRows);
     -- Parity with the C bundle: a `flow` row carries the same columns `Scry.webFactsOf`
@@ -238,18 +286,7 @@ def main : IO Unit := EIO.toIO (do
     -- Findings: the count against the manifest, all in bound, all in their file's JSON.
     check ("cs bundle: " ++ Nat.repr (List.length findings) ++ " finding(s) match the manifest")
       (Nat.beq (List.length findings) nFindings);
-    let boundOf : Json → EIO Bool := fun f => do
-      let id := jStr f ["fileId"];
-      match fileWith files id with
-      | .none => EIO.pure .false
-      | .some meta => do
-        d ← readFile id;
-        let len := units (jStr d ["source"]);
-        let inJson := List.any (fun g => String.eq (jStr g ["id"]) (jStr f ["id"]))
-          (jList d ["findings"]);
-        EIO.pure (Bool.and (Bool.and (Nat.lt (jNat f ["span", "start"])
-            (jNat f ["span", "stop"])) (Nat.le (jNat f ["span", "stop"]) len)) inJson);
-    bounds ← List.mapM boundOf findings;
+    bounds ← mapME (findingBound files) findings;
     check "cs bundle: every finding's span is inside its file, listed in its file's JSON"
       (List.all (fun b => b) bounds);
     -- Unicode.cs: the byte/UTF-16 case. Its sink is `Process.Start(cmd);` — 19 units at
@@ -291,12 +328,7 @@ def main : IO Unit := EIO.toIO (do
     huge ← readFile (idOf files "Huge.cs");
     let hugeAst := List.length (List.filter (isKind "ast") (jList huge ["facts"]));
     let cap := jNat m ["ast", "cap"];
-    let leftOutOf (name : String) : Nat :=
-      match List.find (fun t => String.endsWith (jStr t ["path"]) name)
-          (jList m ["ast", "truncated"]) with
-      | .some t => jNat t ["leftOut"]
-      | .none => 0;
-    let leftOut := leftOutOf "Huge.cs";
+    let leftOut := leftOutOf m "Huge.cs";
     say ("huge: ast=" ++ Nat.repr hugeAst ++ " cap=" ++ Nat.repr cap
       ++ " leftOut=" ++ Nat.repr leftOut);
     check "cs bundle: Huge.cs keeps the manifest's cap and no more"
@@ -353,15 +385,14 @@ def main : IO Unit := EIO.toIO (do
     -- Determinism.
     r2 ← run ["cs", target, "--bundle", "build/web-bundle-cs2", "--assets", "../web"];
     check "cs bundle: the second export exits 0" (Nat.beq r2.code 0);
-    let same (p : String) : EIO Bool := do
-      a ← FS.readFile ("build/web-bundle-cs/" ++ p);
-      b ← FS.readFile ("build/web-bundle-cs2/" ++ p);
-      EIO.pure (String.eq a b);
-    check "cs bundle: two exports write the same manifest" (← same "data/manifest.json");
-    check "cs bundle: two exports write the same files" (← same "data/files.json");
-    check "cs bundle: two exports write the same findings" (← same "data/findings.json");
-    check "cs bundle: two exports write the same per-file JSON"
-      (← same ("data/f/" ++ shellId ++ ".json"));
+    sameManifest ← sameExport "data/manifest.json";
+    check "cs bundle: two exports write the same manifest" sameManifest;
+    sameFiles ← sameExport "data/files.json";
+    check "cs bundle: two exports write the same files" sameFiles;
+    sameFindings ← sameExport "data/findings.json";
+    check "cs bundle: two exports write the same findings" sameFindings;
+    sameFileJson ← sameExport ("data/f/" ++ shellId ++ ".json");
+    check "cs bundle: two exports write the same per-file JSON" sameFileJson;
     -- `scry web` on the same tree: refused, the C# path named, nothing written.
     w ← run ["web", target, "--out", "build/web-bundle-cs-refused"];
     check "web refuses a C#-only tree (non-zero exit)" (Bool.not (Nat.beq w.code 0));

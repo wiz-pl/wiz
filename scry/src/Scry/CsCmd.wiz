@@ -11,6 +11,10 @@ import Scry.CsLower
 import Scry.SourceBundle
 import Scry.TaintCmd
 import Web.EditorModel
+import Web.Loom
+import Web.Source.Facts
+import Web.Source.Static
+import Scry.WebCmd
 import Web.Source.Model
 import Web.Source.Span
 /-!
@@ -25,6 +29,7 @@ section names every file, construct and exclusion that was not fully analysed.
 ```
 scry cs PATH [--json] [--sarif OUT] [--bundle DIR] [--assets DIR]
              [--fail-on error|warning|note] [--rules FILE] [--no-taint]
+                   [--ui FILE]
 ```
 
 `PATH` is a directory, a `.csproj`, a `.sln`/`.slnx`, or a single `.cs` file.
@@ -914,7 +919,7 @@ are `Scry.bundleModelOf`'s (C#'s findings and `sink`/`flow` rows) plus the `ast`
 each file's parse; `Scry.bundleWriteData` writes the four data files and the per-file
 JSONs, so the shapes are the C export's. Without the Loom runtime this command does not
 link, `index.html` is a plain listing of what the data holds, never a blank page. -/
-def Scry.Cs.writeBundle (assetsOpt : Option String) (out : String) (t : Scry.Cs.Target)
+def Scry.Cs.writeBundle (assetsOpt uiOpt : Option String) (out : String) (t : Scry.Cs.Target)
     (results : List Scry.Cs.FileResult) (analysis : Scry.Cs.Analysis)
     (r : Scry.Cs.Report) : EIO Unit := do
   models ← Scry.Cs.bundleModelsGo analysis.raw analysis.checks analysis.origins results;
@@ -928,20 +933,43 @@ def Scry.Cs.writeBundle (assetsOpt : Option String) (out : String) (t : Scry.Cs.
   Scry.bundleWarnLarge files;
   Scry.bundleDirs out;
   assets ← Scry.webFindAssets assetsOpt;
+  -- The reader's host, the same set `scry web` copies (`WebCmd.wiz:395-406`): the page
+  -- `bundleIndexHtml` writes below mounts `app.js`, which loads `source-static.js` for its
+  -- answers. Copying only three of them left the reader unable to answer a hover.
   host ← (match assets with
     | .none => EIO.pure []
     | .some d => Scry.webCopyHostGo d out
         [("source-app.js", "app.js"), ("source.css", "app.css"),
-         ("source-static.js", "source-static.js")]);
+         ("source-static.js", "source-static.js"),
+         ("source-live.js", "source-live.js"),
+         ("lsp-client.js", "lsp-client.js")]);
   framework ← (match assets with
     | .none => EIO.pure []
-    | .some d => Scry.webCopyHostGo d out
-        [("framework/mount.js", "framework/mount.js")
-        , ("framework/driver.js", "framework/driver.js")
-        , ("framework/runtime.js", "framework/runtime.js")]);
-  Scry.bundleWriteData out Scry.sourceTool files findings facts host framework .false
+    | .some d => Scry.webCopyFrameworkGo d out
+        ["mount.js", "driver.js", "runtime.js", "adopt.js"]);
+  -- The Loom runtime (`--ui`): `app.js` imports `wiz-source-ui.mjs`, so a bundle without
+  -- it 404s that module and the page cannot mount. `scry web` copies it the same way.
+  Scry.bundleWriteData out Scry.sourceTool files findings facts host framework
+    (match uiOpt with | .none => Bool.false | .some _ => Bool.true)
     (Scry.Cs.bundleExtra t r truncated filesWithAst);
-  FS.writeFile (String.append out "/index.html") (Scry.Cs.bundlePage files findings);
+  _copied ← match uiOpt with
+    | .none => EIO.pure (.false : Bool)
+    | .some src => Scry.webCopy src (String.append out "/wiz-source-ui.mjs");
+  -- The interactive reader, not a listing: `bundleIndexHtml` wraps the Loom runtime's
+  -- SSR in `<div id="app" data-wiz-mode="static">` and `app.js` mounts on it, so the page
+  -- shows the source with an infoview and its findings are walkable - the same page
+  -- `scry web` writes for C. The SSR comes from the UI trace's `initial`, exactly as the
+  -- C path does it (`WebCmd.wiz:382-385`).
+  let bundle := Source.Bundle.mk "static" Scry.sourceTool files findings facts;
+  let trace := Scry.webUiTraceJson bundle;
+  let ssr := match Json.parse trace with
+    | .ok j => Json.getStr j "initial"
+    | .error _ => "";
+  FS.writeFile (String.append out "/index.html") (Scry.bundleIndexHtml ssr);
+  -- The scripted walk the reader replays: the same `ui-trace.json` `scry web` writes
+  -- (`WebCmd.wiz:410`). Without it the page renders its SSR and cannot step through the
+  -- findings, which is what makes the reader interactive rather than a static page.
+  FS.writeFile (String.append out "/ui-trace.json") (String.append trace "\n");
   match truncated with
   | .nil => EIO.pure ()
   | _ => Scry.Cs.sayErr ("note: the bundle's `ast` facts are capped at "
@@ -1348,11 +1376,17 @@ structure Scry.Cs.Opts where
   /-- `--assets DIR`: the checkout's `web/` directory whose host files go into
   `--bundle DIR` (default: the first `web/` found from here up, as `scry web`). -/
   assets : Option String
+  /-- `--ui FILE`: copy a built `wiz-source-ui.mjs` (the Loom runtime,
+  `web/build-source-ui.sh`) into the bundle. Without it `app.js`'s import of that module
+  404s and the page cannot mount - the export is data + SSR only, as `scry web` says. -/
+  ui : Option String
 
 def Scry.Cs.usage : String :=
   "usage: scry cs PATH [--json] [--sarif OUT] [--bundle DIR] [--assets DIR]\n"
   ++ "                   [--fail-on error|warning|note] [--rules FILE] [--no-taint]\n"
-  ++ "  PATH is a directory, a .csproj, a .sln/.slnx, or one .cs file.\n"
+  ++ "  PATH is a directory, a .csproj, a .sln/.slnx, or one .cs file.
+  --ui FILE     copy a built wiz-source-ui.mjs into the bundle (web/build-source-ui.sh).
+                Without it the reader's runtime is missing and the page cannot mount.\n"
   ++ "  Walks for *.cs (excluding bin/, obj/, node_modules/, hidden dirs, *.g.cs,\n"
   ++ "  *.Designer.cs), parses and lowers each file, and reports findings plus a\n"
   ++ "  coverage section naming every construct or file that was skipped.\n"
@@ -1390,6 +1424,9 @@ partial def Scry.Cs.parseArgsGo (target : Option String) (o : Scry.Cs.Opts) :
     | "--assets" => match rest with
       | .cons v r => Scry.Cs.parseArgsGo target { o with assets := .some v } r
       | .nil => .error ("--assets needs a DIR\n" ++ Scry.Cs.usage)
+    | "--ui" => match rest with
+      | .cons v r => Scry.Cs.parseArgsGo target { o with ui := .some v } r
+      | .nil => .error ("--ui needs a module file\n" ++ Scry.Cs.usage)
     | "--fail-on" => match rest with
       | .cons v r => match Scry.Cs.parseFailOn v with
         | .ok sev => Scry.Cs.parseArgsGo target { o with failOn := .some sev } r
@@ -1406,7 +1443,7 @@ partial def Scry.Cs.parseArgsGo (target : Option String) (o : Scry.Cs.Opts) :
 
 def Scry.Cs.parseArgs (args : List String) : Except String Scry.Cs.Opts :=
   Scry.Cs.parseArgsGo .none
-    (Scry.Cs.Opts.mk "" .false .none .none .true .none .none .none) args
+    (Scry.Cs.Opts.mk "" .false .none .none .true .none .none .none .none) args
 
 /-- The default C# rule pack: the corpus pack first (a checkout), then an installed
 `rules/csharp.scry`. A tree with no pack still gets its coverage report. -/
@@ -1450,7 +1487,7 @@ def Scry.Cs.writeSarifOr (opts : Scry.Cs.Opts) (out : String)
 def Scry.Cs.writeBundleOr (opts : Scry.Cs.Opts) (out : String) (t : Scry.Cs.Target)
     (results : List Scry.Cs.FileResult) (analysis : Scry.Cs.Analysis)
     (r : Scry.Cs.Report) (writeSarif : EIO Nat) : EIO Nat := do
-  w ← Scry.Cs.attempt (Scry.Cs.writeBundle opts.assets out t results analysis r);
+  w ← Scry.Cs.attempt (Scry.Cs.writeBundle opts.assets opts.ui out t results analysis r);
   match w with
   | .error e => do
     Scry.Cs.sayErr ("scry cs: --bundle " ++ out ++ ": " ++ e);
