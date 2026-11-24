@@ -439,6 +439,18 @@ def Scry.webCopy (from to : String) : EIO Bool := do
     FS.writeFile to text;
     EIO.pure .true
 
+/-- Copy a file **as bytes**. `FS.readFile` stops at a NUL byte (its own doc says to use
+`FS.readBytes` for binary data), so copying a `.wasm` with it wrote a 0-byte file and the
+browser aborted with "wasm validation error: at offset 0: failed to match magic number". -/
+def Scry.webCopyBinary (from to : String) : EIO Bool := do
+  present ← EIO.lift (FS.isFile from);
+  match present with
+  | .false => EIO.pure .false
+  | .true => do
+    bytes ← FS.readBytes from;
+    FS.writeBytes to bytes;
+    EIO.pure .true
+
 /-- The first `web/` directory that has the host's files, from the current directory up
 (or `--assets`). -/
 partial def Scry.webFindAssetsGo : List String → EIO (Option String)
@@ -535,7 +547,7 @@ def Scry.webCopyUi (src out : String) : EIO Bool := do
   m ← Scry.webCopy src (String.append out "/wiz-source-ui.mjs");
   -- `src` ends in `.mjs`; the wasm is the same stem.
   let wasm := String.append (String.dropEnd 4 src) ".wasm";
-  _copiedWasm ← Scry.webCopy wasm (String.append out "/wiz-source-ui.wasm");
+  _copiedWasm ← Scry.webCopyBinary wasm (String.append out "/wiz-source-ui.wasm");
   EIO.pure m
 
 /-- The reader's page. The first paint is the reader's SSR; `app.js` mounts the Loom
