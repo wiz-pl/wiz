@@ -99,7 +99,9 @@ def testNoStaleClosure : Bool :=
         | .ok (f1, rt4) =>
           match applyVal 1000 rt4 f1 (.nat 1) with
           | .ok (.nat newResult, _) => oldResult == 2 && newResult == 11
-          | _ => false
+          | .ok _ => false
+          | .error _ => false
+      | .ok _ => false
 
 /-- The Loom-shaped case: the host's state is ordinary data and survives a swap;
 only the view/update slot changes. The state's *type* does not change, so this is
@@ -132,7 +134,9 @@ def testStateSurvivesSwap : Bool :=
         | .ok (v1, rt4) =>
           match applyVal 1000 rt4 v1 (.nat state) with
           | .ok (.nat r1, _) => r0 == 5 && r1 == 6
-          | _ => false
+          | .ok _ => false
+          | .error _ => false
+    | .ok _ => false
 
 /-- Test 7: an unpinned `read` is rejected by the checker; `readAt` needs a
 `Pinned` in the context. -/
