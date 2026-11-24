@@ -45,6 +45,7 @@ on:
       - "web/source_fixture_gen.wiz"
       - "web/source_fixture_test.mjs"
       - "web/source_static_test.mjs"
+      - "web/source_export_gate.sh"
       - "web/build-source-ui.sh"
       - ".github/workflows/scry.yml"
   push:
@@ -71,6 +72,7 @@ on:
       - "web/source_fixture_gen.wiz"
       - "web/source_fixture_test.mjs"
       - "web/source_static_test.mjs"
+      - "web/source_export_gate.sh"
       - "web/build-source-ui.sh"
       - ".github/workflows/scry.yml"
   workflow_dispatch:
@@ -142,7 +144,11 @@ jobs:
         # serves, and `web/source_static_test.mjs` replays the SSR and every scripted
         # Loom patch through the real patch applier. The second export must be
         # byte-identical (`sha256sum data/*.json`): no timestamp, machine or order in
-        # the data. The reader's modules (`lib/Web/Source/**`, `Highlight`, `EditorBridge`,
+        # the data. `web/source_export_gate.sh` is the same test's negative case: three
+        # mutations of this bundle (a span past its file's end, a dropped finding, one
+        # byte of a scripted page) must each make it fail, so a green acceptance test
+        # cannot be green because it checks nothing. The reader's modules
+        # (`lib/Web/Source/**`, `Highlight`, `EditorBridge`,
         # `Hover`, `Goals`) and the `web/source-*` files are in this workflow's paths, so a
         # change to the reader's core or host runs this too.
         run: |
@@ -154,6 +160,7 @@ jobs:
           (cd "$out/b2" && sha256sum data/*.json) > "$out/h2"
           diff "$out/h1" "$out/h2"
           echo "rebuild identical: $(wc -l < "$out/h1") data/*.json files"
+          sh web/source_export_gate.sh "$out/b"
       - name: The source reader in headless Chromium (`.#wiz-source-ui` + the built bundle)
         # The reader's runtime is a Wasm module, so the Node test above cannot see whether
         # it mounts: this loads the exported bundle in a real browser, with scripting off

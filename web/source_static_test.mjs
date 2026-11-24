@@ -77,6 +77,19 @@ for (const f of filesJson.files) {
 const findings = findingsJson.findings || [];
 ok(findings.length === manifest.counts.findings, "the finding index matches the count",
   findings.length + " vs " + manifest.counts.findings);
+
+// Every finding's span is inside its own file. The reader slices the source by these
+// offsets (`Web.Source.Span` is UTF-16, so the bound is the string's own length), and a
+// span past the end renders an empty or wrong selection instead of failing loudly: the
+// export gate's first mutation is exactly that, so the bound is checked here, not assumed.
+for (const f of findings) {
+  const d = perFile[f.fileId];
+  const len = d && typeof d.source === "string" ? d.source.length : -1;
+  ok(!!f.span && f.span.start >= 0 && f.span.stop > f.span.start && f.span.stop <= len,
+    "finding " + f.id + " has its span inside its file",
+    JSON.stringify(f.span) + " of " + len + " UTF-16 units");
+}
+
 ok(findings.every((f) => /^f_[0-9a-f]{16}$/.test(f.id)),
   "every finding has a semantic id", findings.map((f) => f.id).join(" "));
 const ids = findings.map((f) => f.id);
