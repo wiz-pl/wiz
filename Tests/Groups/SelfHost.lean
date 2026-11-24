@@ -4627,14 +4627,19 @@ def selfHostHostGroup : Group where
         let self ← IO.appPath
         let env : Array (String × Option String) :=
           #[("WIZ_SELFHOST_COMPILER", some stub.toString), ("WIZ_SELFHOST_CHECKER", some stub.toString)]
-        let flags := (← flagsRef.get).toArray
+        -- The stub must reach the children as an OVERRIDE, so the driver flags that name
+        -- the real self-hosted programs have to be dropped here: the flag wins over the
+        -- environment (`selfhostBinaryOverride`), and CI passes both flags to every shard,
+        -- so without this the children ran the REAL compiler and the sweep was vacuous
+        -- (run 45285555908: 211/211 stub children exited 0).
+        let rec stripSelfhostFlags : List String → List String
+          | "--selfhost-compiler" :: _ :: rest => stripSelfhostFlags rest
+          | "--selfhost-checker" :: _ :: rest => stripSelfhostFlags rest
+          | f :: rest => f :: stripSelfhostFlags rest
+          | [] => []
+        let flags := (stripSelfhostFlags (← flagsRef.get)).toArray
         let caseBound := 600
-        -- (H1: every child re-elaborates its own closure, ~77 s a case on a CI runner,
-        -- so 36 cases do not fit 2700 s - the sweep died at 2795 s in run 45285555908
-        -- with 36/36 cases actually run. The bound is a budget for *not finishing*, not
-        -- a verdict; the job's own limit is 120 minutes and the stub path does not build
-        -- anything.)
-        let sweepBound := 4200
+        let sweepBound := 2700
         let began ← IO.monoMsNow
         let mut passed := #[]
         let mut hung := #[]
