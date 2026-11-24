@@ -73,7 +73,12 @@
       # A flake output cannot be a function in `packages`, but `lib` may hold one.
       withLakeCache = pkgs: lakeCache: packagesWith pkgs lakeCache;
 
-      packagesWith = pkgs: lakeCache:
+      packagesWith = pkgs: lakeCache: packagesWithNse pkgs lakeCache { };
+
+      # `wizOverride` is the seeded compiler for the web packages (`lib.webWith`, CI's
+      # `builtins.storePath`). Without it they take the pure `wiz`, which instantiates
+      # `wiz-unwrapped` — the cold compile the `web` job fell into on every pull request.
+      packagesWithNse = pkgs: lakeCache: { wizOverride ? null }:
         let
           lib = pkgs.lib;
           fs = lib.fileset;
@@ -329,6 +334,12 @@ EOF
               platforms = systems;
             };
           };
+          # The compiler the web packages run (`WIZ=…` and their `nativeBuildInputs`).
+          # `lib.webWith <store path>` sets it to the lean job's seeded build, so a pull
+          # request substitutes it instead of cold-building `wiz-unwrapped` — the same
+          # mechanism as `towerFor`, and the reason the `web` job no longer needs its own
+          # 45-minute compiler build.
+          wc = if wizOverride == null then wiz else wizOverride;
           # The test driver (`tests --list`, `tests --run GROUP INDEX`), from the same
           # build as wiz and grail (so `nix build .#wiz` builds it too). The driver looks
           # for `wiz`/`grail` beside itself (`IO.appPath.parent` in Tests/Grail.lean), so
@@ -422,10 +433,10 @@ EOF
                 ./web/build-infoview-ui.sh ./web/build-docs-ui.sh ./web/build-doc-live-ui.sh
               ];
             };
-            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            nativeBuildInputs = [ wc pkgs.emscripten ];
             buildPhase = ''
               runHook preBuild
-              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wc}/bin/wiz
               sh web/build.sh out --gmp-src ${pkgs.gmp.src}
               runHook postBuild
             '';
@@ -480,10 +491,10 @@ EOF
               ];
             };
             # node: web/playground_static.mjs fills the static-complete page.
-            nativeBuildInputs = [ wiz pkgs.emscripten pkgs.nodejs ];
+            nativeBuildInputs = [ wc pkgs.emscripten pkgs.nodejs ];
             buildPhase = ''
               runHook preBuild
-              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wc}/bin/wiz
               # -O1: emcc runs binaryen's `wasm-opt` at -O2 and up, and on this module that
               # stage peaks at 16.9 GiB (measured 2026-11-18) — it is SIGKILLed on a 16 GB
               # CI runner. -O1 (LLVM's, without binaryen) is 2.3 GiB and ~3 min faster, for
@@ -524,10 +535,10 @@ EOF
                 ./lib
               ];
             };
-            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            nativeBuildInputs = [ wc pkgs.emscripten ];
             buildPhase = ''
               runHook preBuild
-              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wc}/bin/wiz
               sh web/build-playground-ui.sh out --gmp-src ${pkgs.gmp.src}
               runHook postBuild
             '';
@@ -562,10 +573,10 @@ EOF
                 ./lib
               ];
             };
-            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            nativeBuildInputs = [ wc pkgs.emscripten ];
             buildPhase = ''
               runHook preBuild
-              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wc}/bin/wiz
               sh web/build-landing-ui.sh out --gmp-src ${pkgs.gmp.src}
               runHook postBuild
             '';
@@ -601,10 +612,10 @@ EOF
                 ./lib
               ];
             };
-            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            nativeBuildInputs = [ wc pkgs.emscripten ];
             buildPhase = ''
               runHook preBuild
-              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wc}/bin/wiz
               sh web/build-source-ui.sh out --gmp-src ${pkgs.gmp.src}
               runHook postBuild
             '';
@@ -708,7 +719,7 @@ EOF
               root = ./.;
               fileset = fs.unions [ ./scripts/wasm-fixtures ./web/wasm-host.mjs ];
             };
-            nativeBuildInputs = [ wiz pkgs.nodejs ];
+            nativeBuildInputs = [ wc pkgs.nodejs ];
             buildPhase = ''
               runHook preBuild
               export HOME=$TMPDIR
@@ -868,7 +879,7 @@ EOF
               # `landing.css` onto itself and `cp` refuses
               # ("... landing.css and ... landing.css are the same file").
               cp -R --no-preserve=mode ${web-bundle}/. site-web/
-              WIZ=${wiz}/bin/wiz sh web/build-landing.sh site-web
+              WIZ=${wc}/bin/wiz sh web/build-landing.sh site-web
               mkdir -p site-web/landing
               cp -R --no-preserve=mode ${wiz-landing-ui}/. site-web/landing/
               WIZ_SOURCE_URL=${lib.escapeShellArg sourceUrl} \
@@ -1549,6 +1560,17 @@ EOF
         # the lean job's store path through `builtins.storePath`, so the seeded compiler
         # is a build input and `wiz-unwrapped` is never instantiated.
         towerWith = wizPkg: (packagesWith pkgs null).towerFor wizPkg;
+        # `lib.webWith wizPkg` is the same web packages (`wiz-web`, `wiz-playground`,
+        # `wiz-playground-ui`, `wiz-source-ui`, `wasm-fixtures`, `site`) built with that
+        # `wiz`. CI passes the lean job's store path, so the `web` job substitutes the
+        # compiler instead of rebuilding `wiz-unwrapped` for every web derivation.
+        webWith = wizPkg:
+          let
+            w = packagesWithNse pkgs null { wizOverride = wizPkg; };
+          in {
+            inherit (w) wiz-web wiz-playground wiz-playground-ui wiz-source-ui
+              wasm-fixtures site;
+          };
       });
 
       apps = forAll (pkgs:
