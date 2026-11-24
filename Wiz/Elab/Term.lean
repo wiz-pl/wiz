@@ -3866,6 +3866,13 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     -- (stage 11) remember identifiers and their types, for hovers and go-to-definition
     let record (n : Name) (c : LocalCtx R) (ty : VTy R) : ElabM R Unit := do
       if stx.info.stop > 0 then pushInfo (.ident stx.info n (c.lvl > 0) c ty)
+    -- (diagnostics) a name the file declared but whose declaration failed to elaborate:
+    -- say which declaration failed and where, instead of blaming the use ("unknown
+    -- identifier"). The root error is reported once, at the declaration.
+    let failedDecl (n : Name) : ElabM R Unit := do
+      if let some d := (← getGlobals).failedDecl? n then
+        throwAt ctx.info s!"'{n}' failed to elaborate (its declaration at {d.pos} has an error; fix that one)"
+          ErrorCode.failedDeclaration
     if explicitLevels.isNone then
       if let some (ix, ty) := lookupLocal ctx x then
         record x ctx ty
@@ -3955,6 +3962,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
             if fs.isEmpty && (((structLayout? g (g.resolve base)).map (·.fields)).getD []).contains f then
               throwAt ctx.info s!"unknown identifier '{x}': the field {f} of {base} has no projection function (an erased field has none; take the structure apart with `match` or `let ⟨…⟩`)"
             pushInfo (.done (.unknownIdent ctx.info x ctx.names))
+            failedDecl x
             throwAt ctx.info s!"unknown identifier '{x}'" "unknown-identifier"
           let (t, ty) ← infer ctx (.node stx.info "term.ident" #[.ident stx.info base])
           -- (#266) `T.f` with `T` a global type (or type family, or function) and no field
@@ -3967,11 +3975,13 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
             catch e =>
               if e.msg.startsWith "no field '" then
                 pushInfo (.done (.unknownIdent ctx.info x ctx.names))
+                failedDecl x
                 throwAt ctx.info s!"unknown identifier '{x}'" "unknown-identifier"
               else throw e
           else elabFields ctx t ty (f :: fs)
       | _ =>
         pushInfo (.done (.unknownIdent ctx.info x ctx.names))
+        failedDecl x
         throwAt ctx.info s!"unknown identifier '{x}'" "unknown-identifier"
   | "term.recCall" =>
     -- a recursive call `f y …` of the definition whose equations these are, already the
