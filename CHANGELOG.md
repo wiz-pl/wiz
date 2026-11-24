@@ -1074,6 +1074,15 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   imported into one program; they are not drop-in replacements. Six of the seventeen
   e-graph examples are differential. Groups `scry-egraph` and `scry-taint` cover them.
 
+* lib(Web.Source): `Source.firstLocatedRow`, `Source.View.clipSpans` and
+  `Source.firstFileWithFinding` are total `def`s again, so three hand-written axioms are
+  gone and `Source.firstFileWithFinding`'s ledger row with them. The lesson is not the
+  deletion but why it took a day of merges to say so: the rows had gone unreviewed and
+  only `=native` case 18 reports that, and the group was not run. A structural recursion
+  on a list tail needs no `partial` — `Source.View.insertSpan`, eight lines from
+  `clipSpans`, is the total proof — so reach for `partial` only after checking whether
+  `List.find`/`map`/`filter` already has the shape (case 18 green).
+
 ## [0.1.0] - unreleased (draft)
 
 The first tagged release. Everything below is new in it; it collects the stage docs 1–30
