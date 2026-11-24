@@ -1517,12 +1517,15 @@ jobs:
       (needs.lean.result == 'success' || needs.lean.result == 'skipped') &&
       needs.wasm.result == 'success'
     runs-on: ubuntu-latest
-    # 30 min: the Node tests (~1 min), but the landing step also fetches Chromium and
-    # builds `.#wiz-landing-ui` in place - measured at 13 minutes on run 45335632454,
-    # after 6.5 minutes of earlier steps, which tripped the old 20-minute wall and was
-    # reported as `cancelled` rather than as a timeout (`gh pr checks` shows a
-    # cancellation as a failure, which is how it read as a concurrency problem).
-    timeout-minutes: 30
+    # 45 min: the Node tests are ~1 min, but the landing step's `nix build
+    # .#wiz-landing-ui` pulls `wiz-landing-ui`, `wiz` and **`wiz-unwrapped`** into the
+    # evaluation, and on a seeded run none of them is in the cache - measured on run
+    # 45376147953: three derivations to build plus 683 MiB of chromium/cadical to fetch,
+    # against a 30-minute wall. `wiz` itself comes from `lean` (see the `nix build`
+    # step); the landing module does not, so this job pays for a cold Lean build of the
+    # compiler to build one `.mjs`. Raising the wall is the honest stopgap; making
+    # `wasm` publish `wiz-landing-ui` so this step substitutes is the real fix.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
