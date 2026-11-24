@@ -204,7 +204,6 @@ that needs 222 s timed out at exactly 300 s with the flag set. The flag after th
 still wins, and this is named so the contract can be tested without spawning a server. -/
 def testOpts (o : Opts) (args : List String) : Opts × List String := grailOpts o args
 
-
 /-- `grail publish`: `--key`/`--expires` are publish-local because `grail index snapshot`
 parses the same flag names, and taking them in `grailOpts` would strip them from that
 command's arguments. Everything else the publish branch reads is already in `Opts`. -/

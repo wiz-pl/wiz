@@ -151,6 +151,35 @@ def testRunnerGroup : Group where
         checkEq (some 900) (Grail.testOpts outer ["--update"]).1.testTimeout
         -- the flag is consumed, not left in the filters
         checkEq ["--update"] (Grail.testOpts outer ["--test-timeout", "5", "--update"]).2 },
+    { name := "-- test-timeout SECS: the dispatcher keeps a flag written before `test`", run := fun _ => do
+        -- The regression was at the CALL SITE (the `test` branch re-parsed from `{}`), so a
+        -- unit test of the parse cannot catch it: the test passes the options in itself and
+        -- stays green when the dispatcher drops them (a mutation survivor). This drives
+        -- `Grail.main`, the same entry point CI runs: with `--test-timeout 1` before `test`
+        -- the case must fail; if the flag is discarded the runner keeps 300 s and it passes.
+        --
+        -- The tree needs a `*.expected` for the control run (a test without one is skipped,
+        -- so the 900 s run "fails" for the wrong reason - run 45335632454), and its content
+        -- must be what the test produces: with no `-- test:` line this is a `check` test,
+        -- whose output is the messages of checking the file (none here), not stdout - run
+        -- 45354517903 said exactly that.
+        let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
+          -- `run` + a 3 s sleep: the case must take longer than the 1 s limit, or the limit
+          -- has nothing to kill and the flag's effect is invisible (the previous `check`
+          -- fixture on a one-line file finished in milliseconds, so both runs passed and the
+          -- case proved nothing - run 45376147953).
+          ("tests/slow.wiz", "-- test: run\nimport Prelude\ndef main : IO Unit := Clock.sleep 3000000000\n"),
+          ("tests/slow.expected", "")]
+        -- (i) the same invocation with a limit the case cannot reach must SUCCEED: that half
+        -- is what stops this test being vacuous. Without it, any failure of `Grail.main` in a
+        -- test process (`self := IO.appPath` re-invoke, a missing fixture) would look like
+        -- proof that the flag arrived.
+        let ok ← Grail.cliMain ["-C", dir.toString, "--test-timeout", "900", "test"]
+        check (ok == 0) s!"the 900 s run must pass (rc {ok}), or this test proves nothing"
+        -- (ii) with the 1 s limit the case must fail. A failure is only accepted as proof
+        -- because (i) passed: the two runs differ in the flag alone.
+        let rc ← Grail.cliMain ["-C", dir.toString, "--test-timeout", "1", "test"]
+        check (rc != 0) s!"a 1 s limit written before `test` must fail the case (rc {rc}): the leading options were dropped" },
     { name := "-- test: run compiles and runs main", run := fun _ => do
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
           ("tests/hello.wiz", "-- test: run\nimport IO\ndef main : IO Unit := IO.println \"hi\"\n"),

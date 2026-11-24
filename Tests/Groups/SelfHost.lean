@@ -4767,10 +4767,9 @@ def selfHostHostGroup : Group where
         -- The stub must reach the children as an OVERRIDE, so the driver flags that name
         -- the real self-hosted programs have to be dropped here: the flag wins over the
         -- environment (`selfhostBinaryOverride`), and CI passes both flags to every shard,
-        -- so without this the children run the REAL compiler and the sweep is vacuous
+        -- so without this the children ran the REAL compiler and the sweep was vacuous
         -- (run 45285555908: 211/211 stub children exited 0). `checkInjection` below is
-        -- what catches a regression of exactly that.   -- (train13 branched before
-        -- 2a3cfb3ba, which made this change on train12; the code is the same.)
+        -- what catches a regression of exactly that.
         let rec stripSelfhostFlags : List String → List String
           | "--selfhost-compiler" :: _ :: rest => stripSelfhostFlags rest
           | "--selfhost-checker" :: _ :: rest => stripSelfhostFlags rest
