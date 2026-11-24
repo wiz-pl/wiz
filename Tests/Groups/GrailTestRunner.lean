@@ -159,10 +159,13 @@ def testRunnerGroup : Group where
         -- the case must fail; if the flag is discarded the runner keeps 300 s and it passes.
         --
         -- The tree needs a `*.expected` for the control run (a test without one is skipped,
-        -- so the 900 s run "fails" for the wrong reason - run 45335632454).
+        -- so the 900 s run "fails" for the wrong reason - run 45335632454), and its content
+        -- must be what the test produces: with no `-- test:` line this is a `check` test,
+        -- whose output is the messages of checking the file (none here), not stdout - run
+        -- 45354517903 said exactly that.
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
           ("tests/slow.wiz", "import Prelude\ndef n : Nat := 1\n"),
-          ("tests/slow.expected", "1\n")]
+          ("tests/slow.expected", "")]
         -- (i) the same invocation with a limit the case cannot reach must SUCCEED: that half
         -- is what stops this test being vacuous. Without it, any failure of `Grail.main` in a
         -- test process (`self := IO.appPath` re-invoke, a missing fixture) would look like
