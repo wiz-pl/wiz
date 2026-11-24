@@ -1517,8 +1517,12 @@ jobs:
       (needs.lean.result == 'success' || needs.lean.result == 'skipped') &&
       needs.wasm.result == 'success'
     runs-on: ubuntu-latest
-    # 20 min: the Node tests (~1 min) and slack; the Wasm builds are `wasm`' job
-    timeout-minutes: 20
+    # 30 min: the Node tests (~1 min), but the landing step also fetches Chromium and
+    # builds `.#wiz-landing-ui` in place - measured at 13 minutes on run 45335632454,
+    # after 6.5 minutes of earlier steps, which tripped the old 20-minute wall and was
+    # reported as `cancelled` rather than as a timeout (`gh pr checks` shows a
+    # cancellation as a failure, which is how it read as a concurrency problem).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
