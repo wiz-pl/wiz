@@ -687,7 +687,11 @@ def cliMain (args : List String) : IO UInt32 := do
       -- Flags after the subcommand are not seen by the parser above (it stops at `test`),
       -- so `grail test --test-timeout 900 …` used to leave the flag in `filters` and the
       -- runner at its 300 s default — a "timed out (300 s)" that no flag could raise.
-      let (topts, rest) := grailOpts {} rest
+      -- Seed from the leading options, not `{}`: `grail --test-timeout 900 test` (the form
+      -- hdl/scripts/check-standalone.sh writes) parsed 900 into `opts` and then the runner
+      -- threw it away, so the example timed out at exactly 300 s with the flag set. Both
+      -- positions now work, the one after the subcommand winning.
+      let (topts, rest) := grailOpts opts rest
       let update := rest.contains "--update"
       let rerun := rest.contains "--rerun"
       let filters := rest.filter (fun a => a != "--update" && a != "--rerun")
