@@ -78,7 +78,11 @@
       # `wizOverride` is the seeded compiler for the web packages (`lib.webWith`, CI's
       # `builtins.storePath`). Without it they take the pure `wiz`, which instantiates
       # `wiz-unwrapped` — the cold compile the `web` job fell into on every pull request.
-      packagesWithNse = pkgs: lakeCache: { wizOverride ? null, hasWizOverride ? false }:
+      # `wizOverride` is the compiler the web packages run. It is used **as an identifier**
+      # in `nativeBuildInputs = [ wc … ]` - never through a conditional or a function
+      # application, which Nix cannot coerce to a derivation and reports as "expected a set
+      # but found a string with context: /nix/store/…". `null` means "the tree's own `wiz`".
+      packagesWithNse = pkgs: lakeCache: { wizOverride ? null }:
         let
           lib = pkgs.lib;
           fs = lib.fileset;
@@ -337,18 +341,14 @@ EOF
           # The compiler the web packages run (`WIZ=…` and their `nativeBuildInputs`).
           # `lib.webWith <store path>` sets it to the lean job's seeded build, so a pull
           # request substitutes it instead of cold-building `wiz-unwrapped` — the same
-          # mechanism as `towerFor`, and the reason the `web` job no longer needs its own
-          # 45-minute compiler build.
-          # **Never compare `wizOverride` with `null`.** `builtins.storePath` is a *string
-          # with context*, and `==` forces it: the derivation then receives that string where
-          # it wanted a derivation, and the message names the store path rather than the
-          # comparison ("expected a set but found a string with context: /nix/store/…").
-          # `hasWizOverride` is passed as a `Bool` by the caller instead, so the value is
-          # never inspected - only chosen. A plain `if … then wiz else wizOverride` is also
-          # wrong here: forcing a *conditional* as a build input raises the same error, which
-          # is why the selection goes through an attribute.
-          wcPick = { seeded, pkg }: if seeded then pkg else wiz;
-          wc = wcPick { seeded = hasWizOverride; pkg = wizOverride; };
+          # mechanism as `towerFor`. `null` means the tree's own `wiz`; a seeded
+          # `builtins.storePath` is a *string with context*, which `nativeBuildInputs`
+          # accepts exactly as `towerFor`'s `wizPkg` does. Three earlier attempts in this
+          # expression (a flag, an attribute selection, a function application) were chasing
+          # a bug that was never here: the failure was `.wiz-source-ui` binding inside the
+          # `webWith` *argument* at the call site in `ci.yml`, and it fails identically with
+          # a derivation argument.
+          wc = if wizOverride == null then wiz else wizOverride;
           # The test driver (`tests --list`, `tests --run GROUP INDEX`), from the same
           # build as wiz and grail (so `nix build .#wiz` builds it too). The driver looks
           # for `wiz`/`grail` beside itself (`IO.appPath.parent` in Tests/Grail.lean), so
@@ -1575,7 +1575,7 @@ EOF
         # compiler instead of rebuilding `wiz-unwrapped` for every web derivation.
         webWith = wizPkg:
           let
-            w = packagesWithNse pkgs null { wizOverride = wizPkg; hasWizOverride = true; };
+            w = packagesWithNse pkgs null { wizOverride = wizPkg; };
           in {
             inherit (w) wiz-web wiz-playground wiz-playground-ui wiz-source-ui;
           };
