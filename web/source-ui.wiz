@@ -1,6 +1,7 @@
 import IO
 import Json
 import Web.EditorBridge
+import Web.Hover
 import Web.Loom
 import Web.Source.Model
 import Web.Source.Static
@@ -29,6 +30,7 @@ checked against a line table without a fourth copy of the offset arithmetic.
 -/
 
 link_c "js.c"
+link_c "step.c"   -- the browser ABI's i32 word entry (`wiz_step`, web/step.c)
 extern "js_patch" Js.patch : String → IO Unit
 
 /-- Patch the page from `s` to `s'` and give `s'` back. -/
@@ -41,7 +43,11 @@ def loomHtml (s : Source.Page) : String := Loom.LiveApp.html Source.View.app s
 def loomStep (s : Source.Page) (ev : String) : IO Source.Page :=
   patched s (Loom.LiveApp.step Source.View.app s ev)
 
-/-- Apply one host effect to the page. -/
+/-- Apply one host effect to the page.
+    * `"hover-lsp" payload raw` — a live `textDocument/hover` result for `payload`;
+    * `"hover-at" fileId offset` — the live reader's pointer: hover there;
+    * `"definition-at" fileId offset` — the live reader's click: ask for a definition;
+    * `"note" text` — a status line (a connection failure is a note, not an error page). -/
 def applyEffect (s : Source.Page) (kind a b : String) : Source.Page :=
   match kind with
   | "bundle" => match Source.Static.decodeBundle a with
@@ -51,7 +57,15 @@ def applyEffect (s : Source.Page) (kind a b : String) : Source.Page :=
   | "answer" => match Source.Static.decodeAnswer b with
     | .some answer => Source.Page.answer s answer
     | .none => { s with note := String.append "the " (String.append a " answer did not decode") }
+  | "hover-lsp" => Source.Page.lspHover s a b
+  | "hover-at" => match Source.spanAtPayload a b with
+    | .some payload => Source.Page.askHover s payload
+    | .none => { s with note := "bad hover position" }
+  | "definition-at" => match Source.spanAtPayload a b with
+    | .some payload => Source.Page.askDefinition s payload
+    | .none => { s with note := "bad definition position" }
   | "route" => Source.Page.route s a
+  | "note" => { s with note := a }
   | "ack" => Source.Page.ack s a
   | _ => s
 
@@ -70,6 +84,16 @@ def loomConsume (s : Source.Page) (ev : String) : Nat := 0
 def loomEditorSpan (text span : String) : String := EditorBridge.span text span
 def loomEditorIndex (version text : String) : String := EditorBridge.indexJson version text
 
+-- The live adapter's position conversion: a UTF-16 offset as an LSP position and back,
+-- both through `Web.EditorModel` (the one line table). The host never counts lines.
+def loomEditorPosition (text offset : String) : String := EditorBridge.position text offset
+def loomEditorOffset (text line character : String) : String :=
+  EditorBridge.offset text line character
+
+-- The definition result parsed by `Web.Hover` (the editor's rule): `{uri, range,
+-- label}` or `null`, so the host maps a URI to a bundle file without reading LSP shapes.
+def loomHoverTarget (result : String) : String := Hover.targetJson result
+
 export "wiz_loom_init" loomInit
 export "wiz_loom_html" loomHtml
 export "wiz_loom_step" loomStep
@@ -78,3 +102,6 @@ export "wiz_loom_requests" loomRequests
 export "wiz_loom_consume" loomConsume
 export "wiz_loom_editor_span" loomEditorSpan
 export "wiz_loom_editor_index" loomEditorIndex
+export "wiz_loom_editor_position" loomEditorPosition
+export "wiz_loom_editor_offset" loomEditorOffset
+export "wiz_loom_hover_target" loomHoverTarget

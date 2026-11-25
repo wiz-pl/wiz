@@ -6,6 +6,23 @@ import Tests.Loader
 
 Each group is tagged with the exercise it exercises. `lake test -- <group>...` runs only
 the named groups. Unimplemented `sorry`s fail at runtime with "executed 'sorry'".
+
+## Two rules for every case
+
+**Prove the injection, then the detection.** A case that asserts an outcome must also
+show that its input reached the code under test; an anti-vacuity or meta case must read
+back the effective value it injected and fail unless that is what ran
+(`Tests.checkInjection` in `Tests/Groups/SelfHost.lean` reads
+`selfhost-override … source=env path=<stub>` lines). The stub meta-case shipped vacuous
+for a night because nothing read the children's stderr: 211 of 211 children ran the real
+compiler and passed. Every such case also needs a mutation self-test that must fail
+(`WIZ_SELFHOST_STUB_MUTATION=env|flag`); docs/building.md, "Anti-vacuity".
+
+**Every case runs under a printed wall limit** (`--test-timeout`, default
+`defaultCaseTimeoutS`, `timeout --kill-after=10`), and its result line says
+`(12.3 s / limit 3600 s)` or `limit none`. A case that runs past it fails with that
+sentence; `scripts/ci.py timings` warns at 80 % of the limit. A timeout raised where it
+never takes effect is then visible as the old limit instead of looking like a fix.
 -/
 
 namespace Tests
@@ -15,6 +32,18 @@ namespace Tests
 initialize toolchainRef : IO.Ref Wiz.Toolchain ← IO.mkRef {}
 /-- The toolchain flags, given again to each case's process. -/
 initialize flagsRef : IO.Ref (List String) ← IO.mkRef []
+
+/-- `--selfhost-cache DIR`: where the self-hosted compiler/checker are built and kept.
+A flag rather than an environment variable, and the value is forwarded to each case's
+process with the other driver flags, so a run that gives it keeps every case on the same
+cache. Default: the system temp directory (`/tmp`). -/
+initialize selfhostCacheRef : IO.Ref (Option System.FilePath) ← IO.mkRef none
+
+/-- `--selfhost-compiler PATH` / `--selfhost-checker PATH`: use this binary instead of
+building one. The flag wins over the `WIZ_SELFHOST_*` environment variables, which are
+kept for the stub-compiler case that sets them for a child process. -/
+initialize selfhostCompilerRef : IO.Ref (Option System.FilePath) ← IO.mkRef none
+initialize selfhostCheckerRef : IO.Ref (Option System.FilePath) ← IO.mkRef none
 /-- The driver's `--jobs N`, for a case that runs alone (a group that did not opt in to
 `Group.parallel`): such a case may use up to N workers of its own (`=selfhost-libdiff`
 checks its files N at a time). `Group.run` passes it to each case's process; the cases
@@ -57,7 +86,8 @@ structure Group where
   say `true` only if its cases touch no state that two cases share (a fixed path must
   belong to one case, and there is no port, driver environment variable or build
   directory in the work tree), and none of them assert on wall time or on the machine's
-  load: see "Running cases in parallel" in `docs/building.md`. -/
+  load: see "Running cases in parallel" in `docs/building.md`. `tests --list-parallel`
+  prints the groups that opted in (`scripts/ci.py` simulates their `--jobs` pool). -/
   parallel : Bool := false
   /-- A hint at the shard that is meant to run the group (`.github/test-shards.json`).
   It is not a fallback: `scripts/check-shards.py` fails when no shard's selectors pick
@@ -179,7 +209,8 @@ def skip (reason : String) : IO Unit := note s!"skipped {reason}"
 
 /-- Whether a missing dependency may be reported as a skip rather than a failure. Set by
 `Tests/Main.lean` from `--allow-missing-deps` or the environment variable
-`WIZ_ALLOW_MISSING_DEPS`; both are explicit, and neither is on by default. -/
+`--allow-missing-deps` only: it is explicit, visible in the argv of the run that used it,
+and off by default. There is no environment variable. -/
 initialize allowMissingDepsRef : IO.Ref Bool ← IO.mkRef false
 
 def setAllowMissingDeps (on : Bool) : IO Unit := allowMissingDepsRef.set on
@@ -197,16 +228,18 @@ def missingDepMarker : String := "missing-dep "
 /-- A case that cannot run because a dependency is absent (no `cc`, GMP, Boehm GC,
 `node`, `yosys`, `iverilog`, `z3`, `llc`, a `wiz`/`grail` binary, a self-host toolchain,
 ...). By default this **fails**, naming the dependency: a green suite must not be green
-because the machine could not run the test. `--allow-missing-deps` (or
-`WIZ_ALLOW_MISSING_DEPS=1`) turns it into a reported skip --- the shard driver sets that
-only for a shard whose environment lacks a documented optional tool, and the skip lint
-still requires an allow-list entry for it. A declared gap stays `skip`, not this. -/
+because the machine could not run the test. The explicit `--allow-missing-deps` flag turns
+it into a reported skip --- the shard driver sets that only for a shard whose environment
+lacks a documented optional tool, and the skip lint still requires an allow-list entry for
+it. There is no environment variable: a variable that can turn a failure into a skip is the
+same defect as a `PATH` that silently finds the wrong compiler. A declared gap stays
+`skip`, not this. -/
 def skipMissing (reason : String) : IO Unit := do
   if ← allowMissingDeps then
     note s!"skipped {reason}"
     note (missingDepMarker ++ reason)
   else
-    throw (IO.userError s!"missing dependency: {reason}\n      this case cannot run without it; install it, or pass --allow-missing-deps (or set WIZ_ALLOW_MISSING_DEPS=1) to report it as a skip")
+    throw (IO.userError s!"missing dependency: {reason}\n      this case cannot run without it; install it, or pass --allow-missing-deps to report it as a skip")
 
 /-- The reason a passing case's process gave for skipping: its `skipped` note, or a line
 in the old style (`(skipped: REASON)`, `(no X: skipped)`) that a case printed itself. -/
@@ -224,6 +257,68 @@ def showMs (ms : Nat) : String :=
   let frac := toString (ms % 1000)
   s!"{ms / 1000}.{"".pushn '0' (3 - frac.length)}{frac}"
 
+/-- The default per-case wall limit, in seconds (see `testTimeLimitRef`).  3600 is above
+every case in `.github/test-timings.json` (the longest is ~1430 s), so the first thing it
+bites is a genuine hang or a case that grew far past its measured time -- not a case that
+is merely slow today. -/
+def defaultCaseTimeoutS : Nat := 3600
+
+/-- The wall limit each case's process is given, in seconds: `--test-timeout N` (default
+`3600`, `0` for no limit).  `Group.run` wraps the case in
+`timeout --kill-after=10 N`, so a case that hangs is killed and named, instead of
+holding its shard until the job's 120-minute timeout.
+
+The limit is printed in every case line (`(12.3 s / limit 3600 s)`) and recorded in
+`--timings` ("limit"), so a timeout that never takes effect -- an option after a
+subcommand (the hdl case, 9ee24e52b) -- is visible as the old limit, not assumed to
+have worked; `scripts/ci.py timings` warns at 80 % of it. -/
+initialize testTimeLimitRef : IO.Ref (Option Nat) ← IO.mkRef (some defaultCaseTimeoutS)
+
+def setTestTimeLimit (limit : Option Nat) : IO Unit := testTimeLimitRef.set limit
+
+/-- The run's wall limit per case (`none`: no limit). -/
+def testTimeLimit : IO (Option Nat) := testTimeLimitRef.get
+
+/-- Whether `timeout` is on PATH (coreutils), asked once.  Without it the limit cannot be
+enforced, and every case line says `limit none` rather than claiming one. -/
+initialize timeoutAvailableRef : IO.Ref (Option Bool) ← IO.mkRef none
+
+def timeoutAvailable : IO Bool := do
+  if let some b ← timeoutAvailableRef.get then return b
+  let b ← try
+    let o ← IO.Process.output { cmd := "timeout", args := #["--version"] }
+    pure (o.exitCode == 0)
+  catch _ => pure false
+  timeoutAvailableRef.set (some b)
+  return b
+
+/-- The limit a case's line reports: the configured one, unless this machine cannot
+enforce it. -/
+def effectiveLimit : IO (Option Nat) := do
+  if ← timeoutAvailable then testTimeLimit else pure none
+
+/-- The command and arguments that run one case: the driver under `timeout` when the
+run has a wall limit (`timeout --kill-after=10 N SELF --run-case GROUP I …`), so the
+grandchildren a case starts are killed with it. -/
+def caseCommand (self : System.FilePath) (g : Group) (i : Nat) (flags : Array String) :
+    IO (String × Array String) := do
+  let args := #["--run-case", g.name, toString i] ++ flags
+  if let some secs ← effectiveLimit then
+    return ("timeout", #["--kill-after=10", toString secs, self.toString] ++ args)
+  return (self.toString, args)
+
+/-- The exit codes `timeout` uses: 124 for the limit, 137 for the `SIGKILL` ten seconds
+after the `SIGTERM` (a case that ignores the first signal). -/
+def timedOut (code : UInt32) : Bool := code == 124 || code == 137
+
+/-- What a case that ran past its limit reports: the limit, and the two honest causes
+(a hang, or a case that got much slower), so raising it stays a decision. -/
+def limitMessage (limit : Option Nat) : String :=
+  s!"the case ran past its wall limit of {limit.getD 0} s (`timeout` killed it):" ++
+  " it hung, or it is far slower than .github/test-timings.json says." ++
+  " Check with `scripts/ci.py timings` before raising --test-timeout."
+
+
 /-- One case's result: its index in the group, its name, whether it passed (a skipped
 case did not fail: `ok`, with the reason in `skipped`), its wall time in milliseconds, the
 notes it printed (`note`), and, for a failure, its output (indented, as the suite prints
@@ -237,17 +332,28 @@ structure CaseResult where
   skipped : Option String := none
   output : String := ""
 
-/-- A case's result as the suite prints it: its position `[n/total]` among the cases this
-run selected, then `✓` passed, `✗` failed (with its output), or `⊘` skipped (with the
-reason). -/
-def renderResult (r : CaseResult) (n total : Nat) : String :=
-  let num := s!"[{n}/{total}] "
+/-- A case's result as the suite prints it: its position `[n/failed/total]` among the
+cases this run selected - the case number, how many have failed so far in this
+invocation (this case included when it is the failure), and the size of the selection -
+then `✓` passed, `✗` failed (with its output), or `⊘` skipped (with the reason). The
+middle number is what makes a long shard readable while it runs: it says whether the run
+is currently losing cases without waiting for the final count.
+
+`(SECONDS s / limit N s)` is the case's effective timeout (Guard C): a case run without
+one says `limit none`, so a timeout that never took effect cannot look like one that
+did. -/
+def renderResult (r : CaseResult) (n failed total : Nat) (limit : Option Nat := none) :
+    String :=
+  let num := s!"[{n}/{failed}/{total}] "
+  let when := match limit with
+    | some secs => s!" ({showMs r.ms} s / limit {secs} s)"
+    | none => s!" ({showMs r.ms} s / limit none)"
   if let some why := r.skipped then
-    s!"{num}  ⊘ {r.name} ({showMs r.ms} s)\n      skipped ({why})"
+    s!"{num}  ⊘ {r.name}{when}\n      skipped ({why})"
   else if r.ok then
-    s!"{num}  ✓ {r.name} ({showMs r.ms} s)"
+    s!"{num}  ✓ {r.name}{when}"
   else
-    s!"{num}  ✗ {r.name} ({showMs r.ms} s)\n      {r.output}"
+    s!"{num}  ✗ {r.name}{when}\n      {r.output}"
 
 /-- The result of a case's process: its child's exit code and output, and the time the
 child ran for (`now` - `start`, measured in the process, not around a queue). -/
@@ -256,12 +362,31 @@ def caseResult (c : Case) (index : Nat) (exitCode : UInt32) (stdout stderr : Str
   let lines := stdout.splitOn "\n"
   let notes := lines.filterMap fun l => if l.startsWith noteMarker then some (l.drop noteMarker.length).toString else none
   let stdoutText := "\n".intercalate (lines.filter (!·.startsWith noteMarker))
-  let skipped := if exitCode == 0 then skipReason notes stdoutText else none
-  let output := if exitCode == 0 then "" else
+  -- A skip is only ever a case that **passed cleanly and declared it** - and a case that
+  -- declared a skip *and* printed a diagnostic is a **failure**, not a pass. Both halves
+  -- matter: merely dropping the skip (the first version of this guard) turned
+  -- `selfhost-2`'s `unknown identifier Desc` from a red into a green ✓ with exit 0, which
+  -- is worse than the skip it replaced.
+  -- What makes it a failure is a diagnostic **before the skip was declared**: a case that
+  -- could not run prints nothing, so `error:` then `skipped …` means the case ran, failed,
+  -- and then reported a missing dependency. A diagnostic *after* a legitimate skip is
+  -- untouched (a case that declares a gap and then prints its diagnosis is still a skip),
+  -- and so is a case whose own output merely contains `error:` without ever skipping.
+  -- `stdoutText` has the note lines stripped out, so the split must be on the **raw**
+  -- stdout: the skip note's position in it is what says whether the case ran first.
+  let beforeSkip := match stdout.splitOn noteMarker with
+    | first :: _ => first
+    | [] => stdout
+  let diagnosedFirst := (stderr ++ beforeSkip).contains "error:"
+  let declaredSkip := skipReason notes stdoutText
+  let skipAbsorbedError := exitCode == 0 && diagnosedFirst && declaredSkip.isSome
+  let ok := exitCode == 0 && !skipAbsorbedError
+  let skipped := if ok then declaredSkip else none
+  let output := if ok then "" else
     if (stderr ++ stdoutText).contains "executed 'sorry'" then
       "not implemented yet (hit a `sorry`)"
     else (stderr ++ stdoutText).trimAscii.toString.replace "\n" "\n      "
-  { index, name := c.name, ok := exitCode == 0, ms, notes, skipped, output }
+  { index, name := c.name, ok, ms, notes, skipped, output }
 
 /-- (13b) The `--trace-guess-fallback` lines of a case's process (its stderr), on the
 driver's stderr, with the case's own file (module `_`) named `GROUP#INDEX`:
@@ -276,7 +401,7 @@ def forwardGuessLines (g : Group) (index : Nat) (stderr : String) : IO Unit := d
 
 /-- Run each case in a child process (`<self> --run-case <group> <index>`), because an
 executed `sorry` aborts the whole process; `only` restricts the run to the cases with
-these indices. Prints each case with its position in the run (`[n/total]`) and wall time
+these indices. Prints each case with its position in the run (`[n/failed/total]`) and wall time
 (`✓` passed, `✗` failed, with its output, `⊘` skipped, with the reason) and gives its
 result to `onResult` as soon as it finishes. `start` is the first case's position in the
 whole invocation's selection (the driver runs several groups) and `total` that selection's
@@ -299,16 +424,18 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
   -- into it); the other cases ignore it
   let part ← casePart
   let partArgs := if part.isEmpty then #[] else #["--part", part]
+  let limit ← effectiveLimit
   let mut results := #[]
   let mut n := start
+  -- failures printed so far (skips are not failures: a skip is a pass with a reason)
+  let mut failed := 0
   for c in g.cases, i in [0:g.cases.length] do
     if let some ixs := only then
       unless ixs.contains i do continue
     let began ← IO.monoMsNow
+    let (cmd, args) ← caseCommand self g i (jobArgs ++ partArgs ++ (← flagsRef.get).toArray)
     let child ← IO.Process.spawn
-      { cmd := self.toString,
-        args := #["--run-case", g.name, toString i] ++ jobArgs ++ partArgs ++ (← flagsRef.get).toArray
-        stdin := .null, stdout := .piped, stderr := .piped }
+      { cmd, args, stdin := .null, stdout := .piped, stderr := .piped }
     let outT ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
     let errT ← IO.asTask (readCaseStderr child.stderr) Task.Priority.dedicated
     let code ← child.wait
@@ -317,8 +444,11 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
     let err ← IO.ofExcept errT.get
     forwardGuessLines g i err
     let r := caseResult c i code out err ms
-    IO.println (renderResult r n total)
+    let r := if timedOut code && !r.ok then { r with output := limitMessage limit } else r
+    let failedNow := if r.ok then failed else failed + 1
+    IO.println (renderResult r n failedNow total limit)
     stdout.flush
+    failed := failedNow
     onResult r
     results := results.push r
     n := n + 1
@@ -344,12 +474,13 @@ private structure Live where
 /-- Start a case's process and the tasks that collect it: one reads each pipe (so the
 child never blocks on a full pipe) and one waits for it (so its wall time does not
 include the time it waits in the pool's queue). The child stays in the driver's process
-group, as it was sequentially: `Ctrl-C` at the terminal reaches the running cases too. -/
+group, as it was sequentially: `Ctrl-C` at the terminal reaches the running cases too.
+The process is the run's `timeout` wrapper when there is a wall limit (`caseCommand`). -/
 private def startCase (self : System.FilePath) (g : Group) (i : Nat) (flags : Array String) : IO Live := do
   let start ← IO.monoMsNow
+  let (cmd, args) ← caseCommand self g i flags
   let child ← IO.Process.spawn
-    { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ flags
-      stdin := .null, stdout := .piped, stderr := .piped }
+    { cmd, args, stdin := .null, stdout := .piped, stderr := .piped }
   let out ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
   let err ← IO.asTask (readCaseStderr child.stderr) Task.Priority.dedicated
   let code ← IO.asTask (do pure (← child.wait, (← IO.monoMsNow) - start)) Task.Priority.dedicated
@@ -357,7 +488,7 @@ private def startCase (self : System.FilePath) (g : Group) (i : Nat) (flags : Ar
 
 /-- Run the cases of `g` that `only` picks with a bounded pool of `jobs` child processes
 at a time, printing each case's result (and calling `onResult`) in the group's case
-order, so the log is deterministic; the `[n/total]` position is assigned when the
+order, so the log is deterministic; the `[n/failed/total]` position is assigned when the
 result is printed (not in the child), so parallel cases cannot interleave numbers.
 `start` and `total` are the whole invocation's first position and size, as in
 `Group.run`. A group must opt in with `parallel := true`.
@@ -376,9 +507,12 @@ def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
   let flags := (if part.isEmpty then #[] else #["--part", part]) ++ (← flagsRef.get).toArray
   let todo := (List.range g.cases.length).filter fun i => only.all (·.contains i)
   let total := total.getD todo.length
+  let limit ← effectiveLimit
   let pending ← IO.mkRef todo
   let live ← IO.mkRef ([] : List Live)
   let results ← IO.mkRef ([] : List CaseResult)
+  -- failures among the results printed so far (the pool prints in case order)
+  let failedRef ← IO.mkRef 0
   -- start the next case off `pending`, unless the pool is full
   let rec fill : Nat → IO Unit
     | 0 => pure ()
@@ -405,11 +539,14 @@ def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
           | throw (IO.userError s!"no case {l.index} in {g.name}")
         forwardGuessLines g l.index stderr
         let r := caseResult c l.index code stdout stderr ms
+        let r := if timedOut code && !r.ok then { r with output := limitMessage limit } else r
         -- cases are printed in `todo` order, so the results collected so far are the
         -- numbers just before this one; numbering here (not in the child) keeps the
         -- pool's parallel processes from interleaving numbers
         let n := start + (← results.get).length
-        IO.println (renderResult r n total)
+        let failedNow ← if r.ok then failedRef.get else do
+          failedRef.modify (· + 1); failedRef.get
+        IO.println (renderResult r n failedNow total limit)
         (← IO.getStdout).flush
         results.modify (· ++ [r])
         onResult r
@@ -438,8 +575,19 @@ def driverFixtures : Group where
     { name := "fixture: skips", run := fun _ => skip "fixture reason" },
     { name := "fixture: skips (old style)", run := fun _ => IO.println "    (skipped: old fixture reason)" },
     -- the environment-skip policy: a missing dependency fails by default and is a
-    -- reported skip only under `--allow-missing-deps` / `WIZ_ALLOW_MISSING_DEPS`
-    { name := "fixture: missing dependency", run := fun _ => skipMissing "no fixture-dep on PATH" }
+    -- reported skip only under the explicit `--allow-missing-deps` flag
+    { name := "fixture: missing dependency", run := fun _ => skipMissing "no fixture-dep on PATH" },
+    -- a case that *ran*, failed, and then claimed a missing dependency: the diagnostic
+    -- precedes the skip note, so it is a failure even with `--allow-missing-deps`. This is
+    -- the `selfhost-2` shape (`unknown identifier Desc` x6, then a skip).
+    { name := "fixture: a skip after a diagnostic is a failure", run := fun _ => do
+        IO.eprintln "error: unknown identifier Desc"
+        skipMissing "no fixture-dep on PATH" },
+    -- the inverse, and the reason the guard is narrow: a case that declares its gap and
+    -- *then* prints a diagnosis is an honest skip, not a swallowed failure.
+    { name := "fixture: a diagnosis after a declared skip is still a skip", run := fun _ => do
+        skip "fixture reason"
+        IO.println "error: this line is output, not a failure" }
   ]
 
 end Tests

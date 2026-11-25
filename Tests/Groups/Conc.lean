@@ -546,9 +546,9 @@ def concGroup : Group where
           | throw (IO.userError s!"`--list-cases =conc` has no case named {target}")
         let args := #["--run", "conc", toString i, "--cc", "/nonexistent/wiz-test-cc"]
         -- The shard that runs this case may itself be `--allow-missing-deps` (the library
-        -- shard is, for iverilog) and exports WIZ_ALLOW_MISSING_DEPS for its children.
-        -- Drop it for both halves, so the default-failure half tests the default even
-        -- there and the opt-in half tests the flag alone.
+        -- shard is, for iverilog). The flag is per-process argv, not an inherited variable,
+        -- so the child starts without it; the environment is cleared anyway so a stray
+        -- `WIZ_ALLOW_MISSING_DEPS` in the caller's shell cannot change the verdict.
         let noAllowEnv : Array (String × Option String) := #[("WIZ_ALLOW_MISSING_DEPS", none)]
         -- without the flag: exit 1, and the failure names the dependency and the flag
         let r ← IO.Process.output { cmd := self.toString, args, env := noAllowEnv }

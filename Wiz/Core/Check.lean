@@ -678,25 +678,41 @@ is `cocon`/`out`'s productivity rule, plus the surface copattern check.)
 A description whose head is not a constructor (a variable, `ret`, or an
 application/projection) is left alone: its spine is not visible to the kernel (the `μ`
 over `c.2.1` in the codes test, `μ Chain.desc i`, …). A *constant* is looked through to
-its value, so `def D := Desc.rec …; μ D ()` cannot hide an unguarded description
-(depth-bounded, so recursive globals stop). The check is conservative: it only rejects a
-`rec`/`hrec` it can see at the head of a constructor spine. -/
-partial def descGuarded (g : Globals R) (depth : Nat) (guarded : Bool) : Term R → Bool
-  | .darg _ _ E => descGuarded g depth true E
-  | .drec _ _ E => guarded && descGuarded g depth guarded E
-  | .dhrec _ _ _ E => guarded && descGuarded g depth guarded E
-  | .lam _ b => descGuarded g depth guarded b
-  | .ann t _ => descGuarded g depth guarded t
-  | .ecase _ _ _ bs => bs.all (descGuarded g depth guarded)
-  | .letE _ _ _ _ b => descGuarded g depth guarded b
+its value, so `def D := Desc.rec …; μ D ()` cannot hide an unguarded description: any
+alias chain is finite, however long, and is unfolded to the end. `seen` is the set of
+names unfolded so far; a kernel global's value refers only to earlier globals, so a
+revisit is a cycle, and a cycle (like depth alone used to be) is *not* guarded: the check
+fails closed rather than guessing. A constant with no value (an axiom or an opaque
+definition) and a name with no declaration are left unjudged by the walk and so are
+rejected too: `μ` over a description whose spine the kernel cannot see is refused, not
+accepted. A pair match is looked through on all three of its parts (the scrutinee, the
+motive and the body), as `Kernel.wiz` does, so `match (D, ()) with | (d, _) => d` cannot
+hide an unguarded description. The check is conservative: it only rejects a `rec`/`hrec`
+it can see at the head of a constructor spine, and it is a step on the way to checking the
+evaluated description; a head that is not a term constructor (a variable, an application,
+a projection) is still accepted, which is the neutral-head policy (D-9). -/
+partial def descGuarded (g : Globals R) (seen : Std.HashSet Name) (guarded : Bool) :
+    Term R → Bool
+  | .darg _ _ E => descGuarded g seen true E
+  | .drec _ _ E => guarded && descGuarded g seen guarded E
+  | .dhrec _ _ _ E => guarded && descGuarded g seen guarded E
+  | .lam _ b => descGuarded g seen guarded b
+  | .ann t _ => descGuarded g seen guarded t
+  | .ecase _ _ _ bs => bs.all (descGuarded g seen guarded)
+  | .letE _ _ _ _ b => descGuarded g seen guarded b
+  -- a pair match: any of the scrutinee, the motive and the body may be (or contain, at
+  -- a head this walks) the description the `μ` is over. The self-hosted kernel walks the
+  -- same three (`split` there has no binder names)
+  | .split _ s _ m _ _ b =>
+    descGuarded g seen guarded s && descGuarded g seen guarded m &&
+      descGuarded g seen guarded b
   | .const n _ =>
-    match depth with
-    | 0 => true
-    | k + 1 => match g.find? n with
+    if seen.contains n then false
+    else match g.find? n with
       | some d => match d.value with
-        | some v => descGuarded g k guarded v
-        | none => true
-      | none => true
+        | some v => descGuarded g (seen.insert n) guarded v
+        | none => false
+      | none => false
   | _ => true
 
 /-- The error a `μ` whose description is not guarded gets. -/
@@ -1108,7 +1124,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     let vI := ctx.eval I
     let _ ← check ctx D (.desc l vI)
     -- (a recursive field must be guarded, a non-recursive field before it: μ X. X is out)
-    unless descGuarded ctx.globals 16 false D do throw (.other unguardedDescription)
+    unless descGuarded ctx.globals {} false D do throw (.other unguardedDescription)
     let _ ← check ctx i vI
     pure (if prop then .sort 0 else .sort (.succ l), Usage.zeros ctx.lvl)
   | .nu l I D i s h => do

@@ -22,8 +22,26 @@ if [ -n "${WIZ_CFLAGS:-}" ]; then set -- "$@" --cflags "$WIZ_CFLAGS"; fi
 if [ -n "${WIZ_LDFLAGS:-}" ]; then set -- "$@" --ldflags "$WIZ_LDFLAGS"; fi
 "$WIZ" "$@" > "$OUT/fixture.json"
 node "$ROOT/web/framework/test.mjs" "$OUT/fixture.json"
+# The normalised SSR tree hash (`Loom.ssrHash`): the Wiz fixture, then the rules the
+# adopt decision relies on (attribute order/white space equal, a real change/key differs,
+# a witness collision replaces).
+set -- run -I "$ROOT/lib" "$ROOT/web/framework/hash_gen.wiz"
+if [ -n "${WIZ_CFLAGS:-}" ]; then set -- "$@" --cflags "$WIZ_CFLAGS"; fi
+if [ -n "${WIZ_LDFLAGS:-}" ]; then set -- "$@" --ldflags "$WIZ_LDFLAGS"; fi
+"$WIZ" "$@" > "$OUT/hash.json"
+node "$ROOT/web/framework/hash_test.mjs" "$OUT/hash.json"
+# The morph fallback (focus/selection/value preservation, keyed moves): Node only.
+node "$ROOT/web/framework/morph_test.mjs"
 # The driver's ABI (event strings, payloads, onStep, js_patch): Node only, no wiz.
 node "$ROOT/web/framework/driver_test.mjs"
+# The i32 word entry (`wiz-web/1`, web/step.c): a runtime built from step_gen.wiz
+# exports the i64 step and links the shim, and its C half calls both.
+set -- run -I "$ROOT/lib" "$ROOT/web/framework/step_gen.wiz"
+if [ -n "${WIZ_CFLAGS:-}" ]; then set -- "$@" --cflags "$WIZ_CFLAGS"; fi
+if [ -n "${WIZ_LDFLAGS:-}" ]; then set -- "$@" --ldflags "$WIZ_LDFLAGS"; fi
+"$WIZ" "$@" > "$OUT/step.txt"
+grep -qF 'step: all checks passed' "$OUT/step.txt" && echo "ok (step words)" || {
+  echo "FAIL (step words)"; cat "$OUT/step.txt"; exit 1; }
 # The mount contract (one export; element, module, events, host capabilities): Node only.
 node "$ROOT/web/framework/mount_test.mjs"
 # The wire envelope/monitor and the adopt/replace contract: Node only.

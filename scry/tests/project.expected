@@ -93,4 +93,48 @@ index: json severity query: ok
 index: corrupt quire is a miss: ok
 index: quire hit after repair: ok
 index: truncated quire is a miss: ok
+lower: the lowerer identity is in the key: ok
+lower: the full CST digest is in the key: ok
+lower: the preprocessing digest is in the key: ok
+lower: the target alone changes the key: ok
+lower: the original text digest is in the key: ok
+lower: --allow-errors is in the key: ok
+lower: a same-length #line rewrite keeps the blanked preprocessed text: ok
+lower: a same-length #line rewrite changes the lowering pre digest: ok
+lower: cold hit 0: ok
+lower: cold miss 1: ok
+lower: cold write 1: ok
+lower: warm hit 1: ok
+lower: warm miss 0: ok
+lower: warm write 0: ok
+lower: the warm TU dump is byte-identical to cold: ok
+lower: a changed header does not hit: ok
+lower: a changed header misses: ok
+lower: the changed-header TU equals a cold build: ok
+lower: the changed header's entry warms: ok
+lower: the re-warmed TU equals the cold build: ok
+lower: the comment fixture is cold: ok
+lower: the comment fixture lowers cold: ok
+lower: the comment fixture parse warms: ok
+lower: the comment fixture lower warms: ok
+lower: a header comment hits the CST cache: ok
+lower: a header comment misses the parse cache 0: ok
+lower: a header comment misses the lowering cache: ok
+lower: a header comment re-lowers: ok
+lower: the comment change's warm TU has the cold origins: ok
+lower: the corruption fixture writes one entry: ok
+lower: the entry names its format: ok
+lower: the entry names the lowerer stamp: ok
+lower: a truncated entry does not hit: ok
+lower: a truncated entry is corrupt: ok
+lower: a truncated entry misses: ok
+lower: warms after truncation: ok
+lower: the body corruption fixture changed: ok
+lower: a body corruption does not hit: ok
+lower: a body corruption is corrupt: ok
+lower: warms after the digest mismatch: ok
+lower: twin cold hit 0: ok
+lower: twin cold misses 2: ok
+lower: twin cold writes 2: ok
+lower: both targets hit on the second run: ok
 cache: cleanup: ok

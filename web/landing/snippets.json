@@ -1,0 +1,28 @@
+{
+  "snippets": [
+    {
+      "name": "quantities",
+      "title": "Quantities on binders",
+      "lede": "0 is erased at run time, 1 is used exactly once, and ω may be used any number of times. The checker prices every use.",
+      "file": "quantities.wiz"
+    },
+    {
+      "name": "vectors",
+      "title": "A length in the type",
+      "lede": "Vec A n is a list whose type records how many elements it has. The length is erased, and head has no nil case to write.",
+      "file": "vectors.wiz"
+    },
+    {
+      "name": "equality",
+      "title": "Observational equality",
+      "lede": "Functions are equal when they agree on every argument, and propositions are equal when each implies the other: propositional equality computes.",
+      "file": "equality.wiz"
+    },
+    {
+      "name": "native",
+      "title": "A program that leaves the browser",
+      "lede": "The kernel, elaborator and compiler are written in Wiz itself; the same source compiles through C or LLVM to a native executable.",
+      "file": "native.wiz"
+    }
+  ]
+}

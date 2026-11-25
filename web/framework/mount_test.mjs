@@ -181,6 +181,45 @@ eq("edit's caret follows the inserted text", 1, replaced.selectionStart);
 eq("edit leaves the field's live value too", "X b", field.value);
 eq("edit without a text field is null", null, app.host.edit({ insert: "x" }));
 
+// ## A runtime with only the word entry (`wiz_step`, `wiz-web/1`) mounts the same way,
+// and the page's own i64 entry points still receive a BigInt state.
+function wordStub(html) {
+  const strings = new Map();
+  let next = 1;
+  const put = (s) => { const p = next++; strings.set(p, s); return p; };
+  const seen = { steps: [], states: [] };
+  return {
+    seen,
+    default: async () => ({
+      _wiz_loom_init: () => 7,
+      _wiz_loom_html: () => put(html),
+      _wiz_step: (state, p, len) => {
+        seen.steps.push({ state, p, len, event: strings.get(Number(p)) });
+        return state + 1;
+      },
+      _wiz_loom_show: (state, p) => {
+        seen.states.push(typeof state);
+        seen.shown = strings.get(Number(p));
+        return Number(state) + 1;
+      },
+      stringToNewUTF8: put,
+      UTF8ToString: (p) => strings.get(Number(p)) || "",
+      _free: (p) => { strings.delete(Number(p)); },
+    }),
+  };
+}
+const wordRoot = parse("");
+const wordRuntime = wordStub(SSR);
+const wordApp = await mount(wordRoot, { module: wordRuntime, env, parse });
+eq("a module with only wiz_step mounts", SSR, serialize(wordRoot));
+eq("its step entry is the word form", "i32", wordApp.abi);
+wordRoot.childNodes[0].childNodes[0].dispatchEvent({ type: "click" });
+eq("the event stepped through the three words", "click\n0\n", wordRuntime.seen.steps[0] && wordRuntime.seen.steps[0].event);
+eq("the state is the unsigned word the step returned", 8, wordApp.state());
+wordApp.call("wiz_loom_show", "ok");
+eq("a string argument still arrives", "ok", wordRuntime.seen.shown);
+eq("the page's i64 entry points get the word state as a BigInt", "bigint", wordRuntime.seen.states[0]);
+
 // ## A module that is not a runtime is refused before the page is touched
 let rejected = null;
 try { await mount("#root", { module: async () => ({}) , env, parse }); }

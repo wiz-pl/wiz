@@ -1,22 +1,77 @@
 #!/bin/sh
-# Remind the pusher which registered light checks have no clean record for the
-# commit(s) being pushed.  This is advisory: it always exits 0 and never blocks
-# a push.
+# Two checks on the commits being pushed, both against the gitignored `.checks/`
+# ledger:
 #
-# The records live in `.checks/` (gitignored, per worktree) and are written by
-# `scripts/checks-ledger.py run NAME`.  They are keyed by commit + check, so an
-# amend or rebase needs fresh runs.  `.checks/` is untrusted by design: it is a
-# fast-fail reminder, not a security gate, and CI does not read it.
+#  * `warn` (advisory) reminds the pusher which registered light checks have no
+#    clean record for the commit(s) being pushed;
+#  * `require` (blocking) refuses a push to `refs/heads/integration/*` whose sha
+#    has no clean BUILD record from `heavy`.  `nix eval` does not run a builder,
+#    so only a build of this exact sha proves it compiles; a merge commit is a
+#    new sha, so the merge result has to be built.  Other refs are not checked:
+#    agent branches keep pushing freely.
+#
+# The record names are the three `heavy` writes (`heavy:lake` for `lake ...`,
+# `heavy:nix-build:<attr>` for `nix build .#X`, `heavy:nix` for a nix command
+# named by hand); what counts as a build is decided from the record's argv by
+# `require` (see `build_evidence` in scripts/checks-ledger.py), so a bare
+# `heavy:lake` pattern would miss every `nix build` and refuse a push the
+# message itself told the user to build.
+#
+# The ledger is per-worktree, but the records are read from every worktree of
+# this checkout (and every /workspace/wt/* checkout), keyed by commit: a lane
+# builds in its own tree and the train is pushed from another one, and a sha is
+# a sha once `dirty` is false.
+#
+# Exit status (deliberate, not incidental):
+#   0  every pushed integration sha has a clean build record, or
+#   1  a red record: a pushed integration sha has no clean build for this exact
+#      commit.  That blocks.
+#   *  any other status means `require` could not answer (2 = an unreadable
+#      ledger, git failing, a bad invocation; anything else is a crash).
+#      "Cannot answer" is a migration state, not a verdict: it warns loudly and
+#      lets the push through, because a guard that blocks when it is broken is a
+#      guard people learn to pass `--no-verify`.
+#
+# It cannot block the other way: `git push --no-verify` is git's own escape
+# hatch and skips this hook entirely.  A bypass leaves no trace here at the
+# moment it happens; `audit` reports it later, from the remote-tracking refs
+# (`.checks/bypass.log`).  This is a local guard against mistakes, not a
+# security gate: `.checks/` is untrusted (see scripts/checks-ledger.py).
 #
 # Install the repository's hooks once per clone:
 #     git config core.hooksPath .githooks
 # (scripts/install-hooks.sh is the older per-clone alternative; it does not
-# install this warning.)
+# install this hook.)
 set -u
 
 root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 [ -f "$root/scripts/checks-ledger.py" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
-python3 "$root/scripts/checks-ledger.py" warn --pre-push || true
+# Both checks read git's pre-push stdin, and a stream can be read once: keep a
+# copy for the second one.  Without a temp file the push would still be checked
+# by `warn` only, which would silently drop the blocking half.
+tmp=$(mktemp 2>/dev/null) || exit 0
+trap 'rm -f "$tmp"' EXIT
+trap 'exit 1' HUP INT TERM
+cat > "$tmp"
+
+python3 "$root/scripts/checks-ledger.py" warn --pre-push < "$tmp" || true
+# a remote tip with no record is a push that skipped this hook (`--no-verify`)
+python3 "$root/scripts/checks-ledger.py" audit --for 'refs/heads/integration/*' >/dev/null 2>&1 || true
+python3 "$root/scripts/checks-ledger.py" require --pre-push \
+  --name 'heavy:lake' \
+  --name 'heavy:nix-build:*' \
+  --name 'heavy:nix' \
+  --for 'refs/heads/integration/*' < "$tmp"
+rc=$?
+case "$rc" in
+  0) exit 0 ;;
+  1) exit 1 ;;
+esac
+echo "checks-ledger: WARNING: could not answer whether the pushed sha has a clean" >&2
+echo "  build record (checks-ledger exited $rc), so the push is allowed.  Run:" >&2
+echo "    python3 scripts/checks-ledger.py status" >&2
+echo "    python3 scripts/checks-ledger.py audit" >&2
+echo "  A red record still blocks; this is an unreadable ledger or a broken tool." >&2
 exit 0

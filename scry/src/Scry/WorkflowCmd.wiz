@@ -420,13 +420,13 @@ partial def Scry.wfScanPairs (o : Scry.ScanOpts) (st : Scry.WfStore) (file rules
     List (Scry.RuleFinding × Option Scry.Certificate) → EIO Scry.WfStore
   | .nil => EIO.pure st
   | .cons (f, cert) rest => do
-    let id := Scry.wfId f file;
-    let key := Scry.wfSemanticKey f file;
+    let id := Scry.wfId "c" f file;
+    let key := Scry.wfSemanticKey "c" f file;
     let origin := Scry.originAt rep.origins f.func f.sink;
     let lineText := match origin with
       | .some org => Scry.wfLineAt source org.line
       | .none => "";
-    let lineHash := Scry.wfLineHash f lineText;
+    let lineHash := Scry.wfLineHash "c" f lineText;
     let art := Scry.wfArtifactDir (Scry.wfArtifactsPath o.artifacts) id;
     stepd1 ← Scry.wfEnsureDir art;
     staticJson ← Scry.wfStaticJson rep f cert source rulesPath rulesText o.allowErrors smt
@@ -1281,7 +1281,7 @@ def Scry.verifyCmd (args : List String) : EIO Nat :=
         let opts := { Scry.emptyTaintOpts rec0.source with
           rules := rec0.rules, allowErrors := rec0.allowErrors };
         rep ← Scry.analyzeFile opts;
-        let ids := List.map (fun f => Scry.wfId f rec0.source) rep.findings;
+        let ids := List.map (fun f => Scry.wfId "c" f rec0.source) rep.findings;
         let present := List.any (fun x => String.eq x rec0.id) ids;
         let after := Scry.wfStaticAfterJson rec0.source rep ids present;
         let vdir := Path.join rec0.artifacts "verify";

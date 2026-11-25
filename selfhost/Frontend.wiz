@@ -606,19 +606,27 @@ inductive Foreign where
   -- text (an include, a glue function) the backend puts before the wrappers
   | cfunc (name : String) (params : List String) (res : String)
   | code (text : String)
+-- (A11, D1) What a deriver registration names: one of the frontend's compiled-in
+-- derivers (a kind number), or a declaration the user registered. A registration is
+-- never dispatched by a name: a user declaration called `deriveBEq` is a `.user`, not
+-- the built-in `BEq` body. (The host already stores the declaration's `Name`.)
+inductive DeriverRef where
+  | builtinDeriver (kind : Nat)
+  | user (name : String)
+
 -- (A11) the deriver of each class the frontend implements (`deriving C` runs it): the
 -- Lean toolchain registers these with `attribute [deriver C] f` on import of
 -- `lib/Deriving.wiz`, and the self-hosted prelude declares only `Append`, so the five are
--- pre-registered here. The value is the deriver's name (`deriveBEq`, …), as
--- `attribute [deriver C] f` records it: dispatch is by **name**, like the host's table
--- (`CommandState.derivers`), not by the class's method shape.
-def builtinDerivers : StrMap (Option String) :=
+-- pre-registered here. The value is a built-in kind (1 `Inhabited`, 2 `BEq`, 3 `Repr`,
+-- 4 `DecidableEq`, 5 `Compare`), never the deriver's spelling: `deriverCmd` is the only
+-- place a spelling becomes a kind, and only when no declaration has that name.
+def builtinDerivers : StrMap (Option DeriverRef) :=
   StrMap.insert (StrMap.insert (StrMap.insert (StrMap.insert (StrMap.insert StrMap.empty
-    (Str.ofString "Inhabited") (.some "deriveInhabited"))
-    (Str.ofString "BEq") (.some "deriveBEq"))
-    (Str.ofString "Repr") (.some "deriveRepr"))
-    (Str.ofString "DecidableEq") (.some "deriveDecidableEq"))
-    (Str.ofString "Compare") (.some "deriveCompare")
+    (Str.ofString "Inhabited") (.some (.builtinDeriver 1)))
+    (Str.ofString "BEq") (.some (.builtinDeriver 2)))
+    (Str.ofString "Repr") (.some (.builtinDeriver 3)))
+    (Str.ofString "DecidableEq") (.some (.builtinDeriver 4)))
+    (Str.ofString "Compare") (.some (.builtinDeriver 5))
 -- (D8 goals) what the language server keeps from a check: a body's expected type (a
 -- `term`), or a tactic state (a `goal`). Both are character offsets into the document's
 -- text; the driver (`selfhost/Cli.wiz`) answers the infoview's plain queries from them.
@@ -684,7 +692,7 @@ inductive NsFrame where
 inductive Globals where
   | mk (all : Array Global) (scope : Scope) (inds : StrMap (Option IndInfo)) (ffi : List Foreign)
        (classes : StrMap (Option ClassInfo)) (insts : List InstInfo) (headers : List Header)
-       (priv : Bool) (ders : StrMap (Option String))
+       (priv : Bool) (ders : StrMap (Option DeriverRef))
        (nsPrefix : String) (opens : List String) (aliases : List NsAlias)
        (nsStack : List NsFrame) (trust : Bool) (smtTrust : Bool) (lsp : LspCtx)
 def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false builtinDerivers
@@ -825,13 +833,14 @@ def Globals.class (gs : Globals) (T : String) : Option ClassInfo := match gs wit
     | .none => .none
 def Globals.addClass (gs : Globals) (T : String) (info : ClassInfo) : Globals := match gs with
   | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d np o a st t s l
--- (A11) the deriver registered for a class (`deriving C` runs it), by class name
-def Globals.deriver (gs : Globals) (C : String) : Option String := match gs with
+-- (A11, D1) the deriver registered for a class (`deriving C` runs it), by class name:
+-- a built-in kind or a user declaration, never a bare name
+def Globals.deriver (gs : Globals) (C : String) : Option DeriverRef := match gs with
   | .mk _ _ _ _ _ _ _ _ ders _ _ _ _ _ _ _ => match StrMap.findD ders (Str.ofString C) .none with
     | .some f => .some f
     | .none => .none
-def Globals.addDeriver (gs : Globals) (C f : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f)) np o a st t s l
+def Globals.addDeriver (gs : Globals) (C : String) (r : DeriverRef) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some r)) np o a st t s l
 -- (A10) the instances, the latest first
 def Globals.insts : Globals → List InstInfo
   | .mk _ _ _ _ _ ins _ _ _ _ _ _ _ _ _ _ => ins
@@ -5475,34 +5484,200 @@ def inferTransp (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp : Option SpT
 -- frontend's `inferData?`/`checkData?`: an unshadowed identifier applied to its arguments
 -- (`builtinApp?`). `cocon` is what a non-corecursive copattern definition builds, and
 -- `T.mk` is a `cocon`; `coit` is what a corecursive one builds.
-def builtinNames3 : List String := .cons "ν" (.cons "out" (.cons "coit" (.cons "cocon" .nil)))
+--
+-- **TT-06: the data primitives that need a type.** `Desc I`, `μ D i`, `Desc.ret i`,
+-- `Desc.arg q S D`, `Desc.rec q j D` and `Desc.hrec q H j D` are the `Desc` half of the
+-- Lean frontend's `builtinNames` (`Elab/Term.lean`), and are read exactly as its
+-- `inferData?`/`checkData?` read them: `Desc I` is the universe one step down, `μ`/`ν`
+-- expect a description (which carries its index type in its own type), and the three
+-- field formers are checking forms of a description (the kernel's `dret`/`darg`/`drec`
+-- have their index type in their type, which inferring a bare `Desc.arg` cannot recover).
+-- The guardedness walk is the kernel's (`Kernel.wiz` `descGuarded` in the `μ` rule), so
+-- `μ X. X` is rejected on both sides. `Desc.elim`, `Desc.interp`, `Desc.All`, `con`,
+-- `ind` and `scofix` are in the Lean table but not implemented here: they are left out
+-- of this list (a source that writes one gets "unknown identifier", not a half-checked
+-- term; the gap is stated in `docs/stages/21-bootstrap.md` 21as).
+def builtinNames3 : List String := .cons "Desc" (.cons "Desc.ret" (.cons "Desc.arg"
+  (.cons "Desc.rec" (.cons "Desc.hrec" (.cons "μ" (.cons "ν" (.cons "out"
+  (.cons "coit" (.cons "cocon" .nil)))))))))
 def builtinName : List String → String → Bool
   | .nil, _ => .false
   | .cons x xs, n => match strEq x n with
     | .true => .true
     | .false => builtinName xs n
+-- The Lean frontend's `builtinApp?` reads a built-in name only when it is neither a local
+-- (its `lookupLocal`) nor a global (`globals.contains`): a user's `def Desc …` shadows
+-- the primitive instead of being read as one. A name the scope resolves at all — a local,
+-- this module's, an `open`ed one — shadows it; `resolveNameV` is that lookup here.
 def builtinApp (gs : Globals) (cx : Cx) (s : Syntax) : Option BApp :=
   match strEq (kindOf s) "term.app" with
   | .false => .none
   | .true => match strEq (kindOf (kid s 0)) "term.ident" with
     | .false => .none
     | .true => let n := identOf (kid s 0);
-      match Bool.and (builtinName builtinNames3 n) (match Scope.lookup (Cx.sc cx) n with
-        | .some _ => .false
-        | .none => .true) with
+      match Bool.and (builtinName builtinNames3 n) (match resolveNameV (Cx.sc cx) gs n with
+        | .ok _ => .false
+        | .privTo _ _ => .false
+        | .ambiguous _ => .false
+        | .missing => .true) with
       | .true => .some (.mk n (kids (kid s 1)))
       | .false => .none
+-- a description's written quantity. In `Desc.rec 1 () D` the `1` is an ordinary
+-- *term* argument (`term.num`, whose child is a `num` node), as a `.qty`-typed literal
+-- is on the Lean side (`elabQtyLit` reads a numeral); a binder's spelling is a
+-- `quantity` node; `ω` is either. A quantity *term* (`%t`) is not evaluated: `bad`.
+def builtinQ (qs : Syntax) : QW := match strEq (kindOf qs) "term.num" with
+  | .true => qtyNode qs
+  | .false => match strEq (kindOf qs) "quantity" with
+    | .true => qtyNode qs
+    | .false => match strEq (kindOf qs) "term.omega" with
+      | .true => .is .qw
+      | .false => match strEq (kindOf qs) "null" with
+        -- a `null` child node: the argument was not written
+        | .true => .dflt
+        | .false => .bad
+-- `Desc I` is the universe it describes one step down: `I : Sort (l+1)`, `Desc I : Sort (l+2)`
+-- The level one below `lI`: `Desc I` with `I : Sort (l+1)` lives in `Sort (l+2)`, so
+-- `inferDesc` needs `l` from `lI`. A numeral above zero has a predecessor; `lsucc x` is
+-- `x`; a parameter or a `max` has no known predecessor, and the caller reports that.
+def lvlPred : Lvl → Option Lvl
+  | .lnum n => match n with
+    | .zero => .none
+    | .succ m => .some (.lnum m)
+  | .lsucc l => .some l
+  | _ => .none
+
+def inferDesc (gs : Globals) (es : ES) (cx : Cx) (args : List Syntax) : TE :=
+  let d := Cx.lvl cx;
+  match args with
+  | .cons I .nil => match inferType gs es cx I with
+    | .err m => .err m
+    | .ok I0 Ity es1 => match whnf (force es1 Ity) with
+      | .vsort lI => match lvlPred lI with
+        | .some l => .ok (.descr l I0) (.vsort (lsucc (lsucc l))) es1
+        | .none => .err "Desc takes an index type at a positive universe level"
+      | v => .err (String.append "Desc takes an index type, but this one's type is "
+          (show (scopeNames (Cx.sc cx)) d (quote d v)))
+    | e => e
+  | _ => .err "Desc takes one index type"
+-- `μ D i` and `ν D i`: the description's type is `Desc l I`, the index is an `I`, the
+-- data type is in `Sort (l+1)` (`ν`'s by subtyping at the sized families, as for any
+-- inferred form) — the Lean frontend's `inferData?`, one rule for both (A19's `ν` rule).
+-- The guard on `μ`'s description is the kernel's (`Kernel.wiz` `descGuarded`, in the data
+-- rule), so `μ X. X` is rejected on both sides and neither is a second semantics here.
+def inferMuNu (gs : Globals) (es : ES) (cx : Cx) (isMu : Bool) (args : List Syntax) : TE :=
+  let d := Cx.lvl cx;
+  match args with
+  | .cons D (.cons i .nil) => match inferT gs es cx D .none with
+    | .err m => .err m
+    | .ok D0 dty es1 => match whnf (force es1 dty) with
+      | .vdesc l Iv => match checkT gs es1 cx i Iv .none with
+        | .ok i0 _ es2 => .ok (if isMu then .mu l (quote d Iv) D0 i0
+            else .nu l (quote d Iv) D0 i0 .szInf) (.vsort (lsucc l)) es2
+        | e => e
+      | v => .err (String.append (String.append (if isMu then "μ" else "ν")
+          " expects a description, got ") (show (scopeNames (Cx.sc cx)) d (quote d v)))
+    | e => e
+  | _ => .err (String.append (if isMu then "μ" else "ν") " takes a description and an index")
+-- (TT-06) **a description is a checking form.** `Desc.ret i`, `Desc.arg q S D`,
+-- `Desc.rec q j D` and `Desc.hrec q H j D` are read against the description they are, as
+-- `checkData?` reads them and as the kernel's `dret`/`darg`/`drec`/`dhrec` are checked
+-- (their index type is in their type, so there is nothing to infer them from: a bare one
+-- is "cannot infer the type of a description", not a guessed index type). A description
+-- written under `μ` has no expected type to take, so `μ` here is infer-then-check: the
+-- description's own type is written, `(Desc.arg q S D : Desc I)`, exactly as the Lean
+-- frontend's `inferData?` reads a `μ` (`infer D`, then `check i I`).
+def checkDescRet (gs : Globals) (es : ES) (cx : Cx) (args : List Syntax) (ty : Val) : TE :=
+  let d := Cx.lvl cx;
+  match whnf (force es ty) with
+  | .vdesc l Iv => match args with
+    | .cons i .nil => match checkT gs es cx i Iv .none with
+      | .ok i0 _ es1 => .ok (.dret i0) ty es1
+      | e => e
+    | _ => .err "Desc.ret takes one index"
+  | v => .err (String.append "Desc.ret builds a description, but the expected type is not one (write (Desc.ret i : Desc I)), it is "
+      (show (scopeNames (Cx.sc cx)) d (quote d v)))
+-- `Desc.arg q S D`: a non-recursive field of type `S` in the universe one step down, then
+-- the rest of the description under it, `(s : S) → Desc l I` — the kernel's `.darg` arm
+def checkDescArg (gs : Globals) (es : ES) (cx : Cx) (args : List Syntax) (ty : Val) : TE :=
+  let d := Cx.lvl cx;
+  match whnf (force es ty) with
+  | .vdesc l Iv => match args with
+    | .cons qs (.cons S (.cons D .nil)) => match builtinQ qs with
+      | .bad => .err qtyErr
+      | .is q => match inferType gs es cx S with
+        | .err m => .err m
+        | .ok S0 Sty es1 => match whnf (force es1 Sty) with
+          | .vsort lS => match lvlEquiv lS (lsucc l) with
+            | .false => .err "a description's field type must be in its universe (lift it with ULift)"
+            | .true =>
+              let vS := eval (TCtx.env (Cx.c cx)) S0;
+              match checkT gs es1 cx D (.vpi .qw (lsucc l) (lsucc (lsucc l)) vS (.cons Iv .nil) (.descr l (.var 1))) .none with
+              | .ok D0 _ es2 => .ok (.darg (.qlit q) S0 D0) ty es2
+              | e => e
+          | v => .err (String.append "a description's field type must be a type, but it is in "
+              (show (scopeNames (Cx.sc cx)) d (quote d v)))
+        | e => e
+      | .dflt => .err "a description's field form takes a quantity: write it, as in (Desc.arg 1 Unit q)"
+    | _ => .err "Desc.arg takes a quantity, a field type and the rest of the description"
+  | v => .err (String.append "Desc.arg builds a description, but the expected type is not one (write (Desc.arg q S D : Desc I)), it is "
+      (show (scopeNames (Cx.sc cx)) d (quote d v)))
+-- `Desc.rec q j D`: a recursive field at index `j`, then the rest of the description
+def checkDescRec (gs : Globals) (es : ES) (cx : Cx) (args : List Syntax) (ty : Val) : TE :=
+  let d := Cx.lvl cx;
+  match whnf (force es ty) with
+  | .vdesc l Iv => match args with
+    | .cons qs (.cons j (.cons D .nil)) => match builtinQ qs with
+      | .bad => .err qtyErr
+      | .is q => match checkT gs es cx j Iv .none with
+        | .err m => .err m
+        | .ok j0 _ es1 => match checkT gs es1 cx D ty .none with
+          | .ok D0 _ es2 => .ok (.drec (.qlit q) j0 D0) ty es2
+          | e => e
+      | .dflt => .err "a description's field form takes a quantity: write it, as in (Desc.arg 1 Unit q)"
+    | _ => .err "Desc.rec takes a quantity, an index and the rest of the description"
+  | v => .err (String.append "Desc.rec builds a description, but the expected type is not one (write (Desc.rec q j D : Desc I)), it is "
+      (show (scopeNames (Cx.sc cx)) d (quote d v)))
+-- `Desc.hrec q H j D`: an infinitary field — `H : Sort (l+1)`, an index per `h : H`
+-- (`j : H → I`), then the rest under them — the kernel's `.dhrec` arm and the Lean
+-- frontend's `checkData?` arm
+def checkDescHrec (gs : Globals) (es : ES) (cx : Cx) (args : List Syntax) (ty : Val) : TE :=
+  let d := Cx.lvl cx;
+  match whnf (force es ty) with
+  | .vdesc l Iv => match args with
+    | .cons qs (.cons H (.cons j (.cons D .nil))) => match builtinQ qs with
+      | .bad => .err qtyErr
+      | .is q => match inferType gs es cx H with
+        | .err m => .err m
+        | .ok H0 Hty es1 => match whnf (force es1 Hty) with
+          | .vsort lH => match lvlEquiv lH (lsucc l) with
+            | .false => .err "an infinitary field's family must be in the description's universe (lift it with ULift)"
+            | .true =>
+              let vH := eval (TCtx.env (Cx.c cx)) H0;
+              let lI := lsucc l;
+              -- `j : H → I`: the index type under `H`'s binder
+              let IH : Val := .vpi .qw lI lI vH (.nil) (.descr l (.var 0));
+              match checkT gs es1 cx j IH .none with
+                | .err m => .err m
+                | .ok j0 _ es2 => match checkT gs es2 cx D ty .none with
+                  | .ok D0 _ es3 => .ok (.dhrec (.qlit q) H0 j0 D0) ty es3
+                  | e => e
+          | v => .err (String.append "an infinitary field's family must be a type, but it is in "
+              (show (scopeNames (Cx.sc cx)) d (quote d v)))
+        | e => e
+      | .dflt => .err "a description's field form takes a quantity: write it, as in (Desc.arg 1 Unit q)"
+    | _ => .err "Desc.hrec takes a quantity, a family, an index map and the rest of the description"
+  | v => .err (String.append "Desc.hrec builds a description, but the expected type is not one (write (Desc.hrec q H j D : Desc I)), it is "
+      (show (scopeNames (Cx.sc cx)) d (quote d v)))
 def inferBuiltin (gs : Globals) (es : ES) (cx : Cx) (n : String) (args : List Syntax) : TE :=
   let d := Cx.lvl cx;
-  if strEq n "ν" then match args with
-    | .cons D (.cons i .nil) => match inferT gs es cx D .none with
-      | .err m => .err m
-      | .ok D0 dty es1 => match whnf (force es1 dty) with
-        | .vdesc l Iv => match checkT gs es1 cx i Iv .none with
-          | .ok i0 _ es2 => .ok (.nu l (quote d Iv) D0 i0 .szInf) (.vsort (lsucc l)) es2
-          | e => e
-        | v => .err (String.append "ν expects a description, got " (show (scopeNames (Cx.sc cx)) d (quote d v)))
-    | _ => .err "ν takes a description and an index"
+  if strEq n "Desc" then inferDesc gs es cx args
+  else if strEq n "μ" then inferMuNu gs es cx .true args
+  else if strEq n "ν" then inferMuNu gs es cx .false args
+  else if strEq n "Desc.ret" then .err "cannot infer the type of a description: write its index type, (Desc.ret i : Desc I)"
+  else if strEq n "Desc.arg" then .err "cannot infer the type of a description: write its index type, (Desc.arg q S D : Desc I)"
+  else if strEq n "Desc.rec" then .err "cannot infer the type of a description: write its index type, (Desc.rec q j D : Desc I)"
+  else if strEq n "Desc.hrec" then .err "cannot infer the type of a description: write its index type, (Desc.hrec q H j D : Desc I)"
   else if strEq n "out" then match args with
     | .cons x .nil => match inferT gs es cx x .none with
       | .err m => .err m
@@ -5520,7 +5695,11 @@ def inferBuiltin (gs : Globals) (es : ES) (cx : Cx) (n : String) (args : List Sy
   else .err (String.append "not a coinduction primitive: " n)
 def checkBuiltin (gs : Globals) (es : ES) (cx : Cx) (n : String) (args : List Syntax) (ty : Val) : TE :=
   let d := Cx.lvl cx;
-  if strEq n "coit" then match args with
+  if strEq n "Desc.ret" then checkDescRet gs es cx args ty
+  else if strEq n "Desc.arg" then checkDescArg gs es cx args ty
+  else if strEq n "Desc.rec" then checkDescRec gs es cx args ty
+  else if strEq n "Desc.hrec" then checkDescHrec gs es cx args ty
+  else if strEq n "coit" then match args with
     | .cons S (.cons st (.cons x .nil)) => match whnf (force es ty) with
       | .vnu l I D i sz => match checkT gs es cx S (coitStateTy l I) .none with
         | .err m => .err m
@@ -10904,9 +11083,6 @@ def deriverKind (f : String) : Nat := match strEq (deriverBase f) "deriveInhabit
         | .false => match strEq (deriverBase f) "deriveCompare" with
           | .true => 5
           | .false => 0
-def isBuiltinDeriver (f : String) : Bool := match deriverKind f with
-  | .zero => .false
-  | _ => .true
 -- a type's leading Πs (its parameters, and an index)
 partial def piArity : Tm → Nat
   | .pi _ _ _ _ b => Nat.succ (piArity b)
@@ -10915,23 +11091,25 @@ partial def piArity : Tm → Nat
 def classArity (gs : Globals) (C : String) : Nat := match globalTyOf gs C with
   | .some ty => piArity ty
   | .none => 0
--- (A11) `attribute [deriver C] f`: register `f` as `C`'s deriver, as the host's
--- `command.attrDeriver` does. A built-in deriver's name (`deriveBEq`, …) is the
--- frontend's own and needs no declaration; another `f` must be declared with one
--- argument (`String → MacroM (List Syntax)`), the arity the host checks by unifying its
--- type with `Deriver`. A declared `f` is recorded even though this frontend cannot run
--- it: `deriving C` reports that, with the command's position.
+-- (A11, D1) `attribute [deriver C] f`: register `f` as `C`'s deriver, as the host's
+-- `command.attrDeriver` does. A spelling that names no declaration (`deriveBEq`, …) is
+-- the frontend's built-in deriver; a declaration with that name is a user deriver,
+-- even when the name is one of the built-ins'. The declared `f` must take one argument
+-- (`String → MacroM (List Syntax)`), the arity the host checks by unifying its type with
+-- `Deriver`. A user declaration is recorded as `.user` and `deriving C` refuses it with
+-- `entry-unsupported` (this frontend has no elaboration-time evaluator), never running
+-- the built-in body that happens to share its name.
 def deriverCmd (gs : Globals) (stx : Syntax) : LinkR :=
   let C := identOf' (kid stx 3);
   let f := identOf' (kid stx 5);
   match Scope.lookup (Globals.scope gs) f with
-  | .none => match isBuiltinDeriver f with
-    | .true => LinkR.mk .none (Globals.addDeriver gs C (deriverBase f))
-    | .false => LinkR.mk (.some ("error: " +++ f +++ " is not a deriver: unknown declaration " +++ f)) gs
+  | .none => match deriverKind f with
+    | .zero => LinkR.mk (.some ("error: " +++ f +++ " is not a deriver: unknown declaration " +++ f)) gs
+    | k => LinkR.mk .none (Globals.addDeriver gs C (.builtinDeriver k))
   | .some i => match globalTyOf gs f with
     | .none => LinkR.mk (.some ("error: " +++ f +++ " is not a deriver: unknown declaration " +++ f)) gs
     | .some ty => match piArity ty with
-      | .succ (.zero) => LinkR.mk .none (Globals.addDeriver gs C f)
+      | .succ (.zero) => LinkR.mk .none (Globals.addDeriver gs C (.user f))
       | n => LinkR.mk (.some ("error: " +++ f +++ " is not a deriver: it takes " +++ Nat.toString n
           +++ " arguments, expected one (String → MacroM (List Syntax))")) gs
 -- (stage 21u) `attribute [inline] f`: a hint to the Lean compiler, checked as the Lean
@@ -10986,15 +11164,17 @@ def linkStep (gs : Globals) (stx : Syntax) : Option LinkR := match strEq (kindOf
 -- deriver emits ordinary `def`/`instance` commands, which this elaborator and the
 -- kernel check exactly like a hand-written instance (so no axioms, no new trust).
 --
--- The table is keyed by the class **name**: `attribute [deriver C] f` registers `f`,
--- and the dispatcher picks the deriver by `f`'s name (`deriveInhabited`, `deriveBEq`,
--- `deriveRepr`, `deriveDecidableEq`, `deriveCompare` -- the names `lib/Deriving.wiz`
--- gives them). The five are pre-registered under the canonical class names, because
--- the self-hosted prelude has no `import Deriving`. A registered deriver of another
--- name is recorded and reported as unrunnable when it is used: there is no
--- elaboration-time evaluation of Wiz code here (no `MacroM`, no quotations), so a
--- user's `Deriver := String → MacroM (List Syntax)` cannot be run (a pinned
--- difference; see docs/stages/30-selfhost-typeclasses.md, 30b).
+-- The table is keyed by the class **name**: `attribute [deriver C] f` stores a
+-- `DeriverRef`, a built-in kind (`deriveInhabited`, `deriveBEq`, `deriveRepr`,
+-- `deriveDecidableEq`, `deriveCompare` -- the names `lib/Deriving.wiz` gives them) or a
+-- user declaration, and the dispatcher uses that value, never the registered spelling.
+-- The five built-ins are pre-registered under the canonical class names, because the
+-- self-hosted prelude has no `import Deriving`. A declaration is recorded as `.user` and
+-- reported as unrunnable when it is used: there is no elaboration-time evaluation of Wiz
+-- code here (no `MacroM`, no quotations), so a user's
+-- `Deriver := String → MacroM (List Syntax)` cannot be run (a pinned difference; see
+-- docs/stages/30-selfhost-typeclasses.md, 30b). The registration-time distinction is
+-- what stops a user declaration called `deriveBEq` from running the built-in `BEq` body.
 
 inductive DerivedR where
   | ok (gs : Globals) (line : String)
@@ -11536,25 +11716,28 @@ def deriveInhabitedR (gs : Globals) (C T : String) : DerivedR :=
   match runDeriver deriveInhabitedV gs T with
   | .err m => deriveErr C T m
   | .ok cmds => elabDerivedGo cmds gs
--- (30b) the dispatch: the deriver the class's entry names, run for `T`. `deriveInhabited`
--- runs through the `Deriver`/`runDeriver` runner above; the other four are still the
--- hardcoded functions and are the remaining port (`deriveBEq`, `deriveRepr`,
--- `deriveDecidableEq`, `deriveCompare`, in `lib/Deriving.wiz`).
+-- (30b, D1) the dispatch: the deriver entry names either a built-in kind or a user
+-- declaration. `Inhabited` runs through the `Deriver`/`runDeriver` runner above; the
+-- other four built-ins are still the hardcoded functions and are the remaining port
+-- (`deriveBEq`, `deriveRepr`, `deriveDecidableEq`, `deriveCompare`, in
+-- `lib/Deriving.wiz`). A user declaration is refused with `entry-unsupported`, never
+-- replaced by a built-in that shares its spelling.
 def deriveClassOn (gs : Globals) (C T : String) : DerivedR := match Globals.deriver gs C with
   | .none => .err ("error: no deriver for " +++ C +++ " (register one with `attribute [deriver " +++ C +++ "] f`)")
-  | .some f => match deriverKind f with
-    | .zero => .err ("error: deriving " +++ C +++ " for " +++ T +++ ": the deriver " +++ f
-        +++ " cannot be run (this frontend has no elaboration-time evaluator; the derivers it runs are deriveInhabited, deriveBEq, deriveRepr, deriveDecidableEq and deriveCompare)")
-    | _ => match Globals.class gs C with
-      | .none => deriveErr C T (C +++ " is not a class (declare it with `class`)")
-      | .some (.mk methods) => match Nat.beq (classArity gs C) 1 with
-        | .false => deriveErr C T ("the class takes " +++ Nat.toString (classArity gs C)
-            +++ " parameters; a derived instance is for a class of one type parameter")
-        | .true => match Globals.ind gs T with
-          | .none => deriveErr C T ("not an inductive type or structure: " +++ T)
-          | .some info => match methods with
-            | .nil => deriveErr C T "the class has no methods"
-            | .cons m _ => match deriverKind f with
+  | .some ref => match Globals.class gs C with
+    | .none => deriveErr C T (C +++ " is not a class (declare it with `class`)")
+    | .some (.mk methods) => match Nat.beq (classArity gs C) 1 with
+      | .false => deriveErr C T ("the class takes " +++ Nat.toString (classArity gs C)
+          +++ " parameters; a derived instance is for a class of one type parameter")
+      | .true => match Globals.ind gs T with
+        | .none => deriveErr C T ("not an inductive type or structure: " +++ T)
+        | .some info => match methods with
+          | .nil => deriveErr C T "the class has no methods"
+          | .cons m _ => match ref with
+            | .user f => .err ("error: deriving " +++ C +++ " for " +++ T
+                +++ ": entry-unsupported: the deriver " +++ f
+                +++ " is a user declaration; this frontend has no elaboration-time evaluator (SH-2.1), so it cannot run it (the built-in derivers are deriveInhabited, deriveBEq, deriveRepr, deriveDecidableEq and deriveCompare)")
+            | .builtinDeriver k => match k with
               | .succ (.zero) => deriveInhabitedR gs C T
               | .succ (.succ (.zero)) => deriveBEq gs C m T info
               | .succ (.succ (.succ (.zero))) => deriveRepr gs C m T info

@@ -1611,9 +1611,26 @@ never type-checks them, and their Π/Σ types carry hand-written component sorts
   description whose head is not a constructor spine — a variable or a global (`μ
   Chain.desc i`, `μ c.2.1 c.2.2` in the codes tests) — is not visible to the check and is
   accepted; so is a nested `arg` field of another family (`List A`, …). Constants are
-  looked through (depth-bounded), so `def D := Desc.rec …; μ D ()` cannot hide it. The
-  check is conservative: it sees only the `arg`/`rec`/`hrec` spine (and the branches of an
-  `ecase` in it). `Kernel.wiz` has the same function and verdicts (`=selfhost`).
+  looked through to the end of an alias chain (a global's value refers only to earlier
+  globals, and a name is unfolded at most once, so the walk ends without a depth bound:
+  a revisited name is a cycle), so no chain of definitions can hide it, however many
+  aliases it has. The check fails closed where it cannot see the spine: a constant with
+  no value (an axiom or an opaque definition), a name with no declaration, and a
+  revisited name are all rejected, not accepted. The check is conservative: it sees only
+  the `arg`/`rec`/`hrec` spine (and the branches of an `ecase` in it), and a head that is
+  not a term constructor (a variable, an application, a projection) is still accepted:
+  that is the neutral-head policy (D-9), which step 2 of this fix replaces by walking the
+  evaluated description. A pair match is walked on its scrutinee, motive and body, so
+  `match (D, ()) with | (d, _) => d` cannot hide it either. `Kernel.wiz` has the same
+  function and verdicts (`=selfhost`): the same spine, the same pair-match arms, and a
+  valueless binding is rejected there too. The two *terms* differ, not the verdicts: the
+  self-hosted walk has a `letq` arm (its `letE` carries no quantity) and no visited set
+  (values are carried inline, so a chain is finite by construction and there is no name
+  table to revisit into), and it rejects `.axiomC` where the host rejects a valueless
+  (axiom or opaque) constant: one verdict on two representations. The self-hosted walk
+  also walks a `split`'s scrutinee and motive, which the host does as well; a scrutinee
+  that is a pair of the description and a value is not inspected past its head on either
+  side (the `pair` head is the neutral-head arm).
 * The method's usage is scaled by ω (`QRig.many?`) because the method may run once per
   node (§5.3; Status.md, Q2).
 * `x` is checked against `μ^∞`; a value of a smaller size is accepted by subtyping.

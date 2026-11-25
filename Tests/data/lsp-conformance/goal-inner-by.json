@@ -1,0 +1,18 @@
+{
+  "name": "goal-inner-by",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-inner-by.wiz",
+  "text": "import Prelude\ndef k : Nat → Nat := by\n  exact (by intro x; exact x)\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 9 } } }
+  ],
+  "expected": [{ "match": "exact", "path": "result.goals", "value": ["⊢ Nat → Nat"] }],
+  "note": "the inner `by` itself. The selfhost does not find an inner block entry before 4b (a term elaborated inside a tactic gets no span, `Frontend.wiz:4850`); after 4b it does, and this expectation is then the printer's",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "Pi printer (task 26): the selfhost spells a Pi with its binder, `⊢ (_ : Nat) → Nat` for the host's `⊢ Nat → Nat`",
+      "issue": "task 26"
+    }
+  ]
+}

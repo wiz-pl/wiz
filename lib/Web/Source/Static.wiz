@@ -142,4 +142,5 @@ def Source.Static.decodeAnswer (text : String) : Option Source.Answer :=
       (Json.getStr j "findingId")
       (List.map Source.Static.decodeLine (Json.getList j "lines"))
       (Source.Static.mapSome Source.Static.decodeFact (Json.getList j "rows"))
-      (Source.Static.mapSome Source.Static.decodeFinding (Json.getList j "findings")))
+      (Source.Static.mapSome Source.Static.decodeFinding (Json.getList j "findings"))
+      (Json.getStr j "raw"))

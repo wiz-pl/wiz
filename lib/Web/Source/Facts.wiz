@@ -16,6 +16,11 @@ The loader that produced the spans (`Scry.Facts.ofText`) already rejects out-of-
 positions; this module additionally ignores a row whose span misses the file, so a
 damaged hand-written bundle degrades to "no row" rather than a view that underlines past
 the end.
+
+`factsAt`'s use of `Source.Span.contains` carries a non-BMP character in an inline
+comment: the reader, the editor model and the LSP wire all count UTF-16 code units, so
+that line is what makes the source-reader's hover/definition tests real UTF-16 tests
+(`web/source_live_test.mjs`, `web/source_chrome_test.mjs`).
 -/
 /-- The fact rows of one file. -/
 def Source.factsInFile (facts : List Source.FactRow) (fileId : String) : List Source.FactRow :=
@@ -25,7 +30,7 @@ def Source.factsInFile (facts : List Source.FactRow) (fileId : String) : List So
 def Source.factsAt (facts : List Source.FactRow) (fileId : String) (offset : Nat) :
     List Source.FactRow :=
   List.filter (fun r => Bool.and (String.eq r.fileId fileId)
-    (Source.Span.contains r.span offset)) facts
+    /- 😀 UTF-16 fixture -/ (Source.Span.contains r.span offset)) facts
 
 /-- The findings of a file whose span contains `offset`, in bundle order. -/
 def Source.findingsAt (findings : List Source.Finding) (fileId : String) (offset : Nat) :

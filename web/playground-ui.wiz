@@ -37,6 +37,7 @@ format) is the runtime's.
 -/
 
 link_c "js.c"
+link_c "step.c"   -- the browser ABI's i32 word entry (`wiz_step`, web/step.c)
 extern "js_patch" Js.patch : String → IO Unit
 
 /-- Patch the page from `s` to `s'` and give `s'` back (the page holds the state). -/
@@ -46,6 +47,13 @@ def patched (s s' : Page) : IO Page := do
 
 def loomInit : Page := Page.initial
 def loomHtml (s : Page) : String := Loom.LiveApp.html pageApp s
+
+/-- The first-render identity the static page writes as `data-wiz-ssr`: a hash of the
+normalised tree (`Loom.LiveApp.ssrHash`), so the browser adopts the server-rendered
+page instead of replacing it, and an HTML formatting difference does not force a
+replace. -/
+def loomSsrHash (s : Page) : String := Loom.LiveApp.ssrHash pageApp s
+
 def loomStep (s : Page) (ev : String) : IO Page :=
   patched s (Loom.LiveApp.step pageApp s ev)
 def loomEffect (s : Page) (kind a b : String) : IO Page :=
@@ -155,6 +163,7 @@ def loomHoverTarget (result : String) : String := Hover.targetJson result
 
 export "wiz_loom_init" loomInit
 export "wiz_loom_html" loomHtml
+export "wiz_loom_ssr_hash" loomSsrHash
 export "wiz_loom_step" loomStep
 export "wiz_loom_effect" loomEffect
 export "wiz_loom_requests" loomRequests

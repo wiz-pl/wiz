@@ -22,6 +22,11 @@ sarif: version 2.1.0: ok
 sarif: driver scry: ok
 sarif: one result: ok
 sarif: the result names command-injection: ok
+sarif: the C# fingerprint is f_-prefixed: ok
+c fixture: exit 0 without --fail-on: ok
+c fixture sarif: a scry/c/command-injection result: ok
+c fixture sarif: the C fingerprint is f_-prefixed: ok
+c# scry/v1 differs from the C one: ok
 clean: exit 0: ok
 clean: kind file: ok
 clean: one file found: ok

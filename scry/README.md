@@ -407,9 +407,9 @@ external's pointer (1 finding + two `unknown-memory` warnings and one `unmodelle
 
 **Boundary warnings now carry spans.** `Scry.Warning` has a `Wil.Span`, so a
 `lowering-boundary` result points at the construct (a cast, `sizeof`, a skipped `goto`, …)
-instead of the function definition. SARIF rule ids are namespaced (`scry/c/<rule>`,
-`scry/lowering/boundary`, `scry/lowering/parse-recovery`, `scry/memory/<kind>`) and the
-run declares
+instead of the function definition. SARIF rule ids are namespaced by the run's language
+(`scry/c/<rule>`, `scry/cs/<rule>`, `scry/lowering/boundary`,
+`scry/lowering/parse-recovery`, `scry/memory/<kind>`) and the run declares
 `columnKind: utf16CodeUnits` (the C slice is ASCII, where a byte column is a UTF-16
 column; a non-ASCII source would need an explicit conversion).
 

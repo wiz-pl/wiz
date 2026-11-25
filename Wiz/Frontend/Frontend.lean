@@ -91,8 +91,9 @@ partial def isoKey (base : CommandState R) (m : Name) : Option UInt64 := do
     base.trustNative, base.nativeFuel)
   let settings := mixHash settings (hash (g.assumed, g.quoteErasesProofs, g.pushCalls, g.strictPrivacy, g.module,
     g.pp.useNotation, ppKeys (g.pp.unexpanders.toList.map (·.1)), ppKeys (g.pp.formats.toList.map (·.1))))
-  -- (TT-04) a caller may start from a state with extra attributes/options
-  let registry := toString (repr (base.attrDecls, base.optDecls,
+  -- (TT-04) a caller may start from a state with extra attributes/options; (B1) a term
+  -- elaborator registration also decides how a module's terms elaborate
+  let registry := toString (repr (base.attrDecls, base.optDecls, base.termElabs,
     base.optValues.toList.mergeSort fun a b => decide (a.1 ≤ b.1)))
   let settings := mixHash settings (hash registry)
   let (k, _) ← go [] m {}
@@ -358,6 +359,9 @@ where
   (11s) what they are and their doc comments. -/
   @[nospecialize] step (chars : Array Char) (cmd : Syntax) (s : CommandState R) : CommandState R :=
     let before := s.globals.order.size
+    -- where the command the user wrote starts (a namespace prefix rewrites the name, not
+    -- the range): a failed declaration's message points here
+    let declInfo := cmd.info
     -- (13t) a declaration in a namespace is named `Foo.bar`: prefix it here, once
     let cmd := prefixDeclName s.globals.namespacePrefix s.module s.legacy cmd
     -- (11q) for the language server: the syntax the command uses, by where it was declared
@@ -369,6 +373,18 @@ where
     let s := { s with nextScope := 1000000 + cmd.info.start }
     let s' := ((elabCommand cmd).run { s with pristine := false }).2
     let added := s'.globals.order.extract before s'.globals.order.size
+    -- (diagnostics) a declaration that reported an error and was never added: its later
+    -- uses say which declaration failed, and where, instead of `unknown identifier` (one
+    -- root error, no fabricated cascade). The position is rendered here: only the
+    -- frontend has the file's text.
+    let s' := if let some n := cmdDeclName? cmd then
+        let errs := s'.messages.extract s.messages.size s'.messages.size
+        if errs.any (fun m => m.severity == Severity.error) && (s'.globals.find? n).isNone then
+          let (l, c) := lineCol (String.ofList chars.toList) declInfo.start
+          { s' with globals := { s'.globals with
+              failedDecls := s'.globals.failedDecls.insert n { info := declInfo, pos := s!"{l + 1}:{c + 1}" } } }
+        else s'
+      else s'
     -- (a command macro's located output may have placed them already: keep that)
     let out :=
       { s' with declSites := added.foldl (fun m n => if m.contains n then m else m.insert n (cmd.info, s.module)) s'.declSites,

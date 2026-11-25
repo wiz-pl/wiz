@@ -267,6 +267,43 @@ def group : Group where
     rejected "declaration: a constructor declared twice"
       (prelude ++ "inductive X where\n  | x\n  | x\n")
       (some "duplicate-constructor") "x" "declared twice",
+    -- (diagnostics) the cascade guard: a declaration that failed is not later reported as
+    -- an unknown identifier. One root error (`type-mismatch` at `Bool.true`); the use of
+    -- the failed name says which declaration failed and where, and a use of *that* failing
+    -- declaration says the same about it. The record is part of the command's effect, so a
+    -- warm run (a re-read of the failing commands from the cache) says it too.
+    { name := "diagnostics: a failed declaration is not an unknown identifier (cold and warm cache)"
+      run := fun _ => do
+        let src := prelude ++ "def broken : Nat := Bool.true\ndef uses : Nat := broken\n"
+        let described (s : CommandState ZeroOneMany) : String :=
+          "\n".intercalate ((s.messages.filter (·.severity == .error)).toList.map (describe src))
+        let checkRun (what : String) (s : CommandState ZeroOneMany) (declAt : String) : IO Unit := do
+          let errs := s.messages.filter (·.severity == .error)
+          unless (errs.filter (·.code == "type-mismatch")).size == 1 do
+            throw (IO.userError s!"{what}: expected exactly one root `type-mismatch`{described s}")
+          let unknown := errs.filter fun m => m.text.contains "unknown identifier"
+          unless unknown.isEmpty do
+            throw (IO.userError s!"{what}: a name the file declares is reported as unknown{described s}")
+          let named := errs.any fun m =>
+            m.code == "failed-declaration" && m.text.contains "'broken' failed to elaborate" &&
+            m.text.contains s!"at {declAt}" && spanPointsAt src m "broken"
+          unless named do
+            throw (IO.userError s!"{what}: no `failed-declaration` at `broken`, naming its declaration at {declAt}{described s}")
+        let s ← frontend src
+        checkRun "cold" s "2:1"
+        -- a warm run: `broken` and `uses` are replayed from the cache, and `uses2` is new
+        -- (it may only say "'uses' failed to elaborate" if the failing command's record
+        -- was replayed with it)
+        let src2 := src ++ "def uses2 : Nat := Nat.succ uses\n"
+        let s2 ← frontend src2
+        checkRun "warm" s2 "2:1"
+        let namesUses := s2.messages.any fun m =>
+          m.code == "failed-declaration" && m.text.contains "'uses' failed to elaborate" &&
+          spanPointsAt src2 m "uses"
+        unless namesUses do
+          let d := "\n".intercalate ((s2.messages.filter (·.severity == .error)).toList.map (describe src2))
+          throw (IO.userError s!"warm: the use of the failed `uses` in `uses2` is not `failed-declaration`{d}")
+        cliCheck src [] true },
     rejected "attribute: unknown attribute"
       (prelude ++ "def f (n : Nat) : Nat := n\nattribute [bogus] f\n")
       none "bogus" "unknown attribute" (cli := true),
@@ -291,6 +328,17 @@ def group : Group where
     rejected "builtin: nat.add with the wrong arity"
       ("inductive N where\n  | z\ndef K (a : N) : N := a\nbuiltin nat := N\nbuiltin nat.add := K\n")
       none "builtin nat.add := K" "must take 2 arguments",
+    rejected "term_elab: an unknown syntax kind is refused"
+      (prelude ++ "def f (stx : Syntax) : TacticM Unit := fun k => Tac.done\n" ++
+       "attribute [term_elab term.nope] f\n")
+      (some "unknown-syntax") "term.nope" "unknown syntax kind" (cli := true),
+    rejected "term_elab: a declaration that is not a TermElab is refused"
+      (prelude ++ "syntax \"τ\" : term\nattribute [term_elab term.τ] Nat.zero\n")
+      (some "type-mismatch") "attribute [term_elab term.τ] Nat.zero" "is not a term elaborator",
+    rejected "term_elab: a local registration is refused (the effect outlives its module)"
+      (prelude ++ "syntax \"τ\" : term\ndef f (stx : Syntax) : TacticM Unit := fun k => Tac.done\n" ++
+       "local attribute [term_elab term.τ] f\n")
+      none "attribute [term_elab term.τ] f" "only a no-op attribute can be `local`",
 
     -- deriving
     rejected "deriving: no deriver for the class"

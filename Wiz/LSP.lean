@@ -20,7 +20,8 @@ import Std.Sync.Channel
 `wiz lsp` speaks the Language Server Protocol over stdin/stdout: JSON-RPC messages with
 `Content-Length` headers. It keeps every open document's text and a query engine
 (`Query.lean`), so after an edit only the commands from the edit on are elaborated
-again. Supported: diagnostics (`publishDiagnostics`), hover (the type of the identifier
+again. Supported: diagnostics (`publishDiagnostics`, with the document's version, and the
+pull model's `textDocument/diagnostic`/`resultId`), hover (the type of the identifier
 under the cursor), go to definition (also into libraries), completion of global names,
 and the infoview's requests (`wiz/plainGoal`, `wiz/interactiveGoals`, …; the protocol is
 in `wiz-notes/infoview-protocol.md`): goals and expected types read from the info tree,
@@ -30,8 +31,8 @@ line (`includeTable`; docs/stages/13-language/include-str.md).
 With `--infoview SOCK` it also serves infoviews on a Unix socket, and with `--ws PORT` on
 a WebSocket (`serveWith`).
 
-Positions: LSP counts lines and UTF-16 code units; we count Unicode characters, which
-agree except for characters outside the Basic Multilingual Plane.
+Positions: LSP lines and UTF-16 code units (`toPos`/`ofPos`); offsets inside are
+Unicode characters.
 -/
 
 namespace Wiz.LSP
@@ -140,22 +141,29 @@ structure Server where
   with their info trees: by module, with the hash of the source they were made from -/
   modules : Std.HashMap String (UInt64 × St) := {}
 
-/-- Line and column (0-based) of a character offset. -/
+/-- Line and UTF-16 column (0-based) of a character offset. -/
 def toPos (text : String) (off : Nat) : Json :=
   let pre := (text.toList.take off)
   let line := pre.count '\n'
-  let col := (pre.reverse.takeWhile (· != '\n')).length
+  let col := (pre.reverse.takeWhile (· != '\n')).foldl (fun n c => n + Semantic.utf16Width c) 0
   Json.mkObj [("line", line), ("character", col)]
 
-/-- The character offset of an LSP position. -/
+/-- The character offset of an LSP position (`character` in UTF-16 code units). A
+`character` past the line's end is clamped to the end (LSP 3.17 `Position`); one that
+lands inside a surrogate pair rounds down to the character's start. A `line` past the
+end gives the end of the text. -/
 def ofPos (text : String) (line col : Nat) : Nat := Id.run do
-  let cs := text.toList
+  let cs := text.toList.toArray
   let mut l := 0
   let mut i := 0
-  while l < line && i < cs.length do
+  while l < line && i < cs.size do
     if cs[i]! == '\n' then l := l + 1
     i := i + 1
-  pure (i + col)
+  let mut u := 0
+  while i < cs.size && cs[i]! != '\n' && u + Semantic.utf16Width cs[i]! ≤ col do
+    u := u + Semantic.utf16Width cs[i]!
+    i := i + 1
+  pure i
 
 def range (text : String) (info : SourceInfo) : Json :=
   Json.mkObj [("start", toPos text info.start), ("end", toPos text (max info.stop (info.start + 1)))]
@@ -281,11 +289,26 @@ def diagnostic (srv : Server) (doc : Doc) (m : Msg) : Json :=
                ("severity", (match m.severity with | .error => 1 | .warning => 2 | .info => 3 : Nat)),
                ("source", "wiz"), ("message", m.text)] ++ code)
 
+/-- The document's diagnostics, in order (the state's messages): a `WIZ_WIDGET:` display
+value (`#plot`) is an infoview widget, not a diagnostic. -/
+def diagnosticItems (srv : Server) (doc : Doc) : Array Json :=
+  (doc.state.messages.filter (fun m => !m.text.startsWith "WIZ_WIDGET:")).map (diagnostic srv doc)
+
+/-- (pull diagnostics) The identity of a document's diagnostic report: the text and the
+diagnostics it was made from. `textDocument/diagnostic` returns it as `resultId` and, when
+the client sends the same one back as `previousResultId`, answers `unchanged`. -/
+def diagnosticResultId (doc : Doc) (items : Array Json) : String :=
+  let ds := String.join (items.map (·.compress)).toList
+  s!"{mixHash (hash doc.text) (hash ds)}"
+
 def diagnostics (srv : Server) (uri : String) (doc : Doc) : Json :=
-  -- a `WIZ_WIDGET:` display value (`#plot`) is an infoview widget, not a diagnostic
-  let ds := (doc.state.messages.toList.filter (fun m => !m.text.startsWith "WIZ_WIDGET:")).map (diagnostic srv doc)
+  let ds := diagnosticItems srv doc
+  -- the document's version, so a client can drop an out-of-order publish (LSP 3.17)
+  let version := match doc.version with
+    | some v => [("version", Json.num v)]
+    | none => []
   Json.mkObj [("jsonrpc", "2.0"), ("method", "textDocument/publishDiagnostics"),
-              ("params", Json.mkObj [("uri", uri), ("diagnostics", Json.arr ds.toArray)])]
+              ("params", Json.mkObj ([("uri", Json.str uri)] ++ version ++ [("diagnostics", Json.arr ds)]))]
 
 /-! ## Formatting (`wiz fmt`, stage 11aa) -/
 
@@ -323,6 +346,10 @@ def infoviewMethods : List String :=
 
 def capabilities : Json :=
   Json.mkObj [("capabilities", Json.mkObj [
+    -- Positions are UTF-16 code units (`toPos`/`ofPos`), the encoding every client
+    -- supports: the LSP default, said explicitly so a client never falls back to
+    -- guessing the encoding from the text
+    ("positionEncoding", "utf-16"),
     ("textDocumentSync", (1 : Nat)), ("hoverProvider", true), ("definitionProvider", true),
     ("declarationProvider", true),
     -- (also so that editors report cursor moves, for `--infoview`)
@@ -335,6 +362,10 @@ def capabilities : Json :=
                                            ("full", true)]),
     ("documentSymbolProvider", true), ("workspaceSymbolProvider", true), ("foldingRangeProvider", true),
     ("documentFormattingProvider", true), ("documentRangeFormattingProvider", true),
+    -- (pull diagnostics: `textDocument/diagnostic`) the diagnostics of a document are
+    -- the state's messages, so they also depend on its `include_str` files and imports
+    ("diagnosticProvider", Json.mkObj [("identifier", "wiz"), ("interFileDependencies", true),
+                                       ("workspaceDiagnostics", false)]),
     ("codeActionProvider", Json.mkObj [("codeActionKinds", Json.arr #["quickfix", "refactor.rewrite"]),
                                        ("resolveProvider", true)]),
     ("experimental", Json.mkObj [("wizInfoview", Json.mkObj [("version", (1 : Nat)),
@@ -869,6 +900,19 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
     pure ({ srv with docs := srv.docs.insert uri doc, sessions := session },
      #[diagnostics srv uri doc] ++ (if srv.elaboratedNotes then #[note] else #[]))
   | "textDocument/didClose" => pure ({ srv with docs := srv.docs.erase uri }, #[])
+  | "textDocument/diagnostic" =>
+    -- (pull diagnostics) the same list the last `publishDiagnostics` carried; the
+    -- `resultId` covers the text and the diagnostics, so a client that sends back the
+    -- one it has is told `unchanged` instead of being sent the list again
+    let some doc := srv.docs.get? uri | return (srv, #[replyError (-32602) s!"unknown document {uri}"])
+    let items := diagnosticItems srv doc
+    let resultId := diagnosticResultId doc items
+    let previous := getStr msg ["params", "previousResultId"]
+    if !previous.isEmpty && previous == resultId then
+      pure (srv, #[reply (Json.mkObj [("kind", "unchanged"), ("resultId", Json.str resultId)])])
+    else
+      pure (srv, #[reply (Json.mkObj [("kind", "full"), ("resultId", Json.str resultId),
+                                       ("items", Json.arr items)])])
   | "textDocument/formatting" | "textDocument/rangeFormatting" =>
     let some doc := srv.docs.get? uri | return (srv, #[reply (Json.arr #[])])
     -- `wiz fmt` indents with spaces: a tab counts as one column to the parser, so
@@ -1031,7 +1075,10 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
         | j => some j
       pure (srv, #[reply (if ts.size == 1 then ts[0]! else if ts.isEmpty then Json.null else Json.arr ts)])
     | _ => pure (srv, #[reply (completion srv doc off)])
-  | _ => pure (srv, if id.isSome then #[reply Json.null] else #[])
+  -- An unknown request is an error (JSON-RPC -32601 MethodNotFound); an unknown
+  -- notification is ignored, and so is any `$/…` notification (LSP §"$ Notifications
+  -- and Requests"). A `$/…` *request* is still answered with -32601.
+  | _ => pure (srv, if id.isSome then #[replyError (-32601) s!"{method} is not supported"] else #[])
 
 /-! ## The infoview socket (`wiz lsp --infoview SOCK`, protocol §8)
 

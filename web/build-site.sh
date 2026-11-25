@@ -13,10 +13,12 @@
 #   /licenses/             the Wasm modules' notice (mini-gmp) and licence texts
 #   /source/               the source reader: a `scry web` bundle plus its runtime
 #                          (SOURCE_BUNDLE=DIR). The site build has no `scry` binary, so it
-#                          cannot generate one; the publishing job builds scry and passes
-#                          the directory (SITE_REQUIRE_SOURCE=1 makes its absence fatal).
-#                          A docs-only build leaves SITE_REQUIRE_SOURCE unset and skips
-#                          /source/, with a note, as `web/test-bench.sh` does.
+#                          cannot generate one: `.#pages` adds `/source/` after this
+#                          script runs, from `.#scry`, and checks it with
+#                          `SITE_REQUIRE_SOURCE=1 web/check-site.sh`. This script is
+#                          called without a bundle by `.#docs-site`; a docs-only build
+#                          leaves SOURCE_BUNDLE unset and skips /source/, with a note, as
+#                          `web/test-bench.sh` does.
 #
 # The documentation is generated separately, into SITE/docs:
 #
@@ -25,7 +27,8 @@
 # and the Wasm modules are built by web/build.sh and web/build-playground.sh into WEB.
 #
 #   usage: web/build-site.sh [SITE] [WEB]          (defaults: doc-site, web/out)
-#   SOURCE_BUNDLE=DIR web/source-bundle.sh's output; SITE_REQUIRE_SOURCE=1 for a release
+#   SOURCE_BUNDLE=DIR web/source-bundle.sh's output; SITE_REQUIRE_SOURCE=1 makes an
+#   absent bundle an error here (nothing in CI sets it; `.#pages` checks `/source/`)
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SITE=${1:-$ROOT/doc-site}
@@ -40,13 +43,35 @@ cp "$ROOT/web/bench/index.html" "$SITE/bench/index.html"
 
 # The landing page, at the site root. Its links are relative (docs/, bench/,
 # playground/), so the tree works at a domain root and under a project site's prefix
-# alike.
-cp "$ROOT/web/landing/index.html" "$SITE/index.html"
-cp "$ROOT/web/landing/landing.css" "$SITE/landing.css"
+# alike. The *generated* page is published, not the template: web/build-landing.sh
+# fills the carousel from the snippet files and the island from the Loom first paint,
+# so publishing the template would ship placeholders and an empty quantity section.
+if [ ! -f "$WEB/landing/index.html" ]; then
+  echo "build-site: $WEB/landing/index.html is missing: run web/build-landing.sh $WEB first" >&2
+  exit 1
+fi
+cp "$WEB/landing/index.html" "$SITE/index.html"
+cp "$WEB/landing/landing.css" "$SITE/landing.css"
+mkdir -p "$SITE/landing"
+for f in carousel.js app.js wiz-landing-ui.mjs wiz-landing-ui.wasm; do
+  [ -f "$WEB/landing/$f" ] && cp "$WEB/landing/$f" "$SITE/landing/$f"
+done
+if [ -d "$WEB/landing/framework" ]; then
+  mkdir -p "$SITE/landing/framework"
+  cp "$WEB/landing/framework/"*.js "$SITE/landing/framework/"
+fi
 
 # The playground page is index.html, so /playground/ is a directory index; its own
-# links (playground.css, playground.js, wiz-playground.mjs) are relative to it.
-cp "$ROOT/web/playground.html" "$SITE/playground/index.html"
+# links (playground.css, playground.js, wiz-playground.mjs) are relative to it. The
+# page in WEB is the **static-complete** one `web/build-playground.sh` generated: its
+# `#app` island holds the Loom first paint and `data-wiz-ssr` is the hash the runtime
+# exports. The source `web/playground.html` is only the template (two placeholders), so
+# publishing it directly would ship an empty shell.
+if [ ! -f "$WEB/playground.html" ]; then
+  echo "build-site: $WEB/playground.html is missing: run web/build-playground.sh $WEB first" >&2
+  exit 1
+fi
+cp "$WEB/playground.html" "$SITE/playground/index.html"
 for f in playground.js playground.css overlays.css widgets.css \
          lsp-client.js widgets.js playground-lsp.js hover.js selfhost-lsp-shim.js \
          playground-engine.js squiggles.js completions.js; do
@@ -71,10 +96,10 @@ done
 
 # The static source reader: a `scry web` bundle plus the reader's Wasm runtime. A bundle
 # is source + findings for one analysed tree, so the site does not synthesise one: an
-# absent SOURCE_BUNDLE means no /source/ page, not an empty one. A *publishing* build
-# (the docs job on master) sets SITE_REQUIRE_SOURCE=1: the reader is part of the product
-# then, and a site without it is red here rather than quietly missing a page. A docs-only
-# build (e.g. web/test-bench.sh) leaves it unset and skips /source/.
+# absent SOURCE_BUNDLE means no /source/ page, not an empty one. Nothing in CI sets
+# SITE_REQUIRE_SOURCE for this script any more: `.#pages` and the `docs check` job set it
+# for `web/check-site.sh`. A local build can still set it to make a missing
+# SOURCE_BUNDLE an error here instead of a skipped /source/.
 if [ -z "${SOURCE_BUNDLE:-}" ]; then
   if [ "${SITE_REQUIRE_SOURCE:-0}" = 1 ]; then
     echo "build-site: SITE_REQUIRE_SOURCE=1 but SOURCE_BUNDLE is unset." >&2

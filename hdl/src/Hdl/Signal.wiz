@@ -438,7 +438,8 @@ def Signal.ofCircuit_delay {d : ClockDomain} (t : HwTy) (init : HwTy.El t) (xs :
 -- * `Signal.registerS` is definitional: `registerS_head`, `registerS_eq_register`.
 -- * `Signal.Eqv` congruence is proved for the combinators whose bodies are `coit`
 --   (`map`/`zipWith`/`zipWith3`), for the state cells (`register`/`registerS`), for
---   `mealy` and for the circuit bridge (`ofCircuit`).
+--   `mealy` and for the circuit bridge (`ofCircuit`), and for the sized combinators
+--   (`mapS`/`zipWithS`/`zipWith3S`).
 -- * The *sized-observation* laws (`mapS_at`, `zipWithS_at`, `zipWith3S_at`,
 --   `mapS_id`, `mapS_comp` and the `mapS_head`/`mapS_tail`/`zipWithS_head` prefix forms)
 --   are `rfl`: the body observes its input once through a shared `let`
@@ -447,9 +448,13 @@ def Signal.ofCircuit_delay {d : ClockDomain} (t : HwTy) (init : HwTy.El t) (xs :
 --   its payload at the predecessor size (HDL-2.2a, `Wiz/Elab/Term.lean` and
 --   `selfhost/Frontend.wiz`); before it, a `let`-bound observation carried the family
 --   size where the sized `cocon` wants the predecessor, and the kernel rejected it
---   ("expected ... ν (Signal.desc d A) ... inferred ... ν^j ..."). The `Eqv`
---   congruences for the sized combinators go through `mapS_at`, not `rfl`, and are
---   still to be written.
+--   ("expected ... ν (Signal.desc d A) ... inferred ... ν^j ...").
+-- * The `Eqv` congruences for the sized combinators are not `rfl`: at `∞` a step of
+--   `mapS f s` is a `cocon` whose payload is `f (out s).1`, and the hypothesis is
+--   pointwise (`Signal.at`), so the step needs `mapS_at` and `Eq.congrArg` to move the
+--   equality under `f` (`zipWithS`/`zipWith3S` use `congrArg2`/`congrArg3`). They are
+--   the same proof shape as `Eqv.map`, with the sized observation law in place of the
+--   unsized one.
 
 /-- `f` respects three equalities (a local copy: the library has `congrArg`/`congrArg2`). -/
 def Signal.congrArg3 {A B C D : Type} (f : A → B → C → D) {a a' : A} {b b' : B} {c c' : C}
@@ -618,6 +623,32 @@ def Signal.Eqv.zipWith3 {d : ClockDomain} {A B C D : Type} (f : A → B → C �
   fun (t : Nat) => Eq.trans (Signal.zipWith3_at f a b c t)
     (Eq.trans (Signal.congrArg3 f (ha t) (hb t) (hc t))
       (Eq.symm (Signal.zipWith3_at f a' b' c' t)))
+
+/-- Congruence for `mapS`: equivalent inputs give equivalent sized maps. Not `rfl`: the
+step compares `f` applied to two observations that agree only pointwise, so the proof
+goes through `mapS_at` and `Eq.congrArg` (the sized analogue of `Eqv.map`). -/
+def Signal.Eqv.mapS {d : ClockDomain} {A B : Type} (f : A → B) {s s' : Signal d A}
+    (h : Signal.Eqv s s') :
+    Signal.Eqv (Signal.mapS (i := ∞) f s) (Signal.mapS (i := ∞) f s') :=
+  fun (t : Nat) => Eq.trans (Signal.mapS_at f s t)
+    (Eq.trans (Eq.congrArg f (h t)) (Eq.symm (Signal.mapS_at f s' t)))
+
+/-- Congruence for `zipWithS` (both inputs, the function fixed). -/
+def Signal.Eqv.zipWithS {d : ClockDomain} {A B C : Type} (f : A → B → C)
+    {a a' : Signal d A} (ha : Signal.Eqv a a') {b b' : Signal d B} (hb : Signal.Eqv b b') :
+    Signal.Eqv (Signal.zipWithS (i := ∞) f a b) (Signal.zipWithS (i := ∞) f a' b') :=
+  fun (t : Nat) => Eq.trans (Signal.zipWithS_at f a b t)
+    (Eq.trans (Eq.congrArg2 f (ha t) (hb t))
+      (Eq.symm (Signal.zipWithS_at f a' b' t)))
+
+/-- Congruence for `zipWith3S` (the sized `if`/`Mux` instance is this operation). -/
+def Signal.Eqv.zipWith3S {d : ClockDomain} {A B C D : Type} (f : A → B → C → D)
+    {a a' : Signal d A} (ha : Signal.Eqv a a') {b b' : Signal d B} (hb : Signal.Eqv b b')
+    {c c' : Signal d C} (hc : Signal.Eqv c c') :
+    Signal.Eqv (Signal.zipWith3S (i := ∞) f a b c) (Signal.zipWith3S (i := ∞) f a' b' c') :=
+  fun (t : Nat) => Eq.trans (Signal.zipWith3S_at f a b c t)
+    (Eq.trans (Signal.congrArg3 f (ha t) (hb t) (hc t))
+      (Eq.symm (Signal.zipWith3S_at f a' b' c' t)))
 
 /-- Congruence for `register` (a state cell keeps equivalent inputs equivalent). -/
 def Signal.Eqv.register {d : ClockDomain} {A : Type} (init : A) {s s' : Signal d A}

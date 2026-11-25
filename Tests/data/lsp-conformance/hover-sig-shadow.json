@@ -1,0 +1,20 @@
+{
+  "name": "hover-sig-shadow",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/hover-sig-shadow.wiz",
+  "text": "import Prelude\naxiom f : (x : Nat) → {x : Type} → x\n",
+  "requests": [
+    { "method": "textDocument/hover", "params": { "position": { "line": 1, "character": 6 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.contents.value", "value": "```wiz\nf : Nat → {x : Type} → x\n```" }
+  ],
+  "note": "S2(2) (27a review): a written name reused by a later binder. The first `x` is unused and ω, so it prints as an arrow; the host pushes `_` for an arrow's binder, leaving the later `{x : Type}` its own name. The selfhost pushes the freshened written name, so the later binder gets a prime.",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "S2: the arrow branch pushes the freshened written name instead of `_`, so a later binder that reuses the name gets a prime — `Nat → {x' : Type} → x'` for the host's `Nat → {x : Type} → x` (27a review, S2)",
+      "issue": "S2"
+    }
+  ]
+}

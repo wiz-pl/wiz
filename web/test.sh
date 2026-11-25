@@ -13,6 +13,9 @@
 #   WIZ_WEB_FROM=DIR, WIZ_PLAYGROUND_FROM=DIR and WIZ_PLAYGROUND_UI_FROM=DIR: copy the
 #   modules a Nix build made (`nix build .#wiz-web .#wiz-playground .#wiz-playground-ui`)
 #   instead of building them, as CI does.
+#   The static source reader's export gate (`web/source_export_gate.sh`) runs here when a
+#   `scry web` bundle is available (WIZ_SOURCE_BUNDLE=DIR, or a built
+#   scry/.grail/bin/scry); it needs no Wasm and no browser, and says so when it skips.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PORT=${1:-18765}
@@ -48,6 +51,34 @@ node "$ROOT/web/source_fixture_test.mjs" "$OUT/source-fixture.json" > "$OUT/sour
 if grep -qF 'source fixture: all checks passed' "$OUT/source-fixture.txt"; then
   echo "ok (source reader fixture)"; else
   echo "FAIL (source reader fixture)"; cat "$OUT/source-fixture.txt"; exit 1; fi
+# (source reader) the export gate's negative case: `scry web`'s bundle must pass its
+# acceptance test and each of `web/source_export_gate.sh`'s three mutations must make it
+# fail, so the export's contract is not vacuous. It needs a scry binary, which this job
+# does not build: use `WIZ_SOURCE_BUNDLE=DIR` (a bundle someone exported, e.g. the site's
+# `source/`) or a worktree with `cd scry && grail build` (`grail build web-bundle` writes
+# `scry/build/web-bundle`). The export itself and its determinism are gated in scry.yml.
+GATE_BUNDLE=${WIZ_SOURCE_BUNDLE:-}
+if [ -n "$GATE_BUNDLE" ] && [ ! -d "$GATE_BUNDLE/data" ]; then
+  echo "FAIL (source export gate): WIZ_SOURCE_BUNDLE=$GATE_BUNDLE is not a scry web bundle"
+  exit 1
+fi
+if [ -z "$GATE_BUNDLE" ]; then
+  if [ -f "$ROOT/scry/.grail/bin/scry" ]; then
+    (cd "$ROOT" && "$ROOT/scry/.grail/bin/scry" web scry/tests/fixtures/report \
+      --out "$OUT/source-bundle" --assets web >/dev/null)
+    GATE_BUNDLE=$OUT/source-bundle
+  elif [ -d "$ROOT/scry/build/web-bundle" ]; then
+    GATE_BUNDLE=$ROOT/scry/build/web-bundle
+  fi
+fi
+if [ -n "$GATE_BUNDLE" ]; then
+  "$ROOT/web/source_export_gate.sh" "$GATE_BUNDLE" > "$OUT/source-gate.txt"
+  if grep -qF 'source export gate: all checks passed' "$OUT/source-gate.txt"; then
+    echo "ok (source export gate)"; else
+    echo "FAIL (source export gate)"; cat "$OUT/source-gate.txt"; exit 1; fi
+else
+  echo "ok (source export gate skipped: no scry binary; build scry or set WIZ_SOURCE_BUNDLE)"
+fi
 # (bench) the benchmark page's generator fixtures and the site check's rules for it
 "$ROOT/web/test-bench.sh" > "$OUT/bench.txt"
 grep -qF 'test-bench: ok' "$OUT/bench.txt" && echo "ok (bench page)" || {
@@ -91,6 +122,12 @@ if grep -qF 'playground engine: all checks passed' "$OUT/engine.txt"; then echo 
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground-ui.sh" "$OUT" >/dev/null
+# (static-complete) the playground page with scripts removed: the island, its hash and
+# every pane/control, plus the unfilled-template check
+node "$ROOT/web/static_page_test.mjs" "$OUT/playground.html" \
+  "$OUT/playground-static.json" "$ROOT/web/playground.html" > "$OUT/static-page.txt"
+if grep -qF 'static page: all checks passed' "$OUT/static-page.txt"; then echo "ok (playground, static page)"; else
+  echo "FAIL (playground, static page)"; cat "$OUT/static-page.txt"; exit 1; fi
 "$ROOT/web/build-infoview-ui.sh" "$OUT" >/dev/null
 "$ROOT/web/build-docs-ui.sh" "$OUT" >/dev/null
 "$ROOT/web/build-doc-live-ui.sh" "$OUT" >/dev/null
@@ -116,11 +153,25 @@ node "$ROOT/web/doc_node_test.mjs" "$OUT" "$OUT/doc/site/Col.json" > "$OUT/doc.t
 for want in 'class="tt k-const" data-ref=' 'info: <span class="kind">const</span> <code>Nat : Type</code>' 'tt k-pi sel'; do
   if grep -qF "$want" "$OUT/doc.txt"; then echo "ok (doc, node): $want"; else echo "FAIL (doc, node): missing $want"; cat "$OUT/doc.txt"; exit 1; fi
 done
+# (static-complete docs) the page `wiz doc` wrote, with every script removed: the
+# signature, its tags and the doc comment are the page, not the Wasm module's output
+node "$ROOT/web/docs_static_test.mjs" "$OUT/doc/site/Col.html" > "$OUT/docs-static.txt"
+if grep -qF 'docs static: all checks passed' "$OUT/docs-static.txt"; then echo "ok (docs, static page)"; else
+  echo "FAIL (docs, static page)"; cat "$OUT/docs-static.txt"; exit 1; fi
 if [ -n "$WIZ_WEB_NO_BROWSER" ]; then
   echo "ok (browser skipped: WIZ_WEB_NO_BROWSER)"
   exit 0
 fi
 if command -v chromium >/dev/null; then CHROME=$(command -v chromium); else CHROME=$(nix shell --inputs-from "$ROOT" nixpkgs#chromium -c sh -c 'command -v chromium'); fi
+# (static-complete) the playground in Chromium: a script-disabled load has the whole
+# shell, a normal load adopts the static nodes, and a replace that touches the focused
+# editor morphs instead of re-creating it
+node "$ROOT/web/static_chrome_test.mjs" "$CHROME" "$OUT" > "$OUT/static-chrome.txt"
+if grep -qF 'static chrome: all checks passed' "$OUT/static-chrome.txt"; then
+  echo "ok (playground, chromium static)"
+else
+  echo "FAIL (playground, chromium static)"; cat "$OUT/static-chrome.txt"; exit 1
+fi
 # (11s) the documentation page in Chromium: signatures rendered by the Wasm module
 (cd "$OUT/doc/site" && exec python3 -m http.server $((PORT + 2)) --bind 127.0.0.1) > "$OUT/http.log" 2>&1 &
 HTTP=$!

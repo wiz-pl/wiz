@@ -9,6 +9,23 @@ const VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input"
 
 class Node {
   constructor() { this.parentNode = null; this.childNodes = []; this._ls = new Map(); }
+  get ownerDocument() { return doc; }
+  get firstChild() { return this.childNodes[0] || null; }
+  get lastChild() { return this.childNodes[this.childNodes.length - 1] || null; }
+  get nextSibling() {
+    if (!this.parentNode) return null;
+    const i = this.parentNode.childNodes.indexOf(this);
+    return i < 0 ? null : this.parentNode.childNodes[i + 1] || null;
+  }
+  get previousSibling() {
+    if (!this.parentNode) return null;
+    const i = this.parentNode.childNodes.indexOf(this);
+    return i <= 0 ? null : this.parentNode.childNodes[i - 1] || null;
+  }
+  contains(n) {
+    for (let x = n; x; x = x.parentNode) if (x === this) return true;
+    return false;
+  }
   get textContent() { return this.childNodes.map((n) => n.textContent).join(""); }
   set textContent(v) {
     for (const c of this.childNodes) c.parentNode = null;
@@ -51,7 +68,7 @@ class Node {
 }
 
 class Text extends Node {
-  constructor(data) { super(); this.data = String(data); }
+  constructor(data) { super(); this.nodeType = 3; this.data = String(data); }
   get textContent() { return this.data; }
   set textContent(v) { this.data = String(v); }
 }
@@ -59,22 +76,63 @@ class Text extends Node {
 class Element extends Node {
   constructor(tagName) {
     super();
+    this.nodeType = 1;
     this.tagName = tagName;
     this.attrs = new Map();
+    this.scrollTop = 0;
+    this.scrollLeft = 0;
   }
   getAttribute(name) { return this.attrs.has(name) ? this.attrs.get(name) : null; }
+  getAttributeNames() { return [...this.attrs.keys()]; }
   setAttribute(name, value) { this.attrs.set(String(name), String(value)); }
   removeAttribute(name) { this.attrs.delete(name); }
+  get id() { return this.getAttribute("id") || ""; }
+  set id(v) { this.setAttribute("id", v); }
+  // The live value a browser form control would have: the attribute is only the default
+  // for an input, and a textarea's text child is its default. A test may assign it.
+  get value() {
+    if (this._value !== undefined) return this._value;
+    const tag = String(this.tagName).toLowerCase();
+    if (tag === "textarea") return this.textContent;
+    if (tag === "input" || tag === "select") return this.getAttribute("value") || "";
+    return undefined;
+  }
+  set value(v) { this._value = String(v); }
+  // Only text controls have a selection in the browser; an ordinary element has no
+  // `selectionStart`, so the driver's `typeof target.selectionStart === "number"` rule
+  // keeps a button's keydown payload bare.
+  _isTextControl() {
+    const tag = String(this.tagName).toLowerCase();
+    return tag === "textarea" || tag === "input";
+  }
+  get selectionStart() {
+    return this._isTextControl()
+      ? (this._selectionStart === undefined ? 0 : this._selectionStart) : undefined;
+  }
+  get selectionEnd() {
+    return this._isTextControl()
+      ? (this._selectionEnd === undefined ? this.selectionStart : this._selectionEnd) : undefined;
+  }
+  set selectionStart(v) { this._selectionStart = Number(v); }
+  set selectionEnd(v) { this._selectionEnd = Number(v); }
+  setSelectionRange(start, end) { this._selectionStart = Number(start); this._selectionEnd = Number(end); }
+  focus() { doc.activeElement = this; }
+  blur() { if (doc.activeElement === this) doc.activeElement = null; }
   get ownerDocument() { return doc; }
 }
 
-class DocumentFragment extends Node {}
+class DocumentFragment extends Node {
+  constructor() { super(); this.nodeType = 11; }
+}
 
 const doc = {
+  activeElement: null,
   createElement: (tag) => new Element(tag),
   createTextNode: (s) => new Text(s),
   createRange: () => ({ createContextualFragment: (html) => parseFragment(html) }),
 };
+doc.body = new Element("body");
+doc.documentElement = doc.body;
 
 // ## Parsing
 

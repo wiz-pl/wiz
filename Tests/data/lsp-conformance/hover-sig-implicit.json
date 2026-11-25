@@ -1,0 +1,20 @@
+{
+  "name": "hover-sig-implicit",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/hover-sig-implicit.wiz",
+  "text": "import Prelude\ndef idx {A : Type} (a : A) : A := a\ndef u : Nat := idx 1\n",
+  "requests": [
+    { "method": "textDocument/hover", "params": { "position": { "line": 2, "character": 16 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.contents.value", "value": "```wiz\nidx : {A : Type} → A → A\n```" }
+  ],
+  "note": "the hover of a declaration whose type is implicit-then-explicit: `{A : Type} → A → A` (the same text at the declaration's own name, 1:4, so it is stable). The host is the oracle; the selfhost's declaration signature keeps the braces and the arrows, so after task 27a the only difference left is the sort spelling (`U0` for `Type`).",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "the declaration signature's sort spelling (27a′): the selfhost writes `U0` where the host writes `Type`, so with 27a the hover reads `idx : {A : U0} → A → A`; a compiler built before 27a prints `idx : (x0 :0 U0) → (x1 : x0) → x0`",
+      "issue": "27a′"
+    }
+  ]
+}

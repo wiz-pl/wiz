@@ -1,0 +1,28 @@
+{
+  "name": "diag-utf16",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/diag-utf16.wiz",
+  "text": "import Prelude\ndef s : String := \"😀\"\ndef t : String := String.append \"😀\" nope\n",
+  "note": "`nope` starts after an astral character on the same line, so its UTF-16 column is one more than its code-point column (37/41 here; a code-point server says 36/40). Both ends of the range are pinned exactly.",
+  "diagnostics": [
+    {
+      "match": "subset",
+      "path": "diagnostics",
+      "value": [{ "severity": 1, "source": "wiz", "code": "unknown-identifier" }]
+    },
+    {
+      "match": "exact",
+      "path": "diagnostics.0.range",
+      "value": {
+        "start": { "line": 2, "character": 37 },
+        "end": { "line": 2, "character": 41 }
+      }
+    },
+    { "match": "type", "path": "diagnostics.0.severity", "value": "integer" },
+    { "match": "type", "path": "diagnostics.0.code", "value": "string" },
+    { "match": "type", "path": "diagnostics.0.message", "value": "string" },
+    { "match": "type", "path": "diagnostics.0.range", "value": "object" }
+  ],
+  "requests": [],
+  "expected": []
+}

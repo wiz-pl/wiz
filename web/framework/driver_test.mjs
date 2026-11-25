@@ -6,7 +6,7 @@
 //
 //   node web/framework/driver_test.mjs
 "use strict";
-import { start, payloadOf } from "./driver.js";
+import { start, payloadOf, utf8Length } from "./driver.js";
 import { parse, serialize } from "./minidom.mjs";
 
 let failed = 0;
@@ -14,6 +14,8 @@ const ok = (cond, what, detail = "") => {
   if (cond) console.log("ok: " + what);
   else { failed++; console.log("FAIL: " + what + (detail ? "\n  " + detail : "")); }
 };
+const eq = (what, want, got) => ok(Object.is(got, want), what,
+  `want ${JSON.stringify(want)}\n  got  ${JSON.stringify(got)}`);
 
 const SSR = '<div><textarea id="editor" data-wiz-on-input="0">x</textarea>' +
   '<button data-wiz-on-click="1" data-wiz-on-keydown="2">Run</button></div>';
@@ -30,7 +32,7 @@ function stubModule(html) {
     _wiz_loom_html: () => put(html),
     _wiz_loom_step: (state, p) => {
       steps.push({ state: Number(state), event: strings.get(Number(p)) });
-      return state + 1;
+      return Number(state) + 1;
     },
     stringToNewUTF8: (s) => put(s),
     UTF8ToString: (p) => strings.get(Number(p)) || "",
@@ -116,18 +118,96 @@ ok(key({ type: "keydown", key: "a" }) === false,
   "an unconsumed key still types (the runtime did not prevent)");
 ok(key({ type: "keydown", key: "Enter", ctrlKey: true }) === true,
   "a consumed key is prevented");
-ok(asks.length === 2 && asks[0] === "keydown\n0\na" && asks[1] === "keydown\n0\nEnter\nc",
+ok(asks.length === 2 && asks[0] === "keydown\n0\na\n\n@0@0" &&
+   asks[1] === "keydown\n0\nEnter\nc\n@0@0",
   "the consume query gets the same event string the step did", JSON.stringify(asks));
 
 // ## js_patch is wired to the patch applier
 globalThis.wizPatch(JSON.stringify([{ op: "text", path: "0.0", text: "patched" }]));
 ok(serialize(root).includes("patched"), "wizPatch applies a patch to the mounted tree", serialize(root));
+eq("a non-island mount reports the replace mode", "replace", globalThis.wizLoomMode);
+
+// ## resync is the JS-on reload: one full replace, never a partial adopt
+const beforeResync = root.childNodes[0];
+app.resync();
+ok(root.childNodes[0] !== beforeResync, "resync replaces the container's tree");
+ok(serialize(root) === SSR, "resync re-renders the current state's SSR", serialize(root));
 
 // ## setState: a page that changed the state itself hands it back
 app.setState(41);
-fire(button, { type: "click" });
+// resync above replaced the tree, so take the button from the current root.
+const current = root.childNodes[0].childNodes[1];
+fire(current, { type: "click" });
 ok(steps[steps.length - 1].state === 41, "the next event steps from the state the page set",
   JSON.stringify(steps[steps.length - 1]));
+
+// ## The i32 word entry (`wiz-web/1`): the same event strings as Numbers
+// A browser module exports `wiz_step(state, payload_ptr, payload_len) -> state` instead
+// of the i64 `wiz_loom_step`; the driver must use it, pass unsigned words, and normalise
+// the (sign-extended) i32 result. The i64 entry stays the fallback the rest of this file
+// exercises.
+ok(app.abi === "i64", "a module without wiz_step steps through the i64 entry", app.abi);
+
+function wordModule(html) {
+  const strings = new Map();
+  const calls = [];
+  let next = 1;
+  const put = (s) => { const p = next++; strings.set(p, s); return p; };
+  const module = {
+    answer: undefined,          // the word `_wiz_step` returns (undefined: the state + 1)
+    calls,
+    htmlStates: [],             // the type of the state the i64 entries are given
+    _wiz_loom_init: () => 7,
+    _wiz_loom_html: (state) => { module.htmlStates.push(typeof state); return put(html); },
+    _wiz_step: (state, p, len) => {
+      calls.push({ state, p, len, event: strings.get(p) });
+      return module.answer === undefined ? state + 1 : module.answer;
+    },
+    stringToNewUTF8: put,
+    UTF8ToString: (p) => strings.get(p) || "",
+    _free: (p) => { strings.delete(p); },
+  };
+  return module;
+}
+
+const wordWasm = wordModule(SSR);
+const wordRoot = parse("");
+const wordSeen = [];
+const wordApp = start(wordWasm, wordRoot, {
+  parse,
+  events: ["input", "click"],
+  onStep: (state) => wordSeen.push(state),
+});
+eq("the module's step entry is reported", "i32", wordApp.abi);
+eq("the SSR is mounted through the word entry too", SSR, serialize(wordRoot));
+eq("a word module's html call still gets a BigInt state", "bigint", wordWasm.htmlStates[0]);
+
+const wordArea = wordRoot.childNodes[0].childNodes[0];
+wordArea.value = "héllo";
+fire(wordArea, { type: "input" });
+const one = wordWasm.calls[0];
+ok(one !== undefined, "the event reaches wiz_step", JSON.stringify(wordWasm.calls));
+eq("the event string is the same one the i64 entry gets", "input\n0\nhéllo", one && one.event);
+ok(one && typeof one.state === "number" && typeof one.p === "number" && typeof one.len === "number",
+  "the state, the address and the length are Numbers (no BigInt on the step path)",
+  JSON.stringify(one && { state: typeof one.state, p: typeof one.p, len: typeof one.len }));
+eq("the length is the payload's UTF-8 byte count", 14, one && one.len);
+eq("the state is the word the step returned", 8, wordApp.state());
+eq("onStep sees the word state", 8, wordSeen[0]);
+
+// A Wasm i32 result arrives in JavaScript sign-extended: the handle is unsigned, so the
+// driver normalises it, and the next step passes the same word back.
+wordWasm.answer = -1;                                   // 0xFFFFFFFF as Wasm returns it
+fire(wordRoot.childNodes[0].childNodes[1], { type: "click" });
+eq("an i32 result above 0x7FFFFFFF is normalised to an unsigned word", 4294967295, wordApp.state());
+fire(wordRoot.childNodes[0].childNodes[1], { type: "click" });
+eq("and the next step passes that word back", 4294967295, wordWasm.calls[2] && wordWasm.calls[2].state);
+
+// The length rule itself.
+eq("utf8Length: ASCII", 3, utf8Length("abc"));
+eq("utf8Length: two bytes for U+00E9", 2, utf8Length("é"));
+eq("utf8Length: four bytes above U+FFFF", 4, utf8Length("😀"));
+eq("utf8Length: a lone surrogate is written as U+FFFD (three bytes)", 3, utf8Length("\ud800"));
 
 console.log(failed === 0 ? "loom driver: all checks passed" : `loom driver: ${failed} failure(s)`);
 process.exit(failed === 0 ? 0 : 1);

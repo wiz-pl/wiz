@@ -448,9 +448,13 @@ def Runtime.initial (helpers : List Helper) (slots : List Slot) : Runtime :=
   let slots := slots.map fun s =>
     let helperRev := helperHashFor helpers s.body
     let bodyRev := bodyRevisionOf s.ty s.body s.witness helperRev
+    -- `revisionFor` takes dependency *revisions* (strings), not slot ids: at
+    -- initialisation the ids are all that exists, so each dep resolves through the
+    -- same "missing" fallback `depRevs` uses, and `refreshRevisions` below then
+    -- recomputes to a fixed point.
     { s with bodyRevision := bodyRev
              internal := s.surface ++ "@" ++ bodyRev
-             revision := revisionFor bodyRev s.deps }
+             revision := revisionFor bodyRev (s.deps.map fun _ => "missing") }
   let slots := refreshRevisions (slots.length + 2) 0 slots
   let g : Gen :=
     { id := 0

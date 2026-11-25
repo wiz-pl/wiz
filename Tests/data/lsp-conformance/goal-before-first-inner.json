@@ -1,0 +1,18 @@
+{
+  "name": "goal-before-first-inner",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-before-first-inner.wiz",
+  "text": "import Prelude\ndef k : Nat → Nat := by\n  exact (by intro x; exact x)\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 11 } } }
+  ],
+  "expected": [{ "match": "exact", "path": "result.goals", "value": ["⊢ Nat → Nat"] }],
+  "note": "the caret before the inner block's first tactic. This expectation is the block-order swap's load-bearing pin: without the swap the answer is the outer step's `no goals`, with the swap it is the inner block's own goal — so do not weaken it to match the wrong block. Before 4b the selfhost has no inner block entry at all (`Frontend.wiz:4850`); after 4b it does.",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "Pi printer (task 26): the selfhost spells a Pi with its binder, `⊢ (_ : Nat) → Nat` for the host's `⊢ Nat → Nat`",
+      "issue": "task 26"
+    }
+  ]
+}

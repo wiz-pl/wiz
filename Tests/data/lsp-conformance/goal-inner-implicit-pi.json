@@ -1,0 +1,20 @@
+{
+  "name": "goal-inner-implicit-pi",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-inner-implicit-pi.wiz",
+  "text": "import Prelude\ndef h (g : (A : Type) → {a : A} → A) : Nat := by\n  exact 0\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 2 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.goals", "value": ["g : (A : Type) → {a : A} → A\n⊢ Nat"] }
+  ],
+  "note": "an inner implicit Π: the host prints the braces of `{a : A}` and `Type` for `Type`. The expected text also pins `(A : Type)` — the binder is used in the codomain, so it is not elided.",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "the selfhost elaborates an inner implicit Π as explicit — implicitness is in the global mask, not in Pi types, so `{a : A}` prints as `(x2 : x1)` (and `Type` as `U0`, binders freshened): `g : (x1 : U0) → (x2 : x1) → x1`",
+      "issue": "implicit-pi"
+    }
+  ]
+}

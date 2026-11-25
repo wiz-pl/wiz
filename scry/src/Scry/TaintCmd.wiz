@@ -1389,7 +1389,7 @@ def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
   | .some out => do
     let notesBoundary := List.map (fun n => Scry.BoundaryFinding.mk n.rule n.message
       "<budget>" 0 .none) notes;
-    let sarifText := Scry.renderSarifWithBaselines "scry" origins pack
+    let sarifText := Scry.renderSarifWithBaselines "c" "scry" origins pack
       (List.map (fun r => Scry.SarifFinding.mk r.f r.checked
         (Scry.baselineOfRow dmOpt r.hit)) frows)
       (List.append

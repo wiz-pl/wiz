@@ -29,10 +29,40 @@ exactly. They do not change this page (it marks the start line only). -/
 structure Scry.ReportStep where
   kind : String
   func : String
+  /-- The file this step is in. A path can cross files (`a.c` -> `b.h`), so a step's
+  `line`/`column` only mean something together with the file they were measured in.
+  Empty when the origin did not name one. -/
+  file : String
   line : Nat
   column : Nat
   endLine : Nat
   endColumn : Nat
+
+/-- A page location, re-expressed in the language's index where it does not fit the
+source: a span the front end's line table skipped (a `#line` region, a form-feeds line
+table) still has a place in the source. `step` is 1 for the sink, `2 + k` for path step
+`k`. `origin` is the original location (0-based line, 1-based column, end exclusive). -/
+structure Scry.ReindexedOrigin where
+  finding : String
+  step : Nat
+  origin : Nat × Nat × Nat × Nat
+  fixed : Nat × Nat × Nat × Nat
+
+/-- An origin the source cannot place at all: the step is dropped from the bundle and the
+export writes a `scry/unplaced-origin` finding saying so. A path that is silently
+shortened would overstate what the analysis shows. -/
+structure Scry.RejectedOrigin where
+  finding : String
+  /-- 1 for the sink, `2 + k` for path step `k`. -/
+  step : Nat
+  func : String
+  point : Nat
+  /-- The origin's 1-based line (0 when unlocated). -/
+  line : Nat
+  column : Nat
+  endLine : Nat
+  endColumn : Nat
+  reason : String
 
 /-- One finding on the page. `anchor` is page-unique (the semantic id, with a `-N`
 suffix only on a genuine collision); `id` is always the semantic id. -/
@@ -59,6 +89,16 @@ structure Scry.ReportFinding where
   origin had no end; the web bundle then uses a one-unit caret. -/
   endLine : Nat
   endColumn : Nat
+  /-- The finding's path as the reader can place it. For `scry report` this is `steps`;
+  `scry cs --bundle` fills it from the program's located program points, because the
+  C# lowering does not hand a path back from the rule pack. Empty means the source has
+  no located step beyond the sink. -/
+  pathSteps : List Scry.ReportStep
+  /-- `scry cs --bundle`: `pathSteps` re-expressed in the source's own index (the C# line
+  table skips `#line`-directives, the reader's does not). -/
+  reindexed : List Scry.ReindexedOrigin
+  /-- `scry cs --bundle`: path steps this file's source cannot place. -/
+  rejected : List Scry.RejectedOrigin
 
 /-- A non-finding diagnostic (lowering boundary or points-to memory warning). It is
 listed separately and is not evidence that the program is safe. -/

@@ -197,6 +197,13 @@ partial def grailOpts (o : Opts) : List String → Opts × List String
     else let (o, r) := grailOpts o rest; (o, a :: r)
   | [] => (o, [])
 
+/-- The `test` subcommand's options: the same parser, seeded with the options already read
+before the subcommand. `grail --test-timeout 900 test` used to parse 900 into the leading
+options and then re-parse from nothing, so the runner kept its 300 s default and an example
+that needs 222 s timed out at exactly 300 s with the flag set. The flag after the subcommand
+still wins, and this is named so the contract can be tested without spawning a server. -/
+def testOpts (o : Opts) (args : List String) : Opts × List String := grailOpts o args
+
 /-- `grail publish`: `--key`/`--expires` are publish-local because `grail index snapshot`
 parses the same flag names, and taking them in `grailOpts` would strip them from that
 command's arguments. Everything else the publish branch reads is already in `Opts`. -/
@@ -233,7 +240,12 @@ def vendorOf (dir : System.FilePath) (opt : Option String) (pkg : Package)
       found.map (fun kv : String × String => kv.2)
   v.map (inPackage dir)
 
-def cliMain (args : List String) : IO UInt32 := do
+/-- `selfPath` is the binary a test process re-invokes as its job supervisor (every job is
+spawned as `self --grail-job …`). It defaults to this process's own path, which is right for
+`grail` itself; a test that calls `cliMain` **in process** must pass the real `grail`, because
+`IO.appPath` there is the `tests` binary and `tests --grail-job …` fails instantly - a case
+that dies instantly never reaches its own timeout, so `--test-timeout` cannot be observed. -/
+def cliMain (args : List String) (selfPath : Option System.FilePath := none) : IO UInt32 := do
   -- (after the toolchain flags: tower's wrapper puts its flags before the user's arguments)
   if ((({} : Toolchain).parseFlags args).2) == ["--version"] then
     IO.println (← Wiz.versionLine "grail"); return 0
@@ -256,7 +268,10 @@ def cliMain (args : List String) : IO UInt32 := do
   let std ← findStd opts.std
   let jobs := opts.jobs.getD (max 1 (min 4 (System.Platform.Internal.getHardwareConcurrency ()).toNat))
   let mkRunner (ctx : Ctx) (testTimeoutMs : Nat := 1000 * opts.testTimeout.getD 300) : IO Runner := do
-    pure { ctx, stats := ← IO.mkRef {}, memo := ← IO.mkRef {}, jobs, self := ← IO.appPath,
+    let self ← match selfPath with
+      | .some p => pure p
+      | .none => IO.appPath
+    pure { ctx, stats := ← IO.mkRef {}, memo := ← IO.mkRef {}, jobs, self,
            timeoutMs := 1000 * opts.timeout.getD 1800, testTimeoutMs }
   -- the flags win over the build files; read them now, apply them last
   let raw := args
@@ -687,7 +702,11 @@ def cliMain (args : List String) : IO UInt32 := do
       -- Flags after the subcommand are not seen by the parser above (it stops at `test`),
       -- so `grail test --test-timeout 900 …` used to leave the flag in `filters` and the
       -- runner at its 300 s default — a "timed out (300 s)" that no flag could raise.
-      let (topts, rest) := grailOpts {} rest
+      -- Seed from the leading options, not `{}`: `grail --test-timeout 900 test` (the form
+      -- hdl/scripts/check-standalone.sh writes) parsed 900 into `opts` and then the runner
+      -- threw it away, so the example timed out at exactly 300 s with the flag set. Both
+      -- positions now work, the one after the subcommand winning.
+      let (topts, rest) := testOpts opts rest
       let update := rest.contains "--update"
       let rerun := rest.contains "--rerun"
       let filters := rest.filter (fun a => a != "--update" && a != "--rerun")

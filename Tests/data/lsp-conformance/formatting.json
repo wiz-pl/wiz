@@ -1,0 +1,15 @@
+{
+  "name": "formatting",
+  "servers": ["host"],
+  "uri": "file:///conf/formatting.wiz",
+  "text": "import Prelude\ndef  f :Nat:=1\n",
+  "requests": [
+    {
+      "method": "textDocument/formatting",
+      "params": { "options": { "tabSize": 2, "insertSpaces": true } }
+    }
+  ],
+  "expected": [
+    { "match": "applyEquals", "path": "result", "value": "import Prelude\ndef f :Nat:= 1\n" }
+  ]
+}

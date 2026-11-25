@@ -970,6 +970,22 @@ attribute [tactic tactic.exact] Tactic.exact
 ``` -/
 def Tactic : Type := Syntax → TacticM Unit
 
+/-- A term elaborator: a Wiz function from a term's syntax to `TacticM Unit`, registered
+with `attribute [term_elab kind] f`, where `kind` is the syntax kind to handle (as
+`syntax "τ" : term` declares `term.τ`). The elaborator runs with one goal — the term's
+expected type under an ascription or a `check`, or a fresh type metavariable when the
+term's type is inferred — and assigns it, e.g. with `TacticM.exact` on a subterm or
+`TacticM.assign` of an `Expr` it builds. The term is what the goal was assigned.
+
+```
+syntax "τ" : term
+def tauElab : TermElab := fun stx => do
+  g ← TacticM.mainGoal;
+  TacticM.assign g (Expr.const "Nat.zero")
+attribute [term_elab term.τ] tauElab
+``` -/
+def TermElab : Type := Syntax → TacticM Unit
+
 /-- The main goal (the first open one); fails if there are none. -/
 def TacticM.mainGoal : TacticM Nat := do
   gs ← TacticM.getGoals;

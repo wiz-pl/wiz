@@ -1,0 +1,35 @@
+{
+  "name": "completion-json",
+  "servers": ["host"],
+  "uri": "file:///conf/completion-json.wiz",
+  "text": "import Prelude\ndef label : String := \"x\"\ndef three : String := lab\n",
+  "note": "The whole completion result is pinned for a prefix that matches exactly one declaration: isIncomplete is a boolean, items is an array of CompletionItems with numeric kind and an exact TextEdit range in UTF-16 columns.",
+  "diagnostics": [
+    { "match": "exact", "path": "diagnostics.0.code", "value": "unknown-identifier" }
+  ],
+  "requests": [
+    { "method": "textDocument/completion", "params": { "position": { "line": 2, "character": 25 } } }
+  ],
+  "expected": [
+    {
+      "match": "exact",
+      "path": "result",
+      "value": {
+        "isIncomplete": false,
+        "items": [
+          {
+            "label": "label",
+            "kind": 3,
+            "sortText": "2label",
+            "filterText": "label",
+            "detail": "String",
+            "textEdit": {
+              "range": { "start": { "line": 2, "character": 22 }, "end": { "line": 2, "character": 25 } },
+              "newText": "label"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

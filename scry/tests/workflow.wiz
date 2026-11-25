@@ -30,10 +30,10 @@ def main : IO Unit := EIO.toIO (do
     [Scry.PathNode.mk "main" 1 0 Scry.PathKind.source,
      Scry.PathNode.mk "main" 2 0 Scry.PathKind.flow,
      Scry.PathNode.mk "main" 3 0 Scry.PathKind.sink];
-  let idA := Scry.wfId f "src/a.c";
-  let idB := Scry.wfId f "./src/a.c";
+  let idA := Scry.wfId "c" f "src/a.c";
+  let idB := Scry.wfId "c" f "./src/a.c";
   check "identity: a ./ prefix is normalized" (String.eq idA idB);
-  let idC := Scry.wfId (taintFinding "format-string" f.path) "src/a.c";
+  let idC := Scry.wfId "c" (taintFinding "format-string" f.path) "src/a.c";
   check "identity: the rule is part of the id" (Bool.not (String.eq idA idC));
   let fMem := taintFinding "command-injection"
     [Scry.PathNode.mk "main" 1 0 Scry.PathKind.source,
@@ -41,13 +41,13 @@ def main : IO Unit := EIO.toIO (do
      Scry.PathNode.mk "main" 3 0 Scry.PathKind.load,
      Scry.PathNode.mk "main" 4 0 Scry.PathKind.sink];
   check "identity: a path-shape change is a new id"
-    (Bool.not (String.eq idA (Scry.wfId fMem "src/a.c")));
+    (Bool.not (String.eq idA (Scry.wfId "c" fMem "src/a.c")));
   check "identity: the line hash ignores whitespace"
-    (String.eq (Scry.wfLineHash f "  system(cmd); ")
-      (Scry.wfLineHash f "system(cmd);"));
+    (String.eq (Scry.wfLineHash "c" f "  system(cmd); ")
+      (Scry.wfLineHash "c" f "system(cmd);"));
   check "identity: the line hash sees a content change"
-    (Bool.not (String.eq (Scry.wfLineHash f "system(cmd);")
-      (Scry.wfLineHash f "system(other);")));
+    (Bool.not (String.eq (Scry.wfLineHash "c" f "system(cmd);")
+      (Scry.wfLineHash "c" f "system(other);")));
 
   -- triage machine
   check "triage: new -> confirmed" (Scry.wfAllowed .new .confirmed);

@@ -20,4 +20,5 @@ return {
   cmd = '⌘', -- lib/Web/Editor.wiz: the editor hint's Command key (Ctrl/⌘+Enter runs)
   hat = '\u{0302}', -- combining circumflex: x\hat → x̂ (docs/CoreSpec.md)
   vec = '\u{20D7}', -- combining arrow above: v\vec → v⃗
+  smile = '\u{1F600}', -- lib/Web/Source/Facts.wiz: the source reader's UTF-16 fixture
 }

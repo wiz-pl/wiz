@@ -811,6 +811,14 @@ inductive MTm where
   | prf (l : MLvl) (t : MTm)
   deriving Inhabited
 
+/-- A source that defines `D0` as `head` and then a 17-step alias chain `D1 … D17`, each
+name referring to the previous one: longer than the depth bound the `μ` guard used to have
+(`descGuarded`, TT-06 step 1). Shared by the `inductive` group and the selfhost
+differential, so both run the same chain. -/
+def aliasChain (head : String) : String :=
+  "\n" ++ head ++ "\n" ++
+  String.join ((List.range 17).map fun k => s!"def D{k + 1} : Desc Unit := D{k}\n")
+
 namespace MTm
 
 /-- The global definitions (or axioms, without a value) the differential test uses, in
@@ -1943,76 +1951,198 @@ def selfhostLoader : IO (Name → Option String) := do
     else if m == "Text" then some textLib
     else if m == "Std" then some stdLib else if m == "Sys" then some sysLib else none
 
+/-- Every effective-value line this process has already printed (`reportEffectiveValue`).
+A line is per process and per program, not per lookup: a run looks a program up many
+times and one line per lookup would drown the case's stderr. -/
+initialize selfhostReportedRef : IO.Ref (List String) ← IO.mkRef []
+
+/-- Print the value a multi-source override actually used, once per process:
+
+`selfhost-override <program> source=flag|env|build path=<binary> id=<sidecar or -> pid=<pid>`
+
+on **stderr**, so a case can read its own children's stderr and prove that a fault it
+injected reached the code under test.  That is the anti-vacuity rule (docs/building.md,
+`Tests/Harness.lean`): a meta-case asserts an outcome *and* its input; without this
+line the stub meta-case could not tell "every case failed under the stub" from "the
+stub never took effect" -- which is exactly what happened (run 45285555908: 211 of 211
+children exited 0, because the forwarded `--selfhost-compiler` flag won over the
+`WIZ_SELFHOST_*` the case set). -/
+def reportEffectiveValue (program source path id : String) : IO Unit := do
+  let key := program ++ "\n" ++ source ++ "\n" ++ path
+  if (← selfhostReportedRef.get).contains key then return
+  selfhostReportedRef.modify (· ++ [key])
+  IO.eprintln s!"selfhost-override {program} source={source} path={path} id={id} pid={(← IO.Process.getPID)}"
+
+/-- Whether `selfhost-cache` has already been reported in this process. -/
+initialize selfhostCacheReportedRef : IO.Ref Bool ← IO.mkRef false
+
+/-- This run's cache directory for the self-hosted programs: `--selfhost-cache DIR` when
+given, else `WIZ_SELFHOST_CACHE`, else the system temp directory. Flag first, environment
+second (the flag is forwarded to each case's process, so a run cannot end up with cases
+using different caches), and the default last.
+
+The choice is printed once per process as `selfhost-cache source=flag|env|default
+dir=<dir> pid=<pid>` on stderr, for the same reason as `reportEffectiveValue`: a test
+that sets `WIZ_SELFHOST_CACHE` can show that the cache it meant was the cache used. -/
+def selfhostCacheDir : IO System.FilePath := do
+  let (dir, source) ←
+    if let some d ← selfhostCacheRef.get then pure (d, "flag")
+    else if let some d ← IO.getEnv "WIZ_SELFHOST_CACHE" then pure (System.FilePath.mk d, "env")
+    else pure ("/tmp", "default")
+  unless ← selfhostCacheReportedRef.get do
+    selfhostCacheReportedRef.set true
+    IO.eprintln s!"selfhost-cache source={source} dir={dir} pid={(← IO.Process.getPID)}"
+  return dir
+
 /-- A binary to use instead of building the pipeline's `name` (`compiler` or `checker`),
-from `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER`; `none` in a normal run. The case
-"an echoing stub compiler fails every =selfhost case" (`Tests/Groups/SelfHost.lean`) sets
-them to a stub, so the pipeline group cannot quietly stop testing the pipeline. -/
-def selfhostBinaryOverride (name : String) : IO (Option System.FilePath) := do
-  let var := "WIZ_SELFHOST_" ++ name.toUpper
-  return (← IO.getEnv var).map System.FilePath.mk
+from `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER`; `none` in a normal run.
+
+An override must be built from *this* tree: the file `<binary>.selfhost-id` beside it
+must hold the identity `Selfhost.toolchainId` gives its sources (the Wiz version and the
+source contents; `tests --selfhost-identity compiler|checker` prints it). An override
+whose id file is missing or different is refused with an error, not silently used: a
+stale artifact from another commit would make the selfhost cases test a compiler that is
+not this tree's. The case "an echoing stub compiler fails every =selfhost case"
+(`Tests/Groups/SelfHost.lean`) sets them to a stub, which has no id file and is refused;
+every case that reaches the pipeline still fails, which is what that case asserts. -/
+def selfhostBinaryOverride (name identity : String) : IO (Option System.FilePath) := do
+  -- a `--selfhost-compiler`/`--selfhost-checker` flag wins over the environment variable
+  -- (`WIZ_SELFHOST_<NAME>` remains for the stub-compiler case, which sets it for a child)
+  let fromFlag ← match name with
+    | "compiler" => selfhostCompilerRef.get
+    | "checker"  => selfhostCheckerRef.get
+    | _          => pure none
+  let (path?, var, source) ← match fromFlag with
+    | some p => pure (some p.toString, "--selfhost-" ++ name, "flag")
+    | none => do
+      let var := "WIZ_SELFHOST_" ++ name.toUpper
+      pure ((← IO.getEnv var), var, "env")
+  let some path := path? | return none
+  let exe : System.FilePath := System.FilePath.mk path
+  let idFile : System.FilePath := System.FilePath.mk (path ++ ".selfhost-id")
+  let advertised ←
+    if ← idFile.pathExists then pure ((← IO.FS.readFile idFile).trimAscii.toString)
+    else pure ""
+  -- The effective value, before it is checked: this line is what the stub meta-case
+  -- reads in each child to prove the fault reached the pipeline (`source=env` with the
+  -- stub's path), and it names the sidecar, so a refusal says what it saw.
+  reportEffectiveValue name source path (if advertised.isEmpty then "-" else advertised)
+  unless advertised == identity do
+    throw (IO.userError (s!"{var}={path} is stale: this tree's {name} identity is " ++
+      s!"{identity}, the override's {idFile} says " ++
+      s!"{if advertised.isEmpty then "(nothing)" else advertised}. " ++
+      s!"Build it from this tree (and write the identity beside it) or unset {var}."))
+  unless ← exe.pathExists do
+    throw (IO.userError s!"{var}={path} does not exist")
+  return some exe
+
+/-- The `/tmp` key of one self-hosted program: a cache-schema version, its `name` (the
+compiler, the checker, or a `--selfhost-cache-probe` tag), the C compiler flags
+(`Toolchain.id`: cc, cflags, ldflags, libs, gmp, gc) and the program text. The program
+text is the content of the selfhost sources, so a rebuild of the test driver that leaves
+them unchanged reuses the entry (the old key appended the test binary's mtime, so every
+rebuild was cold). `C.runtime` is in the key because it is linked into the program. -/
+def selfhostCacheKey (name prog : String) (tc : Toolchain) : UInt64 :=
+  hash (name ++ "\n" ++ toString tc.id ++ "\n" ++ toString (hash C.runtime) ++ "\n" ++ prog)
+
+/-- Build one self-hosted program (`prog`) with the same frontend and C compiler the
+test driver uses, under `/tmp/wiz-selfhost-KEY/NAME`. The `(path, built)` result says
+whether this call built it or found the entry.
+
+The directory is keyed by content (`selfhostCacheKey`), and a `<dir>/.lock` held with an
+exclusive `flock` serialises builders: a concurrent case waits for the first build and
+then reuses it instead of compiling the same program again. `try ... finally` releases the
+lock on every path (frontend error, compiler error, success); the executable appears only
+by an atomic `rename` of a fully built temporary, so a failed build leaves nothing that a
+later case would trust. -/
+def buildSelfhostProgram (name prog : String) : IO (Except String (System.FilePath × Bool)) := do
+  let tc ← toolchain
+  let dir : System.FilePath := (← selfhostCacheDir) / s!"wiz-selfhost-{selfhostCacheKey name prog tc}"
+  let exe := dir / name
+  note s!"uses {name}"
+  IO.FS.createDirAll dir
+  let lock ← IO.FS.Handle.mk (dir / ".lock") .append
+  lock.lock
+  try
+    if ← exe.pathExists then return .ok (exe, false)
+    let start ← IO.monoMsNow
+    let loader ← selfhostLoader
+    let s := runFrontend (R := ZeroOneMany) prog { loader, trustedModule := Tests.libModule }
+    let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render prog
+    unless errs.isEmpty do
+      return .error s!"unexpected errors:\n{"\n".intercalate errs.toList}"
+    match Build.irProgram s "main" with
+    | .error e => return .error e
+    | .ok (decls, _) =>
+      -- built under another name and renamed: a reader never sees a partial executable
+      let tmp := dir / s!"{name}-{← IO.monoNanosNow}"
+      match ← Build.compileC tc (C.program decls true (Build.extraC s)) tmp with
+      | .error e =>
+        (try IO.FS.removeFile tmp catch _ => pure ())
+        return .error e
+      | .ok () =>
+        IO.FS.rename tmp exe
+        note s!"built {name} {showMs ((← IO.monoMsNow) - start)}"
+        return .ok (exe, true)
+  finally
+    lock.unlock
+
+/-- The identity of a self-hosted program's sources (the `Wiz.Selfhost.toolchainId` the
+compiler embeds in its own source): what a `WIZ_SELFHOST_*` override's `.selfhost-id`
+sidecar must hold. `tests --selfhost-identity compiler|checker` prints it. -/
+def selfhostIdentity (name : String) : IO (Except String String) := do
+  let files? ← match name with
+    | "compiler" => pure (some Selfhost.compilerFiles)
+    | "checker" => pure (some Selfhost.checkerFiles)
+    | _ => pure none
+  let some files := files? |
+    return .error s!"unknown selfhost program {name} (compiler or checker)"
+  let srcs ← files.mapM (fun (f : String) => IO.FS.readFile f)
+  return .ok (Selfhost.toolchainId srcs)
+
+/-- `tests --selfhost-identity NAME`: print the identity an override's `.selfhost-id`
+must hold, for the CI job that builds the compiler and checker once and exports them. -/
+def selfhostIdentityMain (name : String) : IO UInt32 := do
+  match ← selfhostIdentity name with
+  | .error e => do IO.eprintln e; return 2
+  | .ok id => do IO.println id; return 0
+
+/-- `tests --selfhost-cache-probe TAG`: build a tiny program through `buildSelfhostProgram`
+with TAG in its key, printing `built probe` or `reused probe`. Two of these started at
+once with one TAG are the lock's test hook (`selfhost-host` case "two concurrent ..."). -/
+def selfhostCacheProbe (tag : String) : IO UInt32 := do
+  let prog := "import IO\ndef main : IO Unit := IO.println \"selfhost cache probe\"\n"
+  match ← buildSelfhostProgram s!"probe-{tag}" prog with
+  | .error e => do IO.eprintln e; return 1
+  | .ok (_, built) => do IO.println (if built then "built probe" else "reused probe"); return 0
 
 /-- The whole self-hosted pipeline as a compiled program that checks the file `input.wiz`
-in its working directory. It is built once and kept (under `/tmp`, keyed by its source
-and this test binary), since every test that uses it would otherwise compile it again. -/
+in its working directory. It is built once and kept (under `/tmp`, keyed by its content
+and the C compiler flags), since every test that uses it would otherwise compile it
+again. -/
 def selfhostChecker : IO (Except String System.FilePath) := do
-  if let some exe ← selfhostBinaryOverride "checker" then
+  let src ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
+  if let some exe ← selfhostBinaryOverride "checker" (Selfhost.toolchainId src) then
     note "uses checker"
     return .ok exe
-  let src ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
-  let prog := Selfhost.checkerSource src
-  let stamp := toString (← (← IO.appPath).metadata).modified.sec
-  let dir : System.FilePath := s!"/tmp/wiz-selfhost-{hash (prog ++ stamp)}"
-  let exe := dir / "checker"
-  note "uses checker"
-  if ← exe.pathExists then return .ok exe
-  let start ← IO.monoMsNow
-  IO.FS.createDirAll dir
-  let loader ← selfhostLoader
-  let s := runFrontend (R := ZeroOneMany) prog { loader, trustedModule := Tests.libModule }
-  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render prog
-  unless errs.isEmpty do return .error s!"unexpected errors:\n{"\n".intercalate errs.toList}"
-  match Build.irProgram s "main" with
+  match ← buildSelfhostProgram "checker" (Selfhost.checkerSource src) with
   | .error e => return .error e
-  | .ok (decls, _) =>
-    -- built under another name and renamed: tests may run at the same time
-    let tmp := dir / s!"checker-{← IO.monoNanosNow}"
-    match ← Build.compileC (← toolchain) (C.program decls true (Build.extraC s)) tmp with
-    | .error e => return .error e
-    | .ok () =>
-      IO.FS.rename tmp exe
-      note s!"built checker {showMs ((← IO.monoMsNow) - start)}"
-      return .ok exe
+  | .ok (exe, _) =>
+    reportEffectiveValue "checker" "build" exe.toString "-"
+    return .ok exe
 
 /-- The self-hosted compiler (stage 21): the frontend and `Backend.wiz`, printing the C
 program for `input.wiz` (the frontend's own output as comments). -/
 def selfhostCompiler : IO (Except String System.FilePath) := do
-  if let some exe ← selfhostBinaryOverride "compiler" then
+  let src ← Selfhost.compilerFiles.mapM (fun (f : String) => IO.FS.readFile f)
+  if let some exe ← selfhostBinaryOverride "compiler" (Selfhost.toolchainId src) then
     note "uses compiler"
     return .ok exe
-  let src ← Selfhost.compilerFiles.mapM (fun (f : String) => IO.FS.readFile f)
-  let prog := Selfhost.compilerSource src
-  let stamp := toString (← (← IO.appPath).metadata).modified.sec
-  let dir : System.FilePath := s!"/tmp/wiz-selfhost-{hash (prog ++ stamp)}"
-  let exe := dir / "compiler"
-  note "uses compiler"
-  if ← exe.pathExists then return .ok exe
-  let start ← IO.monoMsNow
-  IO.FS.createDirAll dir
-  -- (the driver ends with `Process.exit` on a frontend error)
-  let loader ← selfhostLoader
-  let s := runFrontend (R := ZeroOneMany) prog { loader, trustedModule := Tests.libModule }
-  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render prog
-  unless errs.isEmpty do return .error s!"unexpected errors:\n{"\n".intercalate errs.toList}"
-  match Build.irProgram s "main" with
+  match ← buildSelfhostProgram "compiler" (Selfhost.compilerSource src) with
   | .error e => return .error e
-  | .ok (decls, _) =>
-    let tmp := dir / s!"compiler-{← IO.monoNanosNow}"
-    match ← Build.compileC (← toolchain) (C.program decls true (Build.extraC s)) tmp with
-    | .error e => return .error e
-    | .ok () =>
-      IO.FS.rename tmp exe
-      note s!"built compiler {showMs ((← IO.monoMsNow) - start)}"
-      return .ok exe
+  | .ok (exe, _) =>
+    reportEffectiveValue "compiler" "build" exe.toString "-"
+    return .ok exe
 
 /-- Check a file of commands with the whole self-hosted pipeline (compiled), and compare
 its output. -/

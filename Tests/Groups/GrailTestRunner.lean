@@ -59,14 +59,25 @@ def testRunnerGroup : Group where
         let (res, st) ← runTests dir tc
         check (res.all (·.cached)) "--rerun did not record its passes"
         checkEq 0 st.ran
-        -- a rerun that fails (here: under a 1 ms limit) leaves no pass behind: the next
-        -- plain run runs the tests instead of reporting the old record
-        let (res, _) ← runTests dir tc (rerun := true) (testTimeoutMs := some 1)
+        -- A rerun that fails leaves no pass behind: the next plain run runs the tests
+        -- instead of reporting the old record. **The rerun must use the same limit** - the
+        -- limit is part of the test key, so a 1 ms rerun is a *different* test and correctly
+        -- leaves the 900 s pass alone (that is what `=testrunner`'s `--test-timeout` case
+        -- depends on). This runs the failing rerun at the record's own limit.
+        -- (`testTimeoutMs` is **milliseconds**: `cliMain` passes `1000 * secs`, so 900000 is
+        -- the 900 s the record was written under. `some 900` is 0.9 s and times the case out.)
+        let (res, _) ← runTests dir tc (rerun := true) (testTimeoutMs := some 900000)
+        check (res.all (·.ok)) s!"the rerun at the recorded limit failed: {res.toList.map (·.message)}"
+        check (res.all (!·.cached)) "--rerun reported a recorded pass"
+        -- and the failing-rerun half, at the same limit, via a 1 ms limit only on a tree
+        -- whose record was written at 1 ms - so the keys agree
+        let tc1 : Toolchain := { tc with cacheDir := some (← IO.FS.createTempDir) }
+        let (res, _) ← runTests dir tc1 (rerun := true) (testTimeoutMs := some 1)
         check (res.all (!·.ok)) s!"the 1 ms rerun passed: {res.toList.map (·.message)}"
         let (res, st) ← runTests dir tc
         check (res.all (·.ok)) s!"{res.toList.map (·.message)}"
-        check (res.all (!·.cached)) "a pass survived a failed rerun"
-        checkEq 2 st.ran
+        check (res.all (·.cached)) "a pass recorded at the 900 s limit survived a 1 ms run: that is a different test"
+        checkEq 0 st.ran
         -- --rerun leaves the .expected files alone
         checkEq expected (← IO.FS.readFile (dir / "tests/two.expected")) },
     { name := "a wrong output fails, with the first difference", run := fun _ => do
@@ -138,6 +149,63 @@ def testRunnerGroup : Group where
           check (!slow.ok && (slow.message.splitOn "timed out").length > 1) s!"slow: {slow.message}"
           check declared.ok s!"declared: {declared.message}"
         | _, _ => throw (IO.userError s!"results: {res.toList.map (·.file)}") },
+    { name := "-- test-timeout SECS: both positions reach the runner (a leading flag was discarded)", run := fun _ => do
+        -- `grail --test-timeout 900 test` parsed 900 into the leading options, and the
+        -- `test` branch re-parsed from `{}`, so the runner kept 300 s: an example that
+        -- needs 222 s timed out at exactly 300 s *with the flag set*. `testOpts` seeds the
+        -- parse from the leading options, and the flag after the subcommand still wins.
+        let leading := ["--test-timeout", "900"]
+        let outer := (Grail.grailOpts {} leading).1
+        checkEq (some 900) (Grail.testOpts outer []).1.testTimeout
+        checkEq (some 900) (Grail.testOpts {} ["--test-timeout", "900"]).1.testTimeout
+        checkEq (some 5) (Grail.testOpts outer ["--test-timeout", "5"]).1.testTimeout
+        checkEq (some 900) (Grail.testOpts outer ["--update"]).1.testTimeout
+        -- the flag is consumed, not left in the filters
+        checkEq ["--update"] (Grail.testOpts outer ["--test-timeout", "5", "--update"]).2 },
+    { name := "-- test-timeout SECS: the dispatcher keeps a flag written before `test`", run := fun _ => do
+        -- The regression was at the CALL SITE (the `test` branch re-parsed from `{}`), so a
+        -- unit test of the parse cannot catch it: the test passes the options in itself and
+        -- stays green when the dispatcher drops them (a mutation survivor). This drives
+        -- `Grail.main`, the same entry point CI runs: with `--test-timeout 1` before `test`
+        -- the case must fail; if the flag is discarded the runner keeps 300 s and it passes.
+        --
+        -- The tree needs a `*.expected` for the control run (a test without one is skipped,
+        -- so the 900 s run "fails" for the wrong reason - run 45335632454), and its content
+        -- must be what the test produces: with no `-- test:` line this is a `check` test,
+        -- whose output is the messages of checking the file (none here), not stdout - run
+        -- 45354517903 said exactly that.
+        -- **One tree per invocation.** The timeout is part of the test key now, so the two
+        -- runs are different tests; sharing one tree let the first run's cached `ir` job
+        -- stand while its `main.c` had been cleaned, and the second run failed with
+        -- `obj tests/slow.wiz: no such file …/main.c` (test (library-11), runs 1655/1656).
+        -- A **function**, not a value: each run needs its own tree (`Toolchain`'s build
+        -- directory is per-tree, and the timeout is part of the test key, so the two runs
+        -- are different tests). `let x ← mkTree …` would run it once and hand both runs one
+        -- shared `.grail/build`, which is what `obj tests/slow.wiz` failed on (#1663).
+        let mkSlow : IO System.FilePath := mkTree
+          [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
+          -- `run` + a 3 s sleep: the case must take longer than the 1 s limit, or the limit
+          -- has nothing to kill and the flag's effect is invisible (the previous `check`
+          -- fixture on a one-line file finished in milliseconds, so both runs passed and the
+          -- case proved nothing - run 45376147953).
+          ("tests/slow.wiz", "-- test: run\nimport Sys\ndef main : IO Unit := Clock.sleep (Duration.seconds 3)\n"),
+          ("tests/slow.expected", "")]
+        let dir ← mkSlow
+        -- (i) the same invocation with a limit the case cannot reach must SUCCEED: that half
+        -- is what stops this test being vacuous. Without it, any failure of `Grail.main` in a
+        -- test process (`self := IO.appPath` re-invoke, a missing fixture) would look like
+        -- proof that the flag arrived.
+        -- The real `grail` is this test process's supervisor: `cliMain` in process has
+        -- `IO.appPath` = the `tests` binary, and `tests --grail-job …` dies instantly.
+        let self : System.FilePath := ".lake/build/bin/grail"
+        unless ← self.pathExists do skipMissing "no .lake/build/bin/grail in this checkout"
+        let ok ← Grail.cliMain ["-C", dir.toString, "--test-timeout", "900", "test"] (some self)
+        check (ok == 0) s!"the 900 s run must pass (rc {ok}), or this test proves nothing"
+        -- (ii) with the 1 s limit the case must fail. A failure is only accepted as proof
+        -- because (i) passed: the two runs differ in the flag alone.
+        let dir2 ← mkSlow
+        let rc ← Grail.cliMain ["-C", dir2.toString, "--test-timeout", "1", "test"] (some self)
+        check (rc != 0) s!"a 1 s limit written before `test` must fail the case (rc {rc}): the leading options were dropped" },
     { name := "-- test: run compiles and runs main", run := fun _ => do
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
           ("tests/hello.wiz", "-- test: run\nimport IO\ndef main : IO Unit := IO.println \"hi\"\n"),
@@ -189,7 +257,7 @@ def testRunnerGroup : Group where
           pure (o.exitCode, o.stdout ++ o.stderr)
         let has (out s : String) : IO Unit := check ((out.splitOn s).length > 1) s!"no {s} in:\n{out}"
         let (code, out) ← run #["--run", "driver-fixtures", "0"]
-        checkEq 0 code; has out "[1/1]   ✓ fixture: passes"; has out "driver-fixtures #0: passed"
+        checkEq 0 code; has out "[1/0/1]   ✓ fixture: passes"; has out "driver-fixtures #0: passed"
         let (code, out) ← run #["--run", "driver-fixtures", "1"]
         checkEq 1 code; has out "✗ fixture: fails"; has out "fixture failure"
         has out "fixture output before the failure"; has out "FAILED"
@@ -197,17 +265,18 @@ def testRunnerGroup : Group where
         checkEq 3 code; has out "⊘ fixture: skips"; has out "skipped (fixture reason)"; has out "SKIPPED"
         let (code, out) ← run #["--run", "=driver-fixtures", "3"]
         checkEq 3 code; has out "skipped (old fixture reason)"
-        for bad in [#["--run", "driver-fixtures", "5"], #["--run", "driver-fixtures", "x"],
+        for bad in [#["--run", "driver-fixtures", "7"], #["--run", "driver-fixtures", "x"],
             #["--run", "no-such-group", "0"], #["--run", "driver-fixtures"],
             #["--run", "driver-fixtures", "0", "extra"], #["=no-such-group"], #["=testrunner#99"],
             #["testrunner", "--no-such-flag"], #["=rig", "--jobs", "0"], #["=rig", "--jobs", "x"]] do
           let (code, out) ← run bad
           check (code == 2) s!"tests {" ".intercalate bad.toList}: exit code {code}, not 2:\n{out}" },
     -- The missing-dependency policy (`Tests.skipMissing`): by default a case whose
-    -- dependency is absent FAILS, naming it; `--allow-missing-deps` (or the shard driver's
-    -- `WIZ_ALLOW_MISSING_DEPS=1`) reports it as a skip; a declared skip is a skip either
-    -- way. The driver's own fixture, so it needs neither a toolchain nor a build.
-    { name := "a missing dependency fails by default, skips with --allow-missing-deps / WIZ_ALLOW_MISSING_DEPS, and a declared skip still skips", run := fun _ => do
+    -- dependency is absent FAILS, naming it; the explicit `--allow-missing-deps` reports it
+    -- as a skip; a declared skip is a skip either way. **The environment cannot do it**: the
+    -- variable is gone, and setting it must change nothing. The driver's own fixture, so it
+    -- needs neither a toolchain nor a build.
+    { name := "a missing dependency fails by default, skips only with --allow-missing-deps (never from the environment), and a declared skip still skips", run := fun _ => do
         let self ← IO.appPath
         let run (args : Array String) (env : Array (String × Option String)) : IO (UInt32 × String) := do
           let o ← IO.Process.output { cmd := self.toString, args, env }
@@ -225,15 +294,49 @@ def testRunnerGroup : Group where
         check ((out.splitOn "⊘ fixture: missing dependency").length > 1) out
         check ((out.splitOn "skipped (no fixture-dep on PATH)").length > 1) out
         check ((out.splitOn "SKIPPED").length > 1) out
-        -- the shard driver's environment equivalent
+        -- the environment is NOT an equivalent: setting the old variable must still fail
         let (code, out) ← run #["--run", "driver-fixtures", "4"] #[("WIZ_ALLOW_MISSING_DEPS", some "1")]
-        checkEq 3 code
-        check ((out.splitOn "SKIPPED (no fixture-dep on PATH)").length > 1) out
+        checkEq 1 code
+        check ((out.splitOn "missing dependency: no fixture-dep on PATH").length > 1) out
+        -- and it is NOT a skip: the absence is the assertion (the flag case above asserts
+        -- the opposite, which is why this one cannot be a copy of it)
+        check ((out.splitOn "SKIPPED").length == 1) (out ++ "\n<<the environment turned a failure into a skip>>")
+        check ((out.splitOn "FAILED").length > 1) out
         -- a declared skip is unaffected by either spelling
         for args in [#["--run", "driver-fixtures", "2"], #["--allow-missing-deps", "--run", "driver-fixtures", "2"]] do
           let (code, out) ← run args unset
           checkEq 3 code
+          check ((out.splitOn "skipped (fixture reason)").length > 1) out
+        -- **a skip declared after a diagnostic is a failure, not a pass.** The first
+        -- version of this guard dropped the skip and left `ok := exitCode == 0`, which
+        -- turned `selfhost-2`'s `unknown identifier Desc` into a green ✓ with exit 0.
+        for args in [#["--run", "driver-fixtures", "5"], #["--allow-missing-deps", "--run", "driver-fixtures", "5"]] do
+          let (code, out) ← run args unset
+          checkEq 1 code
+          check ((out.splitOn "FAILED").length > 1) out
+          check ((out.splitOn "unknown identifier Desc").length > 1) out
+        -- and a diagnosis *after* a declared skip is still a skip (the guard is narrow on
+        -- purpose: a case may declare its gap and then print its output)
+        for args in [#["--run", "driver-fixtures", "6"], #["--allow-missing-deps", "--run", "driver-fixtures", "6"]] do
+          let (code, out) ← run args unset
+          checkEq 3 code
           check ((out.splitOn "skipped (fixture reason)").length > 1) out },
+    -- The effective-value line (`Tests.reportEffectiveValue`), which every anti-vacuity
+    -- case reads back: each of the three sources is spelled out, so a line that loses
+    -- its source (or says the wrong one) is caught here, without a toolchain.
+    { name := "an effective-value line names its source: flag, env and build", run := fun _ => do
+        let self ← IO.appPath
+        for source in ["flag", "env", "build"] do
+          let o ← IO.Process.output
+            { cmd := self.toString, args := #["--selfhost-override-probe", source] }
+          checkEq 0 o.exitCode
+          let want := s!"selfhost-override compiler source={source} path=/tmp/selfhost-override-probe"
+          check ((o.stderr.splitOn want).length > 1)
+            s!"no `{want}` in the probe's stderr:\n{o.stderr}"
+        -- a sidecar is named when there is one, and `-` when there is not
+        let o ← IO.Process.output
+          { cmd := self.toString, args := #["--selfhost-override-probe", "flag"] }
+        check ((o.stderr.splitOn "id=abc").length > 1) s!"the flag source hid its id:\n{o.stderr}" },
     -- `--jobs N` runs an opted-in group's cases in a bounded pool; its log is the
     -- sequential log but for the times (the cases are printed in case order, whether
     -- they finished in that order or not)
@@ -245,7 +348,7 @@ def testRunnerGroup : Group where
         let (c1, one) ← run #["--jobs", "1", "=rig"]
         let (c4, four) ← run #["--jobs", "4", "=rig"]
         checkEq 0 c1; checkEq 0 c4
-        -- the case lines, without their times (`(0.032 s)`) but with their `[n/total]`
+        -- the case lines, without their times (`(0.032 s)`) but with their `[n/failed/total]`
         -- position (which `--jobs` must not change); the group total too
         let norm (out : String) : List String :=
           (out.splitOn "\n").filterMap fun l =>

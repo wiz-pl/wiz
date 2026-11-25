@@ -148,7 +148,8 @@ let next = 1;
 const put = (s) => { const p = next++; strings.set(p, s); return p; };
 const steps = [];
 const wasm = {
-  _wiz_loom_init: () => 0,
+  // the i64 entry's state is a BigInt, as a wasm64 module returns it
+  _wiz_loom_init: () => 0n,
   _wiz_loom_html: () => put(initial),
   _wiz_loom_step: (state, p) => { steps.push(strings.get(Number(p))); return state; },
   stringToNewUTF8: (s) => put(s),
@@ -214,7 +215,7 @@ eq("the layer stays last", "squiggle-layer",
 eq("the menu's selection moved", "lists",
   walk(byId(root, "preset"), (n) => n.getAttribute && n.getAttribute("selected") != null)
     .map((n) => n.getAttribute("value")).join(","));
-ok(app.state() === 0, "the driver keeps the state the runtime returned");
+ok(app.state() === 0n, "the driver keeps the state the runtime returned");
 
 console.log(failed === 0 ? "playground page: all checks passed" : `playground page: ${failed} failure(s)`);
 process.exit(failed === 0 ? 0 : 1);

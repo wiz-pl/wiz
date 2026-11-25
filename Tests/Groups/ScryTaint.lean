@@ -453,8 +453,8 @@ def group : Group where
       run := fun _ => do
         evalRuleNats (rulePrelude ++
           "def prI : Scry.ProgramResult := Scry.analyze Scry.interprocProgram Scry.demoRules\n" ++
-          "def sar : Json := Scry.sarif \"scry\" originMap Scry.demoRules (Scry.programFindings prI)\n" ++
-          "def sarNo : Json := Scry.sarif \"scry\" emptyOrigins Scry.demoRules (Scry.programFindings prI)\n" ++
+          "def sar : Json := Scry.sarif \"c\" \"scry\" originMap Scry.demoRules (Scry.programFindings prI)\n" ++
+          "def sarNo : Json := Scry.sarif \"c\" \"scry\" emptyOrigins Scry.demoRules (Scry.programFindings prI)\n" ++
           "#eval List.length (Json.getList sar \"runs\")\n" ++
           "#eval jLen (sarifDriver sar) \"rules\"\n" ++
           "#eval List.length (sarifResults sar)\n" ++
@@ -469,7 +469,7 @@ def group : Group where
           -- Wiz frontends treat `#eval` as the end of a declaration block.
           "def inv := headJ Json.mkNull (Json.getList (sarifRun sar) \"invocations\")\n" ++
           "def note := Scry.Budget.terminationNotes (Scry.Termination.rounds 2 2)\n" ++
-          "def sarT : Json := match Json.parse (Scry.renderSarifPartialWith \"scry\" originMap Scry.demoRules (List.map (fun f => (f, .true)) (Scry.programFindings prI)) .nil note) with | .ok j => j | .error _ => Json.mkNull\n" ++
+          "def sarT : Json := match Json.parse (Scry.renderSarifPartialWith \"c\" \"scry\" originMap Scry.demoRules (List.map (fun f => (f, .true)) (Scry.programFindings prI)) .nil note) with | .ok j => j | .error _ => Json.mkNull\n" ++
           "def invT := headJ Json.mkNull (Json.getList (sarifRun sarT) \"invocations\")\n" ++
           "#eval jLen (firstResult sar) \"codeFlows\"\n" ++
           "#eval match Json.getList (firstResult sar) \"codeFlows\" with | .cons cf _ => (match Json.getList cf \"threadFlows\" with | .cons tf _ => (if Nat.lt 0 (List.length (Json.getList tf \"locations\")) then 1 else 0) | .nil => 0) | .nil => 0\n" ++
@@ -479,12 +479,12 @@ def group : Group where
           "#eval List.length (Json.getList invT \"toolExecutionNotifications\")") [1, 4, 1, 1, 3, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1]
         evalRuleTexts (rulePrelude ++
           "def prI : Scry.ProgramResult := Scry.analyze Scry.interprocProgram Scry.demoRules\n" ++
-          "def sar : Json := Scry.sarif \"scry\" originMap Scry.demoRules (Scry.programFindings prI)\n" ++
+          "def sar : Json := Scry.sarif \"c\" \"scry\" originMap Scry.demoRules (Scry.programFindings prI)\n" ++
           "#eval Json.getStr sar \"version\"\n" ++
           "#eval jStr (sarifDriver sar) \"name\"\n" ++
           "#eval jStr (firstResult sar) \"ruleId\"\n" ++
           "#eval jStr (firstResult sar) \"level\"\n" ++
-          "#eval match Json.parse (Scry.renderSarif \"scry\" originMap Scry.demoRules (Scry.programFindings prI)) with | .ok j => Json.getStr j \"version\" | .error e => e")
+          "#eval match Json.parse (Scry.renderSarif \"c\" \"scry\" originMap Scry.demoRules (Scry.programFindings prI)) with | .ok j => Json.getStr j \"version\" | .error e => e")
           ["\"2.1.0\"", "\"scry\"", "\"scry/c/command-injection\"", "\"error\"", "\"2.1.0\""] },
     { name := "SARIF contract fixture: codeFlows, primaryLocationLineHash, partial-run notification (scry/tests/sarif-contract.wiz)",
       run := fun _ => do

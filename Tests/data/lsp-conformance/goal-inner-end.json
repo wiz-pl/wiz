@@ -1,0 +1,24 @@
+{
+  "name": "goal-inner-end",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-inner-end.wiz",
+  "text": "import Prelude\ndef k : Nat → Nat := by\n  exact (by intro x; exact x)\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 28 } } },
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 29 } } },
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 1, "character": 21 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.rendered", "value": "no goals" },
+    { "match": "exact", "path": "result.rendered", "value": "no goals" },
+    { "match": "exact", "path": "result.goals", "value": ["⊢ Nat → Nat"] }
+  ],
+  "note": "the two ends of the inner block, then the outer `by` itself (1:21); the inner ends agree, the outer goal is a function type",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "pretty-print: the selfhost spells a Pi with its binder, `⊢ (_ : Nat) → Nat` for the host's `⊢ Nat → Nat` (task 26); the inner ends agree",
+      "issue": "printer"
+    }
+  ]
+}

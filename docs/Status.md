@@ -970,6 +970,31 @@ own positivity, and the self-hosted one now reports the Lean message. Tests:
 `MTm.muSize` (also in the differential samples), the `inductive` group, and the selfhost
 positivity case; see `wiz-notes/mu-size.md`.
 
+**Fail closed (TT-06, step 1).** The walk used to stop after 16 unfoldings of a constant
+and to accept a constant with no value (an axiom or an opaque definition) and a name with
+no declaration. It now unfolds by a **visited set of names** instead of a depth: an alias
+chain is acyclic (a global's value refers only to earlier globals), so a 17-step chain is
+looked through, and a revisited name is a cycle. A revisited name, a valueless constant
+and an unknown name are **rejected**, not accepted. A pair match is walked on its
+scrutinee, motive and body, so `match (D, ()) with | (d, _) => d` cannot hide a
+description either. The head that is neither a term constructor nor a constant (a
+variable, an application, a projection) is still accepted: that is the neutral-head policy
+(D-9), which step 2 replaces by walking the evaluated description. Both kernels changed in
+one patch and now agree on which programs are types: the self-hosted walk has a `letq` arm
+where the host's `letE` carries the quantity, it needs no visited set (values are carried
+inline, so a chain is finite by construction), and it rejects `.axiomC` where the host
+rejects a valueless constant. Two routes cannot be reached from the surface (a cycle needs
+a global whose value names itself; an unknown name fails the `Desc` check first) and are
+covered by reading only.
+
+Tests: the `inductive` group — a 17-alias unguarded chain, an axiom-headed `μ`, the same
+long chain over a guarded description, an alias inside a `darg` kept guarded, and two
+`ecase` branches sharing one alias (so `seen` is per path) — plus F2 (an application head)
+and F3 (a projection head) as **`xfail`**, owner task 74 step 2, expiry 2026-12-08,
+because they need the evaluated-description walk; `MTm.muSize` in the differential
+samples; and the `selfhost` group's `selfhostAgrees` case that runs F1, F4, P1 and P1b
+through both kernels.
+
 ### Q1 / R1. Projections drop linear components — **fixed**: projections need an unrestricted pair (lin-proj; both kernels)
 
 `p.2` on `p : (1 x : A) × B` uses `p` once and discards `x` (§7.1); `p.1` discards the
@@ -1331,6 +1356,20 @@ that checks everything. Wiz's situation:
   not model quantities). Weakening and substitution are proved for its fragments T0 and
   T1; validity and subject reduction are stated, not proved. It models #40's `Desc`/`μ`
   rules; #123's rules have been in it since #135. Its review found D2 (§4).
+  The marking bridge and the open switches are tested, not assumed (group *meta*, "D3
+  (marking bridge)" and "D6 (open switches)"). The kernel checks the **marked** term and
+  WizMeta the **unmarked** one; marking preserves the kernel's verdict on the 533
+  differential terms inside the spec's fragment (of 635; the 102 outside it are not
+  evaluated by the bridge, and one of them reaches a kernel `panic!`,
+  `wiz-notes/kernel-assurance.md` §11), with a `fun` at a proposition as the negative
+  control (rejected unmarked, accepted after `Mark.infer`, accepted by WizMeta unmarked).
+  For the 216 declaration types, `Mark.type`'s level is the kernel's `checkType` level;
+  the marked type is a type at the same level, `Mark.type` is idempotent, and
+  `Mark.inferCore` computes the kernel's type. Each open rule choice now has a
+  distinguishing term —
+  `EqTyCross` vs `EqTyLevelled`, payload kernel/stuck/uniform, `kernelEqFormation`, and
+  quantities at a propositional Π/Σ (the kernel ignores them in `convTy`, WizMeta compares
+  them) — so a silent change to either side flips a case.
 * **Differential test** (group *selfhost*, "the Wiz kernel agrees with the Lean kernel (400
   random terms)", and "… declarations at symbolic levels like the Lean kernel"): the
   hand-picked `MTm.samples` (including the F1 and F2 attacks) and 400 random terms,
@@ -1417,12 +1456,12 @@ outside the kernel (`docs/Status.md` §7.0).
 
 ## 8. Testing evidence
 
-* **Negative tests**: the `elab` group (`Tests/Groups/Elab.lean`) has 43 cases and 24
+* **Negative tests**: the `elab` group (`Tests/Groups/Elab.lean`) has 51 cases and 26
   checks that must be *rejected* (`grep -c -E '^\s+\{ name :='` and
-  `grep -c -E '\bfails(Lib|LibW|Libs|LibsWithin)? '`; counted 2026-11-22), plus the
+  `grep -c -E '\bfails(Lib|LibW|Libs|LibsWithin)? '`; counted 2026-11-23), plus the
   quantity and structural cases in `Tests/Check.lean` (e.g. "linear variable used twice
   is rejected", "linear pair projected twice is rejected", "Type : Type is rejected").
-  Across `Tests/Groups/*.lean` the same two patterns count 1,986 case entries and 457
+  Across `Tests/Groups/*.lean` the same two patterns count 2,118 case entries and 487
   rejection checks (`grep -rhc … | awk '{s+=$1} END {print s}'`).
 * **Attacks that are regression tests**: F1 and F2 above (both kernels), and every
   fixed item of §3 since (F3–F14, T1), with the probe files of

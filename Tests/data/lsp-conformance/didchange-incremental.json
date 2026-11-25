@@ -1,0 +1,36 @@
+{
+  "name": "didchange-incremental",
+  "servers": ["host"],
+  "uri": "file:///conf/didchange-incremental.wiz",
+  "text": "import Prelude\ndef one : String := \"x\"\ndef two : String := String.append \"😀\" nope\n",
+  "note": "Two incremental edits after didOpen. Each range is in UTF-16 units and the first one lies after an astral character on its line, so a code-point session addresses the wrong span. The driver applies the range edit to its own copy and sends the whole text (full sync), and each change waits for its own publishDiagnostics: a server that leaves the old buffer (or keeps the old error) fails.",
+  "diagnostics": [
+    {
+      "match": "subset",
+      "path": "diagnostics",
+      "value": [{ "severity": 1, "code": "unknown-identifier", "range": { "start": { "line": 2, "character": 39 } } }]
+    }
+  ],
+  "changes": [
+    {
+      "range": { "start": { "line": 2, "character": 39 }, "end": { "line": 2, "character": 43 } },
+      "text": "one",
+      "note": "`nope` (39-43, after the astral) becomes `one`",
+      "diagnostics": [{ "match": "exact", "path": "diagnostics", "value": [] }]
+    },
+    {
+      "range": { "start": { "line": 3, "character": 0 }, "end": { "line": 3, "character": 0 } },
+      "text": "def three : String := one\n",
+      "note": "a whole line inserted at the end",
+      "diagnostics": [{ "match": "exact", "path": "diagnostics", "value": [] }]
+    }
+  ],
+  "requests": [
+    { "method": "textDocument/hover", "params": { "position": { "line": 2, "character": 40 } } },
+    { "method": "textDocument/hover", "params": { "position": { "line": 3, "character": 23 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.contents", "value": { "kind": "markdown", "value": "```wiz\none : String\n```" } },
+    { "match": "exact", "path": "result.contents", "value": { "kind": "markdown", "value": "```wiz\none : String\n```" } }
+  ]
+}

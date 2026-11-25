@@ -135,11 +135,11 @@ encoding: a server that answers with a `positionEncoding` must answer `"utf-16"`
 offsets are never used, and line endings are whatever the editor holds (`\n` in the
 playground; a `\r` before a `\n` counts as one character on the line, as in LSP).
 
-The Lean server counts Unicode scalar values, which agrees with UTF-16 for every
-character in the BMP (it is off only for astral characters). A self-hosted server should
-count UTF-16 units; if it counts scalar values instead, it must make the same BMP-only
-assumption. The playground's positions come from `textarea.selectionStart`, i.e. a
-UTF-16 index.
+The Lean server (`wiz lsp`) counts UTF-16 code units and advertises
+`positionEncoding: "utf-16"`, so its positions agree with the playground's UTF-16
+indices (`textarea.selectionStart`) for astral characters too. A self-hosted server
+should count UTF-16 units and say so as well; one that counts scalar values is off by
+one per astral character before the caret.
 
 `lib/Web/EditorModel.wiz` has both conversions (`positionFromOffset`,
 `codePointPositionFromOffset`, `utf16OffsetFromCodePoints`), and the Node tests
@@ -486,7 +486,12 @@ clicking one selects its range. An empty array clears the list and the underline
 diagnostic's `range` may have no `end`, an empty `end`, or span lines: the editor
 underlines the token at its start for the first two and one span per line for the last.
 A publish whose `version` is older than the one already stored for the URI is ignored;
-a server that sends no version keeps last-arrival order. `code`/`data` (the code-action
+a server that sends no version keeps last-arrival order. `wiz lsp` sends the document's
+`version`, and it also serves the pull model: `diagnosticProvider` (with
+`interFileDependencies`, so a change to an `include_str` sibling or an imported module
+matters) and `textDocument/diagnostic`, which answers `{kind: "full", resultId, items}`
+or `{kind: "unchanged", resultId}` when the client's `previousResultId` is still current.
+The playground itself uses push. `code`/`data` (the code-action
 machinery) are not used by the playground.
 
 ## Errors and timeouts
@@ -560,6 +565,24 @@ server does.
   (`CompletionItem` with `textEdit`), hover (Markdown) and definition (`Location`) from
   the index, the goal and expected-type answers (including an astral character), and the
   page's wiring.
+* `node web/lsp_conformance_test.mjs [--only NAME[,NAME]] [--server host|selfhost] [--dump]`
+  — the LSP conformance corpus (`Tests/data/lsp-conformance/*.json`, one file per case;
+  the format and the cases are described in the driver's header). It drives the real
+  servers, one process per case per server: `WIZ_HOST_BIN lsp` (the Lean-hosted server)
+  and `WIZ_SELFHOST_COMPILER lsp` (the self-hosted one), each with a byte-correct
+  `Content-Length` session (`initialize` with `general.positionEncodings: ["utf-16"]`,
+  `didOpen`, the case's `changes` and requests, `shutdown`, `exit`, then exit code 0).
+  A case can pin the `initialize`/`shutdown` JSON itself and match `exact`, `subset`,
+  `absent`, `error`, `type` or `applyEquals` (apply the returned `TextEdit[]` to the
+  text); `changes` are range edits applied client-side and sent as whole-document
+  `didChange`s (both servers advertise full sync), each waited for its own
+  `publishDiagnostics`. `knownGap` makes a failure XFAIL and a pass a failing XPASS, so
+  a fixed gap has to be removed. `--dump` prints the raw JSON, which is how the expected
+  values are regenerated. A meta-test per server requires every advertised `*Provider`
+  and `wizInfoview` method to answer without an error and every unadvertised probe to
+  answer `-32601`. Against an existing build it is light; a server whose variable is
+  unset is skipped with a printed reason. It is not part of `web/test.sh` (no binary is
+  built there for it).
 * `node web/editor_test.mjs` — the editor's pure rules: UTF-16 versus code-point
   positions (including an astral character), squiggle ranges (no end, empty, multi-line,
   overlapping, past the text), and completion lists (shapes, filtering, ordering, the

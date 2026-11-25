@@ -1,8 +1,8 @@
 # A self-hosted CI runner
 
 CI runs on GitHub's `ubuntu-latest` runners. The heavy test shards (those with
-`"heavy": true` in `.github/test-shards.json`: `selfhost-1` … `selfhost-6` and
-`grail-selfhost`) can run on a machine of our own instead. Nothing changes until the
+`"heavy": true` in `.github/test-shards.json`: `selfhost-1` … `selfhost-4`, `hdl` and
+`semantics`) can run on a machine of our own instead. Nothing changes until the
 repository variable `WIZ_RUNNER_HEAVY` is set; unsetting it switches back.
 
 This repository is **public**: anyone can open a pull request, and a workflow run on a
@@ -49,9 +49,9 @@ self-hosted runner executes that pull request's code on the machine. So:
 | `tests` | tests (the shard matrix) | `shards` is not empty |
 | `wasm modules` | web (the Wasm page modules) | `web` |
 | `web` | web (browser-free tests) | `web` |
-| `docs` | docs (the published site) | a push |
-| `deploy docs to Pages` | docs | a push |
-| `packages` | packages (`scry/`, `hdl/`, `tower/`) | `subset_packages` |
+| `docs`, `docs check` | docs (the published site, and its check) | `code` && `web`, on every event but the schedule |
+| `deploy docs to Pages` | docs | a push to `master`, after `docs` and `docs check` pass |
+| `packages` | packages (`scry/`, `hdl/`, `tower/`) | `subset_packages`; a matrix of `scry`, `hdl`, `tower` and `smoke` |
 | `runtime` | runtime (`runtime/`, `c/`) | `subset_runtime` |
 | `CI result` | all | every run but the weekly schedule |
 | `bootstrap fixpoint` | none (schedule/dispatch) | the schedule or the `fixpoint` input |
@@ -63,6 +63,33 @@ an input the table does not classify still runs every job. The `lean` job runs f
 a non-empty `shards` list cannot be expanded without it. The build is warm on a
 `wizlib`/`packages` change (the sources and the seed are unchanged, so Cachix
 substitutes or Lake recompiles nothing).
+
+## The shard budget
+
+A test job is killed at **120 minutes** (`timeout-minutes` in the `tests` job). A killed
+job has a partial log, and `scripts/ci.py balance` cannot see it (it reads only
+successful jobs' walls), so a shard that grows into the timeout hides the regression that
+made it slow. The plan therefore has a hard headroom guard: **no job's predicted wall may
+exceed 75 minutes** (`SHARD_BUDGET_S` in `scripts/ci.py`; the 45 minutes left are the
+job's setup before the `tests` step and the model's error). `JOB_TIMEOUT_S` in
+`scripts/ci.py` mirrors the workflow's timeout and must be changed with it.
+
+* `scripts/ci.py plan` (the `lean` job) prints the longest predicted job with its
+  margins to the budget and to the 120-minute timeout, and exits 1 when a job is over.
+* `scripts/ci.py check-shards` applies the same budget check, so the `lean` job fails
+  before the matrix starts rather than sending a shard that would time out.
+* The prediction is a per-part simulation from `.github/test-timings.json`
+  (`scripts/ci.py simulated_wall`): each group after the previous one, with a barrier
+  between groups; a group that opted in to `--jobs N` runs its cases through the
+  driver's in-order pool (case *i* starts when case *i-N* is collected, so slot *i % N*),
+  and the other groups are summed. Every shared program the part builds is added once,
+  unscaled. It is deliberately conservative: the case times are medians from older runs,
+  and a cold cache or a code change can move a case. `scripts/ci.py plan --json` prints
+  the model's calibration against the 8-part and 12-part library runs (within 3.5 %).
+
+When a shard is over the budget, split it (`"split": N`) or refresh the baseline from
+green runs; do not raise the job timeout. A timeout is a cancelled job whose partial log
+cannot tell which case hung, and `balance` then leaves it out of the reported tail.
 
 ## What the runner needs
 
@@ -229,8 +256,9 @@ big one, with smaller `--cpus`/`--memory`) to take several heavy shards at once.
 ## Caches
 
 Each job starts with an empty container. The Nix store comes from the image and from
-Cachix: the `lean` job's `nix build .#wiz .#tests` store paths are published and the
-shards substitute them. The Wiz build caches (`~/.cache/wiz`, `.grail`,
+Cachix: the `lean` job's `nix build .#wiz .#tests` store paths, and its
+`.#selfhost-compiler`/`.#selfhost-checker`, are published and the shards substitute
+them. The Wiz build caches (`~/.cache/wiz`, `.grail`,
 `/tmp/wiz-selfhost-*`) and the per-subset workspace caches below still come from the
 GitHub Actions cache, as on GitHub's runners, but the **trusted** elaboration layer is
 not one of them: every shard also reads the packaged `$wiz/share/wiz/cache` (a Nix
@@ -262,7 +290,6 @@ restores its own subset's previous entry and recompiles what changed.
 | `lean` | `.subset-cache/lean` | `subset-v1-lean-<os>-<arch>-<toolchain12>-<lean12>` |
 | `lean` | `.lake/docs-examples` | `subset-v1-lean-<os>-<arch>-<toolchain12>-docs-examples-<lean12>` |
 | `docs examples` | `.lake/docs-examples` | `subset-v1-docs-<os>-<arch>-<toolchain12>-examples-<docs12>` |
-| `docs` | `.wiz-doc-cache/ro` | `subset-v1-docs-<os>-<arch>-<toolchain12>-site-<docs12>` |
 | `packages` | `scry/.grail` | `subset-v1-packages-<os>-<arch>-<toolchain12>-<compiler-key>-<packages12>` |
 | `tests` | `~/.cache/wiz`, `.grail`, `/tmp/wiz-selfhost-*` | `subset-v1-tests-wizlib-<os>-<arch>-<toolchain12>-[pr-<N>-]<shard>-<compiler-key>-<selfhost/lib hash>-<tests12>-<wizlib12>-<wiz tree hash>` |
 | `trust ledger` | `.lake/trust-cache` | `subset-v1-wizlib-<os>-<arch>-<toolchain12>-[pr-<N>-]<driver sha>-<wizlib12>` |
@@ -293,9 +320,9 @@ untrusted.**
   (`cachix use badlydrawnwizards`).
 * A pull request publishes only to the PR cache `wiz-pl` (repository variable
   `CACHIX_PR_NAME`), with the token in the secret `CACHIX_PR_AUTH_TOKEN`. A PR's test
-  shards, trust-ledger, web, wasm, lean and packages jobs add that cache as an extra
-  substituter for that job only, so its key is trusted in that job and nowhere else;
-  master and the docs job never add it as a substituter.
+  shards, trust-ledger, web, wasm, lean, packages and docs jobs add that cache as an
+  extra substituter for that job only, so its key is trusted in that job and nowhere
+  else; master never adds it as a substituter.
 * If `CACHIX_PR_AUTH_TOKEN` is unset, or the PR is from a fork, the PR pushes nothing:
   the step prints "the store paths are not published" and continues, and the shards
   build the paths. Nothing falls back to `CACHIX_AUTH_TOKEN`.

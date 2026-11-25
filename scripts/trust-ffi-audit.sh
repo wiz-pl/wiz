@@ -132,6 +132,18 @@ while IFS='	' read -r status loc name sym codes ar br; do
   fi
   d=$(cdef "$sym")
   [ -n "$d" ] || d="<no C definition>"
+  # `host.*` externs are capabilities the host provides, not C functions: the JavaScript
+  # backend resolves them against the page's registry, WebAssembly refuses them at compile
+  # time and the C backend has no binding (`lib/Host.wiz`). Their contract is therefore the
+  # opposite of the others' - a ledger row, and NO C definition. A native one appearing
+  # means the declaration needs a signature row like every other extern, so it fails here.
+  case "$sym" in
+    host.*)
+      if [ "$d" != "<no C definition>" ]; then
+        echo "trust-ffi-audit: $loc $name: host. capability has a C definition ($d)" >&2
+        bad=1
+      fi ;;
+  esac
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$status" "$loc" "$name" "$sym" "$d" "$codes"
 done < "$tmp/joined"
 
@@ -190,7 +202,7 @@ awk -F '\t' '
     }
     return out == "" ? "void" : out
   }
-  $5 != "?" {
+  $5 != "?" && $4 !~ /^host\./ {
     split($5, c, "->")
     ps = params(c[1])
     if (ps == "?") { print "/* bad parameter code: " $4 " */"; bad = 1; next }

@@ -79,7 +79,7 @@ def Scry.traceRun (args : List String) : EIO Unit :=
   match args with
   | .cons path (.cons needle rest) => do
     target ← Scry.Cs.discover path;
-    results ← Scry.Cs.analyseAll target.walk.files;
+    results ← Scry.Cs.analyseAll .false target.walk.files;
     let funcs := List.concat (List.map (fun r => r.funcs) results);
     let origins := Scry.Cs.originMapOf results;
     let packArg : Option String := match rest with

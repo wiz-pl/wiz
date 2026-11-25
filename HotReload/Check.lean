@@ -289,12 +289,17 @@ slot that is not staged is already satisfied by the base generation. A cycle is 
 error, not a stack overflow. -/
 def topoGo (fuel : Nat) (pending : List Stage) (done : List SlotId)
     (acc : List Stage) : Except Err (List Stage) :=
-  match fuel with
-  | 0 => .error .cycle
-  | n + 1 =>
-    match pending with
-    | [] => .ok acc.reverse
-    | _ =>
+  -- `pending` is matched BEFORE `fuel`: the fuel is one unit per stage, so a transaction of
+  -- n stages reaches `pending = []` with `fuel = 0`, and matching fuel first turned every
+  -- successful commit into `.cycle` (all 10 acceptance failures of the first run traced to
+  -- this one arm). Empty pending is done regardless of fuel; fuel 0 with stages left is a
+  -- cycle.
+  match pending with
+  | [] => .ok acc.reverse
+  | _ =>
+    match fuel with
+    | 0 => .error .cycle
+    | n + 1 =>
       let ready? := pending.find? (fun s =>
         s.dependsOn.all (fun d =>
           done.contains d || !(pending.any (fun p => p.slot == d))))

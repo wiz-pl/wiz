@@ -37,7 +37,7 @@ def quoted(text: str) -> list[str]:
 
 # `Wiz.Doc.run` copies these from the assets' `framework/` subdirectory, but the
 # `for f in [ … ]` loop names the files only; normalize them to their real paths.
-FRAMEWORK = {"mount.js", "driver.js", "runtime.js"}
+FRAMEWORK = {"mount.js", "driver.js", "runtime.js", "adopt.js"}
 
 
 def build_assets(text: str) -> list[str]:

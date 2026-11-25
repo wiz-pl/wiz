@@ -73,7 +73,16 @@
       # A flake output cannot be a function in `packages`, but `lib` may hold one.
       withLakeCache = pkgs: lakeCache: packagesWith pkgs lakeCache;
 
-      packagesWith = pkgs: lakeCache:
+      packagesWith = pkgs: lakeCache: packagesWithNse pkgs lakeCache { };
+
+      # `wizOverride` is the seeded compiler for the web packages (`lib.webWith`, CI's
+      # `builtins.storePath`). Without it they take the pure `wiz`, which instantiates
+      # `wiz-unwrapped` — the cold compile the `web` job fell into on every pull request.
+      # `wizOverride` is the compiler the web packages run. It is used **as an identifier**
+      # in `nativeBuildInputs = [ wc … ]` - never through a conditional or a function
+      # application, which Nix cannot coerce to a derivation and reports as "expected a set
+      # but found a string with context: /nix/store/…". `null` means "the tree's own `wiz`".
+      packagesWithNse = pkgs: lakeCache: { wizOverride ? null }:
         let
           lib = pkgs.lib;
           fs = lib.fileset;
@@ -211,6 +220,7 @@
             "scroll.css" "scroll.js" "scroll-search.js" "highlight.css"
             "lsp-client.js" "doc-live.js" "doc-live.css"
             "framework/mount.js" "framework/driver.js" "framework/runtime.js"
+            "framework/adopt.js"
           ];
           docSiteSource = fs.toSource {
             root = ./web;
@@ -328,6 +338,17 @@ EOF
               platforms = systems;
             };
           };
+          # The compiler the web packages run (`WIZ=…` and their `nativeBuildInputs`).
+          # `lib.webWith <store path>` sets it to the lean job's seeded build, so a pull
+          # request substitutes it instead of cold-building `wiz-unwrapped` — the same
+          # mechanism as `towerFor`. `null` means the tree's own `wiz`; a seeded
+          # `builtins.storePath` is a *string with context*, which `nativeBuildInputs`
+          # accepts exactly as `towerFor`'s `wizPkg` does. Three earlier attempts in this
+          # expression (a flag, an attribute selection, a function application) were chasing
+          # a bug that was never here: the failure was `.wiz-source-ui` binding inside the
+          # `webWith` *argument* at the call site in `ci.yml`, and it fails identically with
+          # a derivation argument.
+          wc = if wizOverride == null then wiz else wizOverride;
           # The test driver (`tests --list`, `tests --run GROUP INDEX`), from the same
           # build as wiz and grail (so `nix build .#wiz` builds it too). The driver looks
           # for `wiz`/`grail` beside itself (`IO.appPath.parent` in Tests/Grail.lean), so
@@ -402,6 +423,12 @@ EOF
               fileset = fs.unions [
                 # the program it compiles (`link_c "js.c"` is resolved beside Web.wiz)
                 ./web/build.sh ./web/Web.wiz ./web/js.c
+                # `web/infoview-ui.wiz` also links `step.c` (the browser ABI's i32 word
+                # entry, `wiz_step`); it was in the checkout but not in this fileset, so
+                # `.#wiz-web` failed with "link_c: no file step.c" on train13 (wasm
+                # modules, run 45385863852) - the same class as siteAssetFiles missing
+                # web/landing_highlight.py.
+                ./web/step.c
                 # the page files the script copies into OUT
                 ./web/infoview.html ./web/infoview.js ./web/playground-lsp.js
                 ./web/lsp-client.js ./web/widgets.js ./web/widgets.css
@@ -410,15 +437,15 @@ EOF
                 ./web/overlays.css
                 ./web/doc-live.js ./web/doc-live.css
                 ./web/framework/mount.js ./web/framework/driver.js ./web/framework/runtime.js
-                ./web/framework/editor-text.js
+                ./web/framework/adopt.js ./web/framework/editor-text.js
                 ./web/infoview-ui.wiz ./web/docs-ui.wiz ./web/doc-live-ui.wiz
                 ./web/build-infoview-ui.sh ./web/build-docs-ui.sh ./web/build-doc-live-ui.sh
               ];
             };
-            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            nativeBuildInputs = [ wc pkgs.emscripten ];
             buildPhase = ''
               runHook preBuild
-              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wc}/bin/wiz
               sh web/build.sh out --gmp-src ${pkgs.gmp.src}
               runHook postBuild
             '';
@@ -445,30 +472,38 @@ EOF
                 ./selfhost/Lex.wiz ./selfhost/Parse.wiz ./selfhost/Kernel.wiz
                 ./selfhost/CParse.wiz ./selfhost/CGlue.wiz ./selfhost/Frontend.wiz
                 ./selfhost/Tables.wiz
-                # the page files the script copies into OUT
+                # the page files the script copies into OUT, and the generator that
+                # fills the static-complete page (the same Loom renderer as the runtime)
                 ./web/playground.html ./web/playground.js
+                ./web/playground_static_gen.wiz ./web/playground_static.mjs
                 ./web/playground.css ./web/overlays.css ./web/widgets.css
                 ./web/lsp-client.js ./web/widgets.js
                 ./web/playground-lsp.js ./web/selfhost-lsp-shim.js
                 ./web/playground-engine.js
                 # the entry point's mount contract (mount imports driver, which imports
-                # runtime.js): build-playground.sh copies all three beside the page
+                # runtime.js and adopt.js): build-playground.sh copies all of them
                 ./web/framework/mount.js ./web/framework/driver.js
-                ./web/framework/runtime.js ./web/framework/editor-text.js
+                ./web/framework/runtime.js ./web/framework/adopt.js
+                ./web/framework/editor-text.js
                 # the page's runtime (web/build-playground-ui.sh, built below): its Wiz
                 # app, the FFI it links and the library modules it imports. The rest of
                 # lib/ resolves from the packaged toolchain's own library.
                 ./web/build-playground-ui.sh ./web/playground-ui.wiz ./web/js.c
+                # the same program also links `step.c` (the browser ABI's i32 word
+                # entry); leaving it out fails the derivation with
+                # "link_c: no file step.c" - the class of the siteAssetFiles bug.
+                ./web/step.c
                 ./lib/Web/Loom.wiz ./lib/Web/Editor.wiz ./lib/Web/EditorModel.wiz
                 ./lib/Web/Playground.wiz ./lib/Web/Examples.wiz
                 ./lib/Web/Goals.wiz ./lib/Web/Hover.wiz
                 ./web/squiggles.js ./web/completions.js ./web/hover.js
               ];
             };
-            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            # node: web/playground_static.mjs fills the static-complete page.
+            nativeBuildInputs = [ wc pkgs.emscripten pkgs.nodejs ];
             buildPhase = ''
               runHook preBuild
-              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wc}/bin/wiz
               # -O1: emcc runs binaryen's `wasm-opt` at -O2 and up, and on this module that
               # stage peaks at 16.9 GiB (measured 2026-11-18) — it is SIGKILLed on a 16 GB
               # CI runner. -O1 (LLVM's, without binaryen) is 2.3 GiB and ~3 min faster, for
@@ -502,15 +537,17 @@ EOF
               root = ./.;
               fileset = fs.unions [
                 ./web/build-playground-ui.sh ./web/playground-ui.wiz ./web/js.c
+                # this program links `step.c` too (the browser ABI's i32 word entry).
+                ./web/step.c
                 ./web/framework/driver.js ./web/framework/runtime.js
-                ./web/framework/mount.js
+                ./web/framework/adopt.js ./web/framework/mount.js
                 ./lib
               ];
             };
-            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            nativeBuildInputs = [ wc pkgs.emscripten ];
             buildPhase = ''
               runHook preBuild
-              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wc}/bin/wiz
               sh web/build-playground-ui.sh out --gmp-src ${pkgs.gmp.src}
               runHook postBuild
             '';
@@ -521,6 +558,48 @@ EOF
             '';
             meta = {
               description = "The playground's Loom UI module (wiz-playground-ui.mjs, web/build-playground-ui.sh)";
+              platforms = systems;
+            };
+          };
+          # The landing page's quantity island (`web/landing_ui.wiz`, Web.Landing as a
+          # Loom LiveApp): a tiny module, built here so neither the `web` nor the
+          # `docs` job needs Emscripten. `lib/` is its `-I` root, so a library change
+          # rebuilds it; the page's static first paint (web/build-landing.sh) is a
+          # separate, compiler-only step.
+          wiz-landing-ui = pkgs.stdenv.mkDerivation {
+            pname = "wiz-landing-ui";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [
+                ./web/build-landing-ui.sh ./web/landing_ui.wiz ./web/js.c
+                # the same program also links `step.c` (the browser ABI's i32 word
+                # entry); leaving it out fails the derivation with
+                # "link_c: no file step.c" - the class of the siteAssetFiles bug.
+                ./web/step.c
+                ./web/framework/driver.js ./web/framework/runtime.js
+                ./web/framework/adopt.js ./web/framework/mount.js
+                ./lib
+              ];
+            };
+            nativeBuildInputs = [ wc pkgs.emscripten ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wc}/bin/wiz
+              sh web/build-landing-ui.sh out --gmp-src ${pkgs.gmp.src}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              # build-landing-ui.sh writes OUT/landing/ (the page's asset directory);
+              # the store path is that directory, so the page's --from/--ui copy finds
+              # wiz-landing-ui.mjs at its root.
+              mkdir -p $out
+              cp -r out/landing/. $out/
+              runHook postInstall
+            '';
+            meta = {
+              description = "The landing page's quantity island (wiz-landing-ui.mjs, web/build-landing-ui.sh)";
               platforms = systems;
             };
           };
@@ -537,13 +616,15 @@ EOF
               root = ./.;
               fileset = fs.unions [
                 ./web/build-source-ui.sh ./web/source-ui.wiz ./web/js.c
+                # this program links `step.c` too (the browser ABI's i32 word entry).
+                ./web/step.c
                 ./lib
               ];
             };
-            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            nativeBuildInputs = [ wc pkgs.emscripten ];
             buildPhase = ''
               runHook preBuild
-              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wc}/bin/wiz
               sh web/build-source-ui.sh out --gmp-src ${pkgs.gmp.src}
               runHook postBuild
             '';
@@ -647,7 +728,7 @@ EOF
               root = ./.;
               fileset = fs.unions [ ./scripts/wasm-fixtures ./web/wasm-host.mjs ];
             };
-            nativeBuildInputs = [ wiz pkgs.nodejs ];
+            nativeBuildInputs = [ wc pkgs.nodejs ];
             buildPhase = ''
               runHook preBuild
               export HOME=$TMPDIR
@@ -724,7 +805,15 @@ EOF
           siteAssetFiles = [
             "web/build-site.sh" "web/build-bench.py" "web/build-docs.py"
             "web/check-site.sh" "web/check-links.py" "web/bench/index.html"
-            "web/landing/index.html" "web/landing/landing.css"
+            # the landing page is *generated* in the derivation now (build-site.sh
+            # refuses a WEB without landing/index.html), so the generator, its template
+            # and the snippets have to be inputs. `landing_highlight.py` is the
+            # generator's `from landing_highlight import highlight` (it highlights the
+            # snippet bytes at build time): without it build-landing.py dies with
+            # ModuleNotFoundError in the sandbox, which is not a site bug but a missing
+            # input here.
+            "web/build-landing.sh" "web/build-landing.py" "web/landing_highlight.py"
+            "web/landing"
             "web/playground.html" "web/playground.js" "web/playground.css"
             "web/overlays.css" "web/widgets.css" "web/lsp-client.js" "web/widgets.js"
             "web/playground-lsp.js" "web/hover.js" "web/selfhost-lsp-shim.js"
@@ -742,6 +831,35 @@ EOF
               ./COPYING.RUNTIME
             ] ++ map (f: ./. + "/${f}") siteAssetFiles);
           };
+          # `wiz doc --lib` on its own: the API pages are the expensive, separately
+          # cacheable half of the site (`--jobs 4` over every module), and the site
+          # below consumes the result instead of re-running it. A `lib/` change rebuilds
+          # this and then the site; a change to the site's chrome rebuilds only the site.
+          docs-lib = pkgs.stdenv.mkDerivation {
+            pname = "wiz-docs-lib";
+            inherit (unwrapped) version;
+            src = docsSiteSource;
+            nativeBuildInputs = [ wiz pkgs.python3 pkgs.gnugrep ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR
+              mkdir -p out
+              ${wiz}/bin/wiz doc --lib --jobs 4 -o out/docs --web ${web-bundle} \
+                --source-url ${lib.escapeShellArg "${sourceUrl}/lib/"}
+              cp ${reference}/index.md out/docs/reference.md
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -R out $out
+              runHook postInstall
+            '';
+            passthru.subset = "docsSiteSource (docs/ bench/ examples/ tools/ editors/ drafts/ scry/ + README/ROADMAP/CHANGELOG/LICENSE/COPYING.RUNTIME + the site scripts in siteAssetFiles) + wiz + reference + web-bundle";
+            meta = {
+              description = "The API documentation: `wiz doc --lib` over lib/";
+              platforms = systems;
+            };
+          };
           docs-site = pkgs.stdenv.mkDerivation {
             pname = "wiz-docs-site";
             inherit (unwrapped) version;
@@ -750,12 +868,31 @@ EOF
             buildPhase = ''
               runHook preBuild
               export HOME=$TMPDIR
-              mkdir -p site
-              ${wiz}/bin/wiz doc --lib --jobs 4 -o site/docs --web ${web-bundle} \
-                --source-url ${lib.escapeShellArg "${sourceUrl}/lib/"}
-              cp ${reference}/index.md site/docs/reference.md
+              mkdir -p site site-web
+              # the API pages come from #docs-lib: `wiz doc --lib` is its own derivation
+              # now, so a site-only change does not re-render 245 modules
+              cp -R --no-preserve=mode ${docs-lib}/docs site/docs
+              # The modules the site publishes (playground page and its Wasm) come from
+              # #web-bundle; the LANDING page is generated, not templated: since the
+              # landing merge, `web/build-site.sh` refuses a WEB without
+              # `landing/index.html`, and nothing else in this derivation ran
+              # `web/build-landing.sh` - so `.#pages` could not build (found by the
+              # docs-truth lane; masked because the docs job never ran while `lean` was
+              # red). The island's first paint needs `wiz`; the module itself is
+              # #wiz-landing-ui.
+              #
+              # WEB is an explicit output directory (`#web-bundle` is "the site's
+              # web/out"), not the checkout's `web/`: `build-landing.sh` writes the page
+              # to `OUT/landing` and copies the template's `landing.css`, `carousel.js`
+              # and `app.js` into it, so an OUT that *is* the template directory copies
+              # `landing.css` onto itself and `cp` refuses
+              # ("... landing.css and ... landing.css are the same file").
+              cp -R --no-preserve=mode ${web-bundle}/. site-web/
+              WIZ=${wc}/bin/wiz sh web/build-landing.sh site-web
+              mkdir -p site-web/landing
+              cp -R --no-preserve=mode ${wiz-landing-ui}/. site-web/landing/
               WIZ_SOURCE_URL=${lib.escapeShellArg sourceUrl} \
-                sh web/build-site.sh site ${web-bundle}
+                sh web/build-site.sh site site-web
               runHook postBuild
             '';
             installPhase = ''
@@ -790,8 +927,13 @@ EOF
             root = ./.;
             fileset = fs.unions [
               ./scry
+              # `scry web --assets web` copies five host files, not three: the live host
+              # (`source-live.js`, and `lsp-client.js` which it imports) is what answers
+              # hover and definition with `?lsp=`. `scry web` skips a file it cannot
+              # read, but `web/source-bundle.sh`'s `need` loop then refuses the bundle
+              # ("scry web wrote no source-live.js"), so both are build inputs.
               ./web/source-bundle.sh ./web/source-app.js ./web/source.css
-              ./web/source-static.js
+              ./web/source-static.js ./web/source-live.js ./web/lsp-client.js
               ./web/framework/mount.js ./web/framework/driver.js
               ./web/framework/runtime.js ./web/framework/adopt.js
             ];
@@ -806,17 +948,10 @@ EOF
               export HOME=$TMPDIR
               mkdir -p site
               cp -R --no-preserve=mode ${docs-site}/. site/
-              # scry's link_c points at native/tree-sitter-c-sharp, an uncommitted
-              # out-link in a checkout; in the sandbox it is the fetched grammar.
-              mkdir -p scrybuild
-              cp -R --no-preserve=mode scry scrybuild/
-              cp -R --no-preserve=mode web scrybuild/
-              chmod -R u+w scrybuild
-              rm -rf scrybuild/scry/native/tree-sitter-c-sharp
-              ln -s ${tree-sitter-c-sharp} scrybuild/scry/native/tree-sitter-c-sharp
-              ( cd scrybuild/scry && ${wiz}/bin/grail build scry )
+              # scry is a derivation now (`.#scry`): the sandbox no longer copies the
+              # package, links the grammar and runs `grail build scry` here
               mkdir -p bundle
-              sh web/source-bundle.sh scrybuild/scry/.grail/bin/scry bundle \
+              sh web/source-bundle.sh ${scry}/bin/scry bundle \
                 --ui ${wiz-source-ui} --target scry/tests/fixtures/report
               mkdir -p site/source
               cp -R --no-preserve=mode bundle/. site/source/
@@ -1277,6 +1412,98 @@ EOF
               platforms = systems;
             };
           };
+          # `scry`, the analysis CLI, as a derivation: the same `grail build scry` that
+          # `scry.yml` and the `packages (scry)` leg run in a job step, but with a store
+          # path as the result; `.#pages` takes it as an input. The one thing the dev
+          # shell does that this must repeat is write `grail.local.wiz` (the GMP flags),
+          # because that file is generated and not committed.
+          # The two self-hosted programs, as derivations. The tests build them in a
+          # `/tmp` cache keyed on their source plus the *mtime of the test binary*, so
+          # every fresh runner rebuilds them and concurrent cases can build twice (perf
+          # review H2: ~9,257 s of a suite run, 9.8%). A derivation is the same program
+          # with a content key, substitutable, and the test flags
+          # (`--selfhost-compiler/--selfhost-checker`) take the store path.
+          #
+          # The composition lives in `Wiz/Selfhost.lean` (which files, in which order),
+          # so the driver prints it: `tests --selfhost-source compiler|checker`.
+          # `selfhostProgramWith { wizPkg, testsPkg }` is the same derivation built with
+          # those packages (the shape `towerFor` uses): CI passes the `lean` job's
+          # seeded store paths on a pull request, where the pure `wiz`/`tests` do not
+          # exist. `selfhostProgram` is the pure default.
+          selfhostProgramWith = { wizPkg, testsPkg }: name: from: pkgs.stdenv.mkDerivation {
+            pname = "wiz-selfhost-${name}";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [ ./selfhost ./lib ];
+            };
+            nativeBuildInputs = [ wizPkg testsPkg ];
+            buildInputs = [ pkgs.gmp pkgs.boehmgc ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR
+              ${testsPkg}/bin/tests --selfhost-source ${name} > ${from}.wiz
+              # No --cflags/--ldflags/--gmp here: the wrapped `wiz` already carries the
+              # toolchain's full flags (GMP, and Boehm's -lgc through --gc-ldflags), and
+              # these options REPLACE the wrapper's rather than adding to them - spelling
+              # them here was a second, drifting copy that worked only by flag order.
+              ${wizPkg}/bin/wiz --cc cc build ${from}.wiz -o ${name}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 ${name} $out/bin/${name}
+              # The identity the harness checks for an override (`<exe>.selfhost-id` must
+              # equal `tests --selfhost-identity <name>` for this tree): a property of the
+              # artifact, so a store path from CI is accepted and a stale /tmp binary is
+              # refused. Lands with the harness change it feeds.
+              ${testsPkg}/bin/tests --selfhost-identity ${name} > $out/bin/${name}.selfhost-id
+              chmod 444 $out/bin/${name}.selfhost-id
+              runHook postInstall
+            '';
+            passthru.subset = "selfhost/ + lib/ (the composed program and its prelude)";
+            meta = {
+              description = "The self-hosted ${name} of the Wiz frontend (Wiz.Selfhost, as a store path)";
+              platforms = systems;
+            };
+          };
+          selfhostProgram = name: from:
+            selfhostProgramWith { wizPkg = wiz; testsPkg = tests; } name from;
+          selfhost-compiler = selfhostProgram "compiler" "selfhost-compiler";
+          selfhost-checker = selfhostProgram "checker" "selfhost-checker";
+          scry = pkgs.stdenv.mkDerivation {
+            pname = "scry";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [ ./scry ./lib ];
+            };
+            nativeBuildInputs = [ wiz ];
+            buildInputs = [ pkgs.gmp ];
+            buildPhase = ''
+              runHook preBuild
+              cat > grail.local.wiz <<EOF
+import Grail
+def settings : Settings := Settings.empty
+  |> Settings.set "cflags" "-I${lib.getDev pkgs.gmp}/include"
+  |> Settings.set "ldflags" "-L${pkgs.gmp}/lib -Wl,-rpath,${pkgs.gmp}/lib"
+EOF
+              # the C/C# grammar the vendored shim links; the job did this with
+              # `nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp`
+              ln -s ${tree-sitter-c-sharp} scry/native/tree-sitter-c-sharp
+              ( cd scry && HOME=$TMPDIR ${wiz}/bin/grail build scry )
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 scry/.grail/bin/scry $out/bin/scry
+              runHook postInstall
+            '';
+            meta = {
+              description = "scry, the C/C# analysis CLI (grail build scry, as a store path)";
+              platforms = systems;
+            };
+          };
           # The self-hosted toolchain chain (docs/bootstrap-chain.md): a prototype, not built
           # by CI and not pinned by any commit until the chain's root is declared.
           # `wizc` is the fixpoint compiler built from the Lean host's seed, `wizc-release`
@@ -1289,13 +1516,18 @@ EOF
             inherit (unwrapped) version;
           };
         in {
-          inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native
-                   wiz-web wiz-playground wiz-playground-ui wiz-source-ui release-tarball
-                   wasm-fixtures web-bundle docs-site pages release-bin
+          inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native scry
+                   wiz-web wiz-playground wiz-playground-ui wiz-landing-ui wiz-source-ui release-tarball
+                   wasm-fixtures web-bundle docs-lib docs-site pages release-bin
+                   selfhost-compiler selfhost-checker
                    release-unwrapped release-tower;
           # a function, not a package: `tower` is `towerFor wiz`, and `lib.towerWith`
           # is CI's seeded build. `packages` removes it (see below).
           inherit towerFor;
+          # Likewise a function: `lib.selfhostWith { wiz, tests }` is the seeded build
+          # of the two self-hosted programs, and it needs the builder itself to be an
+          # attribute of this set (a `let` binding is not reachable from `lib`).
+          inherit selfhostProgramWith;
           # The trusted Lake seed as a package: `withLakeCache empty-lake`'s `lake`
           # output (the compiled `.lake` directory without the linked binaries). A master
           # push builds this and publishes the store path to the trusted Cachix; a pull
@@ -1324,10 +1556,29 @@ EOF
       lib = forAll (pkgs: {
         withLakeCache = lakeCache: packagesWith pkgs lakeCache;
         empty-lake = emptyLake pkgs;
+        # `lib.selfhostWith { wiz, tests }` is `.#selfhost-compiler`/`.#selfhost-checker`
+        # built with those packages. CI passes the lean job's seeded store paths through
+        # `builtins.storePath`, so a pull request does not cold-build the pure compiler.
+        selfhostWith = { wiz, tests }: {
+          compiler = (packagesWith pkgs null).selfhostProgramWith
+            { wizPkg = wiz; testsPkg = tests; } "compiler" "selfhost-compiler";
+          checker = (packagesWith pkgs null).selfhostProgramWith
+            { wizPkg = wiz; testsPkg = tests; } "checker" "selfhost-checker";
+        };
         # `lib.towerWith wizPkg` is `.#tower` built with that `wiz` package. CI passes
         # the lean job's store path through `builtins.storePath`, so the seeded compiler
         # is a build input and `wiz-unwrapped` is never instantiated.
         towerWith = wizPkg: (packagesWith pkgs null).towerFor wizPkg;
+        # `lib.webWith wizPkg` is the same web packages (`wiz-web`, `wiz-playground`,
+        # `wiz-playground-ui`, `wiz-source-ui`, `wasm-fixtures`, `site`) built with that
+        # `wiz`. CI passes the lean job's store path, so the `web` job substitutes the
+        # compiler instead of rebuilding `wiz-unwrapped` for every web derivation.
+        webWith = wizPkg:
+          let
+            w = packagesWithNse pkgs null { wizOverride = wizPkg; };
+          in {
+            inherit (w) wiz-web wiz-playground wiz-playground-ui wiz-source-ui;
+          };
       });
 
       apps = forAll (pkgs:

@@ -1,0 +1,9 @@
+web bundle: exit 0: ok
+web bundle: summary: wrote source bundle: build/web-bundle-golden (3 file(s), 2 finding(s), 6 fact(s); no timestamp, stable ids): ok
+web bundle: manifest names the schema: ok
+web bundle: the export is static: ok
+web bundle: the manifest counts three files: ok
+web bundle: the manifest counts the fixtures' two findings: ok
+web bundle: the walk is tests/fixtures/report/safe.c, tests/fixtures/report/taint.c, tests/fixtures/report/xss.c: ok
+web bundle: every path is relative to the target: ok
+web bundle: safe.c is the first file of the walk: ok

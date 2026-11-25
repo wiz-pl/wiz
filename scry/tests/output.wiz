@@ -67,9 +67,9 @@ def main : IO Unit := EIO.toIO (do
   let pack := Scry.RulePack.mk .nil;
   let f := findingAt 7 3;
   let m := originMap 7 3 "a.c";
-  let e := Scry.emitFindingOf "a.c" m pack f .true .false;
+  let e := Scry.emitFindingOf "c" "a.c" m pack f .true .false;
 
-  check "id is the one semanticId" (String.eq e.id (Scry.semanticId f "a.c"));
+  check "id is the one semanticId" (String.eq e.id (Scry.semanticId "c" f "a.c"));
   check "id has the f_ prefix" (String.startsWith e.id "f_");
   check "json row carries the same id" (String.eq (jStr e.json ["id"]) e.id);
   check "json row carries the namespaced rule id"
@@ -85,13 +85,13 @@ def main : IO Unit := EIO.toIO (do
   let f99 := findingAt 99 41;
   let m99 := originMap 99 41 "a.c";
   check "id ignores the sink point and line"
-    (String.eq (Scry.emitFindingId m f) (Scry.emitFindingId m99 f99));
+    (String.eq (Scry.emitFindingId "c" m f) (Scry.emitFindingId "c" m99 f99));
   check "id changes with the file"
-    (Bool.not (String.eq (Scry.emitFindingId m f)
-      (Scry.emitFindingId (originMap 7 3 "b.c") f)));
+    (Bool.not (String.eq (Scry.emitFindingId "c" m f)
+      (Scry.emitFindingId "c" (originMap 7 3 "b.c") f)));
 
   -- A baseline run marks the result `new` in both shapes.
-  let eb := Scry.emitFindingOf "a.c" m pack f .true .true;
+  let eb := Scry.emitFindingOf "c" "a.c" m pack f .true .true;
   check "baseline json says new" (String.eq (jStr eb.json ["baselineState"]) "new");
   check "baseline sarif says new"
     (String.eq (jStr eb.sarif ["baselineState"]) "new");
@@ -99,12 +99,12 @@ def main : IO Unit := EIO.toIO (do
 
   -- Rendering is deterministic: no timestamp, sorted elsewhere, same bytes.
   let text1 := Json.render e.json;
-  let text2 := Json.render (Scry.emitFindingOf "a.c" m pack f .true .false).json;
+  let text2 := Json.render (Scry.emitFindingOf "c" "a.c" m pack f .true .false).json;
   check "json rendering is byte-stable" (String.eq text1 text2);
   check "sarif log is byte-stable"
-    (String.eq (Json.render (Scry.sarifLog "scry" pack .nil [e.sarif]))
-      (Json.render (Scry.sarifLog "scry" pack .nil
-        [(Scry.emitFindingOf "a.c" m pack f .true .false).sarif])));
+    (String.eq (Json.render (Scry.sarifLog "c" "scry" pack .nil [e.sarif]))
+      (Json.render (Scry.sarifLog "c" "scry" pack .nil
+        [(Scry.emitFindingOf "c" "a.c" m pack f .true .false).sarif])));
 
   -- Baseline documents: bare array, {"ids":…}, a findings report, and a SARIF log.
   let readIds : String → Except String (List String) := fun text => match Json.parse text with
@@ -123,7 +123,7 @@ def main : IO Unit := EIO.toIO (do
         pack .nil [e] .nil .nil 1 0 1 .false .none))))) 1);
   check "baseline: SARIF log"
     (Nat.beq (List.length (idsOf (readIds
-      (Json.render (Scry.sarifLog "scry" pack .nil [e.sarif]))))) 1);
+      (Json.render (Scry.sarifLog "c" "scry" pack .nil [e.sarif]))))) 1);
   match readIds "{\"nope\":true}" with
   | .error _ => check "baseline: unknown shape is an error" .true
   | .ok _ => check "baseline: unknown shape is an error" .false;

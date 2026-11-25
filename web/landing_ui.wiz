@@ -1,0 +1,38 @@
+import IO
+import Web.Landing
+import Web.Loom
+
+/-!
+# The landing page's quantity island
+
+`web/landing/app.js` mounts this module on `#quantity-app` through
+`web/framework/mount.js`; the page is the static tree `web/landing/static_gen.wiz`
+wrote at build time. This file is only the C ABI (stage 9g's ownership rule: an
+exported function consumes its state and returns the next one). There are no effects
+and no editor queries, so the three exports the driver requires plus the SSR hash are
+the whole interface.
+-/
+
+link_c "js.c"
+link_c "step.c"   -- the browser ABI's i32 word entry (`wiz_step`, web/step.c)
+extern "js_patch" Js.patch : String → IO Unit
+
+/-- Patch the page from `s` to `s'` and give `s'` back. -/
+def patched (s s' : Landing.State) : IO Landing.State := do
+  Js.patch (Loom.LiveApp.patches Landing.app s s');
+  IO.pure s'
+
+def loomInit : Landing.State := Landing.initial
+def loomHtml (s : Landing.State) : String := Loom.LiveApp.html Landing.app s
+
+/-- The first-render identity the static page writes as `data-wiz-ssr`: the normalised
+tree hash, so the browser adopts the server-rendered tree instead of replacing it. -/
+def loomSsrHash (s : Landing.State) : String := Loom.LiveApp.ssrHash Landing.app s
+
+def loomStep (s : Landing.State) (ev : String) : IO Landing.State :=
+  patched s (Loom.LiveApp.step Landing.app s ev)
+
+export "wiz_loom_init" loomInit
+export "wiz_loom_html" loomHtml
+export "wiz_loom_ssr_hash" loomSsrHash
+export "wiz_loom_step" loomStep

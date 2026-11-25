@@ -131,7 +131,12 @@ structure Scry.EmitFileReport where
   findings : Nat
   truncated : Bool
 
+/-- The run's language, for every id this command derives (`Scry.semanticId`,
+`Scry.sarifRuleId`, `Scry.resultJsonFull`, `Scry.sarifLog` take it first since task 19).
+`findings emit` walks `*.c` only (`Scry.reportFilesOf`), so `emptyOutputOpts` says `"c"`;
+a C# emit path sets it to `"cs"` here rather than at the call sites. -/
 structure Scry.OutputOpts where
+  lang : String
   path : String
   jsonOut : Option String
   sarifOut : Option String
@@ -146,7 +151,7 @@ structure Scry.OutputOpts where
   maxRounds : Option Nat
 
 def Scry.emptyOutputOpts : Scry.OutputOpts :=
-  Scry.OutputOpts.mk "" .none .none .none .none .nil .none .false .false
+  Scry.OutputOpts.mk "c" "" .none .none .none .none .nil .none .false .false
     (.some 300) (.some 2000000) .none
 
 /-- `List.filterMap` for the budget/news list (the standard list library lacks one). -/
@@ -193,14 +198,16 @@ def Scry.budgetMessages (limits : List Scry.BudgetLimit)
 -- ## Building the two renderings
 
 /-- The stable id of a finding, exactly as `Scry.Sarif.resultJsonFull` derives it. -/
-def Scry.emitFindingId (m : Scry.OriginMap) (f : Scry.RuleFinding) : String :=
-  Scry.semanticId f (Scry.findingFile m f)
+def Scry.emitFindingId (lang : String) (m : Scry.OriginMap) (f : Scry.RuleFinding) :
+    String :=
+  Scry.semanticId lang f (Scry.findingFile m f)
 
 /-- Build a finding's two renderings once. `baselineMode` is true when `--baseline`
 was given, so the SARIF/JSON result says `baselineState: new`. -/
-def Scry.emitFindingOf (file : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
-    (f : Scry.RuleFinding) (checked : Bool) (baselineMode : Bool) : Scry.EmitFinding :=
-  let id := Scry.emitFindingId m f;
+def Scry.emitFindingOf (lang : String) (file : String) (m : Scry.OriginMap)
+    (pack : Scry.RulePack) (f : Scry.RuleFinding) (checked : Bool)
+    (baselineMode : Bool) : Scry.EmitFinding :=
+  let id := Scry.emitFindingId lang m f;
   let origin := Scry.originAt m f.func f.sink;
   let line := match origin with
     | .some o => o.line
@@ -217,7 +224,7 @@ def Scry.emitFindingOf (file : String) (m : Scry.OriginMap) (pack : Scry.RulePac
     | .false => idFile;
   let row := Json.mkObj (List.append
     [ ("id", Json.mkStr id)
-    , ("ruleId", Json.mkStr (Scry.sarifRuleId f.rule))
+    , ("ruleId", Json.mkStr (Scry.sarifRuleId lang f.rule))
     , ("file", Json.mkStr shown)
     , ("level", Json.mkStr (Scry.Severity.sarif f.severity))
     , ("checked", Json.mkBool checked) ]
@@ -226,7 +233,7 @@ def Scry.emitFindingOf (file : String) (m : Scry.OriginMap) (pack : Scry.RulePac
           | .some b => Json.mkStr b
           | .none => Json.mkNull) ]));
   Scry.EmitFinding.mk id f.rule f.severity f.message shown line column f.func checked
-    row (Scry.resultJsonFull m pack f checked baseline)
+    row (Scry.resultJsonFull lang m pack f checked baseline)
 
 /-- Build a warning's two renderings once. `file` is the analysed path SARIF uses for
 the `b_` id, matching `Scry.boundaryResultJsonFull`. -/
@@ -439,35 +446,36 @@ def Scry.emitTaintOpts (o : Scry.OutputOpts) (file : String) : Scry.TaintOpts :=
     timeoutSecs := o.timeoutSecs, maxNodes := o.maxNodes, maxRounds := o.maxRounds }
 
 /-- Fold one file's findings into the accumulator, applying the baseline by id. -/
-partial def Scry.emitAddFindingsGo (file : String) (m : Scry.OriginMap)
+partial def Scry.emitAddFindingsGo (lang : String) (file : String) (m : Scry.OriginMap)
     (pack : Scry.RulePack) (baselineMode : Bool) (baselineIds : List String) :
     List (Scry.RuleFinding × Bool) → Scry.EmitAcc → Scry.EmitAcc
   | .nil, acc => acc
   | .cons p rest, acc =>
-    let id := Scry.emitFindingId m p.1;
+    let id := Scry.emitFindingId lang m p.1;
     let known := List.any (fun b => String.eq id b) baselineIds;
     if known then
       let acc' := { acc with total := Nat.succ acc.total,
                             suppressed := Nat.succ acc.suppressed };
-      Scry.emitAddFindingsGo file m pack baselineMode baselineIds rest acc'
+      Scry.emitAddFindingsGo lang file m pack baselineMode baselineIds rest acc'
     else
       let acc' := { acc with total := Nat.succ acc.total,
                             findings := List.cons
-                              (Scry.emitFindingOf file m pack p.1 p.2 baselineMode)
+                              (Scry.emitFindingOf lang file m pack p.1 p.2 baselineMode)
                               acc.findings };
-      Scry.emitAddFindingsGo file m pack baselineMode baselineIds rest acc'
+      Scry.emitAddFindingsGo lang file m pack baselineMode baselineIds rest acc'
 
-def Scry.emitAddFindings (file : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
-    (baselineMode : Bool) (baselineIds : List String)
+def Scry.emitAddFindings (lang : String) (file : String) (m : Scry.OriginMap)
+    (pack : Scry.RulePack) (baselineMode : Bool) (baselineIds : List String)
     (acc : Scry.EmitAcc) (pairs : List (Scry.RuleFinding × Bool)) : Scry.EmitAcc :=
-  Scry.emitAddFindingsGo file m pack baselineMode baselineIds pairs acc
+  Scry.emitAddFindingsGo lang file m pack baselineMode baselineIds pairs acc
 
 /-- Analyse one file and add its findings, warnings and metadata. -/
 def Scry.emitOne (o : Scry.OutputOpts) (pack : Scry.RulePack)
     (baselineMode : Bool) (baselineIds : List String)
     (acc : Scry.EmitAcc) (file : String) : EIO Scry.EmitAcc := do
   rep ← Scry.analyzeFile (Scry.emitTaintOpts o file);
-  let withFindings := Scry.emitAddFindings file rep.origins pack baselineMode baselineIds acc (Scry.zipFindings rep.findings rep.checks);
+  let withFindings := Scry.emitAddFindings o.lang file rep.origins pack baselineMode
+    baselineIds acc (Scry.zipFindings rep.findings rep.checks);
   let boundaries := List.map (Scry.emitWarningOf file) rep.boundaries;
   let memory := List.map (Scry.emitWarningOf file) rep.memory;
   let notes := List.map (fun n => (file, n)) rep.budgetNotes;
@@ -626,7 +634,7 @@ def Scry.emitRun (o : Scry.OutputOpts) : EIO Nat := do
   | .none => EIO.pure ();
   match o.sarifOut with
   | .some out => Scry.emitWrite out (String.append (Json.render
-      (Scry.sarifLog "scry" pack .nil
+      (Scry.sarifLog o.lang "scry" pack .nil
         (List.append (List.map (fun f => f.sarif) findings)
           (List.map (fun w => w.sarif) warnings)))) "\n")
   | .none => EIO.pure ();

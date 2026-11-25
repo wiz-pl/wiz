@@ -1,0 +1,20 @@
+{
+  "name": "goal-d3-nested-pi",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-d3-nested-pi.wiz",
+  "text": "import Prelude\ndef k (xs : List (Nat → Nat)) : Nat := by\n  exact 0\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 2 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.goals", "value": ["xs : List (Nat → Nat)\n⊢ Nat"] }
+  ],
+  "note": "D3 (task 26 review): a Pi nested under an application. `showGoal` covers only the top-level Pi spine, so a Pi in `List (…)`, `Eq(…)` or a Σ argument still goes through `show`. The host prints `List (Nat → Nat)`; the remaining difference after 27a is the goal-mode spelling of an application: the selfhost wraps the whole application, `(List (Nat → Nat))`.",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "goal-mode application parens (27a′): the selfhost prints `xs : (List (Nat → Nat))` where the host prints `xs : List (Nat → Nat)` — the outer application's own parentheses, not the nested Pi",
+      "issue": "27a′"
+    }
+  ]
+}

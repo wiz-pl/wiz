@@ -3647,25 +3647,37 @@ mutual
 -- is a field of the value, not the value itself. `μ X. X` (a description that is only
 -- recursion) is rejected; `ν` does not use this check (`ν X. X` is a valid coinductive
 -- type; its productivity is `cocon`/`out`). A description whose head is not a spine (a
--- variable, `dret`, …) is left alone: the kernel cannot see its spine. A constant is
--- looked through to its inline value (depth-bounded), so a `def` cannot hide it.
-def descGuarded (depth : Nat) (guarded : Bool) : Tm → Bool
-  | .darg _ _ E => descGuarded depth .true E
-  | .drec _ _ E => Bool.and guarded (descGuarded depth guarded E)
-  | .dhrec _ _ _ E => Bool.and guarded (descGuarded depth guarded E)
-  | .lam b => descGuarded depth guarded b
-  | .ann t _ => descGuarded depth guarded t
-  | .ecase _ _ bs => tmsGuarded depth guarded bs
-  | .letE _ _ b => descGuarded depth guarded b
-  | .letq _ _ _ b => descGuarded depth guarded b
-  | .split _ s m b => Bool.and (descGuarded depth guarded s) (Bool.and (descGuarded depth guarded m) (descGuarded depth guarded b))
-  | .const _ _ _ v _ => match depth with
-    | .zero => .true
-    | .succ k => descGuarded k guarded v
+-- variable, `dret`, …) is left alone: the kernel cannot see its spine.
+--
+-- A constant carries its value inline here, so the term is finite and the walk always
+-- ends: there is no depth bound (the host's magic 16 was one route to a false "guarded",
+-- and it is gone in both kernels), and no visited set of names either (the host needs one
+-- because it looks names up in a table; here there is no table to cycle back into).
+-- An axiom has no value to look through: a `μ` over one is rejected, as a valueless
+-- (axiom or opaque) constant is on the host side. The host's third route, an unknown
+-- name, does not exist here. `letq` and `split` are written differently on the two sides
+-- (this term language has a separate `letq` — its `letE` carries no quantity — and a
+-- `split` with no binder names), but both walks look through them: the host walks a pair
+-- match's scrutinee, motive and body as this arm does, so a `let` or a pair match cannot
+-- hide a recursive field on either side. Keep these arms; deleting them to "match" the
+-- host would leave the pair match unwalked here. The neutral-head arm (`_ => .true`)
+-- matches the host's, and is the decision D-9 half of the fix.
+def descGuarded (guarded : Bool) : Tm → Bool
+  | .darg _ _ E => descGuarded .true E
+  | .drec _ _ E => Bool.and guarded (descGuarded guarded E)
+  | .dhrec _ _ _ E => Bool.and guarded (descGuarded guarded E)
+  | .lam b => descGuarded guarded b
+  | .ann t _ => descGuarded guarded t
+  | .ecase _ _ bs => tmsGuarded guarded bs
+  | .letE _ _ b => descGuarded guarded b
+  | .letq _ _ _ b => descGuarded guarded b
+  | .split _ s m b => Bool.and (descGuarded guarded s) (Bool.and (descGuarded guarded m) (descGuarded guarded b))
+  | .const _ _ _ v _ => descGuarded guarded v
+  | .axiomC _ _ => .false
   | _ => .true
-def tmsGuarded (depth : Nat) (guarded : Bool) : Tms → Bool
+def tmsGuarded (guarded : Bool) : Tms → Bool
   | .tnil => .true
-  | .tcons t rest => Bool.and (descGuarded depth guarded t) (tmsGuarded depth guarded rest)
+  | .tcons t rest => Bool.and (descGuarded guarded t) (tmsGuarded guarded rest)
 end
 def unguardedDescription : String :=
   "unguarded recursive description: every recursive field (Desc.rec/Desc.hrec) must occur under a non-recursive (Desc.arg) field; mu X. X is not an inductive type"
@@ -4255,7 +4267,7 @@ def inferW : TCtx → Tm → TyRes
       | .true =>
         let vI := eval (TCtx.env c) I;
         match check c D (.vdesc l vI) with
-        | .ok _ _ => match descGuarded 16 .false D with
+        | .ok _ _ => match descGuarded .false D with
           | .false => .err unguardedDescription
           | .true => match check c i vI with
             | .ok _ _ => .ok (.vsort (lsucc l)) (uZeros (TCtx.lvl c))

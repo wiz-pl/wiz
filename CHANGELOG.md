@@ -12,9 +12,52 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 `scripts/trust-counts.py --write` and checked by `scripts/trust-counts.py --check` (the
 `native` group runs the check), so this file cannot drift from the ledger.
 
-<!-- trust-counts: rows=841 partial=251 axiom_rows=260 builtin_rows=254 native_rows=76 implemented_by=71 repr=5 extern_declarations=226 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=551 shared_reasons=290 legacy=0 expired=0 -->
+<!-- trust-counts: rows=858 partial=254 axiom_rows=267 builtin_rows=261 native_rows=76 implemented_by=71 repr=5 extern_declarations=233 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=559 shared_reasons=299 legacy=0 expired=0 -->
 
 ## [Unreleased]
+
+* web: the browser host ABI's step entry is **three 32-bit words**. A page runtime (a
+  `Web.Loom` app built through the C backend and Emscripten) now also exports
+  `wiz_step : (state : i32, payload_ptr : i32, payload_len : i32) -> i32` from
+  `web/step.c`, linked beside the app's own `i64` `wiz_loom_step`, and
+  `web/framework/driver.js`/`mount.js` call it: the JavaScript API has no `Number` path
+  for an `i64` parameter or result, so the word form is what keeps an opaque handle from
+  costing a `BigInt` allocation per DOM event in and another out (`sota-web-wasm-gpu`
+  R1). The `i64` entry stays: `driver.start` reports
+  `abi: "i32" | "i64"`, falls back to `wiz_loom_step` when the module has no `wiz_step`,
+  and normalises the state for the `i64` calls that remain (`wiz_loom_html`,
+  `wiz_loom_consume`, a page's `call`). `web/framework/step_gen.wiz` and its C half
+  (`step_test.c`) check the words and the payload's length rule on a real build, and the
+  page tests' stubs still drive the `i64` entry. The word entry is the ABI's shape, not a
+  measured speedup.
+* extensibility (G1, shape): `Wiz/Ext` capabilities are kind-scoped. `Kind.capabilities`
+  is the only list a kind may declare — a backend performs build operations, a lint set
+  or rule reads the stable views (a code rule also asks for `elab.lint`), each
+  elaboration kind asks for exactly its own `elab.term|tactic|macro|deriver`, a doc
+  language asks for none — and `Table.register` refuses anything else with
+  `invalid-<kind>-capability` (`invalid-lint-rule-capability`, `invalid-target-capability`,
+  …). The resolver re-checks, so a hand-built table cannot grant `emit` to a lint rule.
+  The generic table already resolves the elaboration kinds: `term-elab-not-enabled`,
+  `term-elab-capability` and `duplicate-term-elab` are pinned in `=ext`. No request set,
+  payload or cache key changes; the attribute handlers are still registered in
+  `CommandState` (the remaining G1 registration work).
+* diagnostics: a declaration that fails to elaborate is no longer reported as
+  `unknown identifier` at every later use. The frontend records it (name, declaration
+  span, `line:col`) and a use is a `failed-declaration` — "'broken' failed to elaborate
+  (its declaration at 2:1 has an error; fix that one)" — at the use's own span, so one
+  root error is reported once instead of a fabricated cascade. The record is part of the
+  command's cache effect (salt 33), so a warm run says the same. `error-codes.md` lists
+  the code; `=reject` pins it (cold and warm cache, with no `unknown identifier`).
+
+* ci: `bootstrap-chain.yml` publishes only what passed. The `release` job now runs only
+  for a CI run that concluded `success` (the `workflow_run` gate excluded `cancelled`
+  and `skipped` only, so a failed run released and pushed its paths); its Cachix push
+  restates the condition. The `chain` job's push needs a new `Chain verdict` step to
+  report `pass=yes`, which requires `chain-step-check: PASS` in self mode and in cross
+  mode when it ran, with no `DIFFER`; a night with no earlier release still publishes.
+  The builds and the artifact uploads stay ungated, so a failing round is still
+  downloadable. `nix/bootstrap-chain.nix`'s "nothing in CI builds these" header was
+  stale: they are built, and no commit pins them.
 
 * nix: the Wasm fixtures, the merged web bundle, the docs site, the Pages artifact and
   the binary release tarball are flake outputs (`.#wasm-fixtures`, `.#web-bundle`,
@@ -26,6 +69,18 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   archive and runs the binaries under `env -i` with only glibc. The CI jobs consume the
   new outputs (`wiz-notes/nix-artifacts.md` is the handover note; `.github/workflows`
   is unchanged here).
+
+* extensibility (B1): `attribute [term_elab kind] f` registers a Wiz term elaborator
+  (`TermElab := Syntax → TacticM Unit`, `lib/Prelude.wiz`) for a term syntax kind; it runs
+  in the elaborator's interpreter with one goal (the expected type, or a fresh type
+  metavariable in `infer`) and builds the term with the existing `TacticM`/`Expr`
+  requests. An unknown kind is refused (`unknown-syntax`), and the registration is not
+  `local` (like `[tactic]`). The data-primitive spellings are now data:
+  `builtin unit|empty|qty|size` rename the kernel formers (the old names are fallbacks),
+  and a string literal is `builtin string`'s `mk` applied to a list of `builtin char` in
+  `builtin list` (`String.mk (List Char)` by default), so a library with its own
+  `MyChar`/`List`/`String` can define its literal encoding; a mismatch is reported at the
+  literal, not left to the kernel (`tests =elab`, `=reject`).
 
 * ci: a pull request's `build` job starts from a `.lake` a **cold** derivation saved
   (`flake.nix`'s `withLakeCache`, keyed by `flake.lock`, `lean-toolchain`, the
@@ -1018,6 +1073,15 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   (seven fields against five) or the `applyAt`/`applyMatches` signature, and cannot be
   imported into one program; they are not drop-in replacements. Six of the seventeen
   e-graph examples are differential. Groups `scry-egraph` and `scry-taint` cover them.
+
+* lib(Web.Source): `Source.firstLocatedRow`, `Source.View.clipSpans` and
+  `Source.firstFileWithFinding` are total `def`s again, so three hand-written axioms are
+  gone and `Source.firstFileWithFinding`'s ledger row with them. The lesson is not the
+  deletion but why it took a day of merges to say so: the rows had gone unreviewed and
+  only `=native` case 18 reports that, and the group was not run. A structural recursion
+  on a list tail needs no `partial` — `Source.View.insertSpan`, eight lines from
+  `clipSpans`, is the total proof — so reach for `partial` only after checking whether
+  `List.find`/`map`/`filter` already has the shape (case 18 green).
 
 ## [0.1.0] - unreleased (draft)
 

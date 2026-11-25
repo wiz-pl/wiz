@@ -1,7 +1,7 @@
 [
   {
     "name": "selfhost",
-    "split": 6,
+    "split": 4,
     "heavy": true,
     "inputs": [
       "selfhost/*",
@@ -67,10 +67,11 @@
   },
   {
     "name": "library",
-    "split": 12,
+    "split": 11,
     "jobs": 4,
     "allow-missing-deps": true,
     "select": [
+      "=cache-invariants",
       "=bus-crc",
       "=bus-law",
       "=bus-protocol",
@@ -185,6 +186,7 @@
       "sized",
       "universes",
       "=args",
+      "=ext",
       "=library",
       "=list-lemmas",
       "=scry-modules",
@@ -197,7 +199,7 @@
   },
   {
     "name": "scaling",
-    "split": 2,
+    "split": 1,
     "jobs": 3,
     "select": [
       "=scaling",

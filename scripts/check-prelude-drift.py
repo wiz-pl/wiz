@@ -114,7 +114,7 @@ META_ROOTS: set[str] = {
     "Append", "Auto", "BinderKind", "CommandMacro", "CtorView", "Deriver", "Expr",
     "ExprView", "FieldView", "HAppend", "IndView", "List", "ListLit", "Macro",
     "MacroM", "Monad", "Monad1", "ParamView", "RewriteResult", "SatAnswer", "Simp",
-    "String", "Syntax", "SyntaxF", "Tac", "Tactic", "TacticM", "PipeProj",
+    "String", "Syntax", "SyntaxF", "Tac", "Tactic", "TacticM", "TermElab", "PipeProj",
 }
 
 #: Names `preludeText` defines that `lib/` does not declare as identifiers. Every

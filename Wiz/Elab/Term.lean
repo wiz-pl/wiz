@@ -180,7 +180,10 @@ def freshPlaceholder (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Term R) := do
     if b then t := .app t (.var (ctx.lvl - lvl - 1))
   pure t
 
-/-- Names the elaborator treats as data primitives when applied (and not shadowed). -/
+/-- Names the elaborator treats as data primitives when applied (and not shadowed).
+This is the `Desc`/`μ`/`ν`/`con`/… table, not the data-primitive *spellings*: the
+`Unit`/`Empty`/`Qty`/`Size` formers and the string literal's `Char`/`List` are read from
+`builtins` (`builtin unit := …`, B1; see `mkStringLit` and the ident case of `infer`). -/
 def builtinNames : List Name :=
   ["Desc", "Desc.ret", "Desc.arg", "Desc.rec", "Desc.hrec", "Desc.elim", "Desc.interp", "Desc.All",
    "μ", "ν", "con", "ind", "out", "coit", "cocon", "scofix"]
@@ -198,14 +201,46 @@ def builtinApp? (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Option (Name × Arr
   return some (n, (stx.getArg 1).args)
 
 /-- The term for a string literal, `String.mk [Char.mk n, …]` with numerals `n`. The
-prelude's names are fixed here. -/
+string type is `builtin string`; the character and list spellings are `builtin char` and
+`builtin list`, with `Char`/`List` as the defaults when they are not registered (B1, so a
+library may give a string literal its own data primitives). The string type's constructor
+must take the list type built here; `check` reports that at the literal if it does not. -/
 def mkStringLit (str : String) (us : List Level := []) : ElabM R (Term R) := do
-  let S := ((← get).builtins.lookup "string").getD "String"
-  let charTy : Term R := .const "Char" []
-  let chr (c : Char) : Term R := .app (.const "Char.mk" []) (.natLit c.toNat)
-  let list := str.toList.foldr (fun c t => Term.app (.app (.app (.const "List.cons" []) charTy) (chr c)) t)
-    (.app (.const "List.nil" []) charTy)
+  let s ← get
+  let S := (s.builtins.lookup "string").getD "String"
+  let C := (s.builtins.lookup "char").getD "Char"
+  let L := (s.builtins.lookup "list").getD "List"
+  let charTy : Term R := .const C []
+  let chr (c : Char) : Term R := .app (.const (C ++ ".mk") []) (.natLit c.toNat)
+  let list := str.toList.foldr (fun c t => Term.app (.app (.app (.const (L ++ ".cons") []) charTy) (chr c)) t)
+    (.app (.const (L ++ ".nil") []) charTy)
   pure (.app (.const (S ++ ".mk") us) list)
+
+/-- (B1) Why the string type's constructor does not take the list `mkStringLit` builds
+from the registered `builtin char`/`builtin list` (if it does not), or `none`. A string
+literal is `S.mk` applied to one `L C` value: `S.mk` must take exactly one explicit
+argument, and it must be `L C`. There is no coercion between two list types, so the
+answer to a mismatch is a `builtin string` whose constructor takes the same types. -/
+def stringLitShapeError? (g : Globals R) (S C L : Name) : Option String :=
+  let rec findExplicit : Term R → Option (Term R × Term R)
+    | .pi _ bi _ a b _ => if bi == .default then some (a, b) else findExplicit b
+    | _ => none
+  let rec hasExplicit : Term R → Bool
+    | .pi _ bi _ _ b _ => if bi == .default then true else hasExplicit b
+    | _ => false
+  match g.find? (S ++ ".mk") with
+  | none => some s!"{S} has no constructor `mk`"
+  | some d =>
+    match findExplicit d.type with
+    | none => some s!"{S}.mk takes no argument; a string literal is {S}.mk of a list"
+    | some (dom, rest) =>
+      if hasExplicit rest then
+        some s!"{S}.mk takes more than one argument; a string literal is {S}.mk of a list"
+      else match dom with
+      | .app (.const L' _) (.const C' _) =>
+        if L' == L && C' == C then none
+        else some s!"{S}.mk takes {L'} {C'}, but `builtin char`/`builtin list` build a list of {C} with {L}; register a `builtin string` whose constructor takes the same (there is no coercion)"
+      | _ => some s!"{S}.mk does not take a list of the `builtin char` type {C}"
 
 /-- (HD9) A numeral `n` at a type `A` other than the `builtin nat` type:
 `@OfNat.ofNat A n ?inst`, with an instance problem `OfNat A n` (the literal is an
@@ -1497,6 +1532,8 @@ partial def check (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM R
   let ctx := ctx.withInfo stx
   recordExpected ctx stx expected
   if let some stx' ← expand? stx then return ← check ctx stx' expected
+  -- (B1) a registered term elaborator for this syntax kind, before the built-in kinds
+  if let some t ← elabTermElab? ctx stx expected then return t
   if let some t ← checkData? ctx stx expected then return t
   -- a variable or application whose type is the expected type's own definition
   -- (`f : Comb i o` against `Comb ?i ?o`, `def Comb … := {r} → [Hw r] → …`): unify the
@@ -1581,12 +1618,17 @@ where
     | "term.str" =>
       match ← force expected with
       | .mu _ _ _ _ _ (some (T, us, _)) _ =>
-        -- a string of the `builtin string` type: `String.mk [Char.mk n, …]`
+        -- a string of the `builtin string` type: `S.mk [C.mk n, …]`, with `C`/`L` from
+        -- `builtin char`/`builtin list` (B1)
         let s ← get
         match s.builtins.lookup "string" with
         | some S =>
           if S != T then throwAt ctx.info s!"string literals are for {S}, not {T}" else
-          mkStringLit (((stx.getArg 0).getStr?).getD "") us
+          let C := (s.builtins.lookup "char").getD "Char"
+          let L := (s.builtins.lookup "list").getD "List"
+          match stringLitShapeError? (← getGlobals) S C L with
+          | some e => throwAt ctx.info s!"string literals: {e}"
+          | none => mkStringLit (((stx.getArg 0).getStr?).getD "") us
         | none => throwAt ctx.info "string literals need `builtin string := …`"
       | _ => do let (t, ty) ← infer ctx stx; unifyAt ctx stx expected ty; pure t
     -- `refl a` against an equation `a' =_A b'`: as elsewhere, infer and unify; if that
@@ -3808,6 +3850,14 @@ partial def elabQuote (ctx : LocalCtx R) (syntaxTy : VTy R) (parent : Name) (stx
 partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) := do
   let ctx := ctx.withInfo stx
   if let some stx' ← expand? stx then return ← infer ctx stx'
+  -- (B1) a registered term elaborator for this syntax kind, with a fresh type
+  -- metavariable as the goal's type (what `#check τ` uses)
+  if (← get).termElabs.any fun (k, _) => k == stx.kind then
+    let a ← freshTypeMeta ctx "the type of a term_elab"
+    let va ← evalIn ctx a
+    match ← elabTermElab? ctx stx va with
+    | some t => return (t, va)
+    | none => pure ()
   match stx.kind with
   | "term.ident" | "term.explicit" | "term.identUniv" =>
     let x := (stx.getArg (if stx.isOfKind "term.explicit" then 1 else 0)).getId?.getD "_"
@@ -3816,6 +3866,13 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     -- (stage 11) remember identifiers and their types, for hovers and go-to-definition
     let record (n : Name) (c : LocalCtx R) (ty : VTy R) : ElabM R Unit := do
       if stx.info.stop > 0 then pushInfo (.ident stx.info n (c.lvl > 0) c ty)
+    -- (diagnostics) a name the file declared but whose declaration failed to elaborate:
+    -- say which declaration failed and where, instead of blaming the use ("unknown
+    -- identifier"). The root error is reported once, at the declaration.
+    let failedDecl (n : Name) : ElabM R Unit := do
+      if let some d := (← getGlobals).failedDecl? n then
+        throwAt ctx.info s!"'{n}' failed to elaborate (its declaration at {d.pos} has an error; fix that one)"
+          ErrorCode.failedDeclaration
     if explicitLevels.isNone then
       if let some (ix, ty) := lookupLocal ctx x then
         record x ctx ty
@@ -3848,19 +3905,31 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
       let g ← getGlobals
       if let some (_, m) := g.privates.toList.find? fun (n, m) => m != g.module && n == Globals.privateName m x then
         throwAt ctx.info s!"'{x}' is private to module {m}" "private"
-      -- built-in types
+      -- (B1) the spellings of the kernel's data primitives are data: `builtin unit := …`,
+      -- `builtin empty := …`, `builtin qty := …`, `builtin size := …`, with the old
+      -- spellings as the defaults when the key is not registered. `True`/`False` are
+      -- still fixed: they are the level-0 aliases of the same formers.
+      let st ← get
+      let unitN := (st.builtins.lookup "unit").getD "Unit"
+      let emptyN := (st.builtins.lookup "empty").getD "Empty"
+      let qtyN := (st.builtins.lookup "qty").getD "Qty"
+      let sizeN := (st.builtins.lookup "size").getD "Size"
+      let isU := x == unitN
+      let isE := x == emptyN
       let builtinLevel : Option Level := match explicitLevels with
         | some _ => none
         | none => some (if x == "True" || x == "False" then 0 else 1)
-      match x, explicitLevels with
-      | "Unit", some #[l] | "Empty", some #[l] =>
-        let l ← elabLevel l
-        return (if x == "Unit" then .unit l else .empty l, .sort l)
-      | "Qty", none => return (.qty, .sort 1)
-      | "Size", none => return (.size, .sort 1)
-      | "Unit", none | "True", none => return (.unit builtinLevel.get!, .sort builtinLevel.get!)
-      | "Empty", none | "False", none => return (.empty builtinLevel.get!, .sort builtinLevel.get!)
-      | _, _ =>
+      match explicitLevels with
+      | some #[l] =>
+        if isU || isE then
+          let l ← elabLevel l
+          return (if isU then .unit l else .empty l, .sort l)
+      | none =>
+        if x == qtyN then return (.qty, .sort 1)
+        if x == sizeN then return (.size, .sort 1)
+        if isU || x == "True" then return (.unit builtinLevel.get!, .sort builtinLevel.get!)
+        if isE || x == "False" then return (.empty builtinLevel.get!, .sort builtinLevel.get!)
+      | some _ => pure ()
       -- the definition being elaborated (`def f … := … f …`): recursion needs equations
       if (← get).defining == some x then
         throwAt ctx.info (s!"recursive call to {x} in a definition without equations; write it as equations " ++
@@ -3886,13 +3955,14 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
           let isName := (lookupLocal ctx base).isNone &&
             match g.find? (g.resolve base) with
             | some d => endsInSort d.type
-            | none => !["Unit", "True", "Empty", "False", "Qty", "Size"].contains base &&
+            | none => !(["Unit", "True", "Empty", "False", "Qty", "Size", unitN, emptyN, qtyN, sizeN].contains base) &&
                       !(g.privates.toList.any fun (n, m) => m != g.module && n == Globals.privateName m base)
           if isName then
             -- a field of a structure that has no projection function (an erased one)
             if fs.isEmpty && (((structLayout? g (g.resolve base)).map (·.fields)).getD []).contains f then
               throwAt ctx.info s!"unknown identifier '{x}': the field {f} of {base} has no projection function (an erased field has none; take the structure apart with `match` or `let ⟨…⟩`)"
             pushInfo (.done (.unknownIdent ctx.info x ctx.names))
+            failedDecl x
             throwAt ctx.info s!"unknown identifier '{x}'" "unknown-identifier"
           let (t, ty) ← infer ctx (.node stx.info "term.ident" #[.ident stx.info base])
           -- (#266) `T.f` with `T` a global type (or type family, or function) and no field
@@ -3905,11 +3975,13 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
             catch e =>
               if e.msg.startsWith "no field '" then
                 pushInfo (.done (.unknownIdent ctx.info x ctx.names))
+                failedDecl x
                 throwAt ctx.info s!"unknown identifier '{x}'" "unknown-identifier"
               else throw e
           else elabFields ctx t ty (f :: fs)
       | _ =>
         pushInfo (.done (.unknownIdent ctx.info x ctx.names))
+        failedDecl x
         throwAt ctx.info s!"unknown identifier '{x}'" "unknown-identifier"
   | "term.recCall" =>
     -- a recursive call `f y …` of the definition whose equations these are, already the
@@ -4609,10 +4681,56 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
   --| sorry
   --sol>
 
+/-- (B1) Run the term elaborator registered for `stx.kind` (`attribute [term_elab k] f`)
+against `expected`, if any: a goal whose hole is a fresh meta of `expected`, the handler
+`f stx : TacticM Unit`, then the end-of-block checks `elabBy` makes — every goal it leaves
+must be solved, and an `assign` with holes is type-checked once its holes are solved — and
+the term is the goal's meta. The handler runs in the interpreter over the same `Tac`
+requests as a tactic (including `TacticM.exact`, which re-enters `check`), so it builds a
+term with `Expr`/`elabInfer`/`assign`, and it must not elaborate its own node again.
+
+A handler is a registration like `[tactic]`: it is not `local`, and `attribute` is not a
+cacheable command, so an importing module replays it rather than taking a cached
+declaration that was elaborated with a different table. -/
+partial def elabTermElab? (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) :
+    ElabM R (Option (Term R)) := do
+  let s ← get
+  let some f := s.termElabs.lookup stx.kind | return none
+  let code ← match s.compileCode ("TacticM.run" :: (s.tactics ++ s.termElabs).map (·.2)) with
+    | .ok c => pure c
+    | .error e => throwAt ctx.info s!"term_elab {f}: {e}"
+  if stx.info.stop > 0 then
+    pushInfo (.done (.expansion stx.info stx.kind (.fn "term_elab" f) none))
+  let m ← freshMeta ctx "term_elab" expected
+  let mut st : TacState R := { goals := #[{ ctx, ty := expected, tm := m }], «open» := [0] }
+  let t := apply code (run code [] (.global "TacticM.run"))
+    (apply code (run code [] (.global f)) (encodeSyntax stx))
+  -- (a request's failure often has no position: report it at the term, as `elabBy` does)
+  st ← try runTac code stx.info st t
+    catch e => throw (if e.info.stop == 0 then { e with info := stx.info } else e)
+  let mut rest : Array String := #[]
+  for i in st.open do
+    if let some gl := st.goals[i]? then
+      if ← gl.isOpen then rest := rest.push (← gl.show)
+  unless rest.isEmpty do
+    throwAt ctx.info s!"term_elab {f}: unsolved goals:\n{"\n\n".intercalate rest.toList}" ErrorCode.unsolvedGoals
+  -- (the `assign` terms with holes: as in `elabBy`, checked in the elaborator's view once
+  -- the holes are solved)
+  for (gl, t) in st.unchecked do
+    let t ← zonk gl.ctx.lvl t
+    unless t.mvars.isEmpty do
+      throwAt ctx.info s!"term_elab {f}: assign: the assigned term still has holes" ErrorCode.tacticFailed
+    let kctx := { gl.kernelCtx (← getGlobals) with types := (← zonkedTypes gl.ctx) }
+    match (← get).kernelInfer kctx t with
+    | .ok ty => unifyAt gl.ctx stx gl.ty ty
+    | .error e => throwAt ctx.info s!"term_elab {f}: assign: {e}" ErrorCode.tacticFailed
+  pure (some m)
+
 /-- `by tac₁; tac₂ …`: a hole of the expected type, filled by running the tactics. -/
 partial def elabBy (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM R (Term R) := do
   let s ← get
-  let code ← match s.compileCode ("TacticM.run" :: s.tactics.map (·.2)) with
+  -- (the registered tactics, and the term elaborators a tactic's `exact` may re-enter)
+  let code ← match s.compileCode ("TacticM.run" :: (s.tactics ++ s.termElabs).map (·.2)) with
     | .ok c => pure c
     | .error e => throwAt ctx.info e
   let m ← freshMeta ctx "by" expected

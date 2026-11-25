@@ -7,6 +7,7 @@ import Scry.Project
 import Scry.ProjectIO
 import Scry.ProjectTaint
 import Scry.ProjectCache
+import Scry.Preproc
 import Scry.TaintCmd
 -- Multi-file project driver tests:
 --
@@ -17,7 +18,10 @@ import Scry.TaintCmd
 -- * cross-TU taint (a source in app.c reaching a sink in io.c), per-file counts and
 --   checked certificates;
 -- * SARIF `artifacts` with relative URIs, `%SRCROOT%`, and an index on every result;
--- * the per-TU parse cache: cold, warm, a changed declaration, and a corrupt entry.
+-- * the per-TU parse cache: cold, warm, a changed declaration, and a corrupt entry;
+-- * the per-TU lowering cache: cold/warm Wil equality, a changed header/macro, a header
+--   comment (same preprocessed text, new origins), corrupt/truncated entries, and a key
+--   that differs only in the unit target.
 --
 -- `cc` must be on PATH (the same requirement as `scry project` itself).
 
@@ -357,7 +361,10 @@ def main : IO Unit := EIO.toIO (do
   f0 ← build fmtDir fmtCache;
   check "cache: the one-TU version fixture is cold" (Nat.beq f0.2.miss 1);
   fnames ← FS.listDir fmtCacheDir;
-  let fentry := match fnames with
+  -- the same cache directory also holds the lowering entries (`lower-<key>.tu`);
+  -- the format test is about the parse entry
+  let fentries := List.filter (fun n => Bool.not (String.startsWith n "lower-")) fnames;
+  let fentry := match fentries with
     | .cons n _ => String.append fmtCacheDir (String.append "/" n)
     | .nil => "";
   ftext ← FS.readFile fentry;
@@ -442,13 +449,17 @@ def main : IO Unit := EIO.toIO (do
   check "index: quire hit" (String.eq q2.reason "hit");
   jl ← Scry.findingsLoad fjson fid;
   ql ← Scry.findingsLoad fquire fid;
+  let sameKeys : Bool := match jl, ql with
+    | .ok a, .ok b => Bool.and (Nat.beq (List.length a) (List.length b))
+        (UIntN.beq (Scry.fiPrint a) (Scry.fiPrint b))
+    | _, _ => Bool.false;
+  check "index: json and quire hold the same findings" sameKeys;
+  let sev0 := List.length (List.filter (fun r => Nat.beq r.severity 0) frows);
+  qc ← Scry.findingsQuery fquire fid 0;
   -- The type is written out: a `let` gives its body no expected type, so the `.false`
   -- term in the second branch has nothing to resolve against, and the elaborator no
   -- longer guesses a constructor's type from the first branch (23cf4a314, "Error
   -- messages: audit and the top 20 fixes"). `Bool.false` would do as well.
-  -- (as `sameKeys` above: a typed `let` gives the match its expected `Bool`. The
-  -- inline `(match …)` in `check`'s argument position did not elaborate here even with
-  -- `Bool.false` in the arm — it was reported as `check` applied to one argument.)
   let qOk : Bool := match qc with
     | .ok n => Nat.beq n sev0
     | .error _ => Bool.false;
@@ -458,3 +469,166 @@ def main : IO Unit := EIO.toIO (do
     | .ok n => Nat.beq n sev0
     | .error _ => Bool.false;
   check "index: json severity query" jOk;
+  let qpath := Scry.findingsCachePath fquire fid;
+  FS.writeFile qpath "not a quire image\n";
+  q3 ← Scry.cacheFindings fquire fid frows;
+  check "index: corrupt quire is a miss" (String.eq q3.reason "corrupt");
+  q4 ← Scry.cacheFindings fquire fid frows;
+  check "index: quire hit after repair" (String.eq q4.reason "hit");
+  qb ← FS.readBytes qpath;
+  FS.writeBytes qpath (Bytes.slice qb 0 100);
+  q5 ← Scry.cacheFindings fquire fid frows;
+  check "index: truncated quire is a miss" (String.eq q5.reason "corrupt");
+
+  -- lowering cache (Stage B of wiz-notes/incremental-scry.md §6.2): the key names the
+  -- lowering's own inputs, a cold run writes one atomic record per TU, a warm run
+  -- reconstructs the identical Wil, and a changed header, a truncated/corrupt record or
+  -- a different target is a miss (never a stale TU). One-line checks throughout: a
+  -- newline before a bare identifier or string argument ends a Wiz application.
+  let lpaths := ["a.c"];
+  let ltexts := ["int f(void);\n"];
+  let ltextsG := ["int g(void);\n"];
+  let lkBase := Scry.lowerCacheKeyFor "lowerer" "cst" "pre" "a.c" lpaths ltexts .true;
+  let lowererKey := Scry.lowerCacheKeyFor "lowerer-b" "cst" "pre" "a.c" lpaths ltexts .true;
+  check "lower: the lowerer identity is in the key" (Bool.not (String.eq lkBase lowererKey));
+  let cstKey := Scry.lowerCacheKeyFor "lowerer" "cst-b" "pre" "a.c" lpaths ltexts .true;
+  check "lower: the full CST digest is in the key" (Bool.not (String.eq lkBase cstKey));
+  let preKey := Scry.lowerCacheKeyFor "lowerer" "cst" "pre-b" "a.c" lpaths ltexts .true;
+  check "lower: the preprocessing digest is in the key" (Bool.not (String.eq lkBase preKey));
+  let targetKey := Scry.lowerCacheKeyFor "lowerer" "cst" "pre" "b.c" lpaths ltexts .true;
+  check "lower: the target alone changes the key" (Bool.not (String.eq lkBase targetKey));
+  let textKey := Scry.lowerCacheKeyFor "lowerer" "cst" "pre" "a.c" lpaths ltextsG .true;
+  check "lower: the original text digest is in the key" (Bool.not (String.eq lkBase textKey));
+  let modeKey := Scry.lowerCacheKeyFor "lowerer" "cst" "pre" "a.c" lpaths ltexts .false;
+  check "lower: --allow-errors is in the key" (Bool.not (String.eq lkBase modeKey));
+  -- H5: a same-length `#line` rewrite blanks to the same preprocessed text, so the parse
+  -- cache's `preDigest` cannot see it; the lowering key's digest also covers the line map
+  let raw10 := "# 10 \"x.c\"\nint f(void) { return 0; }\n";
+  let raw20 := "# 20 \"x.c\"\nint f(void) { return 0; }\n";
+  let origText := "int f(void) { return 0; }\n";
+  let lineFiles := [("x.c", origText)];
+  let p10 := Scry.preprocess "x.c" raw10 lineFiles;
+  let p20 := Scry.preprocess "x.c" raw20 lineFiles;
+  check "lower: a same-length #line rewrite keeps the blanked preprocessed text" (String.eq p10.text p20.text);
+  check "lower: a same-length #line rewrite changes the lowering pre digest" (Bool.not (String.eq (Scry.lowerPreDigest p10) (Scry.lowerPreDigest p20)));
+
+  let ldir := String.append tmp "/lower";
+  FS.createDir ldir;
+  let lcacheDir := String.append tmp "/lowercache";
+  let lcache : Scry.CacheOpts := Scry.CacheOpts.mk .true lcacheDir .json;
+  FS.writeFile (String.append ldir "/h.h") "#define VALUE 1\nint helper(int x);\n";
+  FS.writeFile (String.append ldir "/a.c") "#include \"h.h\"\nint main(void) { return helper(VALUE); }\n";
+  l0 ← build ldir lcache;
+  check "lower: cold hit 0" (Nat.beq l0.2.lowerHit 0);
+  check "lower: cold miss 1" (Nat.beq l0.2.lowerMiss 1);
+  check "lower: cold write 1" (Nat.beq l0.2.lowerWrite 1);
+  l1 ← build ldir lcache;
+  check "lower: warm hit 1" (Nat.beq l1.2.lowerHit 1);
+  check "lower: warm miss 0" (Nat.beq l1.2.lowerMiss 0);
+  check "lower: warm write 0" (Nat.beq l1.2.lowerWrite 0);
+  let tu0 := match l0.1.units with
+    | .cons a _ => Scry.tuDump a.tu a.path a.errors (Scry.cstFullDigest a.store)
+    | .nil => "";
+  let tu1 := match l1.1.units with
+    | .cons b _ => Scry.tuDump b.tu b.path b.errors (Scry.cstFullDigest b.store)
+    | .nil => "";
+  check "lower: the warm TU dump is byte-identical to cold" (String.eq tu0 tu1);
+  FS.writeFile (String.append ldir "/h.h") "#define VALUE 2\nint helper(int x);\n";
+  l2 ← build ldir lcache;
+  check "lower: a changed header does not hit" (Nat.beq l2.2.lowerHit 0);
+  check "lower: a changed header misses" (Nat.lt 0 l2.2.lowerMiss);
+  l2cold ← Scry.ProjectIO.buildProject ldir .none "cc" .true .false .false .nil (Scry.CacheOpts.mk .false "" .json);
+  let tu2 := match l2.1.units with
+    | .cons a _ => Scry.tuDump a.tu a.path a.errors (Scry.cstFullDigest a.store)
+    | .nil => "";
+  let tu2cold := match l2cold.1.units with
+    | .cons b _ => Scry.tuDump b.tu b.path b.errors (Scry.cstFullDigest b.store)
+    | .nil => "";
+  check "lower: the changed-header TU equals a cold build" (String.eq tu2 tu2cold);
+  l3 ← build ldir lcache;
+  check "lower: the changed header's entry warms" (Nat.beq l3.2.lowerHit 1);
+  let tu3 := match l3.1.units with
+    | .cons a _ => Scry.tuDump a.tu a.path a.errors (Scry.cstFullDigest a.store)
+    | .nil => "";
+  check "lower: the re-warmed TU equals the cold build" (String.eq tu3 tu2cold);
+
+  -- H5 operationally: a comment edit in a header changes the original text (and so
+  -- every byte offset in that file) but not the preprocessed text, so the CST cache hits
+  -- while the lowering cache must miss and re-lower to the new origins
+  let cmDir := String.append tmp "/lower-comment";
+  FS.createDir cmDir;
+  let cmCacheDir := String.append tmp "/lower-comment-cache";
+  let cmCache : Scry.CacheOpts := Scry.CacheOpts.mk .true cmCacheDir .json;
+  FS.writeFile (String.append cmDir "/h.h") "/* one */\nstatic int helper(void) { return 1; }\n";
+  FS.writeFile (String.append cmDir "/a.c") "#include \"h.h\"\nint main(void) { return helper(); }\n";
+  m0 ← build cmDir cmCache;
+  check "lower: the comment fixture is cold" (Nat.beq m0.2.hit 0);
+  check "lower: the comment fixture lowers cold" (Nat.beq m0.2.lowerMiss 1);
+  m1 ← build cmDir cmCache;
+  check "lower: the comment fixture parse warms" (Nat.beq m1.2.hit 1);
+  check "lower: the comment fixture lower warms" (Nat.beq m1.2.lowerHit 1);
+  FS.writeFile (String.append cmDir "/h.h") "/* a much longer comment */\nstatic int helper(void) { return 1; }\n";
+  m2 ← build cmDir cmCache;
+  check "lower: a header comment hits the CST cache" (Nat.beq m2.2.hit 1);
+  check "lower: a header comment misses the parse cache 0" (Nat.beq m2.2.miss 0);
+  check "lower: a header comment misses the lowering cache" (Nat.beq m2.2.lowerHit 0);
+  check "lower: a header comment re-lowers" (Nat.beq m2.2.lowerMiss 1);
+  m2cold ← Scry.ProjectIO.buildProject cmDir .none "cc" .true .false .false .nil (Scry.CacheOpts.mk .false "" .json);
+  let tu4 := match m2.1.units with
+    | .cons a _ => Scry.tuDump a.tu a.path a.errors (Scry.cstFullDigest a.store)
+    | .nil => "";
+  let tu4cold := match m2cold.1.units with
+    | .cons b _ => Scry.tuDump b.tu b.path b.errors (Scry.cstFullDigest b.store)
+    | .nil => "";
+  check "lower: the comment change's warm TU has the cold origins" (String.eq tu4 tu4cold);
+
+  -- a fresh one-TU project for the corruption cases, so the cache holds exactly one
+  -- lowering entry (the header fixture above has an older, still-valid one too)
+  let cdir := String.append tmp "/lower-corrupt";
+  FS.createDir cdir;
+  let ccacheDir := String.append tmp "/lower-corrupt-cache";
+  let ccache : Scry.CacheOpts := Scry.CacheOpts.mk .true ccacheDir .json;
+  FS.writeFile (String.append cdir "/c.c") "int c(void) { return 1; }\n";
+  c0 ← build cdir ccache;
+  check "lower: the corruption fixture writes one entry" (Nat.beq c0.2.lowerWrite 1);
+  cnames ← FS.listDir ccacheDir;
+  let centries := List.filter (fun n => String.startsWith n "lower-") cnames;
+  let centry := match centries with
+    | .cons n _ => String.append ccacheDir (String.append "/" n)
+    | .nil => "";
+  ctext ← FS.readFile centry;
+  check "lower: the entry names its format" (String.startsWith ctext "scry-project-lower 1\n");
+  check "lower: the entry names the lowerer stamp" (String.contains ctext "lowerer c-lower-1 default-models");
+  FS.writeFile centry (String.take (Nat.div (String.length ctext) 2) ctext);
+  c1 ← build cdir ccache;
+  check "lower: a truncated entry does not hit" (Nat.beq c1.2.lowerHit 0);
+  check "lower: a truncated entry is corrupt" (Nat.lt 0 c1.2.lowerCorrupt);
+  check "lower: a truncated entry misses" (Nat.beq c1.2.lowerMiss 1);
+  c2 ← build cdir ccache;
+  check "lower: warms after truncation" (Nat.beq c2.2.lowerHit 1);
+  ctext2 ← FS.readFile centry;
+  let cbad := String.replace ctext2 "\nfunc\t" "\nfunc\tX";
+  check "lower: the body corruption fixture changed" (Bool.not (String.eq cbad ctext2));
+  FS.writeFile centry cbad;
+  c3 ← build cdir ccache;
+  check "lower: a body corruption does not hit" (Nat.beq c3.2.lowerHit 0);
+  check "lower: a body corruption is corrupt" (Nat.lt 0 c3.2.lowerCorrupt);
+  c4 ← build cdir ccache;
+  check "lower: warms after the digest mismatch" (Nat.beq c4.2.lowerHit 1);
+
+  -- two units with identical text at different targets: the target is part of the key,
+  -- so one TU's lowering can never be served for the other
+  let twinDir := String.append tmp "/lower-twins";
+  FS.createDir twinDir;
+  let twinCache : Scry.CacheOpts := Scry.CacheOpts.mk .true (String.append tmp "/lower-twincache") .json;
+  FS.writeFile (String.append twinDir "/a.c") "int twin(void) { return 1; }\n";
+  FS.writeFile (String.append twinDir "/b.c") "int twin(void) { return 1; }\n";
+  t0 ← build twinDir twinCache;
+  check "lower: twin cold hit 0" (Nat.beq t0.2.lowerHit 0);
+  check "lower: twin cold misses 2" (Nat.beq t0.2.lowerMiss 2);
+  check "lower: twin cold writes 2" (Nat.beq t0.2.lowerWrite 2);
+  t1 ← build twinDir twinCache;
+  check "lower: both targets hit on the second run" (Nat.beq t1.2.lowerHit 2);
+
+  FS.removeAll tmp;
+  check "cache: cleanup" .true)

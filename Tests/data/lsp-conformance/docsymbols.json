@@ -1,0 +1,10 @@
+{
+  "name": "docsymbols",
+  "servers": ["host"],
+  "uri": "file:///conf/docsymbols.wiz",
+  "text": "import Prelude\ndef one : Nat := 1\ndef two : Nat := one\n",
+  "requests": [{ "method": "textDocument/documentSymbol", "params": {} }],
+  "expected": [
+    { "match": "subset", "path": "result", "value": [{ "name": "one" }, { "name": "two" }] }
+  ]
+}

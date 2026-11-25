@@ -589,6 +589,19 @@ inductive InertReg where
   | conv
   deriving BEq, Repr, Inhabited
 
+/-- A declaration that failed to elaborate and was thus never added to the environment.
+The later uses of its name resolve to this record instead of `unknown identifier` (the
+root error is reported once, at the declaration): a use says *which* declaration failed
+and where. A diagnostics guard against the cascade; `ErrorCode.failedDeclaration`
+names the diagnostic. -/
+structure FailedDecl where
+  /-- the failed declaration command's span -/
+  info : SourceInfo := {}
+  /-- `line:col` of that span (1-based), rendered where the file's text is known (the
+  frontend's command loop); the elaborator itself only has offsets -/
+  pos : String := ""
+  deriving Repr, Inhabited
+
 /-- The global environment. `order` records insertion order so anything that walks
 the environment does so deterministically (never iterate the hash map directly). -/
 structure Globals (R : Type) where
@@ -698,6 +711,11 @@ structure Globals (R : Type) where
   erasure only (a type with a native representation is built and taken apart only in its
   own module, `nativeHome?` in `Compiler/Erase.lean`); the kernel ignores it. -/
   declModule : Std.HashMap Name String := {}
+  /-- (diagnostics) declarations that failed to elaborate, by name: a later use of the
+  name is reported as `failed-declaration` (naming the declaration and its position),
+  never as `unknown identifier`. Filled by the frontend's command loop (`step`); the
+  cache replays it (`Cache.Effect`). The kernel ignores it. -/
+  failedDecls : Std.HashMap Name FailedDecl := {}
 
 namespace Globals
 
@@ -855,6 +873,14 @@ def expandAliases (g : Globals R) (x : Name) : Name :=
   | (a, M) :: _ => M ++ (x.drop a.length).toString
   | [] => x
 
+/-- `List.eraseDups` keeping insertion order, in one pass: `eraseDups` is O(n²) and the
+candidate list is one name plus one per `open`, so it repeats exactly when two `open`s name
+the same namespace. -/
+def dedupNames (xs : List Name) : List Name :=
+  let step : Std.HashSet Name × List Name → Name → Std.HashSet Name × List Name :=
+    fun (seen, out) x => if seen.contains x then (seen, out) else (seen.insert x, x :: out)
+  (xs.foldl step ({}, [])).2.reverse
+
 /-- (13t) What the identifier `x` as written denotes in the module being elaborated.
 
 * A **qualified** name (`A.x`) is resolved as written, after an `open … as` alias maps
@@ -889,13 +915,22 @@ def resolveName (g : Globals R) (x : Name) : Except String Name :=
       ++ [x] ++ g.opens.map (· ++ "." ++ x)).filterMap fun n =>
         let k := g.resolve n
         if g.decls.contains k && (g.privateTo? k).isNone then some k else none
-    match found.eraseDups with   -- complexity: ok (one name plus at most its opens)
+    match dedupNames found with
     | [] => .ok (g.resolve x)
     | [n] => .ok n
     | ns =>
       let names := ns.map privateBase |>.mergeSort
       .error s!"'{x}' is ambiguous: it refers to {", ".intercalate (names.map (s!"'{·}'"))}; \
 qualify it with a namespace"
+
+/-- (diagnostics) The failed declaration an unresolved identifier `x` refers to, if any:
+the same candidates `resolveName` tries for an unqualified name (the current namespace,
+then the root, then each `open`), so that `broken` inside `namespace A` finds the failed
+`A.broken`. A use of such a name is `failed-declaration`, not `unknown identifier`. -/
+def failedDecl? (g : Globals R) (x : Name) : Option FailedDecl :=
+  let cands := (if g.namespacePrefix.isEmpty then [] else [g.namespacePrefix ++ "." ++ x])
+    ++ [x] ++ g.opens.map (· ++ "." ++ x)
+  ((dedupNames cands).filterMap (fun n => g.failedDecls[n]?)).head?
 
 end Globals
 

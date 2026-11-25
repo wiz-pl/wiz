@@ -2,7 +2,6 @@ import IO
 import Json
 import Web.DocLive
 import Web.Loom
-import Web.Wire
 
 /-!
 # The live documentation panel's runtime
@@ -17,6 +16,7 @@ of `{kind,a,b}` and applies them all before that one render (a hover answers sev
 fields at once; `web/doc-live.js` sends them together).
 -/
 link_c "js.c"
+link_c "step.c"   -- the browser ABI's i32 word entry (`wiz_step`, web/step.c)
 extern "js_patch" Js.patch : String → IO Unit
 
 def applyEffects (s : DocLive) (payload : String) : DocLive :=
@@ -31,11 +31,13 @@ def init : Loom.Session DocLive DocLiveMsg := Loom.LiveApp.session docLiveApp
 def html (s : Loom.Session DocLive DocLiveMsg) : String := Loom.Session.html s
 
 /-- The panel's first-render hash, the client half of adopt-and-listen: a page that
-server-renders `#doc-live` writes `data-wiz-ssr` with the same `Wire.ssrHash` of the
-same HTML, and `mount` then adopts the existing nodes instead of replacing them
-(`web/framework/adopt.js`). -/
+server-renders `#doc-live` writes `data-wiz-ssr` with the same `Loom.Session.ssrHash`,
+and `mount` then adopts the existing nodes instead of replacing them
+(`web/framework/adopt.js`). The hash is over the normalised tree (sorted attributes,
+collapsed white space, keys and a length/node-count witness), so an HTML spelling
+difference is not a mismatch. -/
 def ssrHash (s : Loom.Session DocLive DocLiveMsg) : String :=
-  Wire.ssrHash (Loom.Session.html s)
+  Loom.Session.ssrHash s
 
 def patched (s : Loom.Session DocLive DocLiveMsg) (next : DocLive) : IO (Loom.Session DocLive DocLiveMsg) := do
   let r := Loom.LiveApp.effectSessionJson docLiveApp s next;

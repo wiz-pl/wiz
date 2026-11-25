@@ -303,6 +303,10 @@ structure Effect (R : Type) where
   /-- (13b) names made private, and structures made opaque, with their module -/
   privates : Array (Name × String) := #[]
   opaques : Array (Name × String) := #[]
+  /-- (diagnostics) declarations that failed to elaborate, with their command's span and
+  `line:col`: the later uses of their names are `failed-declaration`, not `unknown
+  identifier` (they are replayed with the command that failed) -/
+  failed : Array (Name × SourceInfo × String) := #[]
 
 /-- The command kinds whose effect is just the fields of `Effect`.
 
@@ -331,11 +335,16 @@ def effectOf (s s' : CommandState R) : Effect R :=
     sites := newNames.filterMap fun n => (s'.declSites.get? n).map fun (i, m) => (n, i, m)
     docs := newNames.filterMap fun n => (s'.declDocs.get? n).map fun d => (n, d)
     privates := newEntries s.globals.privates s'.globals.privates
-    opaques := newEntries s.globals.opaques s'.globals.opaques }
+    opaques := newEntries s.globals.opaques s'.globals.opaques
+    failed := newFailed s.globals.failedDecls s'.globals.failedDecls }
 where
   newEntries (old new : Std.HashMap Name String) : Array (Name × String) :=
     if old.size == new.size then #[] else
     ((new.fold (init := #[]) fun acc n m => if old.contains n then acc else acc.push (n, m)).qsort
+      (fun a b => a.1 < b.1))
+  newFailed (old new : Std.HashMap Name FailedDecl) : Array (Name × SourceInfo × String) :=
+    if old.size == new.size then #[] else
+    ((new.fold (init := #[]) fun acc n d => if old.contains n then acc else acc.push (n, d.info, d.pos)).qsort
       (fun a b => a.1 < b.1))
 
 /-- Who declared a name, for messages: a module, or the file being checked (`""`). -/
@@ -348,8 +357,10 @@ def Effect.whose : Option String → String
 def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
   -- a builtin key is registered once (`command.builtin`); a replayed registration (a
   -- module that was elaborated on its own) must not get around that. (Other keys,
-  -- `extern:…`, `repr:…`, `inline`, are per constant.)
-  let once (k : Name) : Bool := k == "nat" || k.startsWith "nat." || k == "string" || k == "memo"
+  -- `extern:…`, `repr:…`, `inline`, are per constant.) The data-primitive spellings
+  -- (B1) are registered once too: they name what a literal means.
+  let once (k : Name) : Bool := k == "nat" || k.startsWith "nat." || k == "string" || k == "memo" ||
+    k == "unit" || k == "empty" || k == "qty" || k == "size" || k == "char" || k == "list"
   let clash := e.builtins.filter fun (k, n) => once k && (s.globals.builtinOf? k).any (· != n)
   if let (k, n) :: _ := clash then
     let was := (s.globals.builtinOf? k).getD "?"
@@ -376,6 +387,8 @@ def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
                                 privates := e.privates.foldl (fun m (n, md) => m.insert n md) globals.privates,
                                 opaques := e.opaques.foldl (fun m (n, md) => m.insert n md) globals.opaques }.setBuiltins
                                 (e.builtins ++ globals.builtins)
+  let globals := { globals with failedDecls := e.failed.foldl (fun m (n, i, p) =>
+                                m.insert n { info := i, pos := p }) globals.failedDecls }
   { s with globals, messages := s.messages ++ e.messages, builtins := e.builtins ++ s.builtins,
            classes := e.classes ++ s.classes, instances := s.instances ++ e.instances,
            coinductives := s.coinductives ++ e.coinductives, foreignTypes := e.foreignTypes ++ s.foreignTypes,
@@ -495,10 +508,11 @@ def Effect.toSx (e : Effect R) : Sx :=
     list (e.sites.toList.map fun (n, i, m) => list [str n, info i, str m]),
     list (e.privates.toList.map fun (n, m) => list [str n, str m]),
     list (e.opaques.toList.map fun (n, m) => list [str n, str m]),
-    list (e.docs.toList.map fun (n, d) => list [str n, str d.kind, list (d.doc.toList.map str), names d.parent.toList, nat d.start])]
+    list (e.docs.toList.map fun (n, d) => list [str n, str d.kind, list (d.doc.toList.map str), names d.parent.toList, nat d.start]),
+    list (e.failed.toList.map fun (n, i, p) => list [str n, info i, str p])]
 
 def Effect.ofSx? (x : Sx) : Option (Effect R) := do
-  let #[ds, ms, bs, as, cs, is, cos, fts, cc, hs, ss, ps, os, dcs] ← items? x | none
+  let #[ds, ms, bs, as, cs, is, cos, fts, cc, hs, ss, ps, os, dcs, fl] ← items? x | none
   let decl (x : Sx) : Option (Decl R) := do
     let #[n, ps, ty, v, inl, im, w, tw] ← items? x | none
     pure { name := ← atom? n, levelParams := ← (← items? ps).toList.mapM atom?, type := ← dterm ty,
@@ -543,12 +557,15 @@ def Effect.ofSx? (x : Sx) : Option (Effect R) := do
     docs := (← (← items? dcs).mapM fun x => do
       let #[n, k, d, p, st] ← items? x | none
       pure (← atom? n, { kind := ← atom? k, doc := (← (← items? d).toList.mapM atom?).head?,
-                         parent := (← dnames p).head?, start := ← (← atom? st).toNat? })) }
+                         parent := (← dnames p).head?, start := ← (← atom? st).toNat? }))
+    failed := (← (← items? fl).mapM fun x => do
+      let #[n, i, p] ← items? x | none
+      pure (← atom? n, ← dinfo i, ← atom? p)) }
 
 /-- The cache's version: change it whenever the format or the elaborator's output changes.
 (The directory store also mixes in the binary's own hash, `binaryId`, so two builds of
 wiz never share entries; the salt is for invalidating by hand.) -/
-def salt : UInt64 := hash "wiz-cache-32-type-written"  -- 32: `Decl.typeWritten` (the type was written, so `#check` keeps the Π names of its ascription), so cached declarations carry it; 31: macro scopes start at the command's source position (a cache hit no longer shifts them); 30: mandatory component sorts (Π/Σ carry ⟨dom, cod⟩, ULift its content's sort), a mutual block's constructors named per type, error codes, `Info.fix`, `scase` quantity (K1), `letUnit`; 20: proof markers (P2: declarations are stored marked); 15: doc comments and declaration kinds (11s); 14: a builtin key is registered once; 13: witnesses, assumed registrations, warnings; 12: private constructors, observations, fields (13b); 11: 22i, marked structure tails; 9: private names (13b); 8: Q4
+def salt : UInt64 := hash "wiz-cache-33-failed-declaration"  -- 33: failed declarations are replayed, so a use of one says "failed to elaborate" on a warm cache too; 32: `Decl.typeWritten` (the type was written, so `#check` keeps the Π names of its ascription), so cached declarations carry it; 31: macro scopes start at the command's source position (a cache hit no longer shifts them); 30: mandatory component sorts (Π/Σ carry ⟨dom, cod⟩, ULift its content's sort), a mutual block's constructors named per type, error codes, `Info.fix`, `scase` quantity (K1), `letUnit`; 20: proof markers (P2: declarations are stored marked); 15: doc comments and declaration kinds (11s); 14: a builtin key is registered once; 13: witnesses, assumed registrations, warnings; 12: private constructors, observations, fields (13b); 11: 22i, marked structure tails; 9: private names (13b); 8: Q4
 
 /-! ## Keys and atomic writes (stage 23c)
 
@@ -1068,7 +1085,7 @@ structure ModuleManifest where
   toolchain : String := ""
   /-- the strong toolchain namespace (`Toolchain.tag`: target, compiler, flags) -/
   toolchainTag : String := ""
-  /-- the strong target namespace (`Toolchain.targetTag`: triple and word width) -/
+  /-- the strong target namespace (`Toolchain.targetTag`: triple, word width and the selected backend entry) -/
   targetTag : String := ""
   /-- the rig the region was saved for (`RigTag.tag`) -/
   rig : String := ""
@@ -1348,7 +1365,15 @@ structure ManifestStore where
   entries : IO.Ref (Std.HashMap String (Array (ManifestEntry × System.FilePath)))
   /-- module `Key.id` → (region entry, layer), in layer order -/
   regions : IO.Ref (Std.HashMap String (Array (ManifestEntry × System.FilePath)))
-  /-- keys named by a manifest whose own root failed: always a miss -/
+  /-- `Key.id`s named by a manifest whose own root, expiry or tags failed: a miss in every
+  layer. Poison is **global per key**, not per layer (K2 option (a), the spec's §1.4/I12,
+  pinned by `=cache-invariants` T11): a bad manifest in any searched layer hides a valid
+  entry for the same key in *another* layer, including the write cache, and the poisoning
+  goes both ways. The scope is the ids the manifest names (its command keys, its region key
+  and the fast-only compatibility ids), so another module's key in the same layer is
+  untouched. That is an availability cost chosen over a per-layer set: it never yields a
+  wrong result, and a repair run rewrites the bad layer. Do not scope this per layer
+  without restating §1.4 and I12 and changing T11. -/
   poisoned : IO.Ref (Std.HashSet String)
   /-- module keys with a manifest file in some layer (valid or not) -/
   present : IO.Ref (Std.HashSet String)
@@ -1388,6 +1413,10 @@ def ManifestStore.isRead (m : ManifestStore) (dir : System.FilePath) : Bool :=
 def ManifestStore.isUnsigned (m : ManifestStore) (dir : System.FilePath) : Bool :=
   m.unsignedReads.any (·.toString == dir.toString)
 
+/-- May `dir` be served? The write layer always; a read-only layer only if it opted in. -/
+def ManifestStore.trusted (m : ManifestStore) (dir : System.FilePath) : Bool :=
+  !m.isRead dir || m.isUnsigned dir
+
 /-- A layer's generation expiry (Unix seconds, `0` for none), read once. -/
 def ManifestStore.expiryOf (m : ManifestStore) (dir : System.FilePath) : IO Nat := do
   let key := dir.toString
@@ -1424,10 +1453,12 @@ def ManifestStore.bump (m : ManifestStore) (f : VerifyCounts → VerifyCounts) :
 def ManifestStore.inWrite (m : ManifestStore) (dir : System.FilePath) : Bool :=
   some dir.toString == m.write.map (·.toString)
 
-/-- Index the region entry a layer just wrote, replacing that layer's previous entry for
-the key. A rewritten region may differ byte-for-byte from the old one (the image is not
-canonical), so keeping the old entry first would read the new file against the old
-digest, drop it, and lose the repair. -/
+/-- (K1) Index the region entry a layer just wrote, replacing that layer's previous entry
+for the key. A rewritten region may differ byte-for-byte from the old one (the image is not
+canonical), so keeping the old entry first would read the new file against the old digest,
+drop it, and lose the repair. Read-layer entries for the key are kept: they may answer
+another layer, and they are tried before or after this one without changing the artifact
+the key selects. -/
 def ManifestStore.setRegion (m : ManifestStore) (id : String) (e : ManifestEntry)
     (dir : System.FilePath) : IO Unit :=
   m.regions.modify fun mp =>
@@ -1485,7 +1516,9 @@ def ManifestStore.load (m : ManifestStore) (key : Key) : IO Unit := do
             m.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (e, dir))
         else
           -- (expired or not self-consistent: the entries it names are all misses, both
-          -- under its strong keys and under the fast-only compatibility key)
+          -- under its strong keys and under the fast-only compatibility key. The poison is
+          -- global per key by design — K2 option (a), pinned by T11 — so this layer's bad
+          -- manifest also hides a valid entry for the same key in another layer.)
           if expired then
             IO.eprintln s!"cache verify: {dir}: manifest for module {man.module} expired (valid-until {man.validUntil})"
           for e in man.allEntries do
@@ -1958,7 +1991,12 @@ def Store.layeredCore (write : Option System.FilePath) (reads : List System.File
       | none => pure ()
     seen := fun k => do
       if (← seenInMemory.get).contains (Key.id k) then return true
-      for dir in dirs do
+      -- (only layers that may be served: a refused read-only layer's marker says nothing
+      -- this process may rely on — C1)
+      let usable := match manifests with
+        | some ms => dirs.filter ms.trusted
+        | none => dirs        -- `--cache-verify off`: the explicit unverified mode
+      for dir in usable do
         if ← (dir / s!"{markerName k}.wizm").pathExists then return true
       pure false
     markSeen := fun k m => match write with
@@ -2066,6 +2104,13 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
             { a with binary := binary, textSalt := salt, rig := opts.rig }
           for ent in e.toList do
             let id := Key.id key
+            -- (K1) replace the write layer's entries for this id: the failed old entry
+            -- and the fresh one name the same file, and the post-pass `getRegion` walks
+            -- the list old-first. Read-layer entries are kept (they may answer other
+            -- layers), but the write layer must not leave its own stale entry ahead of
+            -- the bytes it just wrote. `setRegion` (this side of the merge) is that
+            -- repair, factored: it drops the write layer's entry for the key and adds
+            -- the fresh one, so neither the old digest nor a deleted repair survives.
             ms.setRegion id ent dir
           pure e
         catch _ => pure none

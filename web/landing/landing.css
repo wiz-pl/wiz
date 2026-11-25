@@ -12,6 +12,8 @@
   --ok: #2e7d32;
   --code-bg: #1d1d1b;
   --code-fg: #f2f2ea;
+  --code-chrome: #26272b;
+  --code-chrome-fg: #c9c9c2;
   --radius: 10px;
   --measure: 68rem;
 }
@@ -27,6 +29,8 @@
     --ok: #8bd48f;
     --code-bg: #101113;
     --code-fg: #e6e6e0;
+    --code-chrome: #1a1b1e;
+    --code-chrome-fg: #b8b8b0;
   }
 }
 * { box-sizing: border-box; }
@@ -55,8 +59,27 @@ pre {
   line-height: 1.55;
 }
 pre code { font-size: inherit; }
-.tok-keyword { color: #9cdcfe; }
-.tok-number { color: #ce9178; }
+
+/* The four classes `wiz doc` bakes in (`Wiz/Doc/Highlight.lean`); no other token
+   class is used. The colours are chosen for the dark code panel and all clear 4.5:1. */
+.hl-kw { color: #9cdcfe; font-weight: 600; }
+.hl-com { color: #a8b3a0; font-style: italic; }
+.hl-str { color: #ce9178; }
+.hl-num { color: #b5cea8; }
+@media (prefers-contrast: more) { .hl-com { color: var(--code-fg); } }
+
+/* Visible only to assistive technology (the carousel's status line). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* The skip link is visible only when focused. */
 .skip-link {
@@ -138,13 +161,118 @@ h1 em { color: var(--accent); font-style: normal; }
 .button:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
 .button.primary { border-color: var(--accent); background: var(--accent); color: var(--bg); }
 .button.primary:hover { filter: brightness(1.08); color: var(--bg); }
-.hero-code { max-width: 44rem; margin-top: 2.2rem; }
-.hero-note { max-width: 44rem; margin: -.2rem 0 0; color: var(--dim); font-size: .92rem; }
+.install-quick { max-width: 48rem; margin-top: 2.2rem; }
+.install-title { margin: 0 0 .2rem; font-size: 1.02rem; }
+.install-quick pre { margin: .6rem 0 .4rem; }
 
 .section { padding: 3rem 0; border-top: 1px solid var(--line); }
 .section h2 { margin: 0 0 .6rem; font-size: clamp(1.5rem, 3vw, 2rem); letter-spacing: -.01em; }
 .section-lede { max-width: 46rem; margin: 0 0 1.6rem; color: var(--dim); }
 .section h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+
+/* -- The carousel ------------------------------------------------------- */
+.carousel {
+  margin-top: 1.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.carousel-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .2rem;
+  margin: 0;
+  padding: .6rem .7rem 0;
+  border-bottom: 1px solid var(--line);
+}
+.tab {
+  display: inline-block;
+  padding: .45rem .8rem;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  color: var(--dim);
+  font-weight: 600;
+  font-size: .95rem;
+  text-decoration: none;
+}
+.tab:hover { color: var(--accent); }
+.tab[aria-selected="true"] { border-color: var(--line); background: var(--bg); color: var(--fg); }
+.carousel-panels { padding: 1rem 1.1rem 1.2rem; }
+.slide { margin: 0; padding: 0; border: 0; }
+.slide + .slide { margin-top: 1.2rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+.slide:focus-visible { outline: 3px solid var(--accent); outline-offset: 6px; }
+/* With JavaScript the carousel shows one panel; without it, every panel is the page. */
+#carousel[data-carousel="on"] .slide:not([data-active]) { display: none; }
+#carousel[data-carousel="on"] .slide + .slide { margin-top: 0; padding-top: 0; border-top: 0; }
+/* A cold deep link (#/s/<name>) marks its panel without JavaScript. */
+.carousel:not([data-carousel="on"]) .slide:target {
+  border-radius: 6px;
+  outline: 2px dashed var(--accent);
+  outline-offset: 6px;
+}
+.slide-head h3 { margin: 0 0 .2rem; font-size: 1.08rem; }
+.slide-lede { max-width: 48rem; margin: 0; color: var(--dim); font-size: .95rem; }
+.snippet { margin: .9rem 0 0; }
+.snippet-chrome {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .35rem .9rem;
+  padding: .4rem .7rem;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--code-chrome);
+  color: var(--code-chrome-fg);
+  font-size: .8rem;
+}
+.snippet-lang { font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.snippet-file { color: var(--code-chrome-fg); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.snippet-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .7rem; margin-left: auto; }
+.snippet pre { margin: 0; border-radius: 0 0 var(--radius) var(--radius); }
+.snippet pre:focus-visible { outline-offset: -3px; border-radius: 0 0 var(--radius) var(--radius); }
+.copy {
+  padding: .18rem .55rem;
+  border: 1px solid #55565c;
+  border-radius: 6px;
+  background: #33343a;
+  color: #e6e6e0;
+  font: inherit;
+  font-size: .8rem;
+  cursor: pointer;
+}
+.copy:hover { border-color: var(--accent); }
+.run { color: #9cc7ff; font-weight: 600; }
+
+/* -- The quantity island ------------------------------------------------ */
+.q-app {
+  margin-top: 1.2rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.q-intro { margin: 0 0 .8rem; color: var(--dim); font-size: .95rem; }
+.q-control { display: none; align-items: center; gap: .6rem; margin: 0 0 .9rem; }
+#quantity-app[data-live] .q-control { display: flex; }
+.q-control label { font-weight: 600; }
+.q-control select {
+  padding: .35rem .5rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+.q-panel { margin: .9rem 0 0; padding: .9rem 1rem; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.q-panel h3 { margin: 0 0 .4rem; font-size: .95rem; }
+.q-panel p { margin: .4rem 0 0; color: var(--dim); font-size: .93rem; }
+.q-panel pre { margin: .5rem 0 0; }
+/* The control is CSS-hidden until the runtime mounts, so no-JS readers get the stack
+   and never an inert control. With it, one state attribute selects one panel. */
+#quantity-app[data-live] .q-app.q0 .q-panel:not([data-for="0"]),
+#quantity-app[data-live] .q-app.q1 .q-panel:not([data-for="1"]),
+#quantity-app[data-live] .q-app.qw .q-panel:not([data-for="w"]) { display: none; }
+
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
@@ -215,4 +343,5 @@ h1 em { color: var(--accent); font-style: normal; }
   .hero { padding-top: 3rem; }
   .steps > li { padding-left: 1.2rem; }
   .steps > li::before { position: static; margin-bottom: .5rem; }
+  .snippet-actions { margin-left: 0; }
 }

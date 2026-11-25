@@ -1,0 +1,27 @@
+-- The playground's static-complete page: the whole app's first paint, as Loom renders
+-- it, plus the normalised tree hash the runtime exports as `wiz_loom_ssr_hash`.
+--
+-- `web/build-playground.sh` runs this and passes the JSON to `web/playground_static.mjs`,
+-- which fills `web/playground.html`'s two placeholders. With JavaScript off the page is
+-- the complete playground shell (header, toolbar, editor, panes, footer); with it on the
+-- runtime **adopts** this tree (the hash matches) instead of replacing it. The hash is
+-- over the normalised tree, so an HTML spelling difference is not a mismatch.
+--
+--   wiz run -I <repo>/lib web/playground_static_gen.wiz
+import IO
+import Json
+import Web.Loom
+import Web.Playground
+
+def s0 : Page := Page.initial
+def rendered : Loom.Rendered PageMsg := Loom.LiveApp.render pageApp s0
+
+def fields : List (String × Json) :=
+  [ Json.field "html" (Json.mkStr rendered.html)
+  , Json.field "hash" (Json.mkStr (Loom.LiveApp.ssrHash pageApp s0))
+  , Json.field "nodes"
+      (Json.ofNat (Loom.nodeCount (Loom.RNode.ofList (Loom.RNode.siblings rendered.tree))))
+  ]
+
+def main : IO Unit := do
+  IO.println (Json.render (Json.mkObj fields))

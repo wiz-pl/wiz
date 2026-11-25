@@ -57,9 +57,63 @@ need licenses/GPL-3.0.txt
 need guide/docs/index.html
 need guide/guide.css
 
-# The source reader, when the site has one. A publishing build sets SITE_REQUIRE_SOURCE=1
-# (web/build-site.sh refused to build without a bundle then), so the page and both halves
-# of its runtime are part of the artifact; a docs-only tree may omit the directory.
+# The playground is static-complete: its island carries the Loom first paint and the
+# normalised tree hash, so a JS-off load is the page (and a JS-on load adopts it). A
+# template with an unfilled placeholder, or an error message baked into the artifact,
+# is a broken build rather than a styling problem.
+playground_page="$SITE/playground/index.html"
+if [ -f "$playground_page" ]; then
+  for want in 'id="app"' 'data-wiz-island' 'data-wiz-ssr="t1-' '<header' '<main' \
+              '<footer' 'id="editor"' 'id="preset"'; do
+    grep -qF "$want" "$playground_page" || {
+      echo "check-site: playground/index.html has no $want (not the static-complete page)" >&2
+      fail=1
+    }
+  done
+  grep -qF '<!--wiz-static-->' "$playground_page" && {
+    echo "check-site: playground/index.html still has an unfilled static placeholder" >&2
+    fail=1
+  }
+  grep -qF 'data-wiz-error' "$playground_page" && {
+    echo "check-site: playground/index.html carries a data-wiz-error (a failed mount)" >&2
+    fail=1
+  }
+fi
+
+# The landing page is generated (web/build-landing.sh) and static-complete: the
+# carousel's panels are real snippets, the quantity island carries the Loom first paint
+# and its normalised-tree hash, and no template placeholder or mount error survives.
+landing_page="$SITE/index.html"
+if [ -f "$landing_page" ]; then
+  for want in 'id="carousel"' 'role="tablist"' 'aria-selected="true"' \
+              'role="tabpanel"' 'id="quantity-app"' 'data-wiz-island="loom/1"' \
+              'data-wiz-ssr="t1-' 'id="quantity-widget"' 'class="q-panel"'; do
+    grep -qF "$want" "$landing_page" || {
+      echo "check-site: index.html has no $want (not the static-complete landing)" >&2
+      fail=1
+    }
+  done
+  grep -qF '<!--wiz-' "$landing_page" && {
+    echo "check-site: index.html still has an unfilled static placeholder" >&2
+    fail=1
+  }
+  grep -qF 'data-wiz-error' "$landing_page" && {
+    echo "check-site: index.html carries a data-wiz-error (a failed mount)" >&2
+    fail=1
+  }
+  # The island's module and mount contract: a page that names an island without them
+  # cannot start, and a JS-on load would silently stay static.
+  for f in app.js carousel.js framework/mount.js framework/driver.js \
+           framework/runtime.js framework/adopt.js wiz-landing-ui.mjs \
+           wiz-landing-ui.wasm; do
+    need "landing/$f"
+  done
+fi
+
+# The source reader, when the site has one. `.#pages` and the `docs check` job set
+# SITE_REQUIRE_SOURCE=1 for this script (the artifact always has `/source/` then), so
+# the page and both halves of its runtime are part of the tree; a docs-only tree may
+# omit the directory.
 if [ -d "$SITE/source" ] || [ "${SITE_REQUIRE_SOURCE:-0}" = 1 ]; then
   need source/index.html
   need source/app.js
@@ -90,6 +144,7 @@ check_imports() {
   done
 }
 check_imports "$SITE/playground"
+[ -d "$SITE/landing" ] && check_imports "$SITE/landing"
 [ -d "$SITE/source" ] && check_imports "$SITE/source"
 
 # Every local href/src of FILE resolves under BASE (a directory → its index.html).

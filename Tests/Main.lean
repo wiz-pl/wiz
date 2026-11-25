@@ -146,11 +146,13 @@ def jsonStr (s : String) : String := Id.run do
         else out.push c
   return out.push '"'
 
-/-- The `--timings` record of a case: one line of JSON. -/
-def timingLine (shard group : String) (r : CaseResult) : String :=
+/-- The `--timings` record of a case: one line of JSON.  `limit` is the wall limit the
+case ran under (`--test-timeout`, or `null` for none), so `scripts/ci.py timings` can
+say how much of it a case used without re-parsing the log. -/
+def timingLine (shard group : String) (r : CaseResult) (limit : Option Nat) : String :=
   let notes := ", ".intercalate (r.notes.map jsonStr)
   s!"\{\"shard\": {jsonStr shard}, \"group\": {jsonStr group}, \"index\": {r.index}, \"case\": {jsonStr r.name}, " ++
-  s!"\"seconds\": {showMs r.ms}, \"ok\": {r.ok}, \"notes\": [{notes}]}"
+  s!"\"seconds\": {showMs r.ms}, \"limit\": {match limit with | some n => toString n | none => "null"}, \"ok\": {r.ok}, \"notes\": [{notes}]}"
 
 /-- Remove `--FLAG VALUE` from the arguments; the value, if it was there. -/
 def takeFlag (flag : String) : List String → Option String × List String
@@ -197,9 +199,9 @@ exits with its result (`runOne`). A selector that picks nothing, a case index th
 lacks and an unknown flag are errors. A skip the case declares (`Tests.skip`: a
 documented gap, a `-- test: skip` marker) shows as `⊘` and is counted apart. A case that
 cannot run because a dependency is missing (`Tests.skipMissing`) is a **failure** that
-names the dependency, unless `--allow-missing-deps` (or `WIZ_ALLOW_MISSING_DEPS=1`, the
-shard driver's equivalent) is given, in which case it is a reported skip and the summary
-counts it. `--stats` prints the core evaluator's counters (`Wiz.Core.Stats`) on stderr at
+names the dependency, unless the explicit `--allow-missing-deps` flag is given, in which
+case it is a reported skip and the summary counts it. The flag is the only way: a case that
+reported an error is a failure even with the flag, and there is no environment variable. `--stats` prints the core evaluator's counters (`Wiz.Core.Stats`) on stderr at
 exit, for the driver and for each case's process; it is diagnostics only, and no term,
 cache key or output depends on it. `--timings FILE` appends one line of JSON per case to
 FILE (its group, index, name, wall time in seconds, whether it passed, and its notes:
@@ -212,6 +214,12 @@ in still run one case at a time, but each of their cases is told N (`Tests.caseJ
 long sweep may use N workers inside its one process (`=selfhost-libdiff`, fewer when the
 memory or CPUs are short). `--jobs-all` also parallelizes groups that did not opt in (for
 auditing a group's isolation, not for CI).
+
+`--test-timeout N` (default 3600 s, `0` for none) is the wall limit each case's process
+is given (`Tests.caseCommand`: `timeout --kill-after=10 N`); every case line prints it
+(`(12.3 s / limit 3600 s)`, `limit none` without one), and `--timings` records it as
+`"limit"`, so `scripts/ci.py timings` can warn at 80 % of it. A case that runs past the
+limit fails with that sentence rather than holding the shard to the job timeout.
 
 `--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--ratchet FILE] [--jobs N] [--part i/n]`
 runs the self-hosted compiler and the Lean frontend over every `lib/` and `scry/` file
@@ -229,13 +237,12 @@ def mainImpl (args : List String) : IO UInt32 := do
   -- a `panic!` fails the case that hits it (each case runs in its own process), as it
   -- fails `wiz check`; `--panic-probe continue` turns it off again
   Wiz.exitOnPanic
-  -- A missing dependency is a failure unless this explicit opt-out is given, and the
-  -- environment variable is its equivalent for the shard driver (CI sets it from
-  -- `.github/test-shards.json`'s `allow-missing-deps`, never by default). It is taken off
-  -- before the toolchain flags and passed to each case's process, which strips it again.
-  let (allowArg, args) := takeSwitch "--allow-missing-deps" args
-  let allowEnv ← IO.getEnv "WIZ_ALLOW_MISSING_DEPS"
-  let allowMissing := allowArg || allowEnv.isSome
+  -- A missing dependency is a failure unless the **explicit flag** is given. There is no
+  -- environment variable: an environment that could silently turn a failure into a skip is
+  -- the same defect as a PATH that silently finds the wrong compiler. `--allow-missing-deps`
+  -- is visible in the argv of the run that used it, and CI passes it only for the shards
+  -- whose `allow-missing-deps` is declared in `.github/test-shards.json`.
+  let (allowMissing, args) := takeSwitch "--allow-missing-deps" args
   setAllowMissingDeps allowMissing
   -- `--stats` enables the core counters in this process and in each case's process (the
   -- counter output is diagnostics on stderr; a case's result never depends on it)
@@ -262,25 +269,67 @@ def mainImpl (args : List String) : IO UInt32 := do
     | IO.eprintln "--jobs needs a count of at least 1"; return 2
   caseJobsRef.set jobs
   caseJobsSetRef.set jobsArg.isSome
+  -- `--selfhost-cache DIR`: the directory the self-hosted compiler and checker are built
+  -- in and kept (default: the system temp directory). A flag, not an environment
+  -- variable, so a run states where its cache lives and every case's process inherits it.
+  let (cacheArg, args) := takeFlag "--selfhost-cache" args
+  selfhostCacheRef.set (cacheArg.map System.FilePath.mk)
+  -- `--selfhost-compiler PATH` / `--selfhost-checker PATH`: use these binaries instead of
+  -- building them (they win over `WIZ_SELFHOST_COMPILER`/`_CHECKER`, which stay as the
+  -- stub-compiler escape hatch for a child process).
+  let (compilerArg, args) := takeFlag "--selfhost-compiler" args
+  selfhostCompilerRef.set (compilerArg.map System.FilePath.mk)
+  let (checkerArg, args) := takeFlag "--selfhost-checker" args
+  selfhostCheckerRef.set (checkerArg.map System.FilePath.mk)
   -- `--part i/n`: the part of a split sweep to run (`=selfhost-libdiff`), passed on to
   -- each case's process; not given, a case runs the whole sweep (`1/1`)
   let (partArg, args) := takeFlag "--part" args
   casePartRef.set (partArg.getD "")
+  -- `--test-timeout N`: the wall limit each case's process is given (`timeout`), printed
+  -- in every case line and recorded in `--timings`; 0 means no limit.  It is taken off
+  -- here, like `--jobs`, so it does not reach a case's `--run-case` child (the parent
+  -- owns the wrapper).
+  let (timeoutArg, args) := takeFlag "--test-timeout" args
+  let some timeoutLimit := (match timeoutArg with
+      | none => some (some defaultCaseTimeoutS)
+      | some s => match s.toNat? with
+        | some 0 => some none
+        | some n => some (some n)
+        | none => none)
+    | IO.eprintln s!"--test-timeout needs a number of seconds (0 for no limit), not {timeoutArg}";
+      return 2
+  setTestTimeLimit timeoutLimit
   -- the processes the suite starts get the toolchain as flags
   let child := match args with
-    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | "--list-cases" :: _ | "--allocs" :: _ | "--libdiff-host" :: _ | "--part" :: _ => true
+    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | ["--list-parallel"] | "--list-cases" :: _ | "--allocs" :: _ | "--libdiff-host" :: _ | "--part" :: _ | "--selfhost-identity" :: _ | "--selfhost-cache-probe" :: _ | "--selfhost-override-probe" :: _ => true
     | _ => false
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
   flagsRef.set (tc.toFlags ++ (if traceGuesses then ["--trace-guess-fallback"] else [])
     ++ (if statsArg then ["--stats"] else [])
-    ++ (if allowMissing then ["--allow-missing-deps"] else []))
+    ++ (if allowMissing then ["--allow-missing-deps"] else [])
+    ++ (match cacheArg with | some d => ["--selfhost-cache", d] | none => [])
+    ++ (match compilerArg with | some p => ["--selfhost-compiler", p] | none => [])
+    ++ (match checkerArg with | some p => ["--selfhost-checker", p] | none => []))
   match args' with
   -- one case in this process: what `Group.run` starts for each case
   | ["--run-case", group, ix] =>
     match (← findGroup group) >>= fun g => ix.toNat? >>= (g.cases[·]?) with
     | some c => c.runHere
     | none => do IO.eprintln s!"no such case: {group} #{ix}"; pure 2
+  -- The composed self-hosted program as source, for the Nix derivations that build
+  -- `.#selfhost-compiler`/`.#selfhost-checker` (`Wiz/Selfhost.lean` holds the
+  -- composition; a derivation cannot call Lean, so the driver prints it).
+  | ["--selfhost-source", name] =>
+    let (files, render) ← match name with
+      | "compiler" => pure (Wiz.Selfhost.compilerFiles, Wiz.Selfhost.compilerSource)
+      | "checker" => pure (Wiz.Selfhost.checkerFiles, Wiz.Selfhost.checkerSource)
+      | _ => do
+        IO.eprintln s!"--selfhost-source: 'compiler' or 'checker', not '{name}'"
+        return 2
+    let srcs ← files.mapM (fun (f : String) => IO.FS.readFile f)
+    IO.print (render srcs)
+    pure 0
   | "--run" :: rest => runOne rest
   -- (D1) check a file with the given regularity mode, in a child process that the test
   -- can time out: `Elab.checkDiverges`
@@ -327,6 +376,17 @@ def mainImpl (args : List String) : IO UInt32 := do
   -- the library against the self-hosted compiler (`=selfhost-libdiff`): the host side
   -- of one file (a bounded child of the sweep), and the sweep itself
   | "--libdiff-host" :: rest => Elab.libDiffHostMain rest
+  -- the selfhost build cache's identity (what a `WIZ_SELFHOST_*` override must match)
+  -- and its lock test hook (two concurrent probes with one tag build once)
+  | "--selfhost-identity" :: rest => Elab.selfhostIdentityMain (rest.headD "")
+  | "--selfhost-cache-probe" :: rest => Elab.selfhostCacheProbe (rest.headD "")
+  -- The effective-value line on its own, for the unit case in `=testrunner`: the three
+  -- sources print `source=flag|env|build`, so a line that loses its source is caught
+  -- without building a self-hosted program.
+  | ["--selfhost-override-probe", source] => do
+    Elab.reportEffectiveValue "compiler" source "/tmp/selfhost-override-probe"
+      (if source == "flag" then "abc" else "-")
+    pure 0
   -- `--part` was taken off above (it is a driver flag, not a toolchain flag); give it
   -- back to the sweep's own command line, which validates it
   | "--libdiff" :: rest =>
@@ -342,6 +402,12 @@ def mainImpl (args : List String) : IO UInt32 := do
   -- each group's shard hint (`Group.shard`; empty for the default), for `scripts/ci.py`
   | ["--list-shards"] => do
     for g in ← allGroups do IO.println s!"{g.name}\t{g.shard}"
+    pure 0
+  -- the groups that opt in to `--jobs N` (`Group.parallel`), for `scripts/ci.py`'s
+  -- per-part wall simulation: only these cases go through the in-order pool
+  | ["--list-parallel"] => do
+    for g in ← allGroups do
+      if g.parallel then IO.println g.name
     pure 0
   | "--list-cases" :: sels => do
     for g in ← allGroups do
@@ -366,7 +432,7 @@ def mainImpl (args : List String) : IO UInt32 := do
     let record (g : Group) (r : CaseResult) : IO Unit := do
       if let some file := timings then
         let h ← IO.FS.Handle.mk file .append
-        h.putStrLn (timingLine shard g.name r)
+        h.putStrLn (timingLine shard g.name r (← effectiveLimit))
     let mut passed := 0
     let mut failed := 0
     let mut skipped := 0
@@ -391,7 +457,7 @@ def mainImpl (args : List String) : IO UInt32 := do
     -- the environment skips a job allowed with `--allow-missing-deps` are counted, never
     -- silent. Without the flag these cases are failures, so this line is empty.
     if missingDeps > 0 then
-      IO.println s!"{missingDeps} case(s) skipped for a missing dependency (--allow-missing-deps / WIZ_ALLOW_MISSING_DEPS=1)"
+      IO.println s!"{missingDeps} case(s) skipped for a missing dependency (--allow-missing-deps)"
     pure (if failed == 0 then 0 else 1)
 
 /-- The driver: `--stats` makes each case's process report the core counters (and the
