@@ -9,6 +9,7 @@ import Scry.Rules
 import Scry.CsCst
 import Scry.CsLower
 import Scry.SourceBundle
+import Scry.Budget
 import Scry.TaintCmd
 import Web.EditorModel
 import Web.Loom
@@ -1131,51 +1132,7 @@ def Scry.Cs.keptStore (wantStore : Bool) (cst : Scry.CstStore) (rel text : Strin
     | .false => .some (.error (rel ++ ": the parse's byte spans do not index this file's own text"
         ++ " (a preprocessed file, or a CRLF difference); its AST facts were not written"))
 
-def Scry.Cs.analyseFile (rel full : String) (wantStore : Bool) : EIO Scry.Cs.FileResult := do
-  text ← FS.readFile full;
-  st ← Scry.Native.parse "c_sharp" text;
-  let errs := Scry.Native.errorCount st;
-  cst ← EIO.lift (Scry.Native.toCstStoreIn "c_sharp" rel st);
-  let kept := Scry.Cs.keptStore wantStore cst rel text;
-  let lower := fun (_ : Unit) => Scry.Cs.lowerCstWithModels Scry.csModels rel text
-      (Scry.Cs.ofStore text cst);
-  match Nat.beq errs 0 with
-  | .true => do
-    let l := lower ();
-    -- `with store := kept` sets the field in the result: without it every file's store is
-    -- `none`, `reportFileOf` has nothing to build `ast` rows from, and the manifest still
-    -- declares `factKinds: ["sink","flow","ast"]`.
-    let r : Scry.Cs.FileResult := { Scry.Cs.resultOfLowered rel text l with store := kept };
-    EIO.pure r
-  | .false => do
-    let pre := Scry.Preprocessed.plain rel text;
-    let loc := match Scry.CstStore.firstError cst with
-      | .some i => let sp := Scry.CstStore.spanOf cst i;
-        let pos := Scry.posOf pre sp.start;
-        rel ++ ":" ++ Nat.repr pos.line ++ ":" ++ Nat.repr pos.col
-          ++ " (" ++ Scry.Cs.errorKind cst i ++ ")"
-      | .none => rel;
-    -- The recovery tree is not lowered as a result, but its boundary rows are the first
-    -- thing the reader can say about the file: they go in as warnings beside the error.
-    let warnings := List.map (Scry.Cs.diagOfWarning rel) (lower ()).warnings;
-    EIO.pure (Scry.Cs.FileResult.mk rel .false errs .nil text
-      (List.append
-        [Scry.Cs.Diag.mk .error "parse failure" loc
-          (Nat.repr errs ++ " ERROR/MISSING node(s); the file was not lowered")]
-        warnings)
-      kept)
-
-partial def Scry.Cs.analyseAll (wantStore : Bool) :
-    List (String × String) → EIO (List Scry.Cs.FileResult)
-  | .nil => EIO.pure .nil
-  | .cons (rel, full) rest => do
-    r ← Scry.Cs.attempt (Scry.Cs.analyseFile rel full wantStore);
-    let fr := match r with
-      | .ok x => x
-      | .error e => Scry.Cs.FileResult.mk rel .false 1 .nil "" 
-          [Scry.Cs.Diag.mk .error "unreadable file" rel e] .none;
-    rs ← Scry.Cs.analyseAll wantStore rest;
-    EIO.pure (List.cons fr rs)
+/-- The limits `scry cs` was given, as the `scry taint` contract expresses them. -/
 
 -- ## Aggregation
 
@@ -1445,10 +1402,18 @@ structure Scry.Cs.Opts where
   `web/build-source-ui.sh`) into the bundle. Without it `app.js`'s import of that module
   404s and the page cannot mount - the export is data + SSR only, as `scry web` says. -/
   ui : Option String
+  /-- `--timeout SECS`: stop with a clear refusal after this many seconds (`0` disables). -/
+  timeoutSecs : Option Nat
+  /-- `--max-nodes N`: refuse a file whose CST has more nodes before lowering it. -/
+  maxNodes : Option Nat
+  /-- `--max-rounds N`: cap the points-to/summary fixpoints; a partial result, marked
+  truncated, rather than an unbounded run. -/
+  maxRounds : Option Nat
 
 def Scry.Cs.usage : String :=
   "usage: scry cs PATH [--json] [--sarif OUT] [--bundle DIR] [--assets DIR]\n"
   ++ "                   [--fail-on error|warning|note] [--rules FILE] [--no-taint]\n"
+  ++ "                   [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
   ++ "  PATH is a directory, a .csproj, a .sln/.slnx, or one .cs file.
   --ui FILE     copy a built wiz-source-ui.mjs into the bundle (web/build-source-ui.sh).
                 Without it the reader's runtime is missing and the page cannot mount.\n"
@@ -1462,6 +1427,10 @@ def Scry.Cs.usage : String :=
   ++ "                and names this command.\n"
   ++ "  --assets DIR  the checkout's web/ directory whose host files the bundle copies\n"
   ++ "                (default: the first web/ found from here up).\n"
+  ++ "  limits, as `scry taint`: --timeout SECS (whole run), --max-nodes N (CST size),
+  --max-rounds N (points-to/summary fixpoints; a partial, `truncated` result). 0
+  disables a limit. Without reading a decision the whole walk is unbounded, which is
+  how a large tree looked like a hang.\n"
   ++ "  exit: 0 clean, 1 at/above --fail-on, 2 usage/IO, 3 nothing analysed.\n"
 
 def Scry.Cs.parseFailOn (s : String) : Except String Scry.Severity :=
@@ -1479,6 +1448,24 @@ partial def Scry.Cs.parseArgsGo (target : Option String) (o : Scry.Cs.Opts) :
     | .none => .error Scry.Cs.usage
   | .cons a rest => match a with
     | "--json" => Scry.Cs.parseArgsGo target { o with json := .true } rest
+    | "--timeout" => match rest with
+      | .cons v r => match String.parseNat v with
+        | .some n => Scry.Cs.parseArgsGo target { o with timeoutSecs := .some n } r
+        | .none => .error ("--timeout needs a number of seconds, not \"" ++ v ++ "\"\n"
+            ++ Scry.Cs.usage)
+      | .nil => .error ("--timeout needs a number of seconds\n" ++ Scry.Cs.usage)
+    | "--max-nodes" => match rest with
+      | .cons v r => match String.parseNat v with
+        | .some n => Scry.Cs.parseArgsGo target { o with maxNodes := .some n } r
+        | .none => .error ("--max-nodes needs a node count, not \"" ++ v ++ "\"\n"
+            ++ Scry.Cs.usage)
+      | .nil => .error ("--max-nodes needs a node count\n" ++ Scry.Cs.usage)
+    | "--max-rounds" => match rest with
+      | .cons v r => match String.parseNat v with
+        | .some n => Scry.Cs.parseArgsGo target { o with maxRounds := .some n } r
+        | .none => .error ("--max-rounds needs a round count, not \"" ++ v ++ "\"\n"
+            ++ Scry.Cs.usage)
+      | .nil => .error ("--max-rounds needs a round count\n" ++ Scry.Cs.usage)
     | "--sarif" => match rest with
       | .cons v r => Scry.Cs.parseArgsGo target { o with sarif := .some v } r
       | .nil => .error ("--sarif needs an OUT path\n" ++ Scry.Cs.usage)
@@ -1508,7 +1495,73 @@ partial def Scry.Cs.parseArgsGo (target : Option String) (o : Scry.Cs.Opts) :
 
 def Scry.Cs.parseArgs (args : List String) : Except String Scry.Cs.Opts :=
   Scry.Cs.parseArgsGo .none
-    (Scry.Cs.Opts.mk "" .false .none .none .true .none .none .none .none) args
+    (Scry.Cs.Opts.mk "" .false .none .none .true .none .none .none .none .none .none .none) args
+
+def Scry.Cs.budgetOf (opts : Scry.Cs.Opts) : Scry.RunBudget :=
+  Scry.RunBudget.mk opts.timeoutSecs opts.maxNodes opts.maxRounds .false
+
+def Scry.Cs.analyseFile (opts : Scry.Cs.Opts) (startMs : Nat) (rel full : String)
+    (wantStore : Bool) : EIO Scry.Cs.FileResult := do
+  text ← FS.readFile full;
+  st ← Scry.Native.parse "c_sharp" text;
+  let errs := Scry.Native.errorCount st;
+  cst ← EIO.lift (Scry.Native.toCstStoreIn "c_sharp" rel st);
+  let b := Scry.Cs.budgetOf opts;
+  -- Bound before the nested `match`: a `(← ...)` inside a match scrutinee does not parse.
+  now ← EIO.lift Scry.nowMs;
+  let nodes := Scry.CstStore.nodeCount cst;
+  let kept := Scry.Cs.keptStore wantStore cst rel text;
+  let lower := fun (_ : Unit) => Scry.Cs.lowerCstWithModels Scry.csModels rel text
+      (Scry.Cs.ofStore text cst);
+  -- The two limits refund the file as a **reported row**, never a silent skip: a file that
+  -- was not analysed has to say why, or its absence from the findings reads as "clean".
+  match Scry.Budget.tooManyNodes b rel nodes with
+  | .some why =>
+    EIO.pure (Scry.Cs.FileResult.mk rel .false nodes .nil text
+      [Scry.Cs.Diag.mk .error "max-nodes exceeded" rel why] .none)
+  | .none => match Scry.Budget.expired b startMs now with
+    | .true =>
+      EIO.pure (Scry.Cs.FileResult.mk rel .false nodes .nil text
+        [Scry.Cs.Diag.mk .error "timeout" rel
+          ("--timeout expired before this file was lowered; nothing here was analysed")]
+        .none)
+    | .false => match Nat.beq errs 0 with
+      | .true => do
+        let l := lower ();
+        -- `with store := kept` sets the field in the result: without it every file's store is
+        -- `none`, `reportFileOf` has nothing to build `ast` rows from, and the manifest still
+        -- declares `factKinds: ["sink","flow","ast"]`.
+        let r : Scry.Cs.FileResult := { Scry.Cs.resultOfLowered rel text l with store := kept };
+        EIO.pure r
+      | .false => do
+        let pre := Scry.Preprocessed.plain rel text;
+        let loc := match Scry.CstStore.firstError cst with
+          | .some i => let sp := Scry.CstStore.spanOf cst i;
+            let pos := Scry.posOf pre sp.start;
+            rel ++ ":" ++ Nat.repr pos.line ++ ":" ++ Nat.repr pos.col
+              ++ " (" ++ Scry.Cs.errorKind cst i ++ ")"
+          | .none => rel;
+        -- The recovery tree is not lowered as a result, but its boundary rows are the first
+        -- thing the reader can say about the file: they go in as warnings beside the error.
+        let warnings := List.map (Scry.Cs.diagOfWarning rel) (lower ()).warnings;
+        EIO.pure (Scry.Cs.FileResult.mk rel .false errs .nil text
+          (List.append
+            [Scry.Cs.Diag.mk .error "parse failure" loc
+              (Nat.repr errs ++ " ERROR/MISSING node(s); the file was not lowered")]
+            warnings)
+          kept)
+
+partial def Scry.Cs.analyseAll (opts : Scry.Cs.Opts) (startMs : Nat) (wantStore : Bool) :
+    List (String × String) → EIO (List Scry.Cs.FileResult)
+  | .nil => EIO.pure .nil
+  | .cons (rel, full) rest => do
+    r ← Scry.Cs.attempt (Scry.Cs.analyseFile opts startMs rel full wantStore);
+    let fr := match r with
+      | .ok x => x
+      | .error e => Scry.Cs.FileResult.mk rel .false 1 .nil "" 
+          [Scry.Cs.Diag.mk .error "unreadable file" rel e] .none;
+    rs ← Scry.Cs.analyseAll opts startMs wantStore rest;
+    EIO.pure (List.cons fr rs)
 
 /-- The default C# rule pack: the corpus pack first (a checkout), then an installed
 `rules/csharp.scry`. A tree with no pack still gets its coverage report. -/
@@ -1603,7 +1656,8 @@ def Scry.Cs.run (args : List String) : EIO Nat := do
       let wantStore : Bool := match opts.bundle with
         | .some _ => .true
         | .none => .false;
-      results ← Scry.Cs.analyseAll wantStore t.walk.files;
+      startMs ← EIO.lift Scry.nowMs;
+      results ← Scry.Cs.analyseAll opts startMs wantStore t.walk.files;
       pack ← match opts.taint with
         | .false => EIO.pure ((.ok .none) : Except String (Option (String × Scry.RulePack)))
         | .true => Scry.Cs.attempt (Scry.Cs.loadPack opts.rules);
@@ -1630,12 +1684,28 @@ def Scry.Cs.run (args : List String) : EIO Nat := do
             [Scry.Cs.Diag.mk .note "taint not run: no functions lowered" "(none)" ""]
             [] [] [] p)
         | _ => do
-          let pr := Scry.analyzeCModels Scry.csModels
-            (Scry.Cs.resolveCalls (Wil.program funcs)) p;
+          -- `--max-rounds` reaches the fixpoints, as it does in `scry taint`: the bounded
+          -- variant is the same analysis with the round cap threaded through.
+          let prog := Scry.Cs.resolveCalls (Wil.program funcs);
+          let pr := match opts.maxRounds with
+            | .some n => Scry.analyzeBoundedModels Scry.csModels prog p (.some n)
+            | .none => Scry.analyzeCModels Scry.csModels prog p;
+          -- A `--max-rounds` stop is a **partial** result, and it must say so: a solution
+          -- that hit the cap is not a fixpoint, so the findings below it are not complete.
+          -- (The cap also applies to the summary loop, which `PtResult.rounds` does not
+          -- count, so this reports the points-to half by name rather than claiming the
+          -- whole analysis converged.)
+          let roundNote := match opts.maxRounds with
+            | .some n => match Nat.le n pr.pointsTo.rounds with
+              | .true => [Scry.Cs.Diag.mk .warning "max-rounds reached"
+                  "(points-to)" ("the points-to fixpoint used its " ++ Nat.repr n
+                    ++ "-round cap and did not converge; findings below it are partial")]
+              | .false => []
+            | .none => [];
           let raw := Scry.programFindings pr;
           let m := Scry.Cs.originMapOf results;
           Scry.Cs.finish opts t results (Scry.Cs.Analysis.mk
             (Scry.Cs.findingRows m raw)
             (.some path) (List.length p.rules)
-            (List.map (Scry.Cs.diagOfMem m) pr.warnings)
+            (List.append (List.map (Scry.Cs.diagOfMem m) pr.warnings) roundNote)
             raw (List.map (fun _ => .false) raw) m p)
