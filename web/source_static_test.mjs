@@ -15,9 +15,17 @@
 // No Wasm and no browser: the SSR, the diff and the patch applier are the contract. The
 // same `web/source-static.js` answer producer is used by the browser host.
 //
+// **Which bundle.** `scry web` writes it from a `*.c` tree; `scry cs --bundle` writes the
+// same format from a `*.cs` tree (a C# bundle has no `ui-trace.json`, since the analysis
+// command does not link the reader's runtime). The C-specific section below is skipped,
+// with a note, when the bundle has no `taint.c` finding — a C# bundle is not a failure
+// here — and a bundle of *neither* shape fails, because a bundle with no known fixture is
+// not something this test can vouch for.
+//
 //   node web/source_static_test.mjs BUNDLE_DIR
 "use strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+
 import { join } from "node:path";
 import { applyPatches } from "./framework/runtime.js";
 import { parse, serialize } from "./framework/minidom.mjs";
@@ -40,10 +48,28 @@ const ok = (cond, what, detail = "") => {
 const manifest = readJson(join(data, "manifest.json"));
 const filesJson = readJson(join(data, "files.json"));
 const findingsJson = readJson(join(data, "findings.json"));
-const ui = readJson(join(dir, "ui-trace.json"));
 const perFile = {};
-for (const f of filesJson.files) perFile[f.id] = readJson(join(data, "f", f.id + ".json"));
+// A file the manifest lists but `data/f/` does not have is a red here, not a crash: the
+// reader cannot mount it, so the bundle is incomplete however well its index reads.
+for (const f of filesJson.files) {
+  const p = join(data, "f", f.id + ".json");
+  if (existsSync(p)) perFile[f.id] = readJson(p);
+}
 const bundle = assemble(manifest, filesJson, findingsJson, perFile);
+// `ui-trace.json` is the C export's scripted patch trace; the C# analysis command does
+// not link the reader's Loom runtime, so a C# bundle has a plain page instead and the
+// trace checks below are skipped.
+const hasTrace = existsSync(join(dir, "ui-trace.json"));
+const ui = hasTrace ? readJson(join(dir, "ui-trace.json")) : null;
+const isCSharp = manifest.language === "csharp" || (filesJson.files || []).some(
+  (f) => f.language === "csharp");
+const isC = (filesJson.files || []).some((f) => /safe\.c$/.test(f.path)) ||
+  (findingsJson.findings || []).some((f) => /taint\.c$/.test(f.path));
+if (!isC && !isCSharp) {
+  console.log("FAIL: the bundle is neither the C fixtures' nor a C# export " +
+    "(no safe.c, no csharp file): this test cannot vouch for it");
+  process.exit(1);
+}
 
 const run = (oldHtml, patchesJson) => {
   const root = parse(oldHtml);
@@ -55,21 +81,28 @@ const run = (oldHtml, patchesJson) => {
 
 ok(manifest.schema === "scry.web.bundle/1", "the manifest names the bundle schema");
 ok(manifest.mode === "static", "the manifest says this is a static export");
-ok(manifest.counts && manifest.counts.files === 3, "the manifest counts three files",
-  JSON.stringify(manifest.counts));
+// The C fixtures are three files; a C# bundle counts whatever tree it exported.
+ok(manifest.counts && manifest.counts.files === filesJson.files.length,
+  "the manifest counts the file table", JSON.stringify(manifest.counts));
 ok(manifest.hash && manifest.hash.hash === "fnv1a64" &&
   /not a signature/.test(manifest.hash.note || ""),
   "the manifest says FNV is a content identifier, not a signature");
 
 const paths = filesJson.files.map((f) => f.path.replace(/\\/g, "/"));
-ok(paths.length === 3 && paths.some((p) => p.endsWith("safe.c")) &&
-  paths.some((p) => p.endsWith("taint.c")) && paths.some((p) => p.endsWith("xss.c")),
-  "the three public fixtures are in the file table", JSON.stringify(paths));
+ok(paths.length === (manifest.counts && manifest.counts.files),
+  "every counted file is in the table", JSON.stringify(paths));
+ok(paths.every((p) => !p.startsWith("/") && !p.includes("..")),
+  "no path escapes the bundle", JSON.stringify(paths));
+if (isC) {
+  ok(paths.some((p) => p.endsWith("safe.c")) &&
+    paths.some((p) => p.endsWith("taint.c")) && paths.some((p) => p.endsWith("xss.c")),
+    "the three public fixtures are in the file table", JSON.stringify(paths));
+}
 
 for (const f of filesJson.files) {
   const d = perFile[f.id];
   ok(!!d && d.schema === "scry.source.file/1" && typeof d.source === "string" &&
-    d.source.length > 0, "file " + f.id + " has its source");
+    d.source.length > 0, "file " + f.id + " has its source in data/f/");
   ok(!!f.contentHash && /^[0-9a-f]{16}$/.test(f.contentHash),
     "file " + f.id + " pins a content hash");
 }
@@ -95,6 +128,9 @@ ok(findings.every((f) => /^f_[0-9a-f]{16}$/.test(f.id)),
 const ids = findings.map((f) => f.id);
 ok(new Set(ids).size === ids.length, "the semantic ids are unique");
 ok(ids.join(",") === [...ids].sort().join(","), "findings are ordered by semantic id");
+
+// The scripted trace's steps, or none when the bundle has no trace (a C# export).
+const traceSteps = () => (ui && ui.steps) || [];
 
 const byPath = (suffix) => findings.filter((f) => f.path.replace(/\\/g, "/").endsWith(suffix));
 ok(byPath("safe.c").length === 0, "safe.c has no finding");
@@ -123,6 +159,15 @@ for (const f of findings) {
 }
 
 // ## 2. The answer schema (hover, from precomputed facts)
+//
+// The C fixture's finding drives this section; a C# bundle has no `taint.c`, and its
+// hover/info answers are `web/source_cs_gate.sh`'s and the C# golden's contract.
+
+if (!taint) {
+  console.log("note: no taint.c finding, so the C-specific answer/trace sections are skipped");
+  ok(isCSharp, "a bundle without the C fixture's finding is a C# bundle");
+}
+if (taint) {
 
 ok(taint && taint.fileId, "the finding names its file id");
 const payload = taint ? taint.fileId + "@" + taint.span.start + "-" + taint.span.stop : "";
@@ -175,7 +220,7 @@ ok(route("#/def/" + taint.fileId + "@" + taint.spanText).kind === "definition",
 ok(route("#/f/nope").findingId === "nope", "a missing id still routes (the UI notes it)");
 
 // The trace's route step must actually select the finding in the rendered page.
-const routeStep = (ui.steps || []).find((s) => s.name === "route:#/f/" + taint.id);
+const routeStep = traceSteps().find((s) => s.name === "route:#/f/" + taint.id);
 ok(!!routeStep, "the trace has the #/f/<id> route step");
 if (routeStep) {
   const html = run(ui.initial, routeStep.patches);
@@ -187,10 +232,10 @@ if (routeStep) {
 
 // ## 5. The Loom trace: every patch list reproduces the next SSR
 
-ok(ui.schema === "scry.source.ui/1", "the trace names its schema");
+ok(ui && ui.schema === "scry.source.ui/1", "the trace names its schema");
 // The `route:` steps are entry points from the initial page (a shared link), not part
 // of the chained interaction sequence; each is applied to `ui.initial` below.
-const chained = (ui.steps || []).filter((s) => !s.name.startsWith("route:"));
+const chained = traceSteps().filter((s) => !s.name.startsWith("route:"));
 let current = ui.initial;
 let replayed = 0;
 for (const step of chained) {
@@ -205,15 +250,15 @@ for (const step of chained) {
   replayed++;
 }
 ok(replayed >= 3, "the trace replays the scripted interactions", String(replayed));
-ok((ui.steps || []).some((s) => s.name.startsWith("route:")) &&
-  (ui.steps || []).filter((s) => s.name.startsWith("route:")).every((s) =>
+ok(traceSteps().some((s) => s.name.startsWith("route:")) &&
+  traceSteps().filter((s) => s.name.startsWith("route:")).every((s) =>
     run(ui.initial, s.patches) === s.html),
   "every route step is an entry point from the initial page");
-ok((ui.steps || []).some((s) => s.name === "select:" + taint.id),
+ok(traceSteps().some((s) => s.name === "select:" + taint.id),
   "the trace selects the taint finding");
 
 // The hover step's DOM: the card shows the rule and the span.
-const hoverStep = (ui.steps || []).find((s) => s.name === "hover:" + taint.id);
+const hoverStep = traceSteps().find((s) => s.name === "hover:" + taint.id);
 ok(!!hoverStep, "the trace has the hover step");
 if (hoverStep) {
   ok(hoverStep.html.includes('class="wiz-hover"'), "the hover step renders a card");
@@ -226,7 +271,7 @@ if (hoverStep) {
 }
 
 // The info step's DOM: one fact row and one finding.
-const infoStep = (ui.steps || []).find((s) => s.name === "info:" + taint.id);
+const infoStep = traceSteps().find((s) => s.name === "info:" + taint.id);
 ok(!!infoStep, "the trace has the info step");
 if (infoStep) {
   const rows = (infoStep.html.match(/class="fact-row"/g) || []).length;
@@ -240,7 +285,7 @@ if (infoStep) {
 
 const xss = byPath("xss.c")[0];
 if (xss) {
-  const step = (ui.steps || []).find((s) => s.name === "select:" + xss.id);
+  const step = traceSteps().find((s) => s.name === "select:" + xss.id);
   ok(!!step, "the trace has the xss.c select step");
   if (step) {
     ok(!step.html.includes("<script>alert("), "the source's <script> is escaped");
@@ -248,12 +293,15 @@ if (xss) {
   }
 }
 
+} // `if (taint)`: the C fixture's finding drives sections 2-6.
+
 // ## 7. The host payload
 
 const restored = JSON.parse(bundlePayload(bundle));
 ok(restored.schema === "scry.source.bundle-ui/1" &&
-  restored.files.length === 3 && restored.findings.length === findings.length &&
-  restored.facts.length > 0,
+  restored.files.length === filesJson.files.length &&
+  restored.findings.length === findings.length &&
+  (!isC || restored.facts.length > 0),
   "the host payload carries the three tables",
   restored.files.length + "/" + restored.findings.length + "/" + restored.facts.length);
 

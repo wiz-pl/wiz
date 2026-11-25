@@ -88,6 +88,19 @@ def package : Package := Package.new "scry"
        |> Command.arg "../web"
        |> Command.needs "../web"
        |> Command.stdout "build/web-bundle.txt")
+  -- The C# half of the same export: `scry cs --bundle` over `tests/fixtures/report-cs`,
+  -- the reader's `data/*.json` for a `*.cs` tree (findings, `sink`/`flow` rows and the
+  -- `ast` facts the infotree draws). `tests/web-bundle-cs.wiz` pins its shape and
+  -- determinism; `web/source_cs_gate.sh` is the acceptance test's negative case for it.
+  |> Package.command (Command.new "web-bundle-cs" (Tool.exe "scry")
+       |> Command.arg "cs"
+       |> Command.input "tests/fixtures/report-cs"
+       |> Command.arg "--bundle"
+       |> Command.outDir "build/web-bundle-cs"
+       |> Command.arg "--assets"
+       |> Command.arg "../web"
+       |> Command.needs "../web"
+       |> Command.stdout "build/web-bundle-cs.txt")
   -- The e-graph layer (S12): lowered Wil terms, folds/rewrites, deterministic report.
   |> Package.command (Command.new "egraph" (Tool.exe "scry")
        |> Command.arg "egraph"
