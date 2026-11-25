@@ -5537,6 +5537,16 @@ def builtinQ (qs : Syntax) : QW := match strEq (kindOf qs) "term.num" with
         | .true => .dflt
         | .false => .bad
 -- `Desc I` is the universe it describes one step down: `I : Sort (l+1)`, `Desc I : Sort (l+2)`
+-- The level one below `lI`: `Desc I` with `I : Sort (l+1)` lives in `Sort (l+2)`, so
+-- `inferDesc` needs `l` from `lI`. A numeral above zero has a predecessor; `lsucc x` is
+-- `x`; a parameter or a `max` has no known predecessor, and the caller reports that.
+def lvlPred : Lvl → Option Lvl
+  | .lnum n => match n with
+    | .zero => .none
+    | .succ m => .some (.lnum m)
+  | .lsucc l => .some l
+  | _ => .none
+
 def inferDesc (gs : Globals) (es : ES) (cx : Cx) (args : List Syntax) : TE :=
   let d := Cx.lvl cx;
   match args with
