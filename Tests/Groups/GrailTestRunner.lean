@@ -174,13 +174,18 @@ def testRunnerGroup : Group where
         -- must be what the test produces: with no `-- test:` line this is a `check` test,
         -- whose output is the messages of checking the file (none here), not stdout - run
         -- 45354517903 said exactly that.
-        let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
+        -- **One tree per invocation.** The timeout is part of the test key now, so the two
+        -- runs are different tests; sharing one tree let the first run's cached `ir` job
+        -- stand while its `main.c` had been cleaned, and the second run failed with
+        -- `obj tests/slow.wiz: no such file …/main.c` (test (library-11), runs 1655/1656).
+        let mkSlow ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
           -- `run` + a 3 s sleep: the case must take longer than the 1 s limit, or the limit
           -- has nothing to kill and the flag's effect is invisible (the previous `check`
           -- fixture on a one-line file finished in milliseconds, so both runs passed and the
           -- case proved nothing - run 45376147953).
           ("tests/slow.wiz", "-- test: run\nimport Sys\ndef main : IO Unit := Clock.sleep (Duration.seconds 3)\n"),
           ("tests/slow.expected", "")]
+        let dir := mkSlow
         -- (i) the same invocation with a limit the case cannot reach must SUCCEED: that half
         -- is what stops this test being vacuous. Without it, any failure of `Grail.main` in a
         -- test process (`self := IO.appPath` re-invoke, a missing fixture) would look like
@@ -193,7 +198,8 @@ def testRunnerGroup : Group where
         check (ok == 0) s!"the 900 s run must pass (rc {ok}), or this test proves nothing"
         -- (ii) with the 1 s limit the case must fail. A failure is only accepted as proof
         -- because (i) passed: the two runs differ in the flag alone.
-        let rc ← Grail.cliMain ["-C", dir.toString, "--test-timeout", "1", "test"] (some self)
+        let dir2 := mkSlow
+        let rc ← Grail.cliMain ["-C", dir2.toString, "--test-timeout", "1", "test"] (some self)
         check (rc != 0) s!"a 1 s limit written before `test` must fail the case (rc {rc}): the leading options were dropped" },
     { name := "-- test: run compiles and runs main", run := fun _ => do
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
