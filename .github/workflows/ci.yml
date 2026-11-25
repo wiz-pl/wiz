@@ -1479,17 +1479,17 @@ jobs:
               nix derivation show "$drv" > "$RUNNER_TEMP/$attr.json"
               python3 scripts/check-seeded-wiz.py "$RUNNER_TEMP/$attr.json" "$wiz"
             done
-            # Build each attribute on its own and ask for *its* path. `nix build` over
-            # several attrs prints the store paths **sorted by hash**, not in argument
-            # order, so `sed -n 1p` named the wrong module and the `web` job then failed
-            # with "…wiz-source-ui… has no wiz-infoview.mjs" (run 45499005660).
-            nix build --impure --no-link --max-jobs 1 -L \
-              --expr "($expr).wiz-web" --expr "($expr).wiz-playground" \
-              --expr "($expr).wiz-playground-ui" --expr "($expr).wiz-source-ui"
-            web=$(nix eval --impure --raw --expr "(($expr).wiz-web).outPath")
-            playground=$(nix eval --impure --raw --expr "(($expr).wiz-playground).outPath")
-            ui=$(nix eval --impure --raw --expr "(($expr).wiz-playground-ui).outPath")
-            source_ui=$(nix eval --impure --raw --expr "(($expr).wiz-source-ui).outPath")
+            # One `nix build -L --print-out-paths` per attribute, so each variable is *the
+            # path that build produced*. Two earlier versions failed here: `nix build` over
+            # four attrs prints paths sorted by hash, not in argument order (so `sed -n 1p`
+            # named the wrong module — `web` then failed with "…wiz-source-ui… has no
+            # wiz-infoview.mjs", run 45499005660), and `nix eval …outPath` returns the
+            # derivation's *predicted* output, which need not exist for `--no-link`
+            # (`du: cannot access /nix/store/…-wiz-web-0.1.0`, run #1661).
+            web=$(nix build --impure --no-link --print-out-paths --max-jobs 1 -L --expr "($expr).wiz-web")
+            playground=$(nix build --impure --no-link --print-out-paths --max-jobs 1 -L --expr "($expr).wiz-playground")
+            ui=$(nix build --impure --no-link --print-out-paths --max-jobs 1 -L --expr "($expr).wiz-playground-ui")
+            source_ui=$(nix build --impure --no-link --print-out-paths --max-jobs 1 -L --expr "($expr).wiz-source-ui")
           else
             nix build .#wiz-web .#wiz-playground .#wiz-playground-ui .#wiz-source-ui --no-link -L --max-jobs 1
             web=$(nix path-info .#wiz-web)
