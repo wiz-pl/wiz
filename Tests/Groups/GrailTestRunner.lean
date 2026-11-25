@@ -168,7 +168,7 @@ def testRunnerGroup : Group where
           -- has nothing to kill and the flag's effect is invisible (the previous `check`
           -- fixture on a one-line file finished in milliseconds, so both runs passed and the
           -- case proved nothing - run 45376147953).
-          ("tests/slow.wiz", "-- test: run\nimport Sys\ndef main : IO Unit := Clock.sleep 3000000000\n"),
+          ("tests/slow.wiz", "-- test: run\nimport Sys\ndef main : IO Unit := Clock.sleep (Duration.seconds 3)\n"),
           ("tests/slow.expected", "")]
         -- (i) the same invocation with a limit the case cannot reach must SUCCEED: that half
         -- is what stops this test being vacuous. Without it, any failure of `Grail.main` in a
@@ -239,7 +239,7 @@ def testRunnerGroup : Group where
         checkEq 3 code; has out "⊘ fixture: skips"; has out "skipped (fixture reason)"; has out "SKIPPED"
         let (code, out) ← run #["--run", "=driver-fixtures", "3"]
         checkEq 3 code; has out "skipped (old fixture reason)"
-        for bad in [#["--run", "driver-fixtures", "5"], #["--run", "driver-fixtures", "x"],
+        for bad in [#["--run", "driver-fixtures", "7"], #["--run", "driver-fixtures", "x"],
             #["--run", "no-such-group", "0"], #["--run", "driver-fixtures"],
             #["--run", "driver-fixtures", "0", "extra"], #["=no-such-group"], #["=testrunner#99"],
             #["testrunner", "--no-such-flag"], #["=rig", "--jobs", "0"], #["=rig", "--jobs", "x"]] do
@@ -272,9 +272,26 @@ def testRunnerGroup : Group where
         let (code, out) ← run #["--run", "driver-fixtures", "4"] #[("WIZ_ALLOW_MISSING_DEPS", some "1")]
         checkEq 1 code
         check ((out.splitOn "missing dependency: no fixture-dep on PATH").length > 1) out
-        check ((out.splitOn "SKIPPED").length > 1) (out ++ "\n<<the environment turned a failure into a skip>>")
+        -- and it is NOT a skip: the absence is the assertion (the flag case above asserts
+        -- the opposite, which is why this one cannot be a copy of it)
+        check ((out.splitOn "SKIPPED").length == 1) (out ++ "\n<<the environment turned a failure into a skip>>")
+        check ((out.splitOn "FAILED").length > 1) out
         -- a declared skip is unaffected by either spelling
         for args in [#["--run", "driver-fixtures", "2"], #["--allow-missing-deps", "--run", "driver-fixtures", "2"]] do
+          let (code, out) ← run args unset
+          checkEq 3 code
+          check ((out.splitOn "skipped (fixture reason)").length > 1) out
+        -- **a skip declared after a diagnostic is a failure, not a pass.** The first
+        -- version of this guard dropped the skip and left `ok := exitCode == 0`, which
+        -- turned `selfhost-2`'s `unknown identifier Desc` into a green ✓ with exit 0.
+        for args in [#["--run", "driver-fixtures", "5"], #["--allow-missing-deps", "--run", "driver-fixtures", "5"]] do
+          let (code, out) ← run args unset
+          checkEq 1 code
+          check ((out.splitOn "FAILED").length > 1) out
+          check ((out.splitOn "unknown identifier Desc").length > 1) out
+        -- and a diagnosis *after* a declared skip is still a skip (the guard is narrow on
+        -- purpose: a case may declare its gap and then print its output)
+        for args in [#["--run", "driver-fixtures", "6"], #["--allow-missing-deps", "--run", "driver-fixtures", "6"]] do
           let (code, out) ← run args unset
           checkEq 3 code
           check ((out.splitOn "skipped (fixture reason)").length > 1) out },

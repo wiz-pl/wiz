@@ -362,20 +362,31 @@ def caseResult (c : Case) (index : Nat) (exitCode : UInt32) (stdout stderr : Str
   let lines := stdout.splitOn "\n"
   let notes := lines.filterMap fun l => if l.startsWith noteMarker then some (l.drop noteMarker.length).toString else none
   let stdoutText := "\n".intercalate (lines.filter (!·.startsWith noteMarker))
-  -- A skip is only ever a case that **passed and declared it**. Two guards, because an
-  -- environment skip must not be able to absorb a real failure:
-  --  * a non-zero exit is a failure, whatever it said about skipping;
-  --  * a case that reported an error on stderr cannot be recorded as skipped, even with
-  --    `--allow-missing-deps` - `selfhost-2` reported `unknown identifier Desc` and was
-  --    still counted as a missing-dependency skip, which reads as "the environment could
-  --    not run it" when the truth was "the code does not compile".
-  let reportedError := (stderr ++ stdoutText).contains "error:"
-  let skipped := if exitCode == 0 && !reportedError then skipReason notes stdoutText else none
-  let output := if exitCode == 0 then "" else
+  -- A skip is only ever a case that **passed cleanly and declared it** - and a case that
+  -- declared a skip *and* printed a diagnostic is a **failure**, not a pass. Both halves
+  -- matter: merely dropping the skip (the first version of this guard) turned
+  -- `selfhost-2`'s `unknown identifier Desc` from a red into a green ✓ with exit 0, which
+  -- is worse than the skip it replaced.
+  -- What makes it a failure is a diagnostic **before the skip was declared**: a case that
+  -- could not run prints nothing, so `error:` then `skipped …` means the case ran, failed,
+  -- and then reported a missing dependency. A diagnostic *after* a legitimate skip is
+  -- untouched (a case that declares a gap and then prints its diagnosis is still a skip),
+  -- and so is a case whose own output merely contains `error:` without ever skipping.
+  -- `stdoutText` has the note lines stripped out, so the split must be on the **raw**
+  -- stdout: the skip note's position in it is what says whether the case ran first.
+  let beforeSkip := match stdout.splitOn noteMarker with
+    | first :: _ => first
+    | [] => stdout
+  let diagnosedFirst := (stderr ++ beforeSkip).contains "error:"
+  let declaredSkip := skipReason notes stdoutText
+  let skipAbsorbedError := exitCode == 0 && diagnosedFirst && declaredSkip.isSome
+  let ok := exitCode == 0 && !skipAbsorbedError
+  let skipped := if ok then declaredSkip else none
+  let output := if ok then "" else
     if (stderr ++ stdoutText).contains "executed 'sorry'" then
       "not implemented yet (hit a `sorry`)"
     else (stderr ++ stdoutText).trimAscii.toString.replace "\n" "\n      "
-  { index, name := c.name, ok := exitCode == 0, ms, notes, skipped, output }
+  { index, name := c.name, ok, ms, notes, skipped, output }
 
 /-- (13b) The `--trace-guess-fallback` lines of a case's process (its stderr), on the
 driver's stderr, with the case's own file (module `_`) named `GROUP#INDEX`:
@@ -565,7 +576,18 @@ def driverFixtures : Group where
     { name := "fixture: skips (old style)", run := fun _ => IO.println "    (skipped: old fixture reason)" },
     -- the environment-skip policy: a missing dependency fails by default and is a
     -- reported skip only under the explicit `--allow-missing-deps` flag
-    { name := "fixture: missing dependency", run := fun _ => skipMissing "no fixture-dep on PATH" }
+    { name := "fixture: missing dependency", run := fun _ => skipMissing "no fixture-dep on PATH" },
+    -- a case that *ran*, failed, and then claimed a missing dependency: the diagnostic
+    -- precedes the skip note, so it is a failure even with `--allow-missing-deps`. This is
+    -- the `selfhost-2` shape (`unknown identifier Desc` x6, then a skip).
+    { name := "fixture: a skip after a diagnostic is a failure", run := fun _ => do
+        IO.eprintln "error: unknown identifier Desc"
+        skipMissing "no fixture-dep on PATH" },
+    -- the inverse, and the reason the guard is narrow: a case that declares its gap and
+    -- *then* prints a diagnosis is an honest skip, not a swallowed failure.
+    { name := "fixture: a diagnosis after a declared skip is still a skip", run := fun _ => do
+        skip "fixture reason"
+        IO.println "error: this line is output, not a failure" }
   ]
 
 end Tests
