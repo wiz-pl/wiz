@@ -511,6 +511,20 @@ else
       table.insert(msgs, d.message)
     end
     eq({ '4' }, msgs, 'the diagnostics of Main.wiz')
+    -- the server pushes on every `didOpen`/`didChange` *and* advertises
+    -- `diagnosticProvider`; a client that honours the provider too pulls the same
+    -- document and shows it in a second namespace (`nvim.lsp.wiz.N.wiz`), so every
+    -- diagnostic appears twice. wiz.nvim keeps the push and drops the provider, which
+    -- leaves one namespace holding the list.
+    local names = {}
+    for _, d in ipairs(diags) do
+      names[d.namespace] = true
+    end
+    local n = 0
+    for _ in pairs(names) do
+      n = n + 1
+    end
+    eq(1, n, 'the namespaces the diagnostics of Main.wiz are in (one copy per diagnostic)')
   end)
 
   test('without grail.enable, or outside a package, the command is lsp.cmd', function()
