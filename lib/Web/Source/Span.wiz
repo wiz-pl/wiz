@@ -91,15 +91,60 @@ partial def Source.Span.utf16ColumnGo (cs : List Char) (want : Nat) (n acc : Nat
         | .false => 1;
       Source.Span.utf16ColumnGo rest want (n + 1) (acc + units)
 
-/-- The UTF-16 offset of a 1-based code-point line/column (scry's origin shape). A
-`line` of 0 means "no origin": the empty span at the start. -/
+/-- `(starts, ends)` of every line of `text`, from its UTF-16 units: a line starts after
+the previous newline and ends at its own newline (or at the text's end, which may be a
+line's end or its terminator). `EditorModel.index`'s table is not used here:
+`EditorModel.lineTableGo` records the newline's own offset as the *next* line's start while
+`lineEndAt` subtracts one from it, so the two ends disagree by one unit per line, and every
+span below a line came out one unit short per line (`Unicode.cs`'s 32-line text put its
+sink 32 units past its call - 1271..1289 for a call at 1274..1292). That is an
+`EditorModel` defect with its own blast radius (every LSP offset in the playground); a
+`Source.Span` conversion should not inherit it, so it derives its own table from the text
+it was given. Returns the number of lines and the text's length too, so one walk is all. -/
+structure Source.Span.LineTable where
+  starts : U32Array
+  ends : U32Array
+  length : Nat
+
+partial def Source.Span.lineTableGo (off : Nat) (starts ends : U32Array) :
+    List Nat → Source.Span.LineTable
+  | .nil => Source.Span.LineTable.mk starts (U32Array.push ends (U32.ofNat off)) off
+  | .cons u rest => match Nat.beq u 10 with
+    | .true => Source.Span.lineTableGo (off + 1) (U32Array.push starts (U32.ofNat (off + 1)))
+        (U32Array.push ends (U32.ofNat off)) rest
+    | .false => Source.Span.lineTableGo (off + 1) starts ends rest
+
+def Source.Span.lineTableOf (text : String) : Source.Span.LineTable :=
+  Source.Span.lineTableGo 0 (U32Array.ofList [U32.ofNat 0]) U32Array.empty
+    (EditorModel.units text)
+
+/-- The 0-based line and the UTF-16 offset of its start in `t`, clamped into the text. -/
+def Source.Span.lineStartIn (t : Source.Span.LineTable) (line : Nat) : Nat :=
+  let n := U32Array.size t.starts;
+  match Nat.lt line n with
+    | .true => (U32Array.getD t.starts line 0).toNat
+    | .false => t.length
+
+/-- The UTF-16 offset of the end of line `line` (0-based): its own newline, or the text's
+end. -/
+def Source.Span.lineEndIn (t : Source.Span.LineTable) (line : Nat) : Nat :=
+  let n := U32Array.size t.ends;
+  match Nat.lt line n with
+    | .true => (U32Array.getD t.ends line 0).toNat
+    | .false => t.length
+
+/-- The UTF-16 offset of a 1-based code-point line/column (scry's origin shape). A `line`
+of 0 means "no origin": the empty span at the start. The column walks the line's code
+points, adding 2 for one outside the BMP: scry's column counts code points, a `Source.Span`
+counts UTF-16 units. -/
 def Source.Span.ofLineColumn (i : EditorModel.PositionIndex) (line column : Nat) : Nat :=
   match Nat.beq line 0 with
   | .true => 0
   | .false =>
+    let t := Source.Span.lineTableOf i.text;
     let line0 := line - 1;
-    let start := EditorModel.lineStartAt i line0;
-    let stop := EditorModel.lineEndAt i line0;
+    let start := Source.Span.lineStartIn t line0;
+    let stop := Source.Span.lineEndIn t line0;
     let text := EditorModel.slice i start stop;
     let col0 := match Nat.beq column 0 with
       | .true => 0

@@ -132,9 +132,9 @@ def Scry.reportTaintOpts (o : Scry.ReportOpts) (file : String) : Scry.TaintOpts 
 
 def Scry.reportStepOf (m : Scry.OriginMap) (p : Scry.PathNode) : Scry.ReportStep :=
   match Scry.originAt m p.func p.point with
-  | .some o => Scry.ReportStep.mk (Scry.PathKind.show p.kind) p.func o.line o.column
+  | .some o => Scry.ReportStep.mk (Scry.PathKind.show p.kind) p.func o.uri o.line o.column
       o.endLine o.endColumn
-  | .none => Scry.ReportStep.mk (Scry.PathKind.show p.kind) p.func 0 0 0 0
+  | .none => Scry.ReportStep.mk (Scry.PathKind.show p.kind) p.func "" 0 0 0 0
 
 def Scry.reportFindingOf (file : String) (m : Scry.OriginMap) (f : Scry.RuleFinding)
     (checked : Bool) (hit : Option Scry.DiffHit) : Scry.ReportFinding :=
@@ -284,11 +284,10 @@ def Scry.reportWalkOf (path : String) : EIO Scry.ReportWalk := do
     | .true => do
       w ← Scry.ProjectIO.walkGo path;
       -- A walk that saw no `*.cs` needs no second pass over the names.
-      c ← match w.skipped with
-        | 0 => EIO.pure 0
-        | _ => Scry.ProjectIO.countCs path;
-      EIO.pure (Scry.ReportWalk.mk (Scry.sortStrings w.files) w.links
-        (Nat.add w.skipped c))
+      -- `walkGo` already counts the `*.cs` files it declined to read (`skipped`), so
+      -- adding `countCs` on top reported a one-file tree as "2 *.cs file(s)". Trust the
+      -- walk: it is the same roots and the same skips by construction.
+      EIO.pure (Scry.ReportWalk.mk (Scry.sortStrings w.files) w.links w.skipped)
 
 /-- The C# refusal, shared by `scry web` and `scry report`: a target with no `*.c` but
 some `*.cs` is a miss, not an empty report. Both commands read `*.c` only, so before

@@ -29,6 +29,10 @@ exactly. They do not change this page (it marks the start line only). -/
 structure Scry.ReportStep where
   kind : String
   func : String
+  /-- The file this step is in. A path can cross files (`a.c` -> `b.h`), so a step's
+  `line`/`column` only mean something together with the file they were measured in.
+  Empty when the origin did not name one. -/
+  file : String
   line : Nat
   column : Nat
   endLine : Nat

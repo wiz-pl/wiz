@@ -249,6 +249,35 @@ def ownFindingsOnly (f : Json) : EIO Bool := do
   let path := jStr f ["path"];
   EIO.pure (List.all (fun g => String.eq (jStr g ["path"]) path) (jList d ["findings"]))
 
+/-- Write `bytes` to `p` verbatim: `FS.writeFile` is text and would not carry a NUL or a
+byte above 0x7F. -/
+def writeBytesAt (p : String) (bytes : Bytes) : EIO Unit :=
+  FS.writeBytes p bytes
+
+/-- A file's size in bytes, from its raw contents. -/
+def fileBytes (p : String) : EIO Nat := do
+  bytes ← FS.readBytes p;
+  EIO.pure (Bytes.size bytes)
+
+/-- Whether two number lists agree element for element (the library has no `zipWith`, so
+this is the walk: each step matches one list and takes the other's head with a `match`). -/
+def sameNatList (xs ys : List Nat) : Bool :=
+  match xs with
+  | .nil => match ys with
+    | .nil => .true
+    | .cons _ _ => .false
+  | .cons x rest => match ys with
+    | .nil => .false
+    | .cons y more => Bool.and (Nat.beq x y) (sameNatList rest more)
+
+/-- Whether the two files hold the same bytes (`FS.readFile` is text and stops at a NUL, so
+it cannot answer this for a wasm): the raw buffers as number lists, compared in full. -/
+def sameBytes (a b : String) : EIO Bool := do
+  x ← FS.readBytes a;
+  y ← FS.readBytes b;
+  EIO.pure (Bool.and (Nat.beq (Bytes.size x) (Bytes.size y))
+    (sameNatList (Bytes.toList x) (Bytes.toList y)))
+
 /-- Whether a file's own `data/f/<id>.json` carries at least one `ast` row: the manifest's
 `factKinds` names the kinds the export *writes*, so this is the check that the name is not
 an empty promise. A `let`-bound `fun … => do` loses the block's termination in this
@@ -524,23 +553,31 @@ def main : IO Unit := EIO.toIO (do
     -- The reader's runtime (`--ui`). `app.js` imports `wiz-source-ui.mjs`, and Emscripten
     -- fetches `wiz-source-ui.wasm` beside it: a bundle that copied only the module makes the
     -- browser fetch a missing wasm, receive the 404 page as `text/html`, and abort with
-    -- "expected 'application/wasm'". So `--ui` is exported twice over a stub pair: the module
-    -- and the wasm land beside each other, and the manifest says the runtime came with it.
-    -- Stub files, not the Loom runtime: this test asserts the copy, not what the runtime does.
+    -- "expected 'application/wasm'". The wasm fixture is a **real** wasm header
+    -- (`00 61 73 6d 01 00 00 00`) followed by a 0xFF byte: it starts with a NUL (so a text
+    -- copy stops before its first byte) and is not UTF-8 (so a text read cannot round-trip
+    -- it), and neither failure is visible in a file's size alone - `--ui` copied a 0-byte
+    -- wasm for exactly that reason. This asserts the bytes, not that a file exists.
     uiDir ← EIO.lift (FS.exists "build/cs-ui-src");
     match uiDir with
     | .true => EIO.pure ()
     | .false => FS.createDir "build/cs-ui-src";
     copyIn "tests/fixtures/report-cs/taint/Shell.cs" "build/cs-ui-src/wiz-source-ui.mjs";
-    copyIn "tests/fixtures/report-cs/cap/Overflow.cs" "build/cs-ui-src/wiz-source-ui.wasm";
+    writeBytesAt "build/cs-ui-src/wiz-source-ui.wasm"
+      (Bytes.ofList [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 4, 0xFF, 0x80]);
     ru ← run ["cs", target, "--bundle", "build/web-bundle-cs-ui",
       "--assets", "../web", "--ui", "build/cs-ui-src/wiz-source-ui.mjs"];
     check "cs bundle: --ui exports" (Nat.beq ru.code 0);
     uiMjs ← FS.readFile "build/web-bundle-cs-ui/wiz-source-ui.mjs";
     uiMjsStub ← FS.readFile "build/cs-ui-src/wiz-source-ui.mjs";
     check "cs bundle: --ui copies wiz-source-ui.mjs" (String.eq uiMjs uiMjsStub);
-    hasWasm ← EIO.lift (FS.exists "build/web-bundle-cs-ui/wiz-source-ui.wasm");
-    check "cs bundle: --ui copies wiz-source-ui.wasm beside the module" hasWasm;
+    sameWasm ← sameBytes "build/cs-ui-src/wiz-source-ui.wasm"
+      "build/web-bundle-cs-ui/wiz-source-ui.wasm";
+    check "cs bundle: --ui copies wiz-source-ui.wasm byte for byte (NUL and 0xFF included)"
+      sameWasm;
+    wasmSize ← fileBytes "build/web-bundle-cs-ui/wiz-source-ui.wasm";
+    check ("cs bundle: the copied wasm is not truncated (" ++ Nat.repr wasmSize ++ " bytes)")
+      (Nat.beq wasmSize 11);
     -- And a module built without a wasm is not an error: the module is copied, the wasm is
     -- simply absent, and the export still exits 0 (the runtime may be self-contained).
     copyIn "tests/fixtures/report-cs/taint/Safe.cs" "build/cs-ui-src/solo.mjs";
@@ -549,6 +586,9 @@ def main : IO Unit := EIO.toIO (do
     check "cs bundle: --ui without a .wasm beside it still exits 0" (Nat.beq rs.code 0);
     soloMjs ← EIO.lift (FS.exists "build/web-bundle-cs-ui-solo/wiz-source-ui.mjs");
     check "cs bundle: --ui without a .wasm still copies the module" soloMjs;
+    soloWasm ← EIO.lift (FS.exists "build/web-bundle-cs-ui-solo/wiz-source-ui.wasm");
+    check "cs bundle: --ui writes no wasm when there is none to copy"
+      (Bool.not soloWasm);
     uiManifest ← readJson "build/web-bundle-cs-ui/data/manifest.json";
     check "cs bundle: the manifest says the runtime came with the bundle"
       (match jAt uiManifest ["assets", "runtime"] with
