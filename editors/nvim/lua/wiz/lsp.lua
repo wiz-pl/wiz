@@ -9,6 +9,21 @@ end
 
 M.handlers = { ['wiz/elaborated'] = on_elaborated }
 
+--- `wiz lsp` pushes a document's diagnostics on every `didOpen`/`didChange`, and it
+--- also advertises `diagnosticProvider` (`Wiz/LSP.lean`), which answers
+--- `textDocument/diagnostic`. Neovim serves an advertised `diagnosticProvider` by
+--- *pulling* on exactly those two notifications (`vim/lsp/diagnostic.lua`:
+--- `_enable`/`_refresh`) and storing the pulled items in a second namespace of its own
+--- (`nvim.lsp.wiz.N.wiz`, beside the pushed `nvim.lsp.wiz.N`). A server that does both
+--- is therefore shown twice: `#vim.diagnostic.get(buf)` doubles and the same message
+--- appears back to back. The server's push is the one it always sends, so the client
+--- keeps that and hides the pull provider, which leaves one copy per diagnostic.
+function M.on_init(client)
+  if client.server_capabilities then
+    client.server_capabilities.diagnosticProvider = nil
+  end
+end
+
 --- The client capabilities wiz.nvim asks for: the defaults, plus the
 --- `wiz/elaborated` notification (the infoview refreshes on it).
 function M.capabilities(extra)
@@ -184,6 +199,7 @@ function M.client_config(buf)
     root_dir = root,
     capabilities = M.capabilities(cfg.capabilities),
     handlers = M.handlers,
+    on_init = M.on_init,
     on_attach = M.on_attach,
   }
 end
