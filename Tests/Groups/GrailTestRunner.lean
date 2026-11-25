@@ -59,14 +59,25 @@ def testRunnerGroup : Group where
         let (res, st) ← runTests dir tc
         check (res.all (·.cached)) "--rerun did not record its passes"
         checkEq 0 st.ran
-        -- a rerun that fails (here: under a 1 ms limit) leaves no pass behind: the next
-        -- plain run runs the tests instead of reporting the old record
-        let (res, _) ← runTests dir tc (rerun := true) (testTimeoutMs := some 1)
+        -- A rerun that fails leaves no pass behind: the next plain run runs the tests
+        -- instead of reporting the old record. **The rerun must use the same limit** - the
+        -- limit is part of the test key, so a 1 ms rerun is a *different* test and correctly
+        -- leaves the 900 s pass alone (that is what `=testrunner`'s `--test-timeout` case
+        -- depends on). This runs the failing rerun at the record's own limit.
+        -- (`testTimeoutMs` is **milliseconds**: `cliMain` passes `1000 * secs`, so 900000 is
+        -- the 900 s the record was written under. `some 900` is 0.9 s and times the case out.)
+        let (res, _) ← runTests dir tc (rerun := true) (testTimeoutMs := some 900000)
+        check (res.all (·.ok)) s!"the rerun at the recorded limit failed: {res.toList.map (·.message)}"
+        check (res.all (!·.cached)) "--rerun reported a recorded pass"
+        -- and the failing-rerun half, at the same limit, via a 1 ms limit only on a tree
+        -- whose record was written at 1 ms - so the keys agree
+        let tc1 : Toolchain := { tc with cacheDir := some (← IO.FS.createTempDir) }
+        let (res, _) ← runTests dir tc1 (rerun := true) (testTimeoutMs := some 1)
         check (res.all (!·.ok)) s!"the 1 ms rerun passed: {res.toList.map (·.message)}"
         let (res, st) ← runTests dir tc
         check (res.all (·.ok)) s!"{res.toList.map (·.message)}"
-        check (res.all (!·.cached)) "a pass survived a failed rerun"
-        checkEq 2 st.ran
+        check (res.all (·.cached)) "a pass recorded at the 900 s limit survived a 1 ms run: that is a different test"
+        checkEq 0 st.ran
         -- --rerun leaves the .expected files alone
         checkEq expected (← IO.FS.readFile (dir / "tests/two.expected")) },
     { name := "a wrong output fails, with the first difference", run := fun _ => do
@@ -174,11 +185,15 @@ def testRunnerGroup : Group where
         -- is what stops this test being vacuous. Without it, any failure of `Grail.main` in a
         -- test process (`self := IO.appPath` re-invoke, a missing fixture) would look like
         -- proof that the flag arrived.
-        let ok ← Grail.cliMain ["-C", dir.toString, "--test-timeout", "900", "test"]
+        -- The real `grail` is this test process's supervisor: `cliMain` in process has
+        -- `IO.appPath` = the `tests` binary, and `tests --grail-job …` dies instantly.
+        let self : System.FilePath := ".lake/build/bin/grail"
+        unless ← self.pathExists do skipMissing "no .lake/build/bin/grail in this checkout"
+        let ok ← Grail.cliMain ["-C", dir.toString, "--test-timeout", "900", "test"] (some self)
         check (ok == 0) s!"the 900 s run must pass (rc {ok}), or this test proves nothing"
         -- (ii) with the 1 s limit the case must fail. A failure is only accepted as proof
         -- because (i) passed: the two runs differ in the flag alone.
-        let rc ← Grail.cliMain ["-C", dir.toString, "--test-timeout", "1", "test"]
+        let rc ← Grail.cliMain ["-C", dir.toString, "--test-timeout", "1", "test"] (some self)
         check (rc != 0) s!"a 1 s limit written before `test` must fail the case (rc {rc}): the leading options were dropped" },
     { name := "-- test: run compiles and runs main", run := fun _ => do
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),

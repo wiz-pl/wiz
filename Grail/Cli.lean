@@ -240,7 +240,12 @@ def vendorOf (dir : System.FilePath) (opt : Option String) (pkg : Package)
       found.map (fun kv : String × String => kv.2)
   v.map (inPackage dir)
 
-def cliMain (args : List String) : IO UInt32 := do
+/-- `selfPath` is the binary a test process re-invokes as its job supervisor (every job is
+spawned as `self --grail-job …`). It defaults to this process's own path, which is right for
+`grail` itself; a test that calls `cliMain` **in process** must pass the real `grail`, because
+`IO.appPath` there is the `tests` binary and `tests --grail-job …` fails instantly - a case
+that dies instantly never reaches its own timeout, so `--test-timeout` cannot be observed. -/
+def cliMain (args : List String) (selfPath : Option System.FilePath := none) : IO UInt32 := do
   -- (after the toolchain flags: tower's wrapper puts its flags before the user's arguments)
   if ((({} : Toolchain).parseFlags args).2) == ["--version"] then
     IO.println (← Wiz.versionLine "grail"); return 0
@@ -263,7 +268,10 @@ def cliMain (args : List String) : IO UInt32 := do
   let std ← findStd opts.std
   let jobs := opts.jobs.getD (max 1 (min 4 (System.Platform.Internal.getHardwareConcurrency ()).toNat))
   let mkRunner (ctx : Ctx) (testTimeoutMs : Nat := 1000 * opts.testTimeout.getD 300) : IO Runner := do
-    pure { ctx, stats := ← IO.mkRef {}, memo := ← IO.mkRef {}, jobs, self := ← IO.appPath,
+    let self ← match selfPath with
+      | .some p => pure p
+      | .none => IO.appPath
+    pure { ctx, stats := ← IO.mkRef {}, memo := ← IO.mkRef {}, jobs, self,
            timeoutMs := 1000 * opts.timeout.getD 1800, testTimeoutMs }
   -- the flags win over the build files; read them now, apply them last
   let raw := args

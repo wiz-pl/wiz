@@ -124,8 +124,14 @@ def Runner.testOutput (r : Runner) (file : String) (kind : TestKind) (exe : Syst
 `run`, and the expected output. -/
 def Runner.testKey (r : Runner) (file : String) (kind : TestKind) (expected : Option String) : IO UInt64 := do
   let l ← r.load file
+  -- **The limit is part of the key.** Without it, a pass recorded under one
+  -- `--test-timeout` was reused under another: `=testrunner`'s case ran the same tree at
+  -- 900 s and at 1 s, the second run hit the first run's record and reported a cached
+  -- pass, so `--test-timeout` could not change a verdict it had already cached.
+  let limitMs := testLimitMs r.testTimeoutMs (← IO.FS.readFile (r.ctx.dir / file))
   pure (mixHash (hash "test") (hash (toString [toString r.ctx.binId, toString l.key, kind.name,
-    if kind == .run then toString r.ctx.tc.id else "", expected.getD "\x00none"])))
+    if kind == .run then toString r.ctx.tc.id else "", expected.getD "\x00none",
+    toString limitMs])))
 
 /-- The expected output of a test, and where it lives. -/
 def expectedOf (dir : System.FilePath) (file : String) : IO (System.FilePath × Option String) := do
