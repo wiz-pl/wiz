@@ -1950,3 +1950,64 @@ is never served stale). Serializing `Globals` means encoding `Tm` (60 constructo
 flags, and reconstructing them exactly; a cache hit is trusted without a kernel check,
 so a serializer bug would be a soundness bug, not a slow run. That is a separate piece
 of work, sized and deferred rather than approximated.
+
+## 21as: `Desc` and `μ` in the self-hosted frontend (TT-06 step 1)
+
+The self-hosted frontend could write coinductive types (`ν D i`, `out`, `coit`, `cocon`,
+21ap) but not inductive ones by hand: `Desc` is not a library type (the Lean elaborator
+keeps it in its own `builtinNames` table, `Elab/Term.lean`, next to `μ`, `ν` and the
+constructors), so `Desc`, `μ`, `Desc.ret`, `Desc.arg` and `Desc.rec` were "unknown
+identifier" in `selfhost/Frontend.wiz`. Its own `inductive`/`structure` commands build
+descriptions with the kernel's `.descr`/`.darg`/`.drec` formers, but a source that
+*writes* a description — the TT-06 differential case, which runs one μ fixture through
+both frontends — had nothing to resolve the names to.
+
+They are now built-in applications (`builtinApp`), read as the Lean frontend's
+`inferData?`/`checkData?` read them and as the kernel's own data rules check them:
+
+| Form                   | Rule                                                                                      |
+|------------------------|-------------------------------------------------------------------------------------------|
+| `Desc I`               | infers: `I : Sort (l+1)`, the term is `descr l I : Sort (l+2)`                            |
+| `μ D i`, `ν D i`       | infers: `D` to `Desc l I`, `i : I` checked, the term is `μ`/`ν l I D i`, type `Sort (l+1)` |
+| `Desc.ret i`           | checked against the expected `Desc l I`: `i : I`                                           |
+| `Desc.arg q S D`       | checked: `q` a quantity literal, `S : Sort (l+1)`, `D : (s : S) → Desc l I`                |
+| `Desc.rec q j D`       | checked: `q` a literal, `j : I`, `D` again against the expected description                |
+| `Desc.hrec q H j D`    | checked: `q` a literal, `H : Sort (l+1)`, `j : (h : H) → I`, `D` again                      |
+
+The four field formers are *checking* forms only, exactly as `checkData?` has them and as
+the kernel's `dret`/`darg`/`drec`/`dhrec` are checked: their index type is in their type,
+so there is nothing to infer one from. A bare one is reported as "cannot infer the type of
+a description: write its index type" rather than given an invented index type. A written
+description therefore carries its type — `(Desc.arg 1 Unit (fun _ => …) : Desc Unit)` —
+which is also how the Lean frontend's `inferData?` reads a `μ` (infer `D`, then check `i`
+against the index type it found).
+
+The guardedness of `D` is the kernel's own `descGuarded` (`selfhost/Kernel.wiz`, in the
+data rule), which walks a constant to its value — so any alias chain ends at the
+description it names, and an axiom head has no value to walk. There is no second
+guardedness semantics here, and no depth bound.
+
+**Name resolution.** `builtinApp` reads a built-in name only when the scope does not
+resolve it at all (a local, this module's, or an `open`ed one), which is the Lean
+frontend's `builtinApp?` condition (`lookupLocal`, then `globals.contains`): a user's
+`def Desc …` shadows the primitive rather than being read as one.
+
+**The differential.** The TT-06 case (`Tests/Groups/SelfHost.lean`, "the kernel's μ
+guard: a 17-alias chain, an axiom head and the guarded forms") runs both frontends on
+four fixtures and requires them to agree: the 17-alias chain ending in
+`Desc.rec 1 () (Desc.ret ())` under `μ` is rejected, an `axiom D : Desc Unit` under `μ`
+is rejected, the same alias chain ending in `Desc.arg 1 Unit (fun _ => Desc.rec …)` is
+accepted, and a two-name version of it (`T` then `G := Desc.arg … (fun _ => T)`) is
+accepted. The case asserts the two agree with each other on each fixture, so a
+disagreement is a failure, not a pass.
+
+**Not copied from the Lean table.** `Desc.elim` (a definition by recursion on a
+description: this frontend has no `delim`), `Desc.interp`, `Desc.All`, `con`, `ind` and
+`scofix` are in the Lean `builtinNames` table but not in this frontend's list. A source
+that writes one gets "unknown identifier", not a half-checked term. The list is the
+comment above `builtinNames3`; `inductive`/`structure` still build `dhrec` and the kernel
+still checks it, so only *writing* those forms by hand is missing.
+
+**A quantity term.** `Desc.arg %t …` is `qtyErr`: a quantity *term* is not evaluated here
+(the Lean side checks it at `.qty`), and a literal read from the term's head would be a
+guess. The four fixtures write the literal `1`.
