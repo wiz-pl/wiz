@@ -850,7 +850,7 @@ def Scry.Cs.reportFileOf (r : Scry.Cs.FileResult) (raw : List Scry.RuleFinding)
       , pathSteps := placed.1, reindexed := placed.2.1, rejected := placed.2.2 }) pairs;
   let rf := Scry.ReportFile.mk rel (Scry.reportFileAnchor rel) r.text pages [] [] [] [];
   match r.store with
-  | .some (.ok store) => let f := Scry.Cs.factsOf store r.text rel base;
+  | .some (.ok store) => let f := Scry.Cs.factsOf store r.text rf.anchor base;
     (rf, f.1, Nat.add base (Scry.CstStore.nodeCount store), f.2)
   | .some (.error why) => (rf, [], base, 0)
   | .none => (rf, [], base, 0)
@@ -1142,7 +1142,11 @@ def Scry.Cs.analyseFile (rel full : String) (wantStore : Bool) : EIO Scry.Cs.Fil
   match Nat.beq errs 0 with
   | .true => do
     let l := lower ();
-    EIO.pure ({ Scry.Cs.resultOfLowered rel text l with store := kept })
+    -- `with store := kept` sets the field in the result: without it every file's store is
+    -- `none`, `reportFileOf` has nothing to build `ast` rows from, and the manifest still
+    -- declares `factKinds: ["sink","flow","ast"]`.
+    let r : Scry.Cs.FileResult := { Scry.Cs.resultOfLowered rel text l with store := kept };
+    EIO.pure r
   | .false => do
     let pre := Scry.Preprocessed.plain rel text;
     let loc := match Scry.CstStore.firstError cst with

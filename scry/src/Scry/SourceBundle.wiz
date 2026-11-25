@@ -121,20 +121,33 @@ def Scry.webSpanOfOrigin (i : EditorModel.PositionIndex)
   | .true => Source.Span.at 0
   | .false => Source.Span.ofOrigin i line column endLine endColumn
 
+/-- Whether a path step belongs to the file whose facts are being written. A step's
+`line`/`column` were measured in **its own** file, so a step from another file (`a.c` ->
+`b.h`) drawn here would sit at those coordinates inside the sink's source - a wrong span
+that looks like a real one. The step is skipped instead: the path is shortened, it is never
+invented. An empty `file` (an origin that did not name one) is treated as this file, which
+is what every single-file run produces. -/
+def Scry.stepInThisFile (path : String) (s : Scry.ReportStep) : Bool :=
+  match String.isEmpty s.file with
+  | .true => .true
+  | .false => String.eq (Scry.normPath s.file) (Scry.normPath path)
+
 /-- The `flow` facts of a finding: one row per located path step. `n` is the next node
 number; the result is the rows (in path order) and the number after them. -/
-def Scry.webFlowFactsGo (i : EditorModel.PositionIndex) (fileId : String)
+def Scry.webFlowFactsGo (i : EditorModel.PositionIndex) (fileId path : String)
     (f : Source.Finding) : List Scry.ReportStep → Nat → List Source.FactRow →
     List Source.FactRow × Nat
   | .nil, n, acc => (List.reverse acc, n)
   | .cons s rest, n, acc => match Nat.beq s.line 0 with
-    | .true => Scry.webFlowFactsGo i fileId f rest n acc
-    | .false =>
+    | .true => Scry.webFlowFactsGo i fileId path f rest n acc
+    | .false => match Scry.stepInThisFile path s with
+    | .false => Scry.webFlowFactsGo i fileId path f rest n acc
+    | .true =>
       let span := Scry.webSpanOfOrigin i s.line s.column s.endLine s.endColumn;
       -- The path's last step is the sink itself: the `sink` row already carries that
       -- span, so a second row there would make the info view show the same node twice.
       match Bool.and (Nat.beq span.start f.span.start) (Nat.beq span.stop f.span.stop) with
-      | .true => Scry.webFlowFactsGo i fileId f rest n acc
+      | .true => Scry.webFlowFactsGo i fileId path f rest n acc
       | .false =>
         let row := Source.FactRow.mk "flow" (String.append "n" (Nat.repr n)) fileId span
           [ ("kind", s.kind)
@@ -142,11 +155,11 @@ def Scry.webFlowFactsGo (i : EditorModel.PositionIndex) (fileId : String)
           , ("rule", f.rule)
           , ("finding", f.id)
           ];
-        Scry.webFlowFactsGo i fileId f rest (n + 1) (List.cons row acc)
+        Scry.webFlowFactsGo i fileId path f rest (n + 1) (List.cons row acc)
 
 /-- The facts a finding contributes: one `sink` row and one `flow` row per located path
 step. `base` is the row's position in the file's table, so it is stable across a rebuild. -/
-def Scry.webFactsOf (i : EditorModel.PositionIndex) (fileId : String) (base : Nat)
+def Scry.webFactsOf (i : EditorModel.PositionIndex) (fileId path : String) (base : Nat)
     (f : Source.Finding) (steps : List Scry.ReportStep) : List Source.FactRow × Nat :=
   let sink := Source.FactRow.mk "sink" (String.append "n" (Nat.repr base)) fileId f.span
     [ ("rule", f.rule)
@@ -157,7 +170,7 @@ def Scry.webFactsOf (i : EditorModel.PositionIndex) (fileId : String) (base : Na
         | .false => "no certificate")
     , ("finding", f.id)
     ];
-  let rest := Scry.webFlowFactsGo i fileId f steps (base + 1) [];
+  let rest := Scry.webFlowFactsGo i fileId path f steps (base + 1) [];
   (List.cons sink rest.1, rest.2)
 
 /-- Build one file's findings and facts, threading the fact node number. -/
@@ -168,7 +181,7 @@ def Scry.webFindingsOf (i : EditorModel.PositionIndex) (fileId path : String) :
     let span := Scry.webSpanOfOrigin i rf.sinkLine rf.sinkColumn rf.endLine rf.endColumn;
     let finding := Source.Finding.mk rf.id fileId path rf.rule rf.severity rf.message
       span rf.sinkLine rf.sinkColumn rf.checked "";
-    let facts := Scry.webFactsOf i fileId n finding rf.steps;
+    let facts := Scry.webFactsOf i fileId path n finding rf.steps;
     let tail := Scry.webFindingsOf i fileId path rest facts.2;
     (List.cons finding tail.1, List.append facts.1 tail.2.1, tail.2.2)
 
@@ -206,7 +219,7 @@ partial def Scry.bundleFindingsGo (rf : Scry.ReportFile) (i : EditorModel.Positi
     let span := Scry.webSpanOfOrigin i r.sinkLine r.sinkColumn r.endLine r.endColumn;
     let finding := Source.Finding.mk r.id rf.anchor rf.path r.rule r.severity r.message
       span r.sinkLine r.sinkColumn r.checked "";
-    let facts := Scry.webFactsOf i rf.anchor n finding (Scry.bundleStepsOf r);
+    let facts := Scry.webFactsOf i rf.anchor rf.path n finding (Scry.bundleStepsOf r);
     let tail := Scry.bundleFindingsGo rf i rest facts.2;
     (List.cons finding tail.1, List.append facts.1 tail.2.1, tail.2.2)
 
@@ -239,6 +252,18 @@ def Scry.bundleFindingsOf (rf : Scry.ReportFile) (i : EditorModel.PositionIndex)
     (fun r => r.rejected) rf.findings));
   (List.append own.1 rejected, own.2.1, own.2.2)
 
+/-- `facts` with their node ids shifted so the first is `start` (`n<start>`, `n<start+1>`, …).
+The rows' other columns are untouched: a reader keys a tree by `node`, so one file's ids
+must be one sequence - the findings' rows first, the caller's `ast` rows after them. -/
+partial def Scry.renumberFactsGo (n : Nat) : List Source.FactRow → List Source.FactRow
+  | .nil => []
+  | .cons r rest =>
+    List.cons { r with node := String.append "n" (Nat.repr n) }
+      (Scry.renumberFactsGo (Nat.add n 1) rest)
+
+def Scry.renumberFacts (start : Nat) (facts : List Source.FactRow) : List Source.FactRow :=
+  Scry.renumberFactsGo start facts
+
 /-- One file's reader model from its findings and its fact rows. The facts are numbered
 after the finding rows (`after`), so the file's node ids are one sequence.
 
@@ -253,7 +278,12 @@ def Scry.bundleModelOf (rf : Scry.ReportFile) (facts : List Source.FactRow) (aft
   let file := Source.File.mk rf.anchor rf.path (Scry.webLanguage rf.path) rf.source
     (EditorModel.lineCount i);
   let built := Scry.bundleFindingsOf rf i after;
-  (file, built.1, List.append built.2.1 facts)
+  -- The caller's own rows (`ast`) continue the file's one node sequence: they are numbered
+  -- from `built.2.2`, the id after the findings' `sink`/`flow` rows. Passing them through
+  -- unrenumbered made every `ast` row collide with a finding's fact ids at `n0`.
+  let nextId := built.2.2;
+  let renumbered := Scry.renumberFacts nextId facts;
+  (file, built.1, List.append built.2.1 renumbered)
 
 -- ## JSON writers
 
