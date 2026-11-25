@@ -339,7 +339,14 @@ EOF
           # request substitutes it instead of cold-building `wiz-unwrapped` — the same
           # mechanism as `towerFor`, and the reason the `web` job no longer needs its own
           # 45-minute compiler build.
-          wc = if wizOverride == null then wiz else wizOverride;
+          # `nativeBuildInputs` needs a value Nix can coerce to a derivation. A plain
+          # `if … then wiz else wizOverride` is a **conditional expression**, and forcing
+          # one as a build input raises "expected a set but found a string with context"
+          # even though each branch is fine on its own. Selecting through an attribute
+          # keeps the result the branch's own value, so either a derivation or a
+          # `builtins.storePath` coerces exactly as `towerFor`'s `wizPkg` does.
+          wcPair = if wizOverride == null then { seeded = wiz; } else { seeded = wizOverride; };
+          wc = wcPair.seeded;
           # The test driver (`tests --list`, `tests --run GROUP INDEX`), from the same
           # build as wiz and grail (so `nix build .#wiz` builds it too). The driver looks
           # for `wiz`/`grail` beside itself (`IO.appPath.parent` in Tests/Grail.lean), so
