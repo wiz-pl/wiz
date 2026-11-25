@@ -525,6 +525,19 @@ else
       n = n + 1
     end
     eq(1, n, 'the namespaces the diagnostics of Main.wiz are in (one copy per diagnostic)')
+    -- the pulled copy lands asynchronously (a fast machine asserts before it arrives),
+    -- so give it a window: a client that honours the provider ends with two namespaces
+    -- here, and one that does not stays at one.
+    vim.wait(2000)
+    local seen = {}
+    for _, d in ipairs(vim.diagnostic.get(0)) do
+      seen[d.namespace] = true
+    end
+    local later = 0
+    for _ in pairs(seen) do
+      later = later + 1
+    end
+    eq(1, later, 'the namespaces the diagnostics of Main.wiz are in a moment later')
   end)
 
   test('without grail.enable, or outside a package, the command is lsp.cmd', function()
