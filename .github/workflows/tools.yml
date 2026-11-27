@@ -46,7 +46,7 @@ jobs:
     # 10 min: three Python unittest runs; no build
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: tools/wiz-mcp
         run: python3 -m unittest discover -s tools/wiz-mcp/tests -p 'test_*.py' -v
       - name: tools/scry-mcp
@@ -67,7 +67,7 @@ jobs:
     # 90 min: substitute/build wiz, then the stdio smoke test
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}

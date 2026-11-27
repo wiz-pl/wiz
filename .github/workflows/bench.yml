@@ -109,7 +109,7 @@ jobs:
     # 180 min: the A/B pairs (~15 per mode) and the Scry corpus on one runner
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -419,7 +419,7 @@ jobs:
     # 120 min: build the self-hosted checker once, then the corpus
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}

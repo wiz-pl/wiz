@@ -86,7 +86,7 @@ jobs:
       run:
         shell: nix develop --command bash -eo pipefail {0}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: badlydrawnwizards
@@ -124,14 +124,14 @@ jobs:
       # the commit built: the pushed one, or the dispatched `commit`
       OLD_COMMIT: ${{ inputs.commit }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit || github.sha }}
       # This workflow's own scripts, pinned to the commit being built: a re-run of an
       # older dispatch must package that commit with that commit's scripts, licences
       # and inputs, not with today's. (An old commit that predates a script is guarded
       # where the script is optional.)
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit || github.sha }}
           path: .release-tools

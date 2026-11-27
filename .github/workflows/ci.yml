@@ -205,7 +205,7 @@ jobs:
       subset_docs: ${{ steps.filter.outputs.subset_docs }}
       shards: ${{ steps.filter.outputs.shards }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 2 # a pull request's merge commit and its first parent (the base)
       - name: What changed
@@ -246,7 +246,7 @@ jobs:
     # 5 min: six Python checks and the libdiff corpus check on the checkout; no build
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # 0: check-release-consistency resolves the packet's candidate (an older
           # commit) and its counts; check-complexity uses HEAD^1.
@@ -295,7 +295,7 @@ jobs:
     # 5 min: two Python checks on the checkout; no build
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check the embedded prelude's surface
         shell: bash
         run: |
@@ -316,7 +316,7 @@ jobs:
     # 5 min: one Python check on the checkout; no build (the check takes <1 s)
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Reachable global name collisions
         shell: bash
         run: python3 scripts/check-name-collisions.py --reachable --quiet
@@ -333,7 +333,7 @@ jobs:
     # 30 min: substitute wiz from Cachix, then the snippet check (a cache miss rebuilds)
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -391,7 +391,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Two builds are identical, and the manifest matches
         shell: bash
         run: scripts/test-source-tarball.sh
@@ -409,7 +409,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Test the statement signing, manifest format and verifier
         shell: bash
         run: python3 -m unittest discover -s scripts/attest/tests -v
@@ -447,7 +447,7 @@ jobs:
       wiz: ${{ steps.nix.outputs.wiz }}
       tests: ${{ steps.nix.outputs.tests }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -689,7 +689,7 @@ jobs:
     # --test-timeout), tower's Nix build and the package smokes.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -829,7 +829,7 @@ jobs:
     # 15 min: cc -fsyntax-only in every configuration, then the stub-pthread binaries
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -868,7 +868,7 @@ jobs:
     # the cold compile (no prewarm: this job builds only `unwrapped`), with slack
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -934,7 +934,7 @@ jobs:
     # this repository's pull requests substitute it from the PR cache.
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -1029,7 +1029,7 @@ jobs:
     # too) is a little less. No wiz/grail/tests build, so nothing else waits on it.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -1059,7 +1059,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.lean.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -1263,7 +1263,7 @@ jobs:
       ui: ${{ steps.nix.outputs.ui }}
       source_ui: ${{ steps.nix.outputs.source_ui }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -1397,7 +1397,7 @@ jobs:
     # 20 min: the Node tests (~1 min) and slack; the Wasm builds are `wasm`' job
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -1469,7 +1469,7 @@ jobs:
     # this is 60 and not 45: a timeout is a cancelled job, not a verdict on the commit.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -1696,7 +1696,7 @@ jobs:
       contents: read
       actions: read # this run's job walls, for the shard-balance gate
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: |
             scripts
@@ -1862,7 +1862,7 @@ jobs:
     # 180 min: three self-hosting stages with Lake on ubuntu-latest
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
